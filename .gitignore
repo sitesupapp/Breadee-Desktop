@@ -4,6 +4,7 @@ node_modules
 # build output
 dist
 dist-ssr
+tsconfig.tsbuildinfo
 
 # Tauri native build artifacts
 src-tauri/target
