@@ -1,0 +1,20 @@
+# dependencies
+node_modules
+
+# build output
+dist
+dist-ssr
+
+# Tauri native build artifacts
+src-tauri/target
+
+# env (never commit real secrets — only .env.example is tracked)
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+*.local
+.vscode/*
+!.vscode/extensions.json
