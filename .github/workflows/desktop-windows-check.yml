@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — Windows BUILD CHECK workflow
+#
+# PURPOSE: Verify that the Tauri desktop app compiles cleanly on a fresh,
+# stable Windows runner. This exists because the local dev machine is
+# unstable (cargo/rustc crash with 0xC0000005), so we can't trust a local
+# build. This is a CI *sanity check* only.
+#
+# THIS IS NOT A RELEASE / PUBLISH WORKFLOW:
+#   - It does NOT run `tauri build`.
+#   - It does NOT produce or upload an installer.
+#   - It does NOT create a GitHub Release or touch production anything.
+#   - It requires NO secrets (typecheck + vite build + `cargo check` only).
+#
+# It runs the frontend checks (typecheck + build) and a Rust `cargo check`
+# of the src-tauri crate. Nothing more.
+# ---------------------------------------------------------------------------
+
+name: Desktop Windows Build Check
+
+on:
+  # Run on every push to the working branch for the desktop app.
+  push:
+    branches: [desktop-staging]
+  # Run as a gate on PRs that target main (we do not auto-merge; this is a check).
+  pull_request:
+    branches: [main]
+  # Allow running it manually from the Actions tab.
+  workflow_dispatch:
+
+# Minimal permissions: this workflow only reads the repo.
+permissions:
+  contents: read
+
+# If new commits land on the same ref, cancel the older in-progress run.
+concurrency:
+  group: desktop-windows-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-check:
+    name: Windows build check
+    # Clean, stable Windows runner — WebView2 and MSVC build tools are
+    # preinstalled on GitHub's windows-latest image, so no extra system
+    # dependencies are needed for Tauri on Windows.
+    runs-on: windows-latest
+
+    steps:
+      # 1. Get the source.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Node toolchain (npm cache keyed off package-lock.json).
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # 3. Install frontend deps exactly as locked (fails if lockfile is stale).
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # 4. TypeScript type check (no emit).
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      # 5. Build the frontend bundle into ./dist.
+      #    Done BEFORE cargo check so the Tauri crate's frontendDist (../dist)
+      #    exists when the Rust build script inspects it.
+      - name: Build frontend
+        run: npm run build
+
+      # 6. Rust stable toolchain for the native Tauri backend.
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # 7. Cache Rust build artifacts to speed up subsequent runs.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 8. Compile-check the native Tauri crate ONLY (no build, no installer).
+      #    --locked enforces the committed Cargo.lock.
+      - name: Cargo check (src-tauri)
+        working-directory: src-tauri
+        run: cargo check --locked
