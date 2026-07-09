@@ -64,8 +64,16 @@ jobs:
       # 5. Build the frontend bundle into ./dist.
       #    (tauri build also runs beforeBuildCommand, but we build explicitly
       #    first so a frontend failure surfaces before the long Rust build.)
+      #    Vite inlines these VITE_* values at build time (src/env.ts fails fast
+      #    if the Supabase vars are missing, which renders a blank window).
+      #    STAGING Supabase only — supplied via encrypted GitHub Actions
+      #    secrets, never a committed .env.
       - name: Build frontend
         run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
 
       # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
@@ -80,8 +88,15 @@ jobs:
       # 8. Build the Tauri app + NSIS installer (release profile).
       #    NOTE: this compiles + links the native app and packages the
       #    installer; it does NOT publish a release.
+      #    tauri:build re-runs `npm run build` (beforeBuildCommand), so the same
+      #    STAGING Supabase env must be present here too, or the packaged app
+      #    ships a blank window. Secrets only — never a committed .env.
       - name: Build Tauri installer
         run: npm run tauri:build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
 
       # 9. Upload the generated Windows installer as a build artifact.
       #    Tauri v2 (targets: ["nsis"]) emits the setup .exe here:

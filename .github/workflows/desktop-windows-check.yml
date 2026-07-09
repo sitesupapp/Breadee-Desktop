@@ -68,8 +68,15 @@ jobs:
       # 5. Build the frontend bundle into ./dist.
       #    Done BEFORE cargo check so the Tauri crate's frontendDist (../dist)
       #    exists when the Rust build script inspects it.
+      #    Vite inlines these VITE_* values at build time (src/env.ts fails fast
+      #    if the Supabase vars are missing). STAGING Supabase only — supplied
+      #    via encrypted GitHub Actions secrets, never a committed .env.
       - name: Build frontend
         run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
 
       # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
