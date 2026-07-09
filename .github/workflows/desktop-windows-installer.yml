@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — Windows INSTALLER ARTIFACT workflow
+#
+# PURPOSE: Build the Windows Tauri installer (NSIS setup .exe) on a clean,
+# stable GitHub Windows runner and upload it as a downloadable build
+# ARTIFACT. This exists because the local dev machine is unstable
+# (cargo/rustc crash with 0xC0000005), so installers can't be built locally.
+#
+# THIS IS NOT A PRODUCTION RELEASE WORKFLOW:
+#   - Manual trigger ONLY (workflow_dispatch) — it never runs automatically.
+#   - It does NOT create a GitHub Release / tag.
+#   - It does NOT publish or distribute anything — the installer is only
+#     retained as a temporary Actions artifact for internal testing.
+#   - It requires NO secrets (no code-signing / updater keys configured).
+#
+# The installer produced here is an UNSIGNED Phase-1 test build.
+# ---------------------------------------------------------------------------
+
+name: Desktop Windows Installer (Artifact)
+
+on:
+  # Manual only for now. Run it from the Actions tab -> Run workflow.
+  workflow_dispatch:
+
+# Minimal permissions: this workflow only reads the repo (artifact upload
+# uses the default token scope, no extra write perms needed).
+permissions:
+  contents: read
+
+jobs:
+  build-installer:
+    name: Build Windows installer
+    # Clean, stable Windows runner — WebView2 + MSVC build tools preinstalled.
+    runs-on: windows-latest
+
+    steps:
+      # 1. Get the source.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Node toolchain (npm cache keyed off package-lock.json).
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # 3. Install frontend deps exactly as locked.
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # 4. TypeScript type check (no emit).
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      # 5. Build the frontend bundle into ./dist.
+      #    (tauri build also runs beforeBuildCommand, but we build explicitly
+      #    first so a frontend failure surfaces before the long Rust build.)
+      - name: Build frontend
+        run: npm run build
+
+      # 6. Rust stable toolchain for the native Tauri backend.
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # 7. Cache Rust build artifacts to speed up subsequent runs.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 8. Build the Tauri app + NSIS installer (release profile).
+      #    NOTE: this compiles + links the native app and packages the
+      #    installer; it does NOT publish a release.
+      - name: Build Tauri installer
+        run: npm run tauri:build
+
+      # 9. Upload the generated Windows installer as a build artifact.
+      #    Tauri v2 (targets: ["nsis"]) emits the setup .exe here:
+      #      src-tauri/target/release/bundle/nsis/*-setup.exe
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: breadee-desktop-windows-installer
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14
