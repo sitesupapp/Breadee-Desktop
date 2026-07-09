@@ -7,7 +7,10 @@
 # (cargo/rustc crash with 0xC0000005), so installers can't be built locally.
 #
 # THIS IS NOT A PRODUCTION RELEASE WORKFLOW:
-#   - Manual trigger ONLY (workflow_dispatch) — it never runs automatically.
+#   - Triggers: manual (workflow_dispatch) + push to desktop-staging.
+#     (A push trigger is needed so the workflow registers and appears in the
+#     Actions sidebar; workflow_dispatch-only workflows only register from the
+#     repo's default branch, which does not carry this file.)
 #   - It does NOT create a GitHub Release / tag.
 #   - It does NOT publish or distribute anything — the installer is only
 #     retained as a temporary Actions artifact for internal testing.
@@ -19,8 +22,13 @@
 name: Desktop Windows Installer (Artifact)
 
 on:
-  # Manual only for now. Run it from the Actions tab -> Run workflow.
+  # Manual run from the Actions tab -> Run workflow.
   workflow_dispatch:
+  # Also run on push to the desktop working branch. This both makes the
+  # workflow visible/registered in the Actions sidebar and builds the
+  # installer artifact on each push to desktop-staging.
+  push:
+    branches: [desktop-staging]
 
 # Minimal permissions: this workflow only reads the repo (artifact upload
 # uses the default token scope, no extra write perms needed).
