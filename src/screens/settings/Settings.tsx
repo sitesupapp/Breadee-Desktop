@@ -1,11 +1,13 @@
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { Printers } from "@/screens/settings/Printers";
+import { ReceiptDesign } from "@/screens/settings/ReceiptDesign";
 import { SyncCenter } from "@/screens/settings/SyncCenter";
 import { DeviceSettings } from "@/screens/settings/DeviceSettings";
 import { Help } from "@/screens/settings/Help";
 
 const TABS = [
   { to: "printers", label: "Printers" },
+  { to: "receipt", label: "Receipt" },
   { to: "sync", label: "Sync Center" },
   { to: "device", label: "Device" },
   { to: "help", label: "Help" },
@@ -31,6 +33,7 @@ export function Settings() {
       <Routes>
         <Route index element={<Navigate to="/settings/printers" replace />} />
         <Route path="printers" element={<Printers />} />
+        <Route path="receipt" element={<ReceiptDesign />} />
         <Route path="sync" element={<SyncCenter />} />
         <Route path="device" element={<DeviceSettings />} />
         <Route path="help" element={<Help />} />
