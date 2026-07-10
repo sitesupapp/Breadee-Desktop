@@ -3,10 +3,31 @@ import { Link } from "react-router-dom";
 import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
 import { roleLabel } from "@/lib/permissions";
-import { visibleNav, enabledFeatureKeys } from "@/lib/nav";
 import { hasValidRate } from "@/lib/currency";
+import { visibleModules, type ModuleEntry } from "@/lib/modules";
 import { pendingCount } from "@/lib/offline/db";
 import { Card, Badge } from "@/components/ui";
+
+const AVAIL_BADGE: Record<ModuleEntry["availability"], { tone: "green" | "amber" | "slate"; label: string }> = {
+  desktop: { tone: "green", label: "On desktop" },
+  planned: { tone: "amber", label: "Coming soon" },
+  web: { tone: "slate", label: "On the web app" },
+};
+
+function ModuleCard({ m }: { m: ModuleEntry }) {
+  const badge = AVAIL_BADGE[m.availability];
+  const body = (
+    <div className={`h-full rounded-xl border border-line p-4 ${m.to ? "bg-white hover:border-brand" : "bg-slate-50/60"}`}>
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-xl leading-none">{m.icon}</span>
+        <Badge tone={badge.tone}>{badge.label}</Badge>
+      </div>
+      <p className={`mt-2 font-bold ${m.to ? "text-ink" : "text-sub"}`}>{m.label}</p>
+      <p className="mt-0.5 text-xs text-sub">{m.desc}</p>
+    </div>
+  );
+  return m.to ? <Link to={m.to} className="block">{body}</Link> : <div aria-disabled className="cursor-default">{body}</div>;
+}
 
 export function Dashboard() {
   const s = useSession();
@@ -17,32 +38,28 @@ export function Dashboard() {
     pendingCount().then(setPending).catch(() => {});
   }, []);
 
-  const nav = useMemo(
-    () => visibleNav({ features: s.features, permissions: s.permissions, role: s.membership?.role, status: s.membership?.status }),
+  const ctx = useMemo(
+    () => ({ features: s.features, permissions: s.permissions, role: s.membership?.role, status: s.membership?.status }),
     [s.features, s.permissions, s.membership?.role, s.membership?.status],
   );
-  const enabledFeatures = useMemo(() => enabledFeatureKeys(s.features), [s.features]);
+  const modules = useMemo(() => visibleModules(ctx), [ctx]);
+  const onDesktop = modules.filter((m) => m.availability === "desktop");
+  const planned = modules.filter((m) => m.availability === "planned");
+  const onWeb = modules.filter((m) => m.availability === "web");
 
   const connection = s.offlineMode ? "Offline mode" : s.online ? "Online" : "No internet";
   const connectionTone = s.offlineMode ? "amber" : s.online ? "green" : "red";
   const rate = s.currency.rate;
-  const currencyLabel = hasValidRate(rate)
-    ? `${s.currency.primary} · ${Math.round(rate).toLocaleString()}/USD`
-    : s.currency.primary;
+  const currencyLabel = hasValidRate(rate) ? `${s.currency.primary} · ${Math.round(rate).toLocaleString()}/USD` : s.currency.primary;
 
   const tiles: { label: string; value: string }[] = [
     { label: "Business", value: s.tenant?.business_name ?? "—" },
     { label: "Role", value: roleLabel(s.membership?.role) },
-    { label: "Branch scope", value: s.membership?.all_branches ? "All branches" : s.membership?.branch_id ? s.membership.branch_id.slice(0, 8) : "—" },
+    { label: "Branch", value: s.membership?.all_branches ? "All branches" : s.membership?.branch_id ? `Branch ${s.membership.branch_id.slice(0, 4)}` : "—" },
     { label: "Currency", value: currencyLabel },
-    { label: "Connection", value: connection },
-    { label: "Pending sync", value: String(pending) },
-    { label: "Terminal", value: `${device.device_name} · ${device.terminal_id}` },
-    { label: "Modules", value: String(nav.length) },
   ];
 
-  // Only surface quick links the user can actually open.
-  const canPos = nav.some((n) => n.to === "/pos");
+  const canPos = onDesktop.some((m) => m.key === "pos");
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -54,7 +71,7 @@ export function Dashboard() {
         <Badge tone={connectionTone}>{connection}</Badge>
       </div>
 
-      {/* Read-only context tiles */}
+      {/* Context tiles */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         {tiles.map((t) => (
           <Card key={t.label} className="p-4">
@@ -63,41 +80,55 @@ export function Dashboard() {
           </Card>
         ))}
       </div>
+      <p className="-mt-2 text-xs text-sub">{connection} · {pending} pending sync · {device.device_name}</p>
 
-      {/* Accessible modules (from the same gated nav model as the sidebar) */}
-      <Card className="p-5">
-        <p className="mb-2 font-bold">Accessible modules</p>
-        <div className="flex flex-wrap gap-2">
-          {nav.map((n) => (
-            <Link key={n.to} to={n.to} className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">
-              <span className="mr-1">{n.icon}</span>{n.label}
-            </Link>
-          ))}
-        </div>
-      </Card>
+      {/* Business modules — clean, honest status. Only built modules are clickable. */}
+      <div>
+        <h2 className="mb-3 text-lg font-bold">Your modules</h2>
 
-      {/* Active features summary */}
-      <Card className="p-5">
-        <p className="mb-2 font-bold">Active features</p>
-        {enabledFeatures.length === 0 ? (
-          <p className="text-sm text-sub">{s.offlineMode ? "Feature list unavailable offline." : "No features enabled for this tenant."}</p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {enabledFeatures.map((f) => (
-              <span key={f} className="rounded-lg border border-line bg-slate-50 px-2 py-0.5 font-mono text-[11px] text-ink">{f}</span>
-            ))}
+        {onDesktop.length > 0 && (
+          <div className="mb-4">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-sub">Available on this desktop</p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {onDesktop.map((m) => <ModuleCard key={m.key} m={m} />)}
+            </div>
           </div>
         )}
-      </Card>
 
-      {/* Quick links (only what the user can open) */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {canPos && (
-          <Link to="/pos"><Card className="p-6 hover:border-brand"><p className="text-lg font-bold">🧾 Open POS</p><p className="mt-1 text-sm text-sub">Takeaway · Dine-in · Delivery</p></Card></Link>
+        {planned.length > 0 && (
+          <div className="mb-4">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-sub">Coming soon to desktop</p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {planned.map((m) => <ModuleCard key={m.key} m={m} />)}
+            </div>
+          </div>
         )}
-        <Link to="/settings/sync"><Card className="p-6 hover:border-brand"><p className="text-lg font-bold">↻ Sync Center</p><p className="mt-1 text-sm text-sub">Review and push offline changes</p></Card></Link>
-        <Link to="/profile"><Card className="p-6 hover:border-brand"><p className="text-lg font-bold">👤 Profile</p><p className="mt-1 text-sm text-sub">Your role, branch and permissions</p></Card></Link>
+
+        {onWeb.length > 0 && (
+          <div className="mb-1">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-sub">Managed on the Breadee web app</p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {onWeb.map((m) => <ModuleCard key={m.key} m={m} />)}
+            </div>
+          </div>
+        )}
+
+        <p className="mt-3 text-[11px] text-sub">
+          Modules marked “Coming soon” or “On the web app” aren’t available in the desktop app yet — an enabled feature doesn’t always have a desktop screen.
+        </p>
       </div>
+
+      {/* Desktop tools — shortcuts to pages that ARE built here */}
+      <Card className="p-5">
+        <p className="mb-2 font-bold">Desktop tools</p>
+        <div className="flex flex-wrap gap-2">
+          {canPos && <Link to="/pos" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🧾 POS</Link>}
+          <Link to="/profile" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">👤 Profile</Link>
+          <Link to="/settings/sync" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">↻ Sync Center</Link>
+          <Link to="/settings/printers" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🖨 Printers</Link>
+          <Link to="/settings/receipt" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🧾 Receipt design</Link>
+        </div>
+      </Card>
     </div>
   );
 }
