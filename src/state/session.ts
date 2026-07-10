@@ -1,8 +1,14 @@
 import { create } from "zustand";
 import { supabase } from "@/lib/supabase";
 import { getDeviceIdentity } from "@/lib/device";
+import { purgeForeignSnapshots, clearSnapshotCache } from "@/lib/offline/db";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
+import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
+
+// Read-only tenant currency settings for display (dual USD/LBP). Never used for POS math.
+export type CurrencySettings = { primary: CurrencyCode; rate: number | null };
+const DEFAULT_CURRENCY: CurrencySettings = { primary: "USD", rate: null };
 
 // Mirrors the web app's SessionContext + resolvePostLoginPath, plus an offline cache
 // so the app can restore the last valid role/tenant/branch/permissions after a first
@@ -19,6 +25,7 @@ type CachedContext = {
   membership: Membership | null;
   features: FeatureMap;
   permissions: Record<string, boolean>;
+  currency: CurrencySettings;
   cachedAt: number;
 };
 
@@ -33,6 +40,7 @@ type SessionState = {
   membership: Membership | null;
   features: FeatureMap;
   permissions: Record<string, boolean>;
+  currency: CurrencySettings;
   init: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signInWithGoogle: () => Promise<{ error: string | null }>;
@@ -65,6 +73,7 @@ export const useSession = create<SessionState>((set, get) => ({
   membership: null,
   features: {},
   permissions: {},
+  currency: DEFAULT_CURRENCY,
 
   init: async () => {
     getDeviceIdentity(); // ensure device identity exists early
@@ -92,6 +101,7 @@ export const useSession = create<SessionState>((set, get) => ({
         membership: cache.membership,
         features: cache.features,
         permissions: cache.permissions,
+        currency: cache.currency ?? DEFAULT_CURRENCY,
       });
       return;
     }
@@ -120,16 +130,28 @@ export const useSession = create<SessionState>((set, get) => ({
     let tenant: Tenant | null = null;
     let features: FeatureMap = {};
     let permissions: Record<string, boolean> = {};
+    let currency: CurrencySettings = DEFAULT_CURRENCY;
     if (membership?.tenant_id) {
-      const [{ data: t }, { data: feat }, { data: perms }] = await Promise.all([
+      const [{ data: t }, { data: feat }, { data: perms }, { data: cur }] = await Promise.all([
         supabase.from("tenants").select("id, business_name, tenant_status, verification_status, selected_plan_id, main_branch_id").eq("id", membership.tenant_id).maybeSingle(),
         supabase.rpc("get_tenant_effective_features", { p_tenant: membership.tenant_id }),
         supabase.rpc("current_user_permissions", { p_tenant: membership.tenant_id }),
+        // Read-only display setting (dual USD/LBP). If RLS blocks it, we fall back to USD.
+        supabase.from("tenant_currency_settings").select("primary_currency, usd_to_lbp_rate").eq("tenant_id", membership.tenant_id).maybeSingle(),
       ]);
       tenant = (t as Tenant) ?? null;
       features = (feat as unknown as FeatureMap) ?? {};
       permissions = (perms as Record<string, boolean>) ?? {};
+      const curRow = cur as { primary_currency?: unknown; usd_to_lbp_rate?: unknown } | null;
+      currency = {
+        primary: isCurrencyCode(curRow?.primary_currency) ? curRow.primary_currency : "USD",
+        rate: typeof curRow?.usd_to_lbp_rate === "number" ? curRow.usd_to_lbp_rate : null,
+      };
     }
+
+    // Cache-scope hardening: drop any cached snapshots that don't belong to this
+    // tenant/branch before continuing, so a previous session's cache can't leak.
+    await purgeForeignSnapshots(tenant?.id ?? null, (membership as Membership)?.branch_id ?? null).catch(() => {});
 
     const next = {
       userId: user.id,
@@ -139,6 +161,7 @@ export const useSession = create<SessionState>((set, get) => ({
       membership: (membership as Membership) ?? null,
       features,
       permissions,
+      currency,
     };
     set({ ...next, offlineMode: false, online: true });
     writeCache({ ...next, cachedAt: Date.now() });
@@ -161,7 +184,10 @@ export const useSession = create<SessionState>((set, get) => ({
   signOut: async () => {
     await supabase.auth.signOut();
     localStorage.removeItem(CACHE_KEY);
-    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, offlineMode: false });
+    // Drop the read-only snapshot cache so no cached data survives into the next login.
+    // The durable outbox (unsynced work) is preserved by design — never dropped here.
+    await clearSnapshotCache().catch(() => {});
+    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false });
   },
 
   can: (perm) => Boolean(get().permissions[perm]),

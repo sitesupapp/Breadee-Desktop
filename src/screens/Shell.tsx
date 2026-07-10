@@ -1,22 +1,24 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
 import { pendingCount } from "@/lib/offline/db";
 import { roleLabel } from "@/lib/permissions";
+import { visibleNav } from "@/lib/nav";
 import { Badge } from "@/components/ui";
-
-const NAV = [
-  { to: "/dashboard", label: "Dashboard", icon: "▦" },
-  { to: "/pos", label: "POS", icon: "🧾" },
-  { to: "/settings", label: "Settings", icon: "⚙" },
-];
 
 export function Shell() {
   const s = useSession();
   const navigate = useNavigate();
   const device = getDeviceIdentity();
   const [pending, setPending] = useState(0);
+
+  // Nav is derived from the session's feature flags + permissions, so unauthorized
+  // modules never appear. Recomputes when role/features/permissions change.
+  const nav = useMemo(
+    () => visibleNav({ features: s.features, permissions: s.permissions, role: s.membership?.role, status: s.membership?.status }),
+    [s.features, s.permissions, s.membership?.role, s.membership?.status],
+  );
 
   useEffect(() => {
     const tick = () => pendingCount().then(setPending).catch(() => {});
@@ -42,7 +44,7 @@ export function Shell() {
           </div>
         </div>
         <nav className="flex-1 space-y-1 px-2">
-          {NAV.map((n) => (
+          {nav.map((n) => (
             <NavLink
               key={n.to}
               to={n.to}

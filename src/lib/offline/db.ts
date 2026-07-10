@@ -69,3 +69,28 @@ export async function enqueue(item: Omit<OutboxItem, "id" | "status" | "attempts
 export async function pendingCount(): Promise<number> {
   return localdb.outbox.where("status").anyOf("queued", "failed", "conflict", "review").count();
 }
+
+// Count of outbox items that still hold unsynced work (must never be dropped silently).
+export async function unsyncedOutboxCount(): Promise<number> {
+  return localdb.outbox.where("status").anyOf("queued", "syncing", "failed", "conflict", "review").count();
+}
+
+// Cache-scope hardening: remove cached snapshots that do NOT belong to the current
+// tenant/branch scope, so one tenant/branch's cached read data can never leak into a
+// different session. Tenant-wide snapshots (branch_id === null) are kept when the
+// tenant matches. The durable outbox is intentionally NOT touched here.
+export async function purgeForeignSnapshots(tenantId: string | null, branchId: string | null): Promise<number> {
+  const all = await localdb.snapshots.toArray();
+  const foreign = all.filter(
+    (s) => s.tenant_id !== tenantId || (branchId != null && s.branch_id != null && s.branch_id !== branchId),
+  );
+  await Promise.all(foreign.map((s) => localdb.snapshots.delete(s.key)));
+  return foreign.length;
+}
+
+// Sign-out cleanup: drop the read-only snapshot cache (re-fetchable when online) so no
+// cached data survives into the next login. The outbox (unsynced work) is PRESERVED —
+// call unsyncedOutboxCount() first if the UI needs to warn about pending items.
+export async function clearSnapshotCache(): Promise<void> {
+  await localdb.snapshots.clear();
+}

@@ -1,9 +1,4 @@
-// Lightweight money formatting for the desktop foundation.
-// TODO(desktop): port the web app's full dual-currency helpers (src/lib/currency.ts:
-// formatMoney / getEquivalentAmount / hasValidRate) once the currency settings RPC
-// wiring is added, so USD + LBP dual display matches the web app exactly.
-export function formatMoney(amount: number | null | undefined, code = "USD"): string {
-  const n = Number(amount ?? 0);
-  if (code === "LBP") return `${Math.round(n).toLocaleString()} LBP`;
-  return `$${n.toFixed(2)}`;
-}
+// Back-compat shim. The dual USD/LBP display helpers now live in `@/lib/currency`.
+// Kept so existing imports (`@/lib/money`) keep working with identical behavior;
+// prefer importing from `@/lib/currency` in new code.
+export { formatMoney, type CurrencyCode } from "@/lib/currency";
