@@ -4,7 +4,7 @@ import { useSession, resolvePostLoginPath } from "@/state/session";
 import { Login } from "@/screens/Login";
 import { Shell } from "@/screens/Shell";
 import { Dashboard } from "@/screens/Dashboard";
-import { POS } from "@/screens/pos/POS";
+import { PosWorkspace } from "@/screens/pos/PosWorkspace";
 import { Profile } from "@/screens/Profile";
 import { Settings } from "@/screens/settings/Settings";
 import { Info } from "@/screens/Info";
@@ -53,6 +53,16 @@ export default function App() {
     <HashRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        {/* The POS is a full-window workspace: it owns its own rail and status
+            bar, so it deliberately sits OUTSIDE the generic app Shell. */}
+        <Route
+          path="/pos"
+          element={
+            <RequireAuth>
+              <PosWorkspace />
+            </RequireAuth>
+          }
+        />
         <Route
           element={
             <RequireAuth>
@@ -62,7 +72,6 @@ export default function App() {
         >
           <Route index element={<PostLogin />} />
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/pos" element={<POS />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/settings/*" element={<Settings />} />
           <Route path="/blocked" element={<Info title="Access blocked" body="This account/tenant is blocked. Contact your administrator." />} />

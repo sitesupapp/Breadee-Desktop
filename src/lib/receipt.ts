@@ -1,81 +1,100 @@
-// Cashier receipt DATA model + builder (foundation). Pure and framework-agnostic.
-// Drives the on-screen receipt preview now; the SAME shape will feed the native
-// printer path in a later phase. No printing here, no side effects.
+// Receipt DATA model + builder. Pure and framework-agnostic.
+//
+// This drives the on-screen preview today. The shape is deliberately close to the
+// web app's `ReceiptData` (items with modifiers and notes, subtotal/discount/total,
+// tendered/change, staff, branch, payment status) so the web's template renderer
+// can be ported onto it during the printing phase without changing callers.
+//
+// No printing here, no side effects. Every monetary figure is passed IN from the
+// server response - nothing on a receipt is calculated by this module.
 
 import type { CurrencyCode } from "@/lib/currency";
+
+export type ReceiptModifier = {
+  name: string;
+  price_delta: number;
+  quantity: number;
+};
 
 export type ReceiptLine = {
   name: string;
   qty: number;
   unitPrice: number;
   lineTotal: number;
+  modifiers?: ReceiptModifier[];
+  note?: string | null;
 };
 
 export type ReceiptData = {
   businessName: string;
-  branchLabel: string;
+  branchName: string;
+  staffName: string | null;
   orderNumber: string;
-  orderType: string; // "Takeaway" for this increment
+  orderType: string;
+  /** Human-readable time captured when the receipt was built. */
+  at: string;
   paid: boolean;
-  method: string | null; // "cash" once paid
-  at: string; // human-readable timestamp captured at print time
+  method: string | null;
   currency: CurrencyCode;
   lines: ReceiptLine[];
   subtotal: number;
   discount: number;
   total: number;
+  /** Cash handling, in the TENDER currency. Null when not a cash tender. */
+  tenderCurrency?: CurrencyCode | null;
+  tenderTotal?: number | null;
+  tendered?: number | null;
+  change?: number | null;
+  exchangeRate?: number | null;
+  /** Operational reference so a paper receipt can be tied back to a shift. */
+  shiftRef?: string | null;
 };
 
-export type BuildReceiptInput = {
+export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType"> & {
   businessName: string | null | undefined;
-  branchLabel: string;
-  orderNumber: string;
-  paid: boolean;
-  method?: string | null;
-  currency: CurrencyCode;
-  lines: ReceiptLine[];
-  subtotal: number;
-  discount?: number;
-  total: number;
-  at: string;
+  orderType?: string;
 };
 
 export function buildReceipt(input: BuildReceiptInput): ReceiptData {
-  const discount = input.discount ?? 0;
   return {
+    ...input,
     businessName: input.businessName?.trim() || "Breadee",
-    branchLabel: input.branchLabel,
-    orderNumber: input.orderNumber,
-    orderType: "Takeaway",
-    paid: input.paid,
-    method: input.method ?? null,
-    at: input.at,
-    currency: input.currency,
-    lines: input.lines,
-    subtotal: input.subtotal,
-    discount,
-    total: input.total,
+    orderType: input.orderType ?? "Takeaway",
   };
 }
 
-// A deterministic sample used by the Settings → Receipt design preview (no real data).
+/** A deterministic sample used by Settings -> Receipt design (no real data). */
 export function sampleReceipt(businessName: string | null | undefined, currency: CurrencyCode): ReceiptData {
   const lines: ReceiptLine[] = [
-    { name: "Chicken Sandwich", qty: 2, unitPrice: 4.5, lineTotal: 9.0 },
+    {
+      name: "Chicken Sandwich",
+      qty: 2,
+      unitPrice: 5.0,
+      lineTotal: 10.0,
+      modifiers: [{ name: "Extra cheese", price_delta: 0.5, quantity: 1 }],
+      note: "no pickles",
+    },
     { name: "Fries", qty: 1, unitPrice: 2.5, lineTotal: 2.5 },
     { name: "Soft Drink", qty: 2, unitPrice: 1.25, lineTotal: 2.5 },
   ];
   const subtotal = lines.reduce((s, l) => s + l.lineTotal, 0);
   return buildReceipt({
     businessName,
-    branchLabel: "Main Branch",
+    branchName: "Main Branch",
+    staffName: "Sample Cashier",
     orderNumber: "SAMPLE-0001",
+    at: "Sample receipt - layout preview",
     paid: true,
     method: "cash",
     currency,
     lines,
     subtotal,
+    discount: 0,
     total: subtotal,
-    at: "Sample receipt · layout preview",
+    tenderCurrency: currency,
+    tenderTotal: subtotal,
+    tendered: subtotal,
+    change: 0,
+    shiftRef: null,
   });
 }
