@@ -29,11 +29,25 @@ on:
   # installer artifact on each push to desktop-staging.
   push:
     branches: [desktop-staging]
+  # Build the installer for PRs into desktop-staging as well, so a reviewer can
+  # download and smoke-test the actual .exe BEFORE the merge rather than after.
+  # Safe to run on PRs: this is `pull_request` (never pull_request_target), so
+  # the token stays read-only, and the workflow has no release/publish/tag step.
+  # The only secrets are the STAGING Supabase URL + anon (publishable) key -
+  # there is no code-signing or release credential in this repo to expose.
+  pull_request:
+    branches: [desktop-staging]
 
 # Minimal permissions: this workflow only reads the repo (artifact upload
 # uses the default token scope, no extra write perms needed).
 permissions:
   contents: read
+
+# Same rule as the build check: a newer commit supersedes an in-flight run for
+# the same PR or branch, and separate PRs never cancel one another.
+concurrency:
+  group: desktop-windows-installer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-installer:
@@ -47,10 +61,12 @@ jobs:
         uses: actions/checkout@v4
 
       # 2. Node toolchain (npm cache keyed off package-lock.json).
+      # Kept in step with the build-check workflow (see the note there): Node 24
+      # is what the repo's tooling is developed and tested against.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       # 3. Install frontend deps exactly as locked.

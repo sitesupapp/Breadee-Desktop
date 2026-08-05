@@ -13,6 +13,7 @@
 | `build` | `tsc -b && vite build` | Type-build + bundle frontend → `dist/` |
 | `preview` | `vite preview` | Serve the built frontend |
 | `typecheck` | `tsc --noEmit` | Type-check only |
+| `test` | `node --test --test-concurrency=1 --import ./test/register.mjs test/*.test.ts` | Focused suite on Node's built-in runner (no test framework installed) |
 | `tauri` | `tauri` | Tauri CLI passthrough |
 | `tauri:dev` | `tauri dev` | Run the native app in dev (needs Rust + MSVC) |
 | `tauri:build` | `tauri build` | Compile Rust + package the installer |
@@ -27,28 +28,59 @@
 
 Two workflows in `.github/workflows/`. Both run on `windows-latest` (WebView2 + MSVC preinstalled) with `permissions: contents: read`, and both inject the staging Supabase values from **GitHub Actions secrets** into the Vite build (see [`CONFIGURATION.md`](./CONFIGURATION.md)).
 
-### 3a. `desktop-windows-check.yml` — "Desktop Windows Build Check"
+### 3a. `desktop-windows-check.yml` — check name **"Windows build check"**
 
-A fast compile/type sanity check. **No installer, no release.**
+A fast compile/type/test sanity gate. **No installer, no release.**
 
-- **Triggers:** push to `desktop-staging`, PR targeting `main`, `workflow_dispatch`.
-- **Steps:** checkout → setup Node 20 (npm cache) → `npm ci` → `npm run typecheck` → `npm run build` *(env: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` from secrets, `VITE_APP_ENV: staging`)* → setup Rust stable → Rust cache → `cargo check --locked` in `src-tauri`.
-- Cancels superseded runs via a concurrency group.
+- **Triggers:** push to `desktop-staging`, **PR targeting `main` or `desktop-staging`**, `workflow_dispatch`.
+- **Steps:** checkout → setup Node 24 (npm cache) → `npm ci` → `npm run typecheck` → **`npm test`** → `npm run build` *(env: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` from secrets, `VITE_APP_ENV: staging`)* → setup Rust stable → Rust cache → `cargo check --locked` in `src-tauri`.
+- Cancels superseded runs via a concurrency group keyed on the PR number (falling back to the ref), so separate PRs never cancel each other and a post-merge `desktop-staging` run is never cancelled by an unrelated PR.
 
-### 3b. `desktop-windows-installer.yml` — "Desktop Windows Installer (Artifact)"
+### 3b. `desktop-windows-installer.yml` — check name **"Build Windows installer"**
 
-Builds the actual Windows installer and uploads it as a downloadable artifact. **No GitHub Release, no code-signing.**
+Builds the actual Windows installer and uploads it as a downloadable artifact. **No GitHub Release, no tag, no code-signing, no publishing.**
 
-- **Triggers:** `workflow_dispatch` **and** push to `desktop-staging`.
-  - The push trigger is required so the workflow **registers and appears in the Actions sidebar** — a `workflow_dispatch`-only workflow only registers from the repo's default branch, which does not carry this file.
-- **Steps:** checkout → setup Node 20 → `npm ci` → `npm run typecheck` → `npm run build` *(same 3 env values)* → setup Rust stable → Rust cache → `npm run tauri:build` *(same env — `tauri build` re-runs the frontend build via `beforeBuildCommand`, so the values must be present here too)* → upload artifact.
+- **Triggers:** `workflow_dispatch`, push to `desktop-staging`, **and PR targeting `desktop-staging`**.
+  - The push trigger is also required so the workflow **registers and appears in the Actions sidebar** — a `workflow_dispatch`-only workflow only registers from the repo's default branch, which does not carry this file.
+- **Steps:** checkout → setup Node 24 → `npm ci` → `npm run typecheck` → `npm run build` *(same 3 env values)* → setup Rust stable → Rust cache → `npm run tauri:build` *(same env — `tauri build` re-runs the frontend build via `beforeBuildCommand`, so the values must be present here too)* → upload artifact.
 - **Artifact:** `breadee-desktop-windows-installer` — contains `src-tauri/target/release/bundle/nsis/*-setup.exe` (e.g. `Breadee_<version>_x64-setup.exe`), `if-no-files-found: error`, `retention-days: 14`.
+- Same PR-scoped concurrency rule as the build check.
+
+### 3c. Why Node 24
+
+`npm test` runs the suite on Node's **built-in** test runner directly over TypeScript sources. That needs native type stripping (Node 22.18+/24) and glob support in `--test` (Node 21+); Node 20 has neither, which is why the tests were not wired into CI before. The bump is a **CI runtime version only** — no package dependency or lockfile changed.
+
+### 3d. PR gating (added after Level 1)
+
+Level 1 integration exposed a gap: **PRs targeting `desktop-staging` ran no checks at all**, and had to be gated by manually dispatching both workflows. Both `pull_request` filters now include `desktop-staging`, so:
+
+```
+PR into desktop-staging  → Windows build check + installer artifact run automatically
+merge                    → push to desktop-staging re-runs both as a post-merge gate
+```
+
+Security notes for the PR triggers:
+
+- Both use **`pull_request`**, never `pull_request_target` — PR code never executes with a privileged token.
+- Top-level `permissions: contents: read` on both; no write scope is granted to any build job.
+- The only secrets are the **staging** Supabase URL and **anon/publishable** key. There is no code-signing certificate, release credential or service-role key in this repository to expose. `src/env.ts` rejects any key containing `service_role`.
+- Neither workflow creates a release, pushes a tag, or uploads anywhere outside the GitHub Actions artifact store.
+- Note: for a PR from a **fork**, GitHub withholds secrets, so the frontend build step would fail. That is the correct, secure default; this repo currently takes PRs only from its own branches.
 
 ## 4. Running & downloading the installer
 
+From a pull request (easiest):
+
+1. Open the PR → **Checks** tab → **Build Windows installer**.
+2. When it is green, open the run → **Artifacts** → download `breadee-desktop-windows-installer` (a zip containing the `-setup.exe`).
+
+Or directly from Actions:
+
 1. GitHub → **Actions** tab → **Desktop Windows Installer (Artifact)**.
-2. **Run workflow** (or just push to `desktop-staging`) → select `desktop-staging`.
-3. When the run is green, open it → **Artifacts** section → download `breadee-desktop-windows-installer` (a zip containing the `-setup.exe`).
+2. **Run workflow** (or just push to `desktop-staging`) → select the branch.
+3. When the run is green, open it → **Artifacts** section → download the zip.
+
+> Artifacts are **internal and temporary** (14-day retention). They are never published, released, tagged or distributed outside the Actions run.
 
 > Requires the two Supabase secrets to be configured (see [`CONFIGURATION.md`](./CONFIGURATION.md)); otherwise the app builds but launches blank because `src/env.ts` fails fast on missing env.
 
