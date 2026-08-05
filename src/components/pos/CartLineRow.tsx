@@ -84,7 +84,6 @@ export function CartLineRow({
         </div>
         <div className="flex items-center gap-1">
           <Button
-            size="sm"
             variant="ghost"
             onClick={(e) => {
               e.stopPropagation();

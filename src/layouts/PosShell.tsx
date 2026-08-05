@@ -120,7 +120,6 @@ export function PosShell(props: PosShellProps) {
         <div className="space-y-1 p-2">
           <Button
             variant="ghost"
-            size="sm"
             className={cn("w-full", !layout.railExpanded && "px-0")}
             onClick={props.onToggleFullscreen}
             title="Fullscreen (F11)"
@@ -129,7 +128,6 @@ export function PosShell(props: PosShellProps) {
           </Button>
           <Button
             variant="ghost"
-            size="sm"
             className={cn("w-full", !layout.railExpanded && "px-0")}
             onClick={props.onExit}
             title="Leave the POS workspace"

@@ -41,7 +41,7 @@ export function CartPanel(props: CartPanelProps) {
         <PanelTitle
           right={
             !empty ? (
-              <Button size="sm" variant="ghost" onClick={props.onNewOrder}>
+              <Button variant="ghost" onClick={props.onNewOrder}>
                 Clear
               </Button>
             ) : undefined
@@ -88,7 +88,7 @@ export function CartPanel(props: CartPanelProps) {
             <p className="mt-0.5 text-xs text-amber-800">
               Orders and payments must belong to an open shift. Open one to start serving.
             </p>
-            <Button size="sm" className="mt-2 w-full" onClick={props.onOpenShift}>
+            <Button className="mt-2 w-full" onClick={props.onOpenShift}>
               Open shift
             </Button>
           </div>

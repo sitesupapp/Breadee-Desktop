@@ -81,7 +81,7 @@ export function PosStatusBar(props: PosStatusBarProps) {
               Drawer {formatMoney(props.cashBox.expected_cash, props.currency)}
             </span>
           )}
-          <Button size="sm" variant="ghost" onClick={props.onEndShift}>
+          <Button variant="ghost" onClick={props.onEndShift}>
             End shift
           </Button>
         </div>
@@ -92,7 +92,6 @@ export function PosStatusBar(props: PosStatusBarProps) {
             No open shift
           </Badge>
           <Button
-            size="sm"
             onClick={props.onOpenShift}
             disabled={!props.canOpenShift}
             title={props.openShiftReason ?? undefined}
