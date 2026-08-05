@@ -30,7 +30,13 @@ export type PaymentDialogProps = {
   orderNumber: string | null;
   error: string | null;
   onCancel: () => void;
-  onConfirm: (input: { method: PaymentMethod; currency: CurrencyCode; discount: Record<string, unknown> }) => void;
+  onConfirm: (input: {
+    method: PaymentMethod;
+    currency: CurrencyCode;
+    discount: Record<string, unknown>;
+    /** What the cashier actually handed over, in the tender currency. */
+    tendered: number | null;
+  }) => void;
 };
 
 export function PaymentDialog(props: PaymentDialogProps) {
@@ -85,6 +91,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
       method,
       currency,
       discount: discountPayload(props.discountGate.allowed, props.subtotal, discountType, discountInPrimary),
+      tendered: tendered.trim() === "" ? null : tenderedNum,
     });
   }
 

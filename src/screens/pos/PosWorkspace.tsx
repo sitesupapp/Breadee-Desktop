@@ -28,14 +28,15 @@ import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart } from "@/state/cart";
 import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
-import { groupsForItem, lineTotals, requiresChoice } from "@/lib/pos/modifiers";
+import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
+import { completePayment } from "@/lib/pos/paymentCompletion";
 import { getShiftExpected } from "@/lib/pos/shifts";
 import { classifyError } from "@/lib/pos/errors";
-import { buildReceipt, type ReceiptData } from "@/lib/receipt";
-import { computeChange } from "@/lib/pos/payments";
-import { convertCurrency, hasValidRate, type CurrencyCode } from "@/lib/currency";
+import type { ReceiptData } from "@/lib/receipt";
+import { useReceipt, shouldShowReceipt } from "@/state/receipt";
+import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
@@ -50,6 +51,8 @@ export function PosWorkspace() {
         <ErrorBoundary label="POS">
           <PosWorkspaceInner />
         </ErrorBoundary>
+        {/* Outside the boundary and the screen's loading states on purpose. */}
+        <ReceiptLayer />
         <ShortcutHelp />
       </ToastProvider>
     </KeyboardProvider>
@@ -176,9 +179,8 @@ function PosWorkspaceInner() {
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [shiftError, setShiftError] = useState<string | null>(null);
   const [expected, setExpected] = useState<ShiftExpected | null>(null);
-  // `lastReceipt` survives closing the preview so Ctrl+P can bring it back.
-  const [lastReceipt, setLastReceipt] = useState<ReceiptData | null>(null);
-  const [receiptOpen, setReceiptOpen] = useState(false);
+  // Receipt presentation is store-owned and atomic - see `state/receipt.ts`.
+  const receiptStore = useReceipt();
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -302,7 +304,12 @@ function PosWorkspaceInner() {
   }, [cart.lines.length, shiftId, pos.gates.takePayments, toast]);
 
   const confirmPayment = useCallback(
-    async (input: { method: PaymentMethod; currency: CurrencyCode; discount: Record<string, unknown> }) => {
+    async (input: {
+      method: PaymentMethod;
+      currency: CurrencyCode;
+      discount: Record<string, unknown>;
+      tendered: number | null;
+    }) => {
       if (inFlight.current) return;
       inFlight.current = true;
       setBusy(true);
@@ -313,48 +320,30 @@ function PosWorkspaceInner() {
         if (!saved) return;
         const result = await payOrder({ orderId: saved.order_id, method: input.method, currency: input.currency, discount: input.discount });
 
-        // Everything on the receipt below comes from the server response.
-        const tenderTotal =
-          input.currency === currency
-            ? result.amount
-            : hasValidRate(rate)
-              ? convertCurrency(result.amount, currency, input.currency, rate)
-              : null;
-        const change = tenderTotal === null ? null : computeChange(tenderTotal, tenderTotal, input.currency).change;
+        // The completion sequence is deterministic and lives in one pure module:
+        // present the receipt (data + visibility atomically) BEFORE the dialog
+        // closes and the cart resets, so neither can race the receipt.
+        const completion = completePayment({
+          result,
+          lines,
+          fallbackOrderNumber: saved.order_number,
+          tenantName: pos.tenantName,
+          branchName: pos.branch.name,
+          operatorName: pos.userName,
+          primaryCurrency: currency,
+          tenderCurrency: input.currency,
+          rate,
+          tenderedInput: input.tendered,
+          shiftId,
+          at: new Date().toLocaleString(),
+        });
 
-        setLastReceipt(
-          buildReceipt({
-            businessName: pos.tenantName,
-            branchName: pos.branch.name,
-            staffName: pos.userName,
-            orderNumber: result.order_number || saved.order_number,
-            at: new Date().toLocaleString(),
-            paid: true,
-            method: result.method,
-            currency,
-            lines: lines.map((l) => ({
-              name: l.name,
-              qty: l.quantity,
-              unitPrice: lineTotals(l.base_price, l.modifiers, 1).finalUnitPrice,
-              lineTotal: lineTotals(l.base_price, l.modifiers, l.quantity).lineTotal,
-              modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.price_delta, quantity: m.quantity })),
-              note: l.kitchen_note,
-            })),
-            subtotal: result.subtotal,
-            discount: result.discount,
-            total: result.amount,
-            tenderCurrency: input.currency,
-            tenderTotal,
-            tendered: tenderTotal,
-            change,
-            exchangeRate: result.exchange_rate,
-            shiftRef: shiftId ? shiftId.slice(0, 8) : null,
-          }),
-        );
+        for (const step of completion.steps) {
+          if (step === "present-receipt") receiptStore.present(completion.receipt);
+          else if (step === "close-payment-dialog") setPayOpen(false);
+          else if (step === "reset-cart") newOrder();
+        }
 
-        setPayOpen(false);
-        setReceiptOpen(true);
-        newOrder();
         void shiftStore.refreshCashBox();
         toast.push({ tone: "success", message: `Paid - order ${result.order_number}` });
       } catch (e) {
@@ -366,7 +355,7 @@ function PosWorkspaceInner() {
         setBusy(false);
       }
     },
-    [currency, ensureOrder, newOrder, pos.branch.name, pos.tenantName, pos.userName, rate, shiftId, shiftStore, toast],
+    [currency, ensureOrder, newOrder, pos.branch.name, pos.tenantName, pos.userName, rate, receiptStore, shiftId, shiftStore, toast],
   );
 
   const doOpenShift = useCallback(
@@ -434,7 +423,7 @@ function PosWorkspaceInner() {
     removeLine: () => cart.selectedKey && removeLine(cart.selectedKey),
     openShift: () => !shiftId && setOpenShiftOpen(true),
     endShift: () => shiftId && void startEndShift(),
-    print: () => lastReceipt && setReceiptOpen(true),
+    print: () => receiptStore.reopen(),
     routeTakeaway: () => setCategory(ALL_CATEGORIES),
     fullscreen: () => void toggleFullscreen(),
   });
@@ -654,7 +643,22 @@ function PosWorkspaceInner() {
 
       <ShiftReportDialog report={shiftStore.lastReport} currency={currency} onClose={() => shiftStore.clearReport()} />
 
-      {receiptOpen && lastReceipt && <ReceiptModal data={lastReceipt} onClose={() => setReceiptOpen(false)} />}
     </>
   );
+}
+
+/**
+ * The receipt preview is mounted OUTSIDE PosWorkspaceInner on purpose.
+ *
+ * PosWorkspaceInner early-returns a loading skeleton whenever the POS context is
+ * momentarily not ready; anything rendered inside it disappears for that window.
+ * A completed receipt is the one thing that must never be lost to a transient
+ * loading state, so it is rendered from the store at the workspace root.
+ */
+function ReceiptLayer() {
+  const receipt = useReceipt((s) => s.receipt);
+  const visible = useReceipt((s) => s.visible);
+  const hide = useReceipt((s) => s.hide);
+  if (!shouldShowReceipt({ receipt, visible })) return null;
+  return <ReceiptModal data={receipt as ReceiptData} onClose={hide} />;
 }
