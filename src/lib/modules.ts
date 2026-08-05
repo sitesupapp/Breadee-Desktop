@@ -12,7 +12,7 @@
 // modules or technical feature keys.
 
 import { FEATURES, hasFeature, type FeatureMap } from "@/lib/features";
-import { canUsePOS } from "@/lib/permissions";
+import { canOperatePOS } from "@/lib/pos/access";
 import type { TenantRole, UserStatus } from "@/lib/types";
 
 export type ModuleAvailability = "desktop" | "planned" | "web";
@@ -43,10 +43,11 @@ export const MODULES: ModuleEntry[] = [
     key: "pos",
     label: "Point of Sale",
     icon: "🧾",
-    desc: "Takeaway orders and cash payment. Dine-in, delivery and printing coming next.",
+    desc: "Shifts, takeaway orders, modifiers, discounts and cash payment. Dine-in, delivery and printing coming next.",
     availability: "desktop",
     to: "/pos",
-    show: (c) => canUsePOS(c.role, c.status) && hasFeature(c.features, FEATURES.POS),
+    // Feature + `pos.access` + the owner exclusion, exactly as the server decides.
+    show: (c) => canOperatePOS({ membership: { role: c.role, status: c.status }, permissions: c.permissions, features: c.features }),
   },
   {
     key: "inventory",

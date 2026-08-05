@@ -3,11 +3,12 @@
 // module the tenant/user isn't entitled to. Pure + framework-agnostic: consumed by
 // the Shell (sidebar) and the Dashboard ("accessible modules") so both stay in sync.
 //
-// PHASE 1: only the approved foundation pages appear here (Dashboard, Profile, POS,
-// Settings). No entries for unbuilt modules (inventory, reports, etc.).
+// POS gating goes through `lib/pos/access.ts` (feature + `pos.access` + the owner
+// exclusion), NOT through role names. The previous role-list check offered POS to
+// tenant owners, whom `pos_assert_operator` rejects server-side.
 
 import { FEATURES, hasFeature, type FeatureMap } from "@/lib/features";
-import { canUsePOS } from "@/lib/permissions";
+import { canOperatePOS } from "@/lib/pos/access";
 import type { TenantRole, UserStatus } from "@/lib/types";
 
 export type NavContext = {
@@ -25,35 +26,36 @@ export type NavItem = {
   show: (ctx: NavContext) => boolean;
 };
 
-// When the effective-features map is empty (e.g. a degraded/offline context where
-// feature data didn't load), we fail OPEN for already-working core pages rather than
-// hiding them — role/permission checks still apply, and RLS remains the real gate.
-const featuresUnknown = (ctx: NavContext) => Object.keys(ctx.features ?? {}).length === 0;
-
 export const NAV_ITEMS: NavItem[] = [
   {
     to: "/dashboard",
     label: "Dashboard",
-    icon: "▦",
+    icon: "#",
     show: () => true, // any authenticated member sees their own dashboard
   },
   {
     to: "/pos",
     label: "POS",
-    icon: "🧾",
-    // Same guard POS.tsx already enforces, plus the tenant POS feature flag.
-    show: (ctx) => canUsePOS(ctx.role, ctx.status) && (hasFeature(ctx.features, FEATURES.POS) || featuresUnknown(ctx)),
+    icon: "P",
+    // Deliberately fails CLOSED: with no features/permissions map there is no
+    // evidence the user may operate the POS, and the server would refuse anyway.
+    show: (ctx) =>
+      canOperatePOS({
+        membership: { role: ctx.role, status: ctx.status },
+        permissions: ctx.permissions,
+        features: ctx.features,
+      }),
   },
   {
     to: "/profile",
     label: "Profile",
-    icon: "👤",
+    icon: "@",
     show: () => true, // read-only view of the member's own context
   },
   {
     to: "/settings",
     label: "Settings",
-    icon: "⚙",
+    icon: "*",
     show: () => true, // local device settings (printers/sync/device/help) are always available
   },
 ];
@@ -74,4 +76,9 @@ export function enabledFeatureKeys(features: FeatureMap): string[] {
     .filter(([, on]) => Boolean(on))
     .map(([k]) => k)
     .sort();
+}
+
+/** Kept for callers that only need the raw POS feature flag. */
+export function hasPosFeature(features: FeatureMap): boolean {
+  return hasFeature(features, FEATURES.POS);
 }
