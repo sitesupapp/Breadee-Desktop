@@ -67,6 +67,23 @@ Security notes for the PR triggers:
 - Neither workflow creates a release, pushes a tag, or uploads anywhere outside the GitHub Actions artifact store.
 - Note: for a PR from a **fork**, GitHub withholds secrets, so the frontend build step would fail. That is the correct, secure default; this repo currently takes PRs only from its own branches.
 
+### 3e. Verified behaviour (2026-08-05, `2466a67`)
+
+Automatic PR gating was confirmed end-to-end on the PR that introduced it (#2) and again on the follow-up verification PR. Both workflows started **without any manual dispatch**:
+
+| Check name (use these for branch protection) | Workflow | Trigger |
+|---|---|---|
+| `Windows build check` | Desktop Windows Build Check | `pull_request` |
+| `Build Windows installer` | Desktop Windows Installer (Artifact) | `pull_request` |
+
+Observed on the automatic PR runs:
+
+- `npm ci` → typecheck → **99 tests / 99 pass / 0 fail** → frontend build → `cargo check --locked`, all green on `windows-latest`
+- NSIS installer built and uploaded as `breadee-desktop-windows-installer` (~2.0 MB, 14-day retention)
+- No GitHub Release, no tag, nothing published
+
+A useful detail worth recording: for `pull_request` events GitHub reads the workflow definition from the **PR head**, not the base branch. That is why the trigger fix took effect on the very PR that introduced it, with no bootstrap dispatch required.
+
 ## 4. Running & downloading the installer
 
 From a pull request (easiest):
