@@ -8,6 +8,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import {
   FORBIDDEN_COMBOS,
@@ -107,6 +110,44 @@ test("every declared id actually has a binding - no id is dead", () => {
   for (const id of ["tableMap", "tableSearch", "tableLeft", "tableRight", "tableOpen"] as ShortcutId[]) {
     assert.ok(bound.has(id), `${id} is declared but unbound`);
   }
+});
+
+// --- the search-box escape hatch ---------------------------------------------
+//
+// Found in staging verification: after Alt+M the caret stayed in the search
+// field, so ArrowLeft/Right/Up/Down and Enter all resolved to null and the table
+// grid could only be reached again with the mouse. Alt+M is the ONE dine-in
+// binding allowed to fire from inside a field - being the way out of the field
+// is its entire purpose - so releasing focus is part of the contract.
+
+test("Alt+M is the only dine-in binding that fires while typing", () => {
+  const dineIn = SHORTCUTS.filter((s) => s.group === "Dine-in");
+  const worksInInput = dineIn.filter((s) => s.worksInInput).map((s) => s.id);
+  // The reserved Ctrl+Shift+* bindings are also worksInInput but register no
+  // handler, so tableMap is the only one that can actually DO anything.
+  assert.ok(worksInInput.includes("tableMap"), "Alt+M lost its escape-hatch status");
+  const live = worksInInput.filter((id) => !RESERVED_SHORTCUTS.includes(id));
+  assert.deepEqual(live, ["tableMap"]);
+});
+
+test("the grid bindings are dead while a field has focus, which is why Alt+M must blur", () => {
+  // These are the bindings Alt+M is expected to hand control back to.
+  for (const key of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"]) {
+    assert.equal(press(key, { typing: true }), null, `${key} unexpectedly fires while typing`);
+    assert.notEqual(press(key), null, `${key} does not resolve outside a field`);
+  }
+});
+
+test("the Alt+M handler releases DOM focus so the grid becomes reachable again", () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "screens", "pos", "DineInWorkspace.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf("tableMap: () => {");
+  assert.ok(start > 0, "the tableMap handler could not be located");
+  const body = source.slice(start, source.indexOf("},", start));
+  assert.match(body, /searchRef\.current\?\.blur\(\)/, "Alt+M no longer releases focus - the arrows will stay dead");
+  assert.match(body, /clearSelection\(\)/, "Alt+M no longer clears the selection");
 });
 
 test("the help sheet has a Dine-in section listing the live and reserved bindings", () => {

@@ -144,6 +144,12 @@ export function useDineInWorkspace(input: {
     {
       tableSearch: () => searchRef.current?.focus(),
       tableMap: () => {
+        // Alt+M is the ONLY dine-in binding marked `worksInInput`, precisely so
+        // it can be pressed from inside the search box. That makes releasing DOM
+        // focus part of the job: the arrows and Enter are not `worksInInput`, so
+        // leaving the caret in the field silently kills every other table
+        // binding and the grid can only be reached again with the mouse.
+        searchRef.current?.blur();
         tables.clearSelection();
         setFocusedId(null);
       },
