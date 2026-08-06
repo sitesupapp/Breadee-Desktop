@@ -8,7 +8,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildSubmitPayload, cartSubtotal, newClientOpId, ShiftRequiredError } from "@/lib/pos/orders";
+import {
+  buildSubmitPayload,
+  cartSubtotal,
+  newClientOpId,
+  ShiftRequiredError,
+  TableRequiredError,
+} from "@/lib/pos/orders";
 import { lineTotals, modifiersTotal } from "@/lib/pos/modifiers";
 import type { CartLine } from "@/types/pos";
 
@@ -127,4 +133,55 @@ test("the cart subtotal is the sum the server will compute", () => {
 test("quantity changes flow straight into the payload", () => {
   const payload = buildSubmitPayload({ ...base, lines: [line({ quantity: 7 })] });
   assert.equal(payload.items[0].quantity, 7);
+});
+
+// --- Dine-in table binding (Level 2A) ----------------------------------------
+//
+// m218 keys the single-active-bill lookup on `table_id`. A dine-in submit that
+// omits it does not fail loudly - it silently opens a SECOND bill on the same
+// table, which then cannot be settled with the first. That defect is made
+// unrepresentable here: the payload cannot be built at all.
+
+test("a dine-in payload can never be built without a table", () => {
+  assert.throws(() => buildSubmitPayload({ ...base, orderType: "dine_in" }), TableRequiredError);
+  assert.throws(() => buildSubmitPayload({ ...base, orderType: "dine_in", tableId: null }), TableRequiredError);
+  assert.throws(() => buildSubmitPayload({ ...base, orderType: "dine_in", tableId: "" }), TableRequiredError);
+});
+
+test("the shift is still required for dine-in, and is checked first", () => {
+  assert.throws(
+    () => buildSubmitPayload({ ...base, orderType: "dine_in", shiftId: null, tableId: "table-1" }),
+    ShiftRequiredError,
+  );
+});
+
+test("a dine-in payload carries table_id so the round joins the table's one open bill", () => {
+  const payload = buildSubmitPayload({ ...base, orderType: "dine_in", tableId: "table-1" });
+  assert.equal(payload.order_type, "dine_in");
+  assert.equal(payload.table_id, "table-1");
+  assert.equal(payload.shift_id, "shift-1");
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "branch_id",
+    "client_op_id",
+    "items",
+    "notes",
+    "order_type",
+    "shift_id",
+    "status",
+    "table_id",
+  ]);
+});
+
+test("the takeaway payload is byte-for-byte unchanged - table_id is absent, not null", () => {
+  const takeaway = buildSubmitPayload(base);
+  assert.equal("table_id" in takeaway, false);
+  // Even when a table id is supplied by mistake, a takeaway order never carries it.
+  const stray = buildSubmitPayload({ ...base, tableId: "table-1" });
+  assert.equal("table_id" in stray, false);
+  assert.deepEqual(stray, takeaway);
+});
+
+test("a dine-in retry reuses the operation id, so m224 replays instead of duplicating the round", () => {
+  const input = { ...base, orderType: "dine_in" as const, tableId: "table-1" };
+  assert.deepEqual(buildSubmitPayload(input), buildSubmitPayload(input));
 });

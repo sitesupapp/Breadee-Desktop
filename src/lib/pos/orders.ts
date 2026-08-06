@@ -45,6 +45,14 @@ export type SubmitOrderPayload = {
   shift_id: string;
   client_op_id: string;
   notes: string | null;
+  /**
+   * Dine-in only. m218 keys the single-active-bill lookup on it: a dine-in
+   * submit carrying a table_id joins that table's ONE open bill as the next
+   * batch, while a dine-in submit WITHOUT it silently opens a second,
+   * unreachable bill. Omitted entirely for takeaway so that payload is byte-for
+   * byte what it was in Level 1.
+   */
+  table_id?: string;
   items: SubmitOrderItem[];
 };
 
@@ -52,6 +60,14 @@ export class ShiftRequiredError extends Error {
   constructor() {
     super("This order is not attached to an open shift");
     this.name = "ShiftRequiredError";
+  }
+}
+
+/** A dine-in submission without a table would create an orphan second bill. */
+export class TableRequiredError extends Error {
+  constructor() {
+    super("This dine-in order is not attached to a table");
+    this.name = "TableRequiredError";
   }
 }
 
@@ -72,8 +88,11 @@ export function buildSubmitPayload(input: {
   lines: CartLine[];
   orderNote?: string | null;
   status?: string;
+  /** Dine-in only. Required for `dine_in`, rejected implicitly for takeaway. */
+  tableId?: string | null;
 }): SubmitOrderPayload {
   if (!input.shiftId) throw new ShiftRequiredError();
+  if (input.orderType === "dine_in" && !input.tableId) throw new TableRequiredError();
   return {
     branch_id: input.branchId,
     order_type: input.orderType,
@@ -81,6 +100,8 @@ export function buildSubmitPayload(input: {
     shift_id: input.shiftId,
     client_op_id: input.clientOpId,
     notes: input.orderNote && input.orderNote.trim() !== "" ? input.orderNote.trim() : null,
+    // Present ONLY for dine-in, so the takeaway payload is unchanged.
+    ...(input.orderType === "dine_in" && input.tableId ? { table_id: input.tableId } : {}),
     items: input.lines.map((l) => ({
       menu_item_id: l.menu_item_id,
       name: l.name,

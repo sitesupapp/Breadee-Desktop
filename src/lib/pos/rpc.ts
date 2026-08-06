@@ -27,7 +27,12 @@ export type PosRpcName =
   | "pos_shift_expected"
   | "pos_cash_box_shift"
   | "pos_submit_order"
-  | "pos_pay_order";
+  | "pos_pay_order"
+  // Level 2A - Dine-In table foundation. Read + open only; the mutating table
+  // operations (move/close/clear/pay) are deliberately NOT listed, so they
+  // cannot be called before their own level lands.
+  | "pos_table_map"
+  | "pos_open_table";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {
