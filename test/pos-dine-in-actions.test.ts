@@ -54,8 +54,14 @@ function allowedRpcNames(): string[] {
 /** RPCs that would mutate or settle a table. None may be reachable in Level 2A. */
 const FORBIDDEN_RPCS = ["pos_move_table", "pos_close_table", "pos_clear_table", "pos_pay_table"];
 
-/** Every action the brief requires to stay non-functional. */
-const MUST_BE_DISABLED: DeferredTableActionKey[] = ["addItems", "submitRound", "move", "close", "clear", "pay"];
+/**
+ * Every action that must stay non-functional.
+ *
+ * Level 2B shipped Add items and Submit round, so they are gone from this list -
+ * they now have real gates in `lib/pos/tableRounds.ts`. What is left is
+ * everything that MOVES or SETTLES a bill.
+ */
+const MUST_BE_DISABLED: DeferredTableActionKey[] = ["move", "close", "clear", "pay"];
 
 // --- Layer 1: the pure decision ---------------------------------------------
 
@@ -99,9 +105,16 @@ test("the pay slot is labelled Pay and says which level delivers it", () => {
 test("every deferred action explains itself by level, never by permission", () => {
   for (const action of DEFERRED_TABLE_ACTIONS) {
     const reason = deferredActionReason(action);
-    assert.match(reason, /Level 2[BCD]\.$/, `${action.key} does not name its level: ${reason}`);
+    assert.match(reason, /Level 2[CD]\.$/, `${action.key} does not name its level: ${reason}`);
     assert.doesNotMatch(reason, /permission/i);
   }
+});
+
+test("ordering actions are no longer deferred - Level 2B shipped them", () => {
+  const keys = DEFERRED_TABLE_ACTIONS.map((a) => String(a.key));
+  assert.equal(keys.includes("addItems"), false, "Add items is a real gated action now");
+  assert.equal(keys.includes("submitRound"), false, "Submit round is a real gated action now");
+  assert.equal(keys.length, 4, `expected exactly move/close/clear/pay, got ${keys.join(", ")}`);
 });
 
 // --- Layer 2: the wiring -----------------------------------------------------
@@ -123,26 +136,39 @@ test("payDisabled is the Pay button's disabled attribute - the shell has not sto
   );
 });
 
-test("dine-in mode renders the read-only bill, never the cart panel that can submit or pay", () => {
+test("dine-in never renders the cart panel, which can send a takeaway order and pay", () => {
   const source = read("screens", "pos", "PosWorkspace.tsx");
   const cartProp = source.indexOf("cart={(layout) =>");
+  const roundPanel = source.indexOf("dineIn.roundPanel(layout)");
   const dineInBill = source.indexOf("dineIn.bill(layout)");
   const cartPanel = source.indexOf("<CartPanel");
-  assert.ok(cartProp >= 0 && dineInBill >= 0 && cartPanel >= 0, "the cart prop structure changed");
-  assert.ok(dineInBill > cartProp, "the dine-in bill is not inside the cart prop");
+  assert.ok(cartProp >= 0 && roundPanel >= 0 && dineInBill >= 0 && cartPanel >= 0, "the cart prop structure changed");
+  assert.ok(roundPanel > cartProp && dineInBill > cartProp, "the dine-in panels are not inside the cart prop");
   assert.ok(
-    dineInBill < cartPanel,
-    "CartPanel is reached before the dine-in branch - Send to kitchen and Pay would render on a table",
+    cartPanel > roundPanel && cartPanel > dineInBill,
+    "CartPanel is reached before the dine-in branches - Send to kitchen and Pay would render on a table",
   );
 });
 
-test("dine-in mode renders the table map, never the menu grid that adds items", () => {
+test("the table map owns the work area unless Add Items borrowed the menu", () => {
   const source = read("screens", "pos", "PosWorkspace.tsx");
   const workProp = source.indexOf("work={(layout) =>");
   const dineInWork = source.indexOf("dineIn.work(layout)");
   const menuGrid = source.indexOf("<MenuItemGrid");
   assert.ok(dineInWork > workProp, "the table map is not inside the work prop");
   assert.ok(menuGrid > dineInWork, "the menu grid is reached before the dine-in branch");
+  // The menu is shared rather than duplicated: exactly one MenuItemGrid exists.
+  assert.equal(source.split("<MenuItemGrid").length - 1, 1, "a second menu implementation appeared");
+  assert.match(source, /dineIn\.view === "map"/, "the work area no longer branches on the dine-in view");
+});
+
+test("Level 2B's real actions are gated on preconditions, not on a deferral list", () => {
+  const rounds = read("lib", "pos", "tableRounds.ts");
+  for (const fn of ["addItemsGate", "submitRoundGate"]) {
+    assert.match(rounds, new RegExp(`export function ${fn}`), `${fn} is missing`);
+  }
+  // Add Items must never consult payment permission.
+  assert.doesNotMatch(rounds, /takePayments|canTakePayments|payGate/, "the round path consults payment permission");
 });
 
 test("the deferred buttons carry no click handler at all", () => {
@@ -163,7 +189,7 @@ test("the reserved dine-in shortcuts have no handler anywhere in the app", () =>
     read("components", "pos", "TableBillPanel.tsx"),
     read("components", "pos", "TableMap.tsx"),
   ].join("\n");
-  for (const id of ["addItems", "moveTable", "closeTable", "clearTable"]) {
+  for (const id of ["moveTable", "closeTable", "clearTable"]) {
     assert.doesNotMatch(sources, new RegExp(`\\b${id}\\s*:\\s*\\(`), `${id} has a shortcut handler registered`);
   }
 });
@@ -172,8 +198,10 @@ test("the dine-in workspace calls no mutating table RPC", () => {
   const sources = [
     read("screens", "pos", "DineInWorkspace.tsx"),
     read("components", "pos", "TableBillPanel.tsx"),
+    read("components", "pos", "DineInRoundPanel.tsx"),
     read("lib", "pos", "tables.ts"),
     read("lib", "pos", "tableBill.ts"),
+    read("lib", "pos", "tableRounds.ts"),
     read("state", "tables.ts"),
     read("lib", "pos", "dineInActions.ts"),
   ].join("\n");
@@ -198,18 +226,31 @@ test("the mutating table RPCs are not in PosRpcName, so callPosRpc cannot accept
   assert.equal(members.length, 8, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
-test("every deferred action's future RPC is either unreachable or gated elsewhere", () => {
+test("every deferred action's future RPC is unreachable", () => {
   const members = allowedRpcNames();
-
   for (const action of DEFERRED_TABLE_ACTIONS) {
-    if (action.rpc === "pos_submit_order") {
-      // Reachable by design - Takeaway needs it. Dine-in is blocked one layer up:
-      // a dine_in payload cannot be built without a table (TableRequiredError),
-      // and dine-in mode never renders the control that submits.
-      const orders = read("lib", "pos", "orders.ts");
-      assert.match(orders, /throw new TableRequiredError\(\)/, "the dine-in submit guard was removed");
-      continue;
-    }
     assert.equal(members.includes(action.rpc), false, `${action.key} can reach ${action.rpc}`);
   }
+});
+
+test("Level 2B added no RPC beyond the one Takeaway already used", () => {
+  // pos_submit_order was already in the allow-list for Takeaway; dine-in rounds
+  // reuse it. No new RPC name may appear for ordering.
+  const members = allowedRpcNames();
+  assert.ok(members.includes("pos_submit_order"));
+  assert.equal(members.length, 8, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // And the dine-in guard that keeps that shared RPC safe is still in place.
+  assert.match(read("lib", "pos", "orders.ts"), /throw new TableRequiredError\(\)/, "the dine-in submit guard was removed");
+});
+
+test("no offline queue is reachable from the dine-in round path", () => {
+  const sources = [
+    read("lib", "pos", "tableRounds.ts"),
+    read("screens", "pos", "DineInWorkspace.tsx"),
+    read("components", "pos", "DineInRoundPanel.tsx"),
+  ].join("\n");
+  assert.doesNotMatch(sources, /enqueue\s*\(/, "a dine-in round can be queued offline");
+  assert.doesNotMatch(sources, /offline\/db|localdb/, "the dine-in round path reaches the offline database");
+  // Offline is refused outright rather than deferred to a queue.
+  assert.match(read("lib", "pos", "tableRounds.ts"), /OfflineOrderingError/);
 });

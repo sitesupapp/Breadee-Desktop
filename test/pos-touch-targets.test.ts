@@ -41,6 +41,8 @@ const OPERATIONAL_SOURCES = [
   "components/pos/TableCard.tsx",
   "components/pos/TableBillPanel.tsx",
   "components/pos/SeatCountDialog.tsx",
+  // Dine-in rounds (Level 2B) - Submit round is a primary operational control.
+  "components/pos/DineInRoundPanel.tsx",
 ];
 
 /** The JSX tag that owns a given attribute offset. */

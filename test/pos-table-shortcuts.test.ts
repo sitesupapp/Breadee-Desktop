@@ -97,12 +97,54 @@ test("no dine-in binding shadows a destructive or standard Windows combo", () =>
 });
 
 test("reserved ids are declared but have no handler, so they cannot half-work", () => {
-  assert.deepEqual([...RESERVED_SHORTCUTS].sort(), ["addItems", "clearTable", "closeTable", "moveTable"]);
+  assert.deepEqual([...RESERVED_SHORTCUTS].sort(), ["clearTable", "closeTable", "moveTable"]);
   for (const id of RESERVED_SHORTCUTS) {
     assert.ok(SHORTCUTS.some((s) => s.id === id), `${id} is reserved but has no binding to reserve`);
     // A reserved binding must say which level delivers it, so the help sheet is honest.
-    assert.match(SHORTCUTS.find((s) => s.id === id)?.label ?? "", /Level 2[BC]/);
+    assert.match(SHORTCUTS.find((s) => s.id === id)?.label ?? "", /Level 2C/);
   }
+});
+
+test("A is live in Level 2B and no longer advertised as a later phase", () => {
+  assert.equal(press("a"), "addItems");
+  assert.equal(RESERVED_SHORTCUTS.includes("addItems" as ShortcutId), false);
+  const spec = SHORTCUTS.find((s) => s.id === "addItems");
+  assert.doesNotMatch(spec?.label ?? "", /Level 2/, "Add items still reads as deferred");
+  assert.match(spec?.label ?? "", /Add items/i);
+  // Typing a table name must not enter Add Items.
+  assert.equal(press("a", { typing: true }), null);
+});
+
+test("Ctrl+Enter is one binding whose owner is the visible screen", () => {
+  assert.equal(press("Enter", { ctrl: true }), "confirmPayment");
+  const spec = SHORTCUTS.find((s) => s.id === "confirmPayment");
+  // The help sheet must name both meanings, since a cashier reads only that.
+  assert.match(spec?.label ?? "", /Submit round/i);
+  assert.match(spec?.label ?? "", /Confirm payment/i);
+});
+
+test("the Add Items layer registers submit, and the map layer registers Add Items", () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "screens", "pos", "DineInWorkspace.tsx"),
+    "utf8",
+  );
+  assert.match(source, /addItems: \(\) => void enterAddItems\(\)/, "A no longer enters Add Items");
+  assert.match(source, /confirmPayment: \(\) => void sendRound\(\)/, "Ctrl+Enter no longer submits the round");
+  // The two layers must be mutually exclusive, or the arrows would have two owners.
+  assert.match(source, /active && view === "map"/, "the map layer is not view-scoped");
+  assert.match(source, /active && view === "add_items"/, "the Add Items layer is not view-scoped");
+});
+
+test("submitting is latched, so a held Ctrl+Enter sends one round", () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "screens", "pos", "DineInWorkspace.tsx"),
+    "utf8",
+  );
+  const start = source.indexOf("const sendRound = useCallback");
+  assert.ok(start > 0, "sendRound could not be located");
+  const body = source.slice(start, start + 900);
+  assert.match(body, /if \(roundInFlight\.current/, "the submit path lost its in-flight latch");
+  assert.match(body, /roundInFlight\.current = true/);
 });
 
 test("every declared id actually has a binding - no id is dead", () => {
@@ -156,7 +198,9 @@ test("the help sheet has a Dine-in section listing the live and reserved binding
   assert.ok(dineIn, "the help sheet has no Dine-in section");
   const labels = dineIn.items.map((i) => i.label).join(" | ");
   assert.match(labels, /table map/i);
-  assert.match(labels, /Level 2B/);
-  assert.match(labels, /Level 2C/);
+  assert.match(labels, /Add items/i, "the shipped Add items binding is missing from the help sheet");
+  assert.match(labels, /Level 2C/, "the still-deferred bindings must name their level");
+  // Level 2B shipped, so nothing in the sheet may still advertise it as coming.
+  assert.doesNotMatch(labels, /Level 2B/, "the help sheet still describes a shipped binding as deferred");
   assert.equal(dineIn.items.length, SHORTCUTS.filter((s) => s.group === "Dine-in").length);
 });

@@ -6,7 +6,8 @@ _Source of truth: the Breadee web app (Next.js 16 + Supabase). This desktop clie
 
 - **Active repository:** `D:\Claude\Projects\Breadee\Breadee-Desktop` (branch `desktop-staging`).
 - **Level 1 worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-1` (branch `feature/desktop-pos-level-1`) — **merged**, kept for reference.
-- **Level 2A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2A` (branch `feature/desktop-pos-level-2a-tables`).
+- **Level 2A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2A` (branch `feature/desktop-pos-level-2a-tables`) — **merged** as `c8ccbb5` via PR #4, kept for reference.
+- **Level 2B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2B` (branch `feature/desktop-pos-level-2b-rounds`).
 - `C:\Users\User\Claude\Projects\Breadee\Breadee-Desktop` is a **read-only fallback copy** of the pre-migration state. Do not work in it.
 - GitHub remote: `github.com/sitesupapp/Breadee-Desktop` (the repo exists and `desktop-staging` is pushed — an earlier version of this document said otherwise).
 
@@ -37,6 +38,41 @@ On `feature/desktop-pos-level-2a-tables`, local only (not pushed, no PR). This l
 
 Explicitly **not** in Level 2A: dine-in ordering, rounds/batches, kitchen submission, Move/Close/Clear, dine-in payment, offline table state, and Levels 2B–2E.
 
+## 1b. Level 2B — Dine-In ordering and rounds (this change set)
+
+On `feature/desktop-pos-level-2b-rounds`, local only (not pushed, no PR). Level 2A made a table reachable and readable; Level 2B makes it **orderable**, up to kitchen submission and no further.
+
+**The cart is a round buffer. The bill belongs to the server.**
+
+```
+table selected -> Add Items -> local round buffer -> pos_submit_order with table_id
+  -> server appends to (or creates) the active bill -> buffer clears -> bill re-read
+```
+
+There is deliberately no client-owned table bill anywhere, and `batch_no` is never computed locally. m218 resolves the single active dine-in bill from `table_id` under an advisory lock and assigns the batch itself — a client that guessed would be wrong the moment a second cashier served the same table.
+
+- **Add Items mode** (`2B-01`) — gated on POS access + dine-in feature + `pos.tables.view` + `pos.create_orders` + an open shift + a selected table + an online connection. It does **not** consult payment permission. The main work area switches from the table map to the existing menu; the table, its bill and the round stay on the right. Add Items never leaves the shell, so there is one status bar and one layout resolver.
+- **One menu, not two** — Takeaway and Add Items render the *same* `MenuItemGrid`, `CategoryNavigation`, `ModifierDialog` and `LineNoteDialog`. A second menu would be a second place for prices to drift.
+- **One cart, with an owner** (`state/cart.ts`) — reusing the single cart store as the round buffer makes ownership load-bearing. `CartOwner` records whether the buffer belongs to Takeaway or to a specific table, and a claim from anyone else is refused. Without it, half-built takeaway lines would end up on a table's kitchen ticket.
+- **Round contract** (`lib/pos/tableRounds.ts`) — every payload carries `order_type: dine_in`, `table_id`, `shift_id`, the resolved branch, items, modifiers and notes, and one `client_op_id`. It carries **no order id**: asserting which bill is active is exactly the decision that must stay on the server. Building fails locally — before any request exists — without a table, shift, branch, items, a connection, or with an unanswered required modifier group.
+- **Per-round idempotency** (`2B-03`) — one operation id per logical round: minted when the first line lands in an empty buffer, reused for every retry, and cleared **only** by the buffer reset that follows a definitively accepted round. Round 2 therefore cannot inherit round 1's id, and a retry replays under m224 instead of appending a duplicate batch.
+- **The submit sequence is stated once and tested** — `ROUND_SEQUENCE` is `build → submit → clear-buffer → refresh`, implemented by `performRound()`. The ordering is the safety property: clearing the buffer after a *failure* would destroy a round the kitchen never saw and the cashier can no longer reconstruct.
+- **Bill panel** (`2B-06`) — batches are labelled from the server's own numbers ("Sent round 1", "Sent round 2"), alongside order number, status, payment status, split-shift flag and totals. In Add Items the unsent round sits in a dashed, differently-coloured box labelled "Round being prepared", above a "Current bill" section. An unsent round is never drawn as though it were already owed.
+- **Unsent rounds are never discarded silently** — leaving Add Items with lines buffered opens a confirmation whose default action *keeps* the round.
+- **Concurrency** — the bill is re-read on entering Add Items and again after every submit, and `describeBillChange()` tells the operator what moved under them (another cashier's round, a changed order number, a settled bill) rather than absorbing it silently.
+
+### Explicitly still deferred
+
+Move, Close, Clear and Pay remain disabled with no click handler, and `pos_move_table`, `pos_close_table`, `pos_clear_table` and `pos_pay_table` remain absent from `PosRpcName`. Also out of scope: dine-in receipts, table configuration, editing or voiding a submitted round, delivery, and Levels 2C–2E.
+
+### Online only
+
+Dine-in ordering is online-only. `OfflineOrderingError` refuses a round outright — nothing is enqueued, the Dexie schema is untouched, and sync replay remains disabled (every handler still returns `review`, and `enqueue()` still has zero call sites). Offline, the cached menu and table map stay readable and Add Items / Submit round are disabled with the reason.
+
+### Staging verification status
+
+**Deferred.** The Level 2B smoke test would open a table and submit two rounds, and Level 2B cannot pay, clear, close or move a table afterwards — so the test table would stay occupied with an unsettleable bill. No cleanup or continuation path has been authorised yet, so no staging write was made. See the report for the three paths that would unblock it.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -46,7 +82,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
 - **Native printing — pending.** The receipt preview is on-screen only; the Print control is disabled rather than silently doing nothing. Printer discovery, routing to hardware and ESC/POS are untouched.
-- **Dine-in ordering and payment — not implemented.** Level 2A shows the table map and the server's open bill; it cannot add a round, submit to the kitchen, move, close, clear or settle a table.
+- **Dine-in settlement — not implemented.** Level 2B adds rounds and submits them to the kitchen, but cannot move, close, clear or pay a table.
 - Delivery, customers, orders workspace, edit/void/refund, reports, KDS, loyalty, Google OAuth deep-link, encrypted local storage.
 
 ## 4. Security checklist
@@ -58,6 +94,8 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - [x] Owners cannot enter the operational POS; every action re-checked server-side.
 - [x] No order can be created without an open shift.
 - [x] No dine-in order can be created without a table (`TableRequiredError`), so m218's single-bill rule cannot be bypassed.
+- [x] One `client_op_id` per logical round; a retry replays under m224 rather than adding a batch.
+- [x] The dine-in round path reaches no offline queue - `enqueue()` still has zero call sites.
 - [x] Table mutation RPCs beyond `pos_open_table` are not reachable from the client — they are not in the `PosRpcName` union.
 - [x] No production migration; production Supabase untouched.
 - [ ] Local IndexedDB is not yet encrypted at rest.
@@ -74,10 +112,10 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 `npm install` (once) → `npm run dev` (http://localhost:5173). `npm run typecheck`, `npm run test`, `npm run build`. Tests use Node's built-in runner with its native TypeScript support — no test framework dependency is installed. Node ≥ 22.18 is required for the runner's TypeScript support; CI pins Node 24.
 
-Current gate results on `feature/desktop-pos-level-2a-tables`: **169 tests, 0 failures**; typecheck clean; production build clean.
+Current gate results on `feature/desktop-pos-level-2b-rounds`: **230 tests, 0 failures**; typecheck clean; production build clean.
 
 Note on this machine: roughly one process spawn in three dies with `EPERM uv_spawn`, `0xC0000005`, `Access is denied` or esbuild's `The service was stopped`. A test *file* reported as failed while listing no failing assertion is that crash, not a real failure — re-run the file alone to tell them apart.
 
 ## 7. Pull request
 
-Not opened. Level 2A is local-only by instruction; integration into `desktop-staging` is a separate task.
+Not opened. Level 2B is local-only by instruction; integration into `desktop-staging` is a separate task.
