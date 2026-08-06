@@ -31,9 +31,23 @@ export type ShortcutId =
   | "endShift"
   | "print"
   | "closeModal"
-  | "fullscreen";
+  | "fullscreen"
+  // Dine-In (Level 2A). `tableMap`, `tableSearch`, `tableLeft/Right` and
+  // `tableOpen` are live; vertical movement reuses the shared `lineUp`/`lineDown`
+  // ids. `addItems`, `moveTable`, `closeTable` and `clearTable` are RESERVED -
+  // they are declared so the help sheet is honest and the bindings cannot be
+  // taken by something else, but no screen registers a handler for them yet.
+  | "tableMap"
+  | "tableSearch"
+  | "tableLeft"
+  | "tableRight"
+  | "tableOpen"
+  | "addItems"
+  | "moveTable"
+  | "closeTable"
+  | "clearTable";
 
-export type ShortcutGroup = "Order" | "Navigation" | "Cart" | "Shift" | "Window";
+export type ShortcutGroup = "Order" | "Navigation" | "Cart" | "Shift" | "Window" | "Dine-in";
 
 export type ShortcutSpec = {
   id: ShortcutId;
@@ -68,12 +82,14 @@ export const SHORTCUTS: ShortcutSpec[] = [
   { id: "search", keys: ["k"], ctrl: true, label: "Search the menu", group: "Navigation", display: "Ctrl+K" },
   { id: "search", keys: ["/"], label: "Search the menu", group: "Navigation", display: "/" },
   { id: "routeTakeaway", keys: ["1"], alt: true, label: "Takeaway", group: "Navigation", display: "Alt+1", worksInInput: true },
-  { id: "routeDineIn", keys: ["2"], alt: true, label: "Dine-in (later phase)", group: "Navigation", display: "Alt+2", worksInInput: true },
+  { id: "routeDineIn", keys: ["2"], alt: true, label: "Dine-in", group: "Navigation", display: "Alt+2", worksInInput: true },
   { id: "routeDelivery", keys: ["3"], alt: true, label: "Delivery (later phase)", group: "Navigation", display: "Alt+3", worksInInput: true },
   { id: "prevCategory", keys: ["ArrowLeft"], alt: true, label: "Previous category", group: "Navigation", display: "Alt+Left", worksInInput: true },
   { id: "nextCategory", keys: ["ArrowRight"], alt: true, label: "Next category", group: "Navigation", display: "Alt+Right", worksInInput: true },
-  { id: "lineUp", keys: ["ArrowUp"], label: "Select previous cart line", group: "Cart", display: "Up" },
-  { id: "lineDown", keys: ["ArrowDown"], label: "Select next cart line", group: "Cart", display: "Down" },
+  // Vertical selection is shared: cart lines in Takeaway, table rows in Dine-in.
+  // One binding per key - the active screen decides what it moves.
+  { id: "lineUp", keys: ["ArrowUp"], label: "Move selection up (cart / tables)", group: "Cart", display: "Up" },
+  { id: "lineDown", keys: ["ArrowDown"], label: "Move selection down (cart / tables)", group: "Cart", display: "Down" },
   { id: "qtyUp", keys: ["+", "="], label: "Increase quantity", group: "Cart", display: "+" },
   { id: "qtyDown", keys: ["-"], label: "Decrease quantity", group: "Cart", display: "-" },
   { id: "removeLine", keys: ["Delete"], label: "Remove line (undoable)", group: "Cart", display: "Delete" },
@@ -82,7 +98,27 @@ export const SHORTCUTS: ShortcutSpec[] = [
   { id: "print", keys: ["p"], ctrl: true, label: "Receipt preview", group: "Order", display: "Ctrl+P", worksInInput: true },
   { id: "closeModal", keys: ["Escape"], label: "Close dialog", group: "Window", display: "Esc", worksInInput: true },
   { id: "fullscreen", keys: ["F11"], label: "Fullscreen", group: "Window", display: "F11", worksInInput: true },
+
+  // --- Dine-in (Level 2A) -----------------------------------------------------
+  { id: "tableMap", keys: ["m"], alt: true, label: "Back to the table map", group: "Dine-in", display: "Alt+M", worksInInput: true },
+  { id: "tableSearch", keys: ["f"], ctrl: true, label: "Search tables", group: "Dine-in", display: "Ctrl+F" },
+  { id: "tableLeft", keys: ["ArrowLeft"], label: "Previous table", group: "Dine-in", display: "Left" },
+  { id: "tableRight", keys: ["ArrowRight"], label: "Next table", group: "Dine-in", display: "Right" },
+  { id: "tableOpen", keys: ["Enter"], label: "Select / open the focused table", group: "Dine-in", display: "Enter" },
+
+  // RESERVED - declared so the binding is not claimed elsewhere and the help
+  // sheet is truthful, but no screen registers a handler in Level 2A. A
+  // reserved id that nothing handles simply does nothing; it cannot call an RPC.
+  { id: "addItems", keys: ["a"], label: "Add items to table (Level 2B)", group: "Dine-in", display: "A" },
+  { id: "moveTable", keys: ["M"], ctrl: true, shift: true, label: "Move table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+M", worksInInput: true },
+  // NOTE: Ctrl+Shift+C is the DevTools inspector in Chromium. Revisit this
+  // binding in Level 2C before wiring a handler to it.
+  { id: "closeTable", keys: ["C"], ctrl: true, shift: true, label: "Close table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+C", worksInInput: true },
+  { id: "clearTable", keys: ["X"], ctrl: true, shift: true, label: "Clear table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+X", worksInInput: true },
 ];
+
+/** Shortcut ids that are declared but intentionally have no handler yet. */
+export const RESERVED_SHORTCUTS: ShortcutId[] = ["addItems", "moveTable", "closeTable", "clearTable"];
 
 /** Bindings we must never register, kept explicit so a future edit trips the test. */
 export const FORBIDDEN_COMBOS = ["Alt+F4", "Ctrl+W", "Ctrl+T", "Ctrl+N", "Ctrl+R", "F5"];
@@ -123,7 +159,7 @@ export function matchShortcut(event: {
 
 /** Deduplicated list for the help sheet, grouped for display. */
 export function shortcutHelp(): { group: ShortcutGroup; items: { display: string; label: string }[] }[] {
-  const groups: ShortcutGroup[] = ["Order", "Cart", "Navigation", "Shift", "Window"];
+  const groups: ShortcutGroup[] = ["Order", "Cart", "Navigation", "Dine-in", "Shift", "Window"];
   return groups.map((group) => ({
     group,
     items: SHORTCUTS.filter((s) => s.group === group).map((s) => ({ display: s.display, label: s.label })),

@@ -36,6 +36,11 @@ const OPERATIONAL_SOURCES = [
   "components/pos/ShiftDialog.tsx",
   "components/pos/NumericKeypad.tsx",
   "components/pos/LineNoteDialog.tsx",
+  // Dine-in (Level 2A) - a table map is a touch surface before it is anything else.
+  "components/pos/TableMap.tsx",
+  "components/pos/TableCard.tsx",
+  "components/pos/TableBillPanel.tsx",
+  "components/pos/SeatCountDialog.tsx",
 ];
 
 /** The JSX tag that owns a given attribute offset. */
@@ -65,6 +70,28 @@ test("no operational POS surface renders a sub-44px Button", () => {
     }
   }
   assert.deepEqual(offenders, [], `sub-44px controls on operational POS surfaces:\n${offenders.join("\n")}`);
+});
+
+test("a table card stays comfortably above the touch floor", () => {
+  const source = readFileSync(join(srcRoot, "components", "pos", "TableCard.tsx"), "utf8");
+  const width = Number(/TABLE_CARD_MIN_WIDTH = (\d+)/.exec(source)?.[1]);
+  const height = Number(/TABLE_CARD_MIN_HEIGHT = (\d+)/.exec(source)?.[1]);
+  assert.ok(width >= 44, `table cards are ${width}px wide, below the 44px touch floor`);
+  assert.ok(height >= 44, `table cards are ${height}px tall, below the 44px touch floor`);
+  // The card is the primary dine-in target; 44px is a floor, not the intent.
+  assert.ok(width >= 120 && height >= 88, "table cards shrank below a comfortable tap size");
+});
+
+test("every table state carries an icon and a label, never colour alone", () => {
+  const source = readFileSync(join(srcRoot, "components", "pos", "TableCard.tsx"), "utf8");
+  const block = /const STATE_STYLE[\s\S]*?\n};/.exec(source)?.[0] ?? "";
+  assert.notEqual(block, "", "STATE_STYLE could not be located");
+  const entries = block.split("\n").filter((l) => /^\s{2}\w+: \{/.test(l));
+  assert.ok(entries.length >= 5, "expected one style entry per table card state");
+  for (const entry of entries) {
+    assert.match(entry, /label: "/, `a table state has no text label: ${entry.trim()}`);
+    assert.match(entry, /icon: "/, `a table state has no icon: ${entry.trim()}`);
+  }
 });
 
 test("raw Tailwind height classes below 44px are not used for POS controls", () => {
