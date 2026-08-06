@@ -27,6 +27,15 @@ export type PosRoute = {
   enabled: boolean;
   /** Why the route is unavailable, shown on hover when disabled. */
   reason?: string | null;
+  /**
+   * In-workspace mode switch. Takeaway and Dine-in share one shell, one status
+   * bar and one layout resolver, so they switch a MODE rather than navigating -
+   * a second router route would mean a second shell instance and a second set of
+   * shift/menu subscriptions. When `onSelect` is present the rail renders a
+   * button; otherwise it falls back to a NavLink on `to`.
+   */
+  onSelect?: () => void;
+  active?: boolean;
 };
 
 export type PosShellProps = {
@@ -34,8 +43,19 @@ export type PosShellProps = {
   statusBar: (layout: LayoutSpec) => ReactNode;
   work: (layout: LayoutSpec) => ReactNode;
   cart: (layout: LayoutSpec) => ReactNode;
+  /** Label for the drawer + its bottom bar. Differs by mode (cart vs bill). */
+  cartTitle?: string;
   /** Bottom-bar summary used only when the cart is a drawer. */
-  cartSummary: { itemCount: number; subtotal: number; currency: CurrencyCode; onPay: () => void; payDisabled: boolean };
+  cartSummary: {
+    itemCount: number;
+    subtotal: number;
+    currency: CurrencyCode;
+    onPay: () => void;
+    payDisabled: boolean;
+    payLabel?: string;
+    /** Why the action is unavailable. Shown on hover, so a dead control explains itself. */
+    payReason?: string | null;
+  };
   cartDrawerOpen: boolean;
   onCartDrawerChange: (open: boolean) => void;
   onExit: () => void;
@@ -84,7 +104,23 @@ export function PosShell(props: PosShellProps) {
 
         <div className="flex-1 space-y-1 px-2">
           {props.routes.map((r) =>
-            r.enabled ? (
+            r.enabled && r.onSelect ? (
+              <button
+                key={r.key}
+                type="button"
+                onClick={r.onSelect}
+                title={r.label}
+                aria-current={r.active ? "page" : undefined}
+                className={cn(
+                  "flex min-h-[48px] w-full items-center gap-3 rounded-xl px-3 text-sm font-semibold transition",
+                  !layout.railExpanded && "justify-center px-0",
+                  r.active ? "bg-brand-soft text-brand-dark" : "text-ink hover:bg-slate-50",
+                )}
+              >
+                <span className="text-base">{r.icon}</span>
+                {layout.railExpanded && <span className="truncate">{r.label}</span>}
+              </button>
+            ) : r.enabled ? (
               <NavLink
                 key={r.key}
                 to={r.to}
@@ -166,8 +202,13 @@ export function PosShell(props: PosShellProps) {
                 {formatMoney(props.cartSummary.subtotal, props.cartSummary.currency)}
               </span>
             </button>
-            <Button size="lg" onClick={props.cartSummary.onPay} disabled={props.cartSummary.payDisabled}>
-              Pay
+            <Button
+              size="lg"
+              onClick={props.cartSummary.onPay}
+              disabled={props.cartSummary.payDisabled}
+              title={props.cartSummary.payReason ?? undefined}
+            >
+              {props.cartSummary.payLabel ?? "Pay"}
             </Button>
           </div>
         )}
@@ -175,7 +216,7 @@ export function PosShell(props: PosShellProps) {
 
       <Drawer
         open={layout.cartAsDrawer && props.cartDrawerOpen}
-        title="Current order"
+        title={props.cartTitle ?? "Current order"}
         width={380}
         onClose={() => props.onCartDrawerChange(false)}
       >

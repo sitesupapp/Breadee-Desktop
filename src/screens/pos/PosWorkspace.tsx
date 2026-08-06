@@ -36,6 +36,10 @@ import { getShiftExpected } from "@/lib/pos/shifts";
 import { classifyError } from "@/lib/pos/errors";
 import type { ReceiptData } from "@/lib/receipt";
 import { useReceipt, shouldShowReceipt } from "@/state/receipt";
+import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
+import { dineInBottomBar } from "@/lib/pos/dineInActions";
+import { canViewTables } from "@/lib/pos/access";
+import { useTables } from "@/state/tables";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
@@ -43,6 +47,12 @@ import { roleLabel } from "@/lib/permissions";
 import type { MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, SubmitOrderResult } from "@/types/pos";
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
+
+/**
+ * The handler for a control that must do nothing at all. Named so a reader can
+ * see the intent, and so nothing gets "temporarily" wired into the Pay slot.
+ */
+const NO_OP = () => {};
 
 export function PosWorkspace() {
   return (
@@ -183,6 +193,23 @@ function PosWorkspaceInner() {
   const receiptStore = useReceipt();
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  // Which order type the workspace is showing. Takeaway and Dine-in share one
+  // shell instance, so this is a mode rather than a router route.
+  const [mode, setMode] = useState<"takeaway" | "dine_in">("takeaway");
+  const tablesGate = canViewTables(pos.access);
+  const dineInActive = mode === "dine_in" && tablesGate.allowed;
+  const tableStore = useTables();
+  const dineIn = useDineInWorkspace({
+    pos,
+    hasOpenShift: Boolean(shiftId),
+    active: dineInActive,
+    onOpenShift: () => setOpenShiftOpen(true),
+    onBillDrawerOpen: () => setCartDrawerOpen(true),
+  });
+
+  // Table state is tenant/branch scoped; drop it when the operator leaves POS.
+  useEffect(() => () => tableStore.reset(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Synchronous latch: three fast clicks must not reach the server three times.
   // The server is still the authority (m224); this only avoids the round trips.
@@ -410,23 +437,33 @@ function PosWorkspaceInner() {
   // --- keyboard --------------------------------------------------------------
   const categoryIds = useMemo(() => [ALL_CATEGORIES, ...categories.map((c) => c.id)], [categories]);
 
+  // Route switching, shift and window controls stay live in BOTH modes.
   useShortcuts({
-    newOrder,
-    search: () => searchRef.current?.focus(),
-    openPayment,
-    prevCategory: () => setCategory((c) => stepCategory(categoryIds, c, -1)),
-    nextCategory: () => setCategory((c) => stepCategory(categoryIds, c, 1)),
-    lineUp: () => cart.moveSelection(-1),
-    lineDown: () => cart.moveSelection(1),
-    qtyUp: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, 1),
-    qtyDown: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, -1),
-    removeLine: () => cart.selectedKey && removeLine(cart.selectedKey),
+    routeTakeaway: () => setMode("takeaway"),
+    routeDineIn: () => tablesGate.allowed && setMode("dine_in"),
     openShift: () => !shiftId && setOpenShiftOpen(true),
     endShift: () => shiftId && void startEndShift(),
-    print: () => receiptStore.reopen(),
-    routeTakeaway: () => setCategory(ALL_CATEGORIES),
     fullscreen: () => void toggleFullscreen(),
   });
+
+  // Takeaway-only bindings. Disabled while Dine-in is active so the arrow keys
+  // and Enter drive the table grid instead of the cart - one binding, one owner.
+  useShortcuts(
+    {
+      newOrder,
+      search: () => searchRef.current?.focus(),
+      openPayment,
+      prevCategory: () => setCategory((c) => stepCategory(categoryIds, c, -1)),
+      nextCategory: () => setCategory((c) => stepCategory(categoryIds, c, 1)),
+      lineUp: () => cart.moveSelection(-1),
+      lineDown: () => cart.moveSelection(1),
+      qtyUp: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, 1),
+      qtyDown: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, -1),
+      removeLine: () => cart.selectedKey && removeLine(cart.selectedKey),
+      print: () => receiptStore.reopen(),
+    },
+    !dineInActive,
+  );
 
   // --- gates -----------------------------------------------------------------
   const noShiftGate: Gate = shiftId
@@ -467,8 +504,25 @@ function PosWorkspaceInner() {
   }
 
   const routes: PosRoute[] = [
-    { key: "takeaway", label: "Takeaway", icon: "T", to: "/pos", enabled: true },
-    { key: "dine_in", label: "Dine-in", icon: "D", to: "/pos", enabled: false, reason: "Dine-in arrives in the next phase." },
+    {
+      key: "takeaway",
+      label: "Takeaway",
+      icon: "T",
+      to: "/pos",
+      enabled: true,
+      active: mode === "takeaway",
+      onSelect: () => setMode("takeaway"),
+    },
+    {
+      key: "dine_in",
+      label: "Dine-in",
+      icon: "D",
+      to: "/pos",
+      enabled: tablesGate.allowed,
+      reason: tablesGate.reason,
+      active: mode === "dine_in",
+      onSelect: () => setMode("dine_in"),
+    },
     { key: "delivery", label: "Delivery", icon: "V", to: "/pos", enabled: false, reason: "Delivery arrives in the next phase." },
   ];
 
@@ -480,13 +534,26 @@ function PosWorkspaceInner() {
         onToggleFullscreen={() => void toggleFullscreen()}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
-        cartSummary={{
-          itemCount,
-          subtotal,
-          currency,
-          onPay: openPayment,
-          payDisabled: cart.lines.length === 0 || busy || !shiftId,
-        }}
+        cartTitle={dineInActive ? "Table bill" : "Current order"}
+        cartSummary={
+          dineInActive
+            ? {
+                // The disabled state is decided in `lib/pos/dineInActions.ts`, not
+                // by a literal here - `payDisabled` is the Pay button's `disabled`
+                // attribute, and this slot must stay dead until Level 2D. The bill
+                // is still one tap away: the summary button opens the drawer.
+                ...dineInBottomBar(dineIn.summary),
+                currency,
+                onPay: NO_OP,
+              }
+            : {
+                itemCount,
+                subtotal,
+                currency,
+                onPay: openPayment,
+                payDisabled: cart.lines.length === 0 || busy || !shiftId,
+              }
+        }
         statusBar={(layout) => (
           <PosStatusBar
             tenantName={pos.tenantName}
@@ -506,81 +573,91 @@ function PosWorkspaceInner() {
             openShiftReason={pos.gates.openShift.reason}
           />
         )}
-        work={(layout) => (
-          <>
-            <div className="mb-3 flex shrink-0 items-center gap-2">
-              <Input
-                ref={searchRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search the menu (Ctrl+K)"
-                className="max-w-md"
-              />
-              {!online && (
-                <span className="rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900">
-                  Offline - ordering needs a connection
-                </span>
-              )}
-              {menuStale && (
-                <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-sub">
-                  Cached menu from {new Date(menuStale).toLocaleTimeString()}
-                </span>
-              )}
-            </div>
-
-            <div className="mb-3">
-              <CategoryNavigation categories={categories} counts={categoryCounts} selected={category} onSelect={setCategory} />
-            </div>
-
-            {menuState === "loading" && (
-              <div className="grid flex-1 grid-cols-3 content-start gap-3">
-                {Array.from({ length: 9 }).map((_, i) => (
-                  <Skeleton key={i} className="h-[104px]" />
-                ))}
-              </div>
-            )}
-
-            {menuState === "error" && (
-              <ErrorState title="The menu could not be loaded" message={menuError ?? ""} onRetry={() => void fetchMenu()} />
-            )}
-
-            {menuState === "ready" &&
-              (visibleItems.length === 0 ? (
-                <EmptyState title="No items match" hint="Try a different category, or clear the search." />
-              ) : (
-                <MenuItemGrid
-                  items={visibleItems}
-                  columns={layout.menuColumns}
-                  currency={currency}
-                  rate={rate}
-                  itemsNeedingChoice={itemsNeedingChoice}
-                  onPick={addItem}
+        work={(layout) =>
+          dineInActive ? (
+            dineIn.work(layout)
+          ) : (
+            <>
+              <div className="mb-3 flex shrink-0 items-center gap-2">
+                <Input
+                  ref={searchRef}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search the menu (Ctrl+K)"
+                  className="max-w-md"
                 />
-              ))}
-          </>
-        )}
-        cart={() => (
-          <CartPanel
-            lines={cart.lines}
-            selectedKey={cart.selectedKey}
-            currency={currency}
-            subtotal={subtotal}
-            shiftOpen={Boolean(shiftId)}
-            busy={busy}
-            savedOrderNumber={cart.savedOrder?.order_number ?? null}
-            createGate={createGate}
-            payGate={payGate}
-            onSelect={cart.select}
-            onAdjust={cart.adjustQuantity}
-            onRemove={removeLine}
-            onEditNote={setNoteKey}
-            onSendToKitchen={() => void sendToKitchen()}
-            onPay={openPayment}
-            onOpenShift={() => setOpenShiftOpen(true)}
-            onNewOrder={newOrder}
-          />
-        )}
+                {!online && (
+                  <span className="rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900">
+                    Offline - ordering needs a connection
+                  </span>
+                )}
+                {menuStale && (
+                  <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-sub">
+                    Cached menu from {new Date(menuStale).toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
+
+              <div className="mb-3">
+                <CategoryNavigation categories={categories} counts={categoryCounts} selected={category} onSelect={setCategory} />
+              </div>
+
+              {menuState === "loading" && (
+                <div className="grid flex-1 grid-cols-3 content-start gap-3">
+                  {Array.from({ length: 9 }).map((_, i) => (
+                    <Skeleton key={i} className="h-[104px]" />
+                  ))}
+                </div>
+              )}
+
+              {menuState === "error" && (
+                <ErrorState title="The menu could not be loaded" message={menuError ?? ""} onRetry={() => void fetchMenu()} />
+              )}
+
+              {menuState === "ready" &&
+                (visibleItems.length === 0 ? (
+                  <EmptyState title="No items match" hint="Try a different category, or clear the search." />
+                ) : (
+                  <MenuItemGrid
+                    items={visibleItems}
+                    columns={layout.menuColumns}
+                    currency={currency}
+                    rate={rate}
+                    itemsNeedingChoice={itemsNeedingChoice}
+                    onPick={addItem}
+                  />
+                ))}
+            </>
+          )
+        }
+        cart={(layout) =>
+          dineInActive ? (
+            dineIn.bill(layout)
+          ) : (
+            <CartPanel
+              lines={cart.lines}
+              selectedKey={cart.selectedKey}
+              currency={currency}
+              subtotal={subtotal}
+              shiftOpen={Boolean(shiftId)}
+              busy={busy}
+              savedOrderNumber={cart.savedOrder?.order_number ?? null}
+              createGate={createGate}
+              payGate={payGate}
+              onSelect={cart.select}
+              onAdjust={cart.adjustQuantity}
+              onRemove={removeLine}
+              onEditNote={setNoteKey}
+              onSendToKitchen={() => void sendToKitchen()}
+              onPay={openPayment}
+              onOpenShift={() => setOpenShiftOpen(true)}
+              onNewOrder={newOrder}
+            />
+          )
+        }
       />
+
+      {dineInActive && dineIn.dialogs}
 
       <ModifierDialog
         open={Boolean(pickerItem)}

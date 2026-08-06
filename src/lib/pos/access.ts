@@ -46,6 +46,14 @@ export const POS_PERMISSIONS = {
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
   APPROVE_SHIFTS: "pos.approve_shifts",
+  // Dine-In tables. VIEW and OPEN are used in Level 2A; MOVE/CLEAR/CLOSE are
+  // declared now so the keys live in one place, but nothing calls them yet -
+  // their RPCs are not even in the `PosRpcName` union.
+  TABLES_VIEW: "pos.tables.view",
+  TABLES_OPEN: "pos.tables.open",
+  TABLES_MOVE: "pos.tables.move",
+  TABLES_CLEAR: "pos.tables.clear",
+  TABLES_CLOSE: "pos.tables.close",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -133,4 +141,50 @@ export function canReviewShift(ctx: PosAccessContext, isOwnShift: boolean): Gate
     return { allowed: false, reason: "You cannot approve your own shift - a manager must review it." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.APPROVE_SHIFTS), "You do not have permission to review shifts.");
+}
+
+// --- Dine-In tables ----------------------------------------------------------
+
+/**
+ * Entering the Dine-In workspace: POS access + the `pos.dine_in` sub-feature +
+ * `pos.tables.view`, which is exactly what `pos_table_map` itself demands.
+ */
+export function canViewTables(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DINE_IN)) {
+    return { allowed: false, reason: "Dine-in is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.TABLES_VIEW), "You do not have permission to view tables.");
+}
+
+/**
+ * Opening a table.
+ *
+ * DESKTOP POLICY: an open shift is required even though `pos_open_table` itself
+ * does not demand one. Opening a table without a shift produces a table the
+ * cashier cannot then order on (the order path requires a shift) - a dead end
+ * that is easy to create and awkward to undo while Clear/Close are out of scope.
+ * This is deliberately STRICTER than the server and never looser.
+ */
+export function canOpenTable(ctx: PosAccessContext, hasOpenShift: boolean): Gate {
+  const view = canViewTables(ctx);
+  if (!view.allowed) return view;
+  if (!perm(ctx, POS_PERMISSIONS.TABLES_OPEN)) {
+    return { allowed: false, reason: "You do not have permission to open tables." };
+  }
+  if (!hasOpenShift) {
+    return { allowed: false, reason: "Open a shift before opening a table." };
+  }
+  return { allowed: true, reason: null };
+}
+
+/**
+ * Declared for Level 2C. Deliberately returns a not-yet-available reason so a
+ * disabled control can explain itself honestly, rather than implying the user
+ * lacks a permission they may well hold.
+ */
+export function tableActionNotYetAvailable(action: string, level: string): Gate {
+  return { allowed: false, reason: `${action} arrives in ${level}.` };
 }

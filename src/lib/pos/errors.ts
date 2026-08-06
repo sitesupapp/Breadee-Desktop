@@ -16,6 +16,12 @@ export type RefusalKind =
   | "already_paid"
   | "finalized"
   | "offline"
+  // Dine-In tables (Level 2A)
+  | "table_not_configured"
+  | "table_not_found"
+  | "table_occupied"
+  | "table_no_open_order"
+  | "feature_disabled"
   | "unknown";
 
 export type ClassifiedError = {
@@ -29,6 +35,45 @@ export type ClassifiedError = {
 };
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
+  // --- Dine-In tables. Listed FIRST because several of these also contain the
+  // words matched by the generic permission/branch rules further down.
+  {
+    kind: "table_not_configured",
+    // pos_open_table raises this with errcode 22023 on a configured branch.
+    test: /uses its configured tables|not part of the current table configuration/i,
+    hint: "Pick a table from the map. Table configuration is managed in the web POS settings.",
+    expected: true,
+  },
+  {
+    kind: "table_not_found",
+    test: /table not found|enter a table number or name/i,
+    hint: "Refresh the table map and try again.",
+    expected: true,
+  },
+  {
+    kind: "table_occupied",
+    test: /destination table already has an open order/i,
+    hint: "Choose a free table.",
+    expected: true,
+  },
+  {
+    kind: "table_no_open_order",
+    test: /no open order on this table|has no open order to move/i,
+    hint: "This table has no open bill. Refresh the map.",
+    expected: true,
+  },
+  {
+    kind: "permission",
+    test: /pos\.tables\.view required/i,
+    hint: "Ask a manager to grant table access.",
+    expected: true,
+  },
+  {
+    kind: "feature_disabled",
+    test: /not enabled for this plan/i,
+    hint: "This module is not part of the current plan.",
+    expected: true,
+  },
   {
     kind: "no_shift",
     test: /not attached to an open shift/i,
