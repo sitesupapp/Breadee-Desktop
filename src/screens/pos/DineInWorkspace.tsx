@@ -16,34 +16,72 @@ import { useShortcuts } from "@/lib/keyboard/provider";
 import { TableMap } from "@/components/pos/TableMap";
 import { TableBillPanel } from "@/components/pos/TableBillPanel";
 import { SeatCountDialog } from "@/components/pos/SeatCountDialog";
+import { DineInRoundPanel } from "@/components/pos/DineInRoundPanel";
+import { Modal } from "@/components/overlays";
+import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
 import { canOpenTable } from "@/lib/pos/access";
+import {
+  addItemsGate as computeAddItemsGate,
+  describeBillChange,
+  performRound,
+  roundOutcomeMessage,
+  submitRoundGate,
+  type RoundContext,
+  type RoundMenu,
+} from "@/lib/pos/tableRounds";
+import { submitOrder } from "@/lib/pos/orders";
+import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
-import type { TableSummary } from "@/types/tables";
+import type { CurrencyCode } from "@/lib/currency";
+import type { CartLine } from "@/types/pos";
+import type { TableBill, TableSummary } from "@/types/tables";
+
+/** Which half of Dine-in is on screen. Add Items borrows the menu from the shell. */
+export type DineInView = "map" | "add_items";
 
 export type DineInWorkspace = {
+  view: DineInView;
   work: (layout: LayoutSpec) => React.ReactNode;
   bill: (layout: LayoutSpec) => React.ReactNode;
+  roundPanel: (layout: LayoutSpec) => React.ReactNode;
   dialogs: React.ReactNode;
   /** Drawer summary for the sub-1024 tier. */
   summary: { itemCount: number; subtotal: number };
   selected: TableSummary | null;
+  /** True while an unsent round is buffered for the selected table. */
+  hasUnsentRound: boolean;
+  /** Ask to leave Add Items; may open a confirmation instead of leaving. */
+  requestLeaveAddItems: () => void;
 };
 
 export function useDineInWorkspace(input: {
   pos: PosContext;
   hasOpenShift: boolean;
+  /** The open shift's id. Required on every round payload - never inferred. */
+  shiftId: string | null;
   active: boolean;
+  online: boolean;
+  menu: RoundMenu;
+  createOrders: Gate;
+  currency: CurrencyCode;
+  cartLines: CartLine[];
+  cartSelectedKey: string | null;
+  onSelectLine: (key: string) => void;
+  onAdjustLine: (key: string, delta: number) => void;
+  onRemoveLine: (key: string) => void;
+  onEditNote: (key: string) => void;
   onOpenShift: () => void;
   onBillDrawerOpen: () => void;
 }): DineInWorkspace {
   const { pos, hasOpenShift, active } = input;
   const toast = useToast();
   const tables = useTables();
+  const cart = useCart();
 
   const [query, setQuery] = useState("");
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -54,6 +92,15 @@ export function useDineInWorkspace(input: {
   const searchRef = useRef<HTMLInputElement>(null);
   // Same synchronous latch Takeaway uses: two fast taps must not both fire.
   const inFlight = useRef(false);
+
+  // --- Level 2B round state ---------------------------------------------------
+  const [view, setView] = useState<DineInView>("map");
+  const [leaveConfirm, setLeaveConfirm] = useState(false);
+  const [roundBusy, setRoundBusy] = useState(false);
+  const [billChange, setBillChange] = useState<string | null>(null);
+  // Separate latch from open-table: sending a round and opening a table are
+  // different operations and must not block one another.
+  const roundInFlight = useRef(false);
 
   const ctx = useMemo(
     () => ({ tenantId: pos.tenantId, branchId: pos.branch.id }),
@@ -128,6 +175,151 @@ export function useDineInWorkspace(input: {
     [selected, openGate.allowed, ctx, toast],
   );
 
+  // --- Level 2B: rounds -------------------------------------------------------
+
+  const roundCtx: RoundContext = useMemo(
+    () => ({ branchId: pos.branch.id, shiftId: input.shiftId, table: selected, online: input.online }),
+    [pos.branch.id, input.shiftId, selected, input.online],
+  );
+
+  /** Lines currently buffered FOR THIS TABLE. Another owner's lines are not ours. */
+  const roundLines = useMemo(
+    () =>
+      selected && cart.owner?.kind === "table" && cart.owner.tableId === selected.id ? input.cartLines : [],
+    [selected, cart.owner, input.cartLines],
+  );
+  const hasUnsentRound = roundLines.length > 0;
+  const roundSubtotal = useMemo(() => selectSubtotal(roundLines), [roundLines]);
+
+  const addItemsGate: Gate = useMemo(() => {
+    const base = computeAddItemsGate({ ctx: roundCtx, createOrders: input.createOrders });
+    if (!base.allowed) return base;
+    // The buffer is shared with Takeaway on purpose (one cart, one round at a
+    // time). If someone else's work is in it, say whose rather than merging.
+    if (input.cartLines.length > 0 && cart.owner?.kind === "takeaway") {
+      return { allowed: false, reason: "Finish or clear the takeaway order first - the cart is in use." };
+    }
+    if (
+      input.cartLines.length > 0 &&
+      cart.owner?.kind === "table" &&
+      selected &&
+      cart.owner.tableId !== selected.id
+    ) {
+      return { allowed: false, reason: "Another table has an unsent round. Send or discard it first." };
+    }
+    return base;
+  }, [roundCtx, input.createOrders, input.cartLines.length, cart.owner, selected]);
+
+  const submitGate: Gate = useMemo(
+    () =>
+      submitRoundGate({
+        ctx: roundCtx,
+        lines: roundLines,
+        createOrders: input.createOrders,
+        menu: input.menu,
+      }),
+    [roundCtx, roundLines, input.createOrders, input.menu],
+  );
+
+  /**
+   * Enter Add Items. The bill is RE-READ first: the operator is about to build a
+   * round against what they can see, so what they see must be current.
+   */
+  const enterAddItems = useCallback(async () => {
+    if (!selected || !addItemsGate.allowed) return;
+    if (!cart.claim({ kind: "table", tableId: selected.id })) return;
+    setBillChange(null);
+    const before = useTables.getState().bill;
+    await tables.loadBill(ctx);
+    setBillChange(describeBillChange(before, useTables.getState().bill));
+    setView("add_items");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, addItemsGate.allowed, ctx]);
+
+  /** Leave Add Items. An unsent round is never discarded silently. */
+  const requestLeaveAddItems = useCallback(() => {
+    if (hasUnsentRound) {
+      setLeaveConfirm(true);
+      return;
+    }
+    setBillChange(null);
+    setView("map");
+  }, [hasUnsentRound]);
+
+  /** Keep the round, just go back to the map. It stays buffered for this table. */
+  const leaveKeepingRound = useCallback(() => {
+    setLeaveConfirm(false);
+    setBillChange(null);
+    setView("map");
+  }, []);
+
+  const discardRound = useCallback(() => {
+    cart.reset();
+    setLeaveConfirm(false);
+    toast.push({ tone: "info", message: "Round discarded", detail: "Nothing was sent to the kitchen." });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toast]);
+
+  /**
+   * Send the round.
+   *
+   * The op id comes from the cart and is NOT cleared on failure, so a retry is
+   * the same logical round and m224 replays rather than duplicating. It is
+   * cleared only by `cart.reset()` after the server has definitively accepted.
+   */
+  const sendRound = useCallback(async () => {
+    if (roundInFlight.current || !selected) return;
+    if (!submitGate.allowed) return;
+    roundInFlight.current = true;
+    setRoundBusy(true);
+    try {
+      const before: TableBill | null = useTables.getState().bill;
+      const opId = useCart.getState().ensureOpId();
+      // The sequence itself lives in `performRound` so it is testable; this is
+      // the same build -> submit -> clear -> refresh order the tests pin.
+      const outcome = await performRound({
+        ctx: { ...roundCtx, table: selected },
+        lines: useCart.getState().lines,
+        clientOpId: opId,
+        menu: input.menu,
+        submit: submitOrder,
+        // Accepted. Only now does the buffer go - and with it the operation id,
+        // so the NEXT round mints a fresh one.
+        clearBuffer: () => useCart.getState().reset(),
+        refresh: async () => {
+          await tables.refresh(ctx);
+          await tables.select(selected.id, ctx);
+        },
+      });
+
+      if (!outcome.ok) throw outcome.error;
+
+      setBillChange(describeBillChange(before, useTables.getState().bill));
+      const { message, detail } = roundOutcomeMessage(outcome.result);
+      toast.push({ tone: outcome.result.idempotent ? "info" : "success", message, detail });
+    } catch (e) {
+      // The round survives, unchanged, with the same operation id.
+      const c = classifyError(e);
+      toast.push({
+        tone: c.expected ? "warning" : "error",
+        message: c.message,
+        detail: c.hint ? `${c.hint} Your round is still here - press Submit round to retry.` : "Your round is still here.",
+      });
+    } finally {
+      roundInFlight.current = false;
+      setRoundBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast]);
+
+  // A selection that moves out from under an unsent round would silently retarget
+  // the food. Leaving Add Items is the safe response.
+  useEffect(() => {
+    if (view !== "add_items") return;
+    if (selected) return;
+    setView("map");
+  }, [view, selected]);
+
   // Grid-aware movement. Only registered while Dine-in is the active mode, so
   // Takeaway's own arrow/Enter handling is untouched.
   const move = useCallback(
@@ -140,22 +332,14 @@ export function useDineInWorkspace(input: {
     [visible, focusedId, tables.selectedTableId],
   );
 
+  // Map view bindings. Unregistered in Add Items so the arrows and Enter belong
+  // to the menu instead - one binding, one owner, decided by the visible view.
   useShortcuts(
     {
       tableSearch: () => searchRef.current?.focus(),
-      tableMap: () => {
-        // Alt+M is the ONLY dine-in binding marked `worksInInput`, precisely so
-        // it can be pressed from inside the search box. That makes releasing DOM
-        // focus part of the job: the arrows and Enter are not `worksInInput`, so
-        // leaving the caret in the field silently kills every other table
-        // binding and the grid can only be reached again with the mouse.
-        searchRef.current?.blur();
-        tables.clearSelection();
-        setFocusedId(null);
-      },
       tableLeft: () => move(-1),
       tableRight: () => move(1),
-      // Shared vertical ids - in Dine-in they walk a grid row.
+      // Shared vertical ids - in the map view they walk a grid row.
       lineUp: () => move(-1),
       lineDown: () => move(1),
       tableOpen: () => {
@@ -163,8 +347,37 @@ export function useDineInWorkspace(input: {
         if (focusedId !== tables.selectedTableId) return select(focusedId);
         if (openGate.allowed) setSeatOpen(true);
       },
-      // addItems / moveTable / closeTable / clearTable are deliberately absent:
-      // an unregistered id does nothing at all.
+      addItems: () => void enterAddItems(),
+    },
+    active && view === "map",
+  );
+
+  // Add Items bindings.
+  useShortcuts(
+    {
+      // Ctrl+Enter. Shared id with the payment dialog, which cannot be open here.
+      // The latch inside sendRound is what makes a held key safe, not this.
+      confirmPayment: () => void sendRound(),
+    },
+    active && view === "add_items",
+  );
+
+  // Alt+M means "back to the table map" in BOTH views, so it is registered once.
+  useShortcuts(
+    {
+      tableMap: () => {
+        // Alt+M is the ONLY dine-in binding marked `worksInInput`, precisely so
+        // it can be pressed from inside a search box. That makes releasing DOM
+        // focus part of the job: the arrows and Enter are not `worksInInput`, so
+        // leaving the caret in the field silently kills every other table
+        // binding and the grid can only be reached again with the mouse.
+        searchRef.current?.blur();
+        if (view === "add_items") return requestLeaveAddItems();
+        tables.clearSelection();
+        setFocusedId(null);
+      },
+      // moveTable / closeTable / clearTable are deliberately absent: an
+      // unregistered id does nothing at all.
     },
     active,
   );
@@ -204,7 +417,9 @@ export function useDineInWorkspace(input: {
         loading={tables.billLoading}
         error={tables.billError}
         openGate={openGate}
+        addItemsGate={addItemsGate}
         shiftOpen={hasOpenShift}
+        onAddItems={() => void enterAddItems()}
         onOpenTable={() => {
           setOpenError(null);
           setSeatOpen(true);
@@ -213,25 +428,93 @@ export function useDineInWorkspace(input: {
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, hasOpenShift],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems],
+  );
+
+  const roundPanel = useCallback(
+    () =>
+      selected ? (
+        <DineInRoundPanel
+          table={selected}
+          bill={tables.bill}
+          billLoading={tables.billLoading}
+          billError={tables.billError}
+          refreshing={tables.refreshing || tables.billLoading}
+          billChange={billChange}
+          lines={roundLines}
+          selectedKey={input.cartSelectedKey}
+          subtotal={roundSubtotal}
+          currency={input.currency}
+          busy={roundBusy}
+          submitGate={submitGate}
+          onSelect={input.onSelectLine}
+          onAdjust={input.onAdjustLine}
+          onRemove={input.onRemoveLine}
+          onEditNote={input.onEditNote}
+          onSubmitRound={() => void sendRound()}
+          onDiscardRound={discardRound}
+          onBackToMap={requestLeaveAddItems}
+        />
+      ) : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
+      roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
+      sendRound, discardRound, requestLeaveAddItems,
+    ],
   );
 
   const dialogs = (
-    <SeatCountDialog
-      open={seatOpen}
-      table={selected}
-      busy={busy}
-      gate={openGate}
-      error={openError}
-      onCancel={() => setSeatOpen(false)}
-      onConfirm={(seats) => void confirmOpen(seats)}
-    />
+    <>
+      <SeatCountDialog
+        open={seatOpen}
+        table={selected}
+        busy={busy}
+        gate={openGate}
+        error={openError}
+        onCancel={() => setSeatOpen(false)}
+        onConfirm={(seats) => void confirmOpen(seats)}
+      />
+
+      {/* An unsent round is never thrown away by a keystroke. Keeping it is the
+          default action, because the expensive mistake is losing a round the
+          cashier already read out to a table. */}
+      <Modal
+        open={leaveConfirm}
+        title="This round has not been sent"
+        subtitle={`${roundLines.length} line${roundLines.length === 1 ? "" : "s"} are still waiting to go to the kitchen.`}
+        size="sm"
+        onClose={() => setLeaveConfirm(false)}
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="ghost" size="lg" onClick={() => setLeaveConfirm(false)}>
+              Stay here
+            </Button>
+            <Button variant="ghost" size="lg" onClick={discardRound}>
+              Discard round
+            </Button>
+            <Button size="lg" onClick={leaveKeepingRound}>
+              Keep it for later
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-sm text-sub">
+          Keeping the round leaves it buffered for {selected?.name ?? "this table"}; you can come back and send it.
+          Discarding removes it - nothing was sent to the kitchen either way.
+        </p>
+      </Modal>
+    </>
   );
 
   return {
+    view,
     work,
     bill,
+    roundPanel,
     dialogs,
+    hasUnsentRound,
+    requestLeaveAddItems,
     summary: {
       itemCount: tables.bill?.orders.reduce((s, o) => s + o.lines.length, 0) ?? 0,
       subtotal: tables.bill?.total ?? 0,

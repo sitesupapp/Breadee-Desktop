@@ -26,7 +26,7 @@ import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
-import { selectItemCount, selectSubtotal, useCart } from "@/state/cart";
+import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
 import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
@@ -200,13 +200,30 @@ function PosWorkspaceInner() {
   const tablesGate = canViewTables(pos.access);
   const dineInActive = mode === "dine_in" && tablesGate.allowed;
   const tableStore = useTables();
+  const roundMenu = useMemo(
+    () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options }),
+    [menu.groupsByItem, menu.groups, menu.options],
+  );
   const dineIn = useDineInWorkspace({
     pos,
     hasOpenShift: Boolean(shiftId),
+    shiftId,
     active: dineInActive,
+    online,
+    menu: roundMenu,
+    createOrders: pos.gates.createOrders,
+    currency,
+    cartLines: cart.lines,
+    cartSelectedKey: cart.selectedKey,
+    onSelectLine: cart.select,
+    onAdjustLine: cart.adjustQuantity,
+    onRemoveLine: (key) => removeLine(key),
+    onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
     onBillDrawerOpen: () => setCartDrawerOpen(true),
   });
+  /** Add Items borrows the menu; the cart buffer then belongs to that table. */
+  const addingToTable = dineInActive && dineIn.view === "add_items";
 
   // Table state is tenant/branch scoped; drop it when the operator leaves POS.
   useEffect(() => () => tableStore.reset(), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -217,6 +234,23 @@ function PosWorkspaceInner() {
 
   // --- actions ---------------------------------------------------------------
 
+  /**
+   * Who the shared buffer belongs to right now. Claimed before every add, so a
+   * takeaway line can never end up inside a table's round (or the reverse) -
+   * there is one cart, and it serves one context at a time.
+   */
+  const claimBuffer = useCallback((): boolean => {
+    const owner: CartOwner =
+      addingToTable && dineIn.selected ? { kind: "table", tableId: dineIn.selected.id } : { kind: "takeaway" };
+    if (useCart.getState().claim(owner)) return true;
+    toast.push({
+      tone: "warning",
+      message: "The cart is in use",
+      detail: "Send or clear the current order before starting another one.",
+    });
+    return false;
+  }, [addingToTable, dineIn.selected, toast]);
+
   const addItem = useCallback(
     (item: SearchableItem, price: number) => {
       const groups = groupsForItem(item.id, menu.groupsByItem, menu.groups);
@@ -224,14 +258,16 @@ function PosWorkspaceInner() {
         setPickerItem({ item, price, groups });
         return;
       }
+      if (!claimBuffer()) return;
       cart.addLine({ menuItemId: item.id, name: item.name, basePrice: price });
     },
-    [cart, menu.groupsByItem, menu.groups],
+    [cart, claimBuffer, menu.groupsByItem, menu.groups],
   );
 
   const confirmPicker = useCallback(
     (input: { modifiers: SelectedModifier[]; quantity: number; note: string | null }) => {
       if (!pickerItem) return;
+      if (!claimBuffer()) return;
       cart.addLine({
         menuItemId: pickerItem.item.id,
         name: pickerItem.item.name,
@@ -242,7 +278,7 @@ function PosWorkspaceInner() {
       });
       setPickerItem(null);
     },
-    [cart, pickerItem],
+    [cart, claimBuffer, pickerItem],
   );
 
   const removeLine = useCallback(
@@ -446,13 +482,13 @@ function PosWorkspaceInner() {
     fullscreen: () => void toggleFullscreen(),
   });
 
-  // Takeaway-only bindings. Disabled while Dine-in is active so the arrow keys
-  // and Enter drive the table grid instead of the cart - one binding, one owner.
+  // Menu + buffer bindings. Live whenever the MENU is on screen - Takeaway, or
+  // Dine-in Add Items - because in both cases these keys edit the same buffer.
+  // Disabled on the table map so the arrows drive the grid instead: one binding,
+  // one owner, decided by what the operator can actually see.
   useShortcuts(
     {
-      newOrder,
       search: () => searchRef.current?.focus(),
-      openPayment,
       prevCategory: () => setCategory((c) => stepCategory(categoryIds, c, -1)),
       nextCategory: () => setCategory((c) => stepCategory(categoryIds, c, 1)),
       lineUp: () => cart.moveSelection(-1),
@@ -460,6 +496,16 @@ function PosWorkspaceInner() {
       qtyUp: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, 1),
       qtyDown: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, -1),
       removeLine: () => cart.selectedKey && removeLine(cart.selectedKey),
+    },
+    !dineInActive || addingToTable,
+  );
+
+  // Takeaway-only. New order, payment and the receipt belong to a takeaway
+  // order; a dine-in round has none of them in Level 2B.
+  useShortcuts(
+    {
+      newOrder,
+      openPayment,
       print: () => receiptStore.reopen(),
     },
     !dineInActive,
@@ -573,12 +619,19 @@ function PosWorkspaceInner() {
             openShiftReason={pos.gates.openShift.reason}
           />
         )}
+        /* One menu implementation, used by Takeaway AND by Dine-in Add Items.
+           A second menu would be a second place for prices to drift. */
         work={(layout) =>
-          dineInActive ? (
+          dineInActive && dineIn.view === "map" ? (
             dineIn.work(layout)
           ) : (
             <>
               <div className="mb-3 flex shrink-0 items-center gap-2">
+                {addingToTable && (
+                  <span className="rounded-lg bg-brand-soft px-3 py-2 text-xs font-extrabold text-brand-dark">
+                    Adding to {dineIn.selected?.name}
+                  </span>
+                )}
                 <Input
                   ref={searchRef}
                   value={query}
@@ -632,7 +685,11 @@ function PosWorkspaceInner() {
         }
         cart={(layout) =>
           dineInActive ? (
-            dineIn.bill(layout)
+            dineIn.view === "add_items" ? (
+              dineIn.roundPanel(layout)
+            ) : (
+              dineIn.bill(layout)
+            )
           ) : (
             <CartPanel
               lines={cart.lines}

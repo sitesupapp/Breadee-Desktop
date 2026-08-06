@@ -4,11 +4,12 @@
 // never displayed as the bill, and nothing in this panel can mutate anything:
 // every forward action is rendered disabled with the level that will deliver it.
 
-import { Badge, Button, EmptyState, PanelTitle, Skeleton, StatusDot, cn, type Gate } from "@/components/ui";
+import { Badge, Button, EmptyState, GatedButton, PanelTitle, Skeleton, StatusDot, cn, type Gate } from "@/components/ui";
 import { formatMoney } from "@/lib/currency";
 import { linesByBatch, billItemCount } from "@/lib/pos/tableBill";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { DEFERRED_TABLE_ACTIONS, deferredActionReason } from "@/lib/pos/dineInActions";
+import { sentRoundLabel } from "@/lib/pos/tableRounds";
 import type { TableBill, TableSummary } from "@/types/tables";
 
 export type TableBillPanelProps = {
@@ -17,10 +18,21 @@ export type TableBillPanelProps = {
   loading: boolean;
   error: string | null;
   openGate: Gate;
+  /** Level 2B: entering Add Items mode for this table. */
+  addItemsGate: Gate;
+  onAddItems: () => void;
   onOpenTable: () => void;
   onOpenShift: () => void;
   shiftOpen: boolean;
 };
+
+/** A submitted time, shown short. The server's timestamp, never a local clock. */
+function submittedAt(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 export function TableBillPanel(props: TableBillPanelProps) {
   const { table, bill } = props;
@@ -32,11 +44,24 @@ export function TableBillPanel(props: TableBillPanelProps) {
           {table ? table.name : "No table selected"}
         </PanelTitle>
         {bill && bill.orders.length > 0 && (
-          <p className="mt-1 text-xs text-sub">
-            {bill.orders.map((o) => `#${o.order_number}`).join(", ")} · {billItemCount(bill)} item
-            {billItemCount(bill) === 1 ? "" : "s"} · {bill.batches.length} round
-            {bill.batches.length === 1 ? "" : "s"}
-          </p>
+          <>
+            <p className="mt-1 text-xs text-sub">
+              {bill.orders.map((o) => `#${o.order_number}`).join(", ")} · {billItemCount(bill)} item
+              {billItemCount(bill) === 1 ? "" : "s"} · {bill.batches.length} round
+              {bill.batches.length === 1 ? "" : "s"}
+            </p>
+            {/* Server-reported lifecycle, read-only. Level 2B submits INTO the
+                existing order/kitchen lifecycle; it does not model one locally. */}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <Badge tone={bill.orders[0].status === "sent_to_kitchen" ? "blue" : "slate"}>
+                {bill.orders[0].status.replace(/_/g, " ")}
+              </Badge>
+              <Badge tone={bill.orders[0].payment_status === "paid" ? "slate" : "amber"}>
+                {bill.orders[0].payment_status}
+              </Badge>
+              {bill.splitShift && <Badge tone="amber">multiple shifts</Badge>}
+            </div>
+          </>
         )}
       </div>
 
@@ -97,9 +122,12 @@ export function TableBillPanel(props: TableBillPanelProps) {
             {linesByBatch(bill).map(({ batch, lines }) => (
               <div key={batch} className="rounded-xl border border-line">
                 <div className="flex items-center justify-between border-b border-line px-3 py-1.5">
-                  <span className="text-xs font-extrabold text-ink">Round {batch}</span>
+                  <span className="text-xs font-extrabold text-ink">{sentRoundLabel(batch)}</span>
                   <span className="text-[11px] text-sub">
                     {lines.length} line{lines.length === 1 ? "" : "s"}
+                    {submittedAt(bill.orders[0]?.created_at ?? null) && batch === bill.batches[0]
+                      ? ` · ${submittedAt(bill.orders[0].created_at)}`
+                      : ""}
                   </span>
                 </div>
                 <ul className="divide-y divide-line">
@@ -158,6 +186,21 @@ export function TableBillPanel(props: TableBillPanelProps) {
           </p>
         )}
 
+        {/* Level 2B. Deliberately ABOVE and visually separate from the deferred
+            grid below - the action that adds food must never sit in the same row
+            as the ones that move or settle a bill. */}
+        {table && (
+          <GatedButton
+            gate={props.addItemsGate}
+            size="lg"
+            className="mb-3 w-full"
+            disabled={!props.addItemsGate.allowed}
+            onClick={props.onAddItems}
+          >
+            Add items (A)
+          </GatedButton>
+        )}
+
         {/* Honest placeholders, from the single deferred-action list in
             `lib/pos/dineInActions.ts`. Each renders `disabled` with NO onClick,
             and the RPC each will eventually call is absent from `PosRpcName` -
@@ -182,7 +225,7 @@ export function TableBillPanel(props: TableBillPanelProps) {
         </div>
         <p className="mt-2 flex items-center gap-1 text-[11px] text-sub">
           <StatusDot tone="slate" />
-          Ordering and payment for dine-in are not enabled yet.
+          Moving, closing, clearing and payment for dine-in are not enabled yet.
         </p>
       </div>
     </section>

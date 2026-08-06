@@ -32,11 +32,12 @@ export type ShortcutId =
   | "print"
   | "closeModal"
   | "fullscreen"
-  // Dine-In (Level 2A). `tableMap`, `tableSearch`, `tableLeft/Right` and
-  // `tableOpen` are live; vertical movement reuses the shared `lineUp`/`lineDown`
-  // ids. `addItems`, `moveTable`, `closeTable` and `clearTable` are RESERVED -
-  // they are declared so the help sheet is honest and the bindings cannot be
-  // taken by something else, but no screen registers a handler for them yet.
+  // Dine-In (Level 2A/2B). `tableMap`, `tableSearch`, `tableLeft/Right`,
+  // `tableOpen` and `addItems` are live; vertical movement reuses the shared
+  // `lineUp`/`lineDown` ids, and Ctrl+Enter reuses `confirmPayment` (see its
+  // spec below). `moveTable`, `closeTable` and `clearTable` remain RESERVED -
+  // declared so the help sheet is honest and the bindings cannot be taken by
+  // something else, but no screen registers a handler for them.
   | "tableMap"
   | "tableSearch"
   | "tableLeft"
@@ -71,10 +72,14 @@ export const SHORTCUTS: ShortcutSpec[] = [
   { id: "ordersList", keys: ["F6"], label: "Orders list", group: "Order", display: "F6", worksInInput: true },
   { id: "holdOrder", keys: ["F7"], label: "Hold order", group: "Order", display: "F7", worksInInput: true },
   {
+    // Shared id, same convention as lineUp/lineDown: ONE binding, and the active
+    // screen decides what it confirms. The payment dialog registers it while
+    // open; Dine-in Add Items registers it to send the round. They never coexist
+    // - a payment dialog is not reachable from Add Items in Level 2B.
     id: "confirmPayment",
     keys: ["Enter"],
     ctrl: true,
-    label: "Confirm payment",
+    label: "Confirm payment / Submit round",
     group: "Order",
     display: "Ctrl+Enter",
     worksInInput: true,
@@ -106,10 +111,12 @@ export const SHORTCUTS: ShortcutSpec[] = [
   { id: "tableRight", keys: ["ArrowRight"], label: "Next table", group: "Dine-in", display: "Right" },
   { id: "tableOpen", keys: ["Enter"], label: "Select / open the focused table", group: "Dine-in", display: "Enter" },
 
+  // Live since Level 2B.
+  { id: "addItems", keys: ["a"], label: "Add items to the selected table", group: "Dine-in", display: "A" },
+
   // RESERVED - declared so the binding is not claimed elsewhere and the help
-  // sheet is truthful, but no screen registers a handler in Level 2A. A
-  // reserved id that nothing handles simply does nothing; it cannot call an RPC.
-  { id: "addItems", keys: ["a"], label: "Add items to table (Level 2B)", group: "Dine-in", display: "A" },
+  // sheet is truthful, but no screen registers a handler. A reserved id that
+  // nothing handles simply does nothing; it cannot call an RPC.
   { id: "moveTable", keys: ["M"], ctrl: true, shift: true, label: "Move table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+M", worksInInput: true },
   // NOTE: Ctrl+Shift+C is the DevTools inspector in Chromium. Revisit this
   // binding in Level 2C before wiring a handler to it.
@@ -118,7 +125,7 @@ export const SHORTCUTS: ShortcutSpec[] = [
 ];
 
 /** Shortcut ids that are declared but intentionally have no handler yet. */
-export const RESERVED_SHORTCUTS: ShortcutId[] = ["addItems", "moveTable", "closeTable", "clearTable"];
+export const RESERVED_SHORTCUTS: ShortcutId[] = ["moveTable", "closeTable", "clearTable"];
 
 /** Bindings we must never register, kept explicit so a future edit trips the test. */
 export const FORBIDDEN_COMBOS = ["Alt+F4", "Ctrl+W", "Ctrl+T", "Ctrl+N", "Ctrl+R", "F5"];
