@@ -7,16 +7,19 @@
 // is one careless edit away from being live. So the decision is made HERE, in a
 // pure function, with a test that pins it - the JSX has no boolean to get wrong.
 //
-// Level 2A makes a table REACHABLE and READABLE. It does not make it orderable,
-// movable, closable, clearable or payable. Those are not hidden: they render as
-// disabled controls naming the level that delivers them, which is honest about
-// the roadmap without implying the operator lacks a permission.
+// A deferred action is not hidden: it renders as a disabled control naming the
+// level that delivers it, which is honest about the roadmap without implying the
+// operator lacks a permission they may well hold.
 //
-// The hard guarantee sits one layer down: `pos_move_table`, `pos_close_table`,
-// `pos_clear_table` and `pos_pay_table` are not in `PosRpcName`, so `callPosRpc`
-// will not accept them. Nothing in this file can reach the server.
+// The hard guarantee sits one layer down: the RPC a deferred action would call is
+// absent from `PosRpcName`, so `callPosRpc` will not accept it. Nothing in this
+// file can reach the server.
+//
+// After Level 2C only ONE action is left here - Pay. Move, Close and Clear are
+// now real controls behind real gates in `lib/pos/tableOps.ts`, and their RPCs
+// have joined the allow-list. `pos_pay_table` has not.
 
-export type DeferredTableActionKey = "move" | "close" | "clear" | "pay";
+export type DeferredTableActionKey = "pay";
 
 export type DeferredTableAction = {
   key: DeferredTableActionKey;
@@ -30,15 +33,11 @@ export type DeferredTableAction = {
 /**
  * Every dine-in action that exists in the product but not in this level.
  *
- * Level 2B delivered Add items and Submit round, so they are gone from this list
- * - they are now real controls behind real gates in `lib/pos/tableRounds.ts`.
- * What remains is everything that MOVES or SETTLES a bill, and each of those
- * still has no reachable RPC.
+ * Level 2B removed Add items and Submit round from this list; Level 2C removed
+ * Move, Close and Clear. What is left is SETTLEMENT - taking the customer's
+ * money - which is the one thing the desktop still cannot do for a table.
  */
 export const DEFERRED_TABLE_ACTIONS: DeferredTableAction[] = [
-  { key: "move", label: "Move", level: "Level 2C", rpc: "pos_move_table" },
-  { key: "close", label: "Close", level: "Level 2C", rpc: "pos_close_table" },
-  { key: "clear", label: "Clear", level: "Level 2C", rpc: "pos_clear_table" },
   { key: "pay", label: "Pay", level: "Level 2D", rpc: "pos_pay_table" },
 ];
 

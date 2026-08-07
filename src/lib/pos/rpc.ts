@@ -28,11 +28,15 @@ export type PosRpcName =
   | "pos_cash_box_shift"
   | "pos_submit_order"
   | "pos_pay_order"
-  // Level 2A - Dine-In table foundation. Read + open only; the mutating table
-  // operations (move/close/clear/pay) are deliberately NOT listed, so they
-  // cannot be called before their own level lands.
+  // Level 2A - Dine-In table foundation. Read + open.
   | "pos_table_map"
-  | "pos_open_table";
+  | "pos_open_table"
+  // Level 2C - table operations. `pos_pay_table` is deliberately STILL absent:
+  // settling a table is Level 2D, and Close refusing an unpaid bill is the
+  // server telling us so. That refusal is surfaced, never worked around.
+  | "pos_move_table"
+  | "pos_close_table"
+  | "pos_clear_table";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {
