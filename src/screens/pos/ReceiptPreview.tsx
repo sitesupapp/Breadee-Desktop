@@ -22,9 +22,15 @@ export function ReceiptPaper({ data }: { data: ReceiptData }) {
         <span>{data.orderType}</span>
         <span>#{data.orderNumber}</span>
       </div>
+      {/* The tenant's STORED table name, printed verbatim (m256).
+          It is never prefixed: a tenant may legitimately call a table "5",
+          "Table 5", "Terrace" or "VIP 2", and prepending "Table " produced
+          "Table Table 4" on the first staging receipt - the same doubled-label
+          defect the web POS already carries. The order type line above supplies
+          the "Dine-in" context, so the name needs no decoration. */}
       {data.tableName && (
         <div className="flex justify-between text-[11px] text-sub">
-          <span>Table {data.tableName}</span>
+          <span>{data.tableName}</span>
           {data.seats != null && <span>{data.seats} seats</span>}
         </div>
       )}

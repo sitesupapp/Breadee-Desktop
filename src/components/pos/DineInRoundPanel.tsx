@@ -199,10 +199,12 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
           </GatedButton>
         </div>
 
-        <p className="mt-2 flex items-center gap-1 text-[11px] text-sub">
-          <StatusDot tone="slate" />
-          Taking payment for a table is not enabled yet.
-        </p>
+        {/* A footer note used to sit here deferring table payment to a later
+            level. It was true while settlement did not exist; once Pay shipped
+            it became a claim the app itself contradicts one screen away, and a
+            POS that misdescribes what it can do is worse than one that says
+            nothing. Sending the round is this panel's only job - Pay lives on
+            the bill panel, behind the shared gate. */}
       </div>
     </section>
   );

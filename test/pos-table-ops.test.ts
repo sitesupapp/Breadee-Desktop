@@ -36,6 +36,7 @@ import { canClearTable, canCloseTable, canMoveTable, type PosAccessContext } fro
 import { classifyError } from "@/lib/pos/errors";
 import { FEATURES } from "@/lib/features";
 import type { TableSummary } from "@/types/tables";
+import { stripJsxComments } from "./source-helpers.ts";
 
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const read = (...p: string[]) => readFileSync(join(srcRoot, ...p), "utf8");
@@ -377,7 +378,12 @@ test("no dine-in surface still claims move, close or clear is unavailable", () =
     ["components", "pos", "DineInRoundPanel.tsx"],
     ["components", "pos", "TableBillPanel.tsx"],
   ]) {
-    const source = read(...file);
+    // Comments are stripped: this asserts what the panel RENDERS, not what it
+    // says about itself. Level 2D's note recording that the old "not enabled
+    // yet" line was removed contains the words "removed" and "not enabled yet"
+    // on one line, which the pattern below matched - a false positive against a
+    // file that had just been fixed.
+    const source = stripJsxComments(read(...file));
     assert.doesNotMatch(
       source,
       /(move|close|clear)[^.\n]*not enabled yet/i,

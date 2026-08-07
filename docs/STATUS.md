@@ -186,7 +186,7 @@ Payment requires a connection, stated by the gate itself. Nothing is enqueued, `
 
 ### Staging verification status
 
-**Not performed — blocked on credentials.** See §8.
+**PASSED, 2026-08-07.** One real Dine-In payment taken on staging. See §8.
 
 ## 2. Toolchain
 
@@ -197,7 +197,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
 - **Native printing — pending.** The receipt preview is on-screen only; the Print control is disabled rather than silently doing nothing. Printer discovery, routing to hardware and ESC/POS are untouched.
-- **Dine-in settlement — implemented in Level 2D, not yet verified on staging.** The code path is complete and covered by tests against injected effects; no real payment has been taken from this build. See §8.
+- **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.
 - Delivery, customers, orders workspace, edit/void/refund, reports, KDS, loyalty, Google OAuth deep-link, encrypted local storage.
@@ -233,7 +233,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 `npm install` (once) → `npm run dev` (http://localhost:5173). `npm run typecheck`, `npm run test`, `npm run build`. Tests use Node's built-in runner with its native TypeScript support — no test framework dependency is installed. Node ≥ 22.18 is required for the runner's TypeScript support; CI pins Node 24.
 
-Current gate results on `feature/desktop-pos-level-2d-payment`: **391 tests, 0 failures** (up from a 266 baseline); typecheck clean; production build clean.
+Current gate results on `feature/desktop-pos-level-2d-payment`: **394 tests, 0 failures** (up from a 266 baseline); typecheck clean; production build clean.
 
 Note on this machine: roughly one process spawn in three dies with `EPERM uv_spawn`, `0xC0000005`, `Access is denied` or esbuild's `The service was stopped`. A test *file* reported as failed while listing no failing assertion is that crash, not a real failure — re-run the file alone to tell them apart. Level 2D's full-suite runs hit this on every single-command attempt, each time on a *different* random file; running the suite in two halves completed cleanly (170 + 221 = 391). CI is the authoritative full-suite gate.
 
@@ -248,21 +248,42 @@ Both were left failing during implementation rather than relaxed in advance. A s
 
 Not opened. Level 2D is local-only by instruction; integration into `desktop-staging` is a separate task.
 
-## 8. Level 2D staging verification — NOT PERFORMED
+## 8. Level 2D staging verification — PASSED (2026-08-07)
 
-The controlled staging smoke test (Dominos Pizza / Main Branch / `cashier@dominos.com`, one dedicated QA shift, one small cash-USD dine-in payment) has **not** been run.
+One controlled Dine-In payment was taken on **staging** (`azjxprewycygsocusxjn`), tenant **Dominos Pizza** (#8), **Main Branch**, as **`cashier@dominos.com`**, from the Level 2D build at `http://localhost:5184` (worktree `feature/desktop-pos-level-2d-payment` @ `5bdc6ef`). Production was never contacted.
 
-It is blocked on authentication: the flow requires signing the desktop app into staging as that cashier, and entering credentials is not something the assistant performs. Nothing about the implementation is blocking — the gates below are green.
+> The build under test was the **dev server from the worktree**, not a packaged app. The previously installed Windows build was a pre-Level-2A binary (2026-07-11) that has no Dine-In at all; it was not used and has since been uninstalled. Packaged-app (Tauri/NSIS) verification is a separate exercise after integration.
 
-What has been proven locally, against injected effects rather than a network:
+| | |
+|---|---|
+| QA shift | `587f8e5a-4c56-4308-af0a-50e4ab407b4c`, opened 20:01:03Z, float **$5.00** |
+| Table | Table 4 `4d836f5e-…`, opened with 2 seats |
+| Order | `5832a356-…` / **260807-0002**, batch 1, `client_op_id` `f238787a-…`, 1× Margherita + Small, note "Desktop Level 2D payment verification" |
+| Bill | subtotal $7.00, discount $0.00, total **$7.00 USD** |
+| Payment | cash, USD, no discount, tendered $10.00, change $3.00 |
+| Server returned | `ok`, orders 1, subtotal 7.00, discount 0, amount 7.00, USD, original 7.00, rate null |
+| Payment rows | **1** — duplicate count **0** |
+| Final state | order `completed` / `paid`, Table 4 `available`, residual unpaid Dine-In bills **0** |
+| Cash box | before `cash_usd 0.00 / expected 5.00 / payment_count 0` → after `cash_usd 7.00 / expected 12.00 / payment_count 1` |
+| QA shift close | expected $12.00, counted $12.00, **difference $0.00**, `pending_manager_review` |
 
-- the exact `pos_pay_table` payload, end to end, with every forbidden field asserted by name;
-- stale-bill protection (changed total, changed order set, vanished bill, freed table, moved shift, already-settled);
-- discount variants (none / percent / amount, >100%, above subtotal, negative, missing permission);
-- USD and LBP, including refusal without a tenant rate;
-- tender exact / over / under / malformed, and that neither tendered nor change reaches the RPC;
-- the duplicate latch (double-click, click+F4, three rapid confirms → one RPC);
-- lost-response recovery (recovered success, safe-retry, ambiguous), and that `submit` runs at most once;
-- the ordered completion sequence, the receipt contents, and the cash-box refresh call.
+Confirmed in the live run:
 
-**No real payment has been taken from this build.** Until the staging smoke test in the Level 2D brief is executed and recorded here, Level 2D is not integration-ready.
+- **F4 opened the dialog and never charged**, and after settlement F4 did nothing at all — Pay was unreachable by mouse and keyboard alike.
+- The completion sequence was observable on the wire in the specified order: `pos_pay_table` → `pos_table_map` → `pos_cash_box_shift`.
+- `pos_close_table` was **not** called; the table was freed by `pos_pay_table` itself.
+- A full page reload plus re-navigation left the table settled, produced no second payment and no reappearing bill.
+- `pos_payments` has no `tendered`/`change`/`client_op_id` columns at all, so those fields cannot have been sent or stored.
+
+### Two presentation defects found and fixed
+
+Both were cosmetic; every financial value was correct.
+
+1. **`Table Table 4` on the receipt.** The receipt prefixed the stored table name with "Table ", but m256 makes the tenant's stored name authoritative and it was already "Table 4" — the same doubled-label defect the web POS carries. Now printed verbatim.
+2. **"Taking payment for a table is not enabled yet."** still rendered in the round panel after Pay shipped. Removed — the app contradicted itself one screen away.
+
+Both are pinned by regression tests in `test/pos-table-payment-wiring.test.ts`. Level 2C's own "no surface claims a shipped action is unavailable" test was tightened to strip comments first: it had matched the word "re**move**d" inside the note recording the fix, failing against a file that had just been corrected.
+
+### Not covered by this run
+
+Deliberately single-payment, so these remain covered by tests only, not by a live charge: discount variants, LBP tender, mixed-currency and split-shift refusals, and the ambiguous/lost-response recovery path (the brief explicitly forbids manufacturing a network failure to test it).

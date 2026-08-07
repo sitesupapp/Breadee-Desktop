@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import { stripJsxComments } from "./source-helpers.ts";
 import { SHORTCUTS, matchShortcut, shortcutHelp, RESERVED_SHORTCUTS } from "@/lib/keyboard/shortcuts";
 import { classifyError } from "@/lib/pos/errors";
 import {
@@ -230,6 +231,52 @@ test("offline payment does not exist, and sync replay is still review-only", () 
   assert.doesNotMatch(workspace, /enqueue|offlineMode/, "the dine-in payment path knows about offline mode");
   // Payment requires a connection, stated by the gate itself.
   assert.match(read("lib", "pos", "tablePayment.ts"), /Taking payment needs a connection/);
+});
+
+// --- regressions found by the staging smoke test ----------------------------
+//
+// Both of these were caught by the first real Level 2D payment on staging
+// (2026-08-07, Dominos Pizza / Main Branch / Table 4, order 260807-0002). Both
+// are presentation defects; the money was correct in every respect.
+
+test("the receipt prints the tenant's stored table name VERBATIM, never prefixed", () => {
+  // The first staging receipt read "Table Table 4", because the stored name is
+  // already "Table 4" and the receipt prefixed it with "Table ". m256 is
+  // explicit that a tenant may call a table "5", "Table 5", "Terrace" or
+  // "VIP 2" and that the stored name is authoritative - so no decoration.
+  // This is the same doubled-label defect the web POS already carries; it must
+  // not be re-created here.
+  const preview = read("screens", "pos", "ReceiptPreview.tsx");
+  assert.doesNotMatch(preview, /Table \{data\.tableName\}/, 'the receipt prefixes the table name again ("Table Table 4")');
+  assert.doesNotMatch(preview, /["'`]\s*Table\s+["'`]\s*\+\s*data\.tableName/, "the table name is concatenated with a prefix");
+  assert.match(preview, /<span>\{data\.tableName\}<\/span>/, "the receipt no longer prints the stored table name verbatim");
+});
+
+test("the builder feeds the receipt the stored name unchanged", async () => {
+  // The presentation fix must not be undone by the builder decorating it.
+  const { buildTablePaymentReceipt } = await import("@/lib/pos/tablePaymentCompletion");
+  const source = read("lib", "pos", "tablePaymentCompletion.ts");
+  assert.match(source, /tableName: input\.table\.name/, "the receipt builder no longer passes the stored name through");
+  assert.equal(typeof buildTablePaymentReceipt, "function");
+});
+
+test("no dine-in surface still claims that taking payment is unavailable", () => {
+  // The round panel carried "Taking payment for a table is not enabled yet."
+  // long after Pay shipped. A POS that contradicts itself one screen away is
+  // worse than one that says nothing.
+  const surfaces = [
+    ["components", "pos", "DineInRoundPanel.tsx"],
+    ["components", "pos", "TableBillPanel.tsx"],
+    ["screens", "pos", "DineInWorkspace.tsx"],
+    ["screens", "pos", "PosWorkspace.tsx"],
+  ];
+  for (const parts of surfaces) {
+    const source = stripJsxComments(read(...parts));
+    const file = parts[parts.length - 1];
+    assert.doesNotMatch(source, /not enabled yet/i, `${file} still says payment is not enabled`);
+    assert.doesNotMatch(source, /arrives in Level 2D/i, `${file} still defers payment to Level 2D`);
+    assert.doesNotMatch(source, /payment.{0,40}coming (soon|next)/i, `${file} still defers payment`);
+  }
 });
 
 test("the dine-in payment path never touches the cart buffer", () => {
