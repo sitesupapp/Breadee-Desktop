@@ -1,14 +1,17 @@
-// Dine-In workspace (Level 2A - table foundation).
+// Dine-In workspace (Levels 2A-2C).
 //
 // This is a HOOK, not a second shell. Takeaway and Dine-in render into the same
 // `PosShell` with the same status bar, layout resolver and drawer machinery; all
-// this contributes is the work region (table map), the right panel (server bill)
-// and its dialogs.
+// this contributes is the work region (table map or the borrowed menu), the
+// right panel (server bill or the round being prepared) and their dialogs.
 //
-// What it deliberately does NOT do: submit an order, add a round, pay, move,
-// close or clear. None of those RPCs are reachable from here - `pos_move_table`,
-// `pos_close_table`, `pos_clear_table` and `pos_pay_table` are not even in the
-// `PosRpcName` union yet.
+// What it can do: open a table (2A), build and send rounds (2B), and move, close
+// or clear a table (2C).
+//
+// What it deliberately still does NOT do: take payment. `pos_pay_table` is not
+// in the `PosRpcName` union, so `callPosRpc` will not accept it, and Close
+// refusing an unpaid bill is the SERVER saying settlement is missing. That
+// refusal is surfaced with its own hint, never worked around.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "@/components/toast";
