@@ -404,7 +404,9 @@ export function useDineInWorkspace(input: {
 
       if (!outcome.ok) throw outcome.error;
 
-      setBillChange(describeBillChange(before, useTables.getState().bill));
+      // Discount the batch WE just added, or every successful submit would
+      // report itself as somebody else's concurrent round.
+      setBillChange(describeBillChange(before, useTables.getState().bill, outcome.result.idempotent ? 0 : 1));
       const { message, detail } = roundOutcomeMessage(outcome.result);
       toast.push({ tone: outcome.result.idempotent ? "info" : "success", message, detail });
     } catch (e) {

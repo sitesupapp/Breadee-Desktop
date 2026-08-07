@@ -201,7 +201,7 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
 
         <p className="mt-2 flex items-center gap-1 text-[11px] text-sub">
           <StatusDot tone="slate" />
-          Move, close, clear and payment for dine-in are not enabled yet.
+          Taking payment for a table is not enabled yet.
         </p>
       </div>
     </section>

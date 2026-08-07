@@ -352,3 +352,22 @@ test("no dine-in shortcut is reserved any more - every declared id has a handler
   const { RESERVED_SHORTCUTS } = await import("@/lib/keyboard/shortcuts");
   assert.deepEqual(RESERVED_SHORTCUTS, []);
 });
+
+test("no dine-in surface still claims move, close or clear is unavailable", () => {
+  // Staging verification, 2026-08-07: the round panel still read "Move, close,
+  // clear and payment for dine-in are not enabled yet" after Level 2C shipped
+  // three of those four. There are two panels with this footer and only one was
+  // updated. The UI must never tell an operator that a control they can see and
+  // press does not exist.
+  for (const file of [
+    ["components", "pos", "DineInRoundPanel.tsx"],
+    ["components", "pos", "TableBillPanel.tsx"],
+  ]) {
+    const source = read(...file);
+    assert.doesNotMatch(
+      source,
+      /(move|close|clear)[^.\n]*not enabled yet/i,
+      `${file.join("/")} still describes a shipped Level 2C action as unavailable`,
+    );
+  }
+});
