@@ -286,7 +286,12 @@ test("every table-operation refusal is an expected refusal, not a fault", () => 
 
 // --- reachability ------------------------------------------------------------
 
-test("the three operation RPCs are now callable, and pos_pay_table still is NOT", () => {
+// RETARGETED IN LEVEL 2D. This assertion used to read `length === 11` and
+// `pos_pay_table` absent, which was correct for exactly as long as settlement was
+// not implemented. It was left failing until Pay was genuinely wired rather than
+// being relaxed in advance - a size assertion that is loosened before the feature
+// lands stops being a guard and becomes a comment.
+test("the operation RPCs are callable, and settlement joined them exactly once", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -295,23 +300,32 @@ test("the three operation RPCs are now callable, and pos_pay_table still is NOT"
   for (const rpc of ["pos_move_table", "pos_close_table", "pos_clear_table"]) {
     assert.ok(members.includes(rpc), `${rpc} should be callable in Level 2C`);
   }
-  // The one that takes money.
-  assert.equal(members.includes("pos_pay_table"), false, "pos_pay_table became reachable - that is Level 2D");
-  assert.equal(members.length, 11, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // The one that takes money. Present now, and present ONCE.
+  assert.equal(members.filter((m) => m === "pos_pay_table").length, 1, "pos_pay_table is not listed exactly once");
+  assert.equal(new Set(members).size, members.length, "an RPC name is declared twice");
+  assert.equal(members.length, 12, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
-test("Pay is the only action left deferred, and it still has no handler", async () => {
+test("no table action is deferred any more - Pay was the last one", async () => {
   const { DEFERRED_TABLE_ACTIONS, isTableActionEnabled } = await import("@/lib/pos/dineInActions");
-  assert.deepEqual(DEFERRED_TABLE_ACTIONS.map((a) => a.key), ["pay"]);
-  assert.equal(isTableActionEnabled("pay"), false);
-  assert.equal(DEFERRED_TABLE_ACTIONS[0].rpc, "pos_pay_table");
+  assert.deepEqual(DEFERRED_TABLE_ACTIONS.map((a) => a.key), []);
+  // The predicate survives as the seam for the next deferred action, and still
+  // refuses unconditionally.
+  assert.equal(isTableActionEnabled(undefined as never), false);
 });
 
-test("the bottom-bar pay slot is still disabled", async () => {
+test("the bottom-bar pay slot follows the shared gate, and takes no boolean", async () => {
   const { dineInBottomBar } = await import("@/lib/pos/dineInActions");
-  const bar = dineInBottomBar({ itemCount: 3, subtotal: 42 });
-  assert.equal(bar.payDisabled, true);
-  assert.match(bar.payReason, /Level 2D/);
+  const summary = { itemCount: 3, subtotal: 42 };
+
+  const refused = dineInBottomBar({ summary, payGate: { allowed: false, reason: "Open a shift before taking payment." } });
+  assert.equal(refused.payDisabled, true);
+  assert.equal(refused.payReason, "Open a shift before taking payment.");
+
+  const allowed = dineInBottomBar({ summary, payGate: { allowed: true, reason: null } });
+  assert.equal(allowed.payDisabled, false);
+  assert.equal(allowed.payReason, null);
+  assert.equal(allowed.payLabel, "Pay");
 });
 
 // --- wiring ------------------------------------------------------------------
