@@ -7,7 +7,8 @@ _Source of truth: the Breadee web app (Next.js 16 + Supabase). This desktop clie
 - **Active repository:** `D:\Claude\Projects\Breadee\Breadee-Desktop` (branch `desktop-staging`).
 - **Level 1 worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-1` (branch `feature/desktop-pos-level-1`) — **merged**, kept for reference.
 - **Level 2A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2A` (branch `feature/desktop-pos-level-2a-tables`) — **merged** as `c8ccbb5` via PR #4, kept for reference.
-- **Level 2B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2B` (branch `feature/desktop-pos-level-2b-rounds`).
+- **Level 2B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2B` (branch `feature/desktop-pos-level-2b-rounds`) — **merged** as `27410bb` via PR #5, kept for reference.
+- **Level 2C worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2C` (branch `feature/desktop-pos-level-2c-table-ops`).
 - `C:\Users\User\Claude\Projects\Breadee\Breadee-Desktop` is a **read-only fallback copy** of the pre-migration state. Do not work in it.
 - GitHub remote: `github.com/sitesupapp/Breadee-Desktop` (the repo exists and `desktop-staging` is pushed — an earlier version of this document said otherwise).
 
@@ -71,7 +72,29 @@ Dine-in ordering is online-only. `OfflineOrderingError` refuses a round outright
 
 ### Staging verification status
 
-**Deferred.** The Level 2B smoke test would open a table and submit two rounds, and Level 2B cannot pay, clear, close or move a table afterwards — so the test table would stay occupied with an unsettleable bill. No cleanup or continuation path has been authorised yet, so no staging write was made. See the report for the three paths that would unblock it.
+**Deferred to Level 2C, by design.** The Level 2B smoke test opens a table and submits two rounds, and Level 2B cannot pay, clear, close or move a table afterwards — so the test table would have stayed occupied with an unsettleable bill. Level 2C provides Clear, which is the cleanup path; the combined smoke test runs there.
+
+## 1c. Level 2C — Dine-In table operations (this change set)
+
+On `feature/desktop-pos-level-2c-table-ops`, local only (not pushed, no PR). Level 2B made a table orderable; Level 2C makes a bill **movable and disposable** — but still not payable.
+
+The three contracts were read from the **staging definitions**, not inferred:
+
+| RPC | What it does | Refuses |
+|---|---|---|
+| `pos_move_table(p_from, p_to)` | Moves every open unpaid order to the destination; frees the source, occupies the target. | Same table, different tenants, an occupied destination, a source with no open order. |
+| `pos_close_table(p_table)` | Completes already-**paid** orders and frees the table. | **Any unpaid order** — *"Pay the table bill first, or clear the table"*. |
+| `pos_clear_table(p_table, p_reason)` | **VOIDS** every open unpaid order, stamps `cancelled_by`/`cancelled_at`, appends `[cleared: reason]`, writes a `table_cleared` activity log, frees the table. | Nothing — it always succeeds, which is precisely why it is confirmed so heavily. |
+
+- **Permissions** — `canMoveTable` / `canCloseTable` / `canClearTable`, each mirroring the `_pos_require(tenant, 'pos.tables.X')` the RPC itself runs. Table view is a prerequisite for all three; owners stay excluded.
+- **DESKTOP POLICY 1 — a reason is mandatory for Clear.** The server accepts an empty one and writes a bare `[cleared]`: an audit row recording that money was voided and nothing about why. That is indistinguishable from theft after the fact, so the desktop refuses to send one. Enforced in the dialog *and* in `clearTable()`, so no caller can skip it.
+- **DESKTOP POLICY 2 — all three require an open shift**, though none of the RPCs demand it. Each mutates open orders belonging to a shift; doing so with no shift of your own leaves the change attributable to a person but not to a till.
+- **Confirmations sized to consequence** — Move lists only *free* destinations; Close predicts the server's refusal before the button is pressed; Clear names the amount that will not be collected, says **VOIDS**, requires typing, and carries an Audited badge.
+- **Separation** — Move and Close sit together; Clear is below a dashed rule, styled `danger`. Pay remains a disabled placeholder.
+- **Keyboard** — `Ctrl+Shift+M` Move, **`Alt+C`** Close, `Ctrl+Shift+X` Clear. Every chord *opens a confirmation*; none performs the operation. Two corrections this level forced: Close moved **off `Ctrl+Shift+C`** (the Chromium DevTools inspector, which the Tauri webview inherits — it would have been eaten in development and in a devtools-enabled build), and none of the three is `worksInInput` any more, so a chord cannot fire from inside the table search box or the Clear dialog's own reason field.
+- **No local patching** — `runOp` refreshes the map and re-reads the bill after every operation. A cleared table still showing as occupied would invite a second clear of a bill that is already void.
+
+The RPC allow-list grows from 8 names to **11**. `pos_pay_table` is deliberately **not** among them.
 
 ## 2. Toolchain
 
@@ -82,7 +105,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
 - **Native printing — pending.** The receipt preview is on-screen only; the Print control is disabled rather than silently doing nothing. Printer discovery, routing to hardware and ESC/POS are untouched.
-- **Dine-in settlement — not implemented.** Level 2B adds rounds and submits them to the kitchen, but cannot move, close, clear or pay a table.
+- **Dine-in settlement — not implemented.** Level 2C moves, closes and clears a table, but **cannot pay one**. `pos_pay_table` is still absent from `PosRpcName`, and Close refusing an unpaid bill is the server saying settlement is missing — that refusal is surfaced with its own hint, never worked around.
 - Delivery, customers, orders workspace, edit/void/refund, reports, KDS, loyalty, Google OAuth deep-link, encrypted local storage.
 
 ## 4. Security checklist
@@ -112,10 +135,10 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 `npm install` (once) → `npm run dev` (http://localhost:5173). `npm run typecheck`, `npm run test`, `npm run build`. Tests use Node's built-in runner with its native TypeScript support — no test framework dependency is installed. Node ≥ 22.18 is required for the runner's TypeScript support; CI pins Node 24.
 
-Current gate results on `feature/desktop-pos-level-2b-rounds`: **230 tests, 0 failures**; typecheck clean; production build clean.
+Current gate results on `feature/desktop-pos-level-2c-table-ops`: **265 tests, 0 failures**; typecheck clean; production build clean.
 
 Note on this machine: roughly one process spawn in three dies with `EPERM uv_spawn`, `0xC0000005`, `Access is denied` or esbuild's `The service was stopped`. A test *file* reported as failed while listing no failing assertion is that crash, not a real failure — re-run the file alone to tell them apart.
 
 ## 7. Pull request
 
-Not opened. Level 2B is local-only by instruction; integration into `desktop-staging` is a separate task.
+Not opened. Level 2C is local-only by instruction; integration into `desktop-staging` is a separate task.
