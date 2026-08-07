@@ -96,13 +96,31 @@ test("no dine-in binding shadows a destructive or standard Windows combo", () =>
   }
 });
 
-test("reserved ids are declared but have no handler, so they cannot half-work", () => {
-  assert.deepEqual([...RESERVED_SHORTCUTS].sort(), ["clearTable", "closeTable", "moveTable"]);
+test("a reserved id has a binding and names its level - the rule holds at any list size", () => {
+  // Level 2C emptied this list: every declared dine-in binding now has a real
+  // handler. The invariant is asserted over whatever the list contains, so it
+  // stays meaningful when the next level reserves something new.
   for (const id of RESERVED_SHORTCUTS) {
     assert.ok(SHORTCUTS.some((s) => s.id === id), `${id} is reserved but has no binding to reserve`);
-    // A reserved binding must say which level delivers it, so the help sheet is honest.
-    assert.match(SHORTCUTS.find((s) => s.id === id)?.label ?? "", /Level 2C/);
+    assert.match(SHORTCUTS.find((s) => s.id === id)?.label ?? "", /Level 2[A-E]/);
   }
+});
+
+test("the Level 2C operations are live and no longer advertised as a later phase", () => {
+  for (const id of ["moveTable", "closeTable", "clearTable"] as ShortcutId[]) {
+    assert.equal(RESERVED_SHORTCUTS.includes(id), false, `${id} is still reserved`);
+    const spec = SHORTCUTS.find((s) => s.id === id);
+    assert.ok(spec, `${id} lost its binding`);
+    assert.doesNotMatch(spec.label, /Level 2/, `${id} still reads as deferred`);
+  }
+  assert.equal(press("M", { ctrl: true, shift: true }), "moveTable");
+  assert.equal(press("c", { alt: true }), "closeTable");
+  assert.equal(press("X", { ctrl: true, shift: true }), "clearTable");
+});
+
+test("Clear says in its own label that it voids the bill", () => {
+  const spec = SHORTCUTS.find((s) => s.id === "clearTable");
+  assert.match(spec?.label ?? "", /voids/i, "the help sheet must not present Clear as a tidy-up");
 });
 
 test("A is live in Level 2B and no longer advertised as a later phase", () => {
@@ -165,11 +183,24 @@ test("every declared id actually has a binding - no id is dead", () => {
 test("Alt+M is the only dine-in binding that fires while typing", () => {
   const dineIn = SHORTCUTS.filter((s) => s.group === "Dine-in");
   const worksInInput = dineIn.filter((s) => s.worksInInput).map((s) => s.id);
-  // The reserved Ctrl+Shift+* bindings are also worksInInput but register no
-  // handler, so tableMap is the only one that can actually DO anything.
   assert.ok(worksInInput.includes("tableMap"), "Alt+M lost its escape-hatch status");
-  const live = worksInInput.filter((id) => !RESERVED_SHORTCUTS.includes(id));
-  assert.deepEqual(live, ["tableMap"]);
+  // Level 2C tightened this: Move/Close/Clear carried `worksInInput` while they
+  // were reserved, which was harmless because nothing handled them. Now that
+  // they open real dialogs, a chord fired from inside the table search box - or
+  // from inside the Clear dialog's own reason field - would stack a second
+  // confirmation over the one being answered. Only the escape hatch keeps it.
+  assert.deepEqual(worksInInput, ["tableMap"]);
+});
+
+test("no destructive table operation can fire from inside a text field", () => {
+  for (const [key, mods] of [
+    ["M", { ctrl: true, shift: true }],
+    ["c", { alt: true }],
+    ["X", { ctrl: true, shift: true }],
+  ] as const) {
+    assert.equal(press(key, { ...mods, typing: true }), null, `${key} fired while typing`);
+    assert.notEqual(press(key, mods), null, `${key} does not resolve outside a field`);
+  }
 });
 
 test("the grid bindings are dead while a field has focus, which is why Alt+M must blur", () => {
@@ -192,15 +223,19 @@ test("the Alt+M handler releases DOM focus so the grid becomes reachable again",
   assert.match(body, /clearSelection\(\)/, "Alt+M no longer clears the selection");
 });
 
-test("the help sheet has a Dine-in section listing the live and reserved bindings", () => {
+test("the help sheet lists every dine-in binding, and none of them as deferred", () => {
   const groups = shortcutHelp();
   const dineIn = groups.find((g) => g.group === "Dine-in");
   assert.ok(dineIn, "the help sheet has no Dine-in section");
   const labels = dineIn.items.map((i) => i.label).join(" | ");
   assert.match(labels, /table map/i);
   assert.match(labels, /Add items/i, "the shipped Add items binding is missing from the help sheet");
-  assert.match(labels, /Level 2C/, "the still-deferred bindings must name their level");
-  // Level 2B shipped, so nothing in the sheet may still advertise it as coming.
-  assert.doesNotMatch(labels, /Level 2B/, "the help sheet still describes a shipped binding as deferred");
+  assert.match(labels, /Move table/i);
+  assert.match(labels, /Close table/i);
+  assert.match(labels, /Clear table/i);
+  // Every dine-in binding has shipped as of Level 2C, so nothing in this section
+  // may still advertise itself as coming later. F1 is the only place a cashier
+  // reads what the keyboard does; a stale "(Level 2C)" there is a lie.
+  assert.doesNotMatch(labels, /Level 2[A-E]/, "the help sheet still describes a shipped binding as deferred");
   assert.equal(dineIn.items.length, SHORTCUTS.filter((s) => s.group === "Dine-in").length);
 });
