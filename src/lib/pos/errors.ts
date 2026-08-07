@@ -22,6 +22,11 @@ export type RefusalKind =
   | "table_occupied"
   | "table_no_open_order"
   | "feature_disabled"
+  // Dine-In table operations (Level 2C)
+  | "close_needs_payment"
+  | "same_table"
+  | "cross_tenant_table"
+  | "clear_reason_required"
   // Dine-In rounds (Level 2B)
   | "empty_round"
   | "modifier_required"
@@ -41,6 +46,33 @@ export type ClassifiedError = {
 };
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
+  // --- Dine-In table operations (Level 2C). The server's own wording is good
+  // here, so these only add the next step - and, for Close, the honest fact that
+  // paying a table from the desktop is not possible yet.
+  {
+    kind: "close_needs_payment",
+    test: /pay the table bill first/i,
+    hint: "Settle the bill first, or clear the table with a reason. Paying a table from the desktop arrives in Level 2D.",
+    expected: true,
+  },
+  {
+    kind: "same_table",
+    test: /choose a different destination table/i,
+    hint: "Pick a free table other than this one.",
+    expected: true,
+  },
+  {
+    kind: "cross_tenant_table",
+    test: /tables belong to different tenants/i,
+    hint: "Both tables must belong to this business. Refresh the table map.",
+    expected: true,
+  },
+  {
+    kind: "clear_reason_required",
+    test: /a reason is required to clear a table/i,
+    hint: "Say why the bill is being voided - it is recorded against your account.",
+    expected: true,
+  },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before
   // a request is made, so they are listed first and matched on our own wording.
   {

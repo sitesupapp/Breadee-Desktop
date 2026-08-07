@@ -32,12 +32,10 @@ export type ShortcutId =
   | "print"
   | "closeModal"
   | "fullscreen"
-  // Dine-In (Level 2A/2B). `tableMap`, `tableSearch`, `tableLeft/Right`,
-  // `tableOpen` and `addItems` are live; vertical movement reuses the shared
-  // `lineUp`/`lineDown` ids, and Ctrl+Enter reuses `confirmPayment` (see its
-  // spec below). `moveTable`, `closeTable` and `clearTable` remain RESERVED -
-  // declared so the help sheet is honest and the bindings cannot be taken by
-  // something else, but no screen registers a handler for them.
+  // Dine-In (Levels 2A-2C). All of these are LIVE as of Level 2C. Vertical
+  // movement reuses the shared `lineUp`/`lineDown` ids, and Ctrl+Enter reuses
+  // `confirmPayment` (see its spec below). The three table operations open a
+  // confirmation rather than acting, so no chord alone can move or void a bill.
   | "tableMap"
   | "tableSearch"
   | "tableLeft"
@@ -114,18 +112,35 @@ export const SHORTCUTS: ShortcutSpec[] = [
   // Live since Level 2B.
   { id: "addItems", keys: ["a"], label: "Add items to the selected table", group: "Dine-in", display: "A" },
 
-  // RESERVED - declared so the binding is not claimed elsewhere and the help
-  // sheet is truthful, but no screen registers a handler. A reserved id that
-  // nothing handles simply does nothing; it cannot call an RPC.
-  { id: "moveTable", keys: ["M"], ctrl: true, shift: true, label: "Move table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+M", worksInInput: true },
-  // NOTE: Ctrl+Shift+C is the DevTools inspector in Chromium. Revisit this
-  // binding in Level 2C before wiring a handler to it.
-  { id: "closeTable", keys: ["C"], ctrl: true, shift: true, label: "Close table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+C", worksInInput: true },
-  { id: "clearTable", keys: ["X"], ctrl: true, shift: true, label: "Clear table (Level 2C)", group: "Dine-in", display: "Ctrl+Shift+X", worksInInput: true },
+  // Live since Level 2C. Each OPENS a confirmation - none performs the operation
+  // directly, so a mistyped chord can never move or void a bill on its own.
+  //
+  // None of them is `worksInInput`. They carried that flag while they were
+  // reserved placeholders, where it was harmless because nothing handled them.
+  // Now that they open real dialogs it would be actively wrong: the operator
+  // types into the table search box and into the Clear dialog's own reason
+  // field, and a chord fired from inside either would stack a second
+  // confirmation over the one they are already answering. Alt+M keeps the flag
+  // because being the way OUT of a text field is its entire purpose.
+  { id: "moveTable", keys: ["M"], ctrl: true, shift: true, label: "Move table", group: "Dine-in", display: "Ctrl+Shift+M" },
+  // Close was Ctrl+Shift+C until Level 2C wired a handler to it. That chord is
+  // the DevTools inspector in Chromium, which the Tauri webview inherits: the
+  // shortcut would have been eaten in development and, with devtools enabled, in
+  // the shipped app too. A binding that works on the developer's machine but not
+  // the cashier's is worse than no binding, so Close moved to Alt+C.
+  { id: "closeTable", keys: ["c"], alt: true, label: "Close table", group: "Dine-in", display: "Alt+C" },
+  { id: "clearTable", keys: ["X"], ctrl: true, shift: true, label: "Clear table (voids the bill)", group: "Dine-in", display: "Ctrl+Shift+X" },
 ];
 
-/** Shortcut ids that are declared but intentionally have no handler yet. */
-export const RESERVED_SHORTCUTS: ShortcutId[] = ["moveTable", "closeTable", "clearTable"];
+/**
+ * Shortcut ids that are declared but intentionally have no handler yet.
+ *
+ * Empty since Level 2C: every declared dine-in binding now has a real handler.
+ * The list stays as the seam for the next level's reservations - and the test
+ * that reads it stays meaningful, because it asserts the list matches reality
+ * rather than asserting a fixed set of names.
+ */
+export const RESERVED_SHORTCUTS: ShortcutId[] = [];
 
 /** Bindings we must never register, kept explicit so a future edit trips the test. */
 export const FORBIDDEN_COMBOS = ["Alt+F4", "Ctrl+W", "Ctrl+T", "Ctrl+N", "Ctrl+R", "F5"];

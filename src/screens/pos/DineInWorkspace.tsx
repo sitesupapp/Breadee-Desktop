@@ -1,14 +1,17 @@
-// Dine-In workspace (Level 2A - table foundation).
+// Dine-In workspace (Levels 2A-2C).
 //
 // This is a HOOK, not a second shell. Takeaway and Dine-in render into the same
 // `PosShell` with the same status bar, layout resolver and drawer machinery; all
-// this contributes is the work region (table map), the right panel (server bill)
-// and its dialogs.
+// this contributes is the work region (table map or the borrowed menu), the
+// right panel (server bill or the round being prepared) and their dialogs.
 //
-// What it deliberately does NOT do: submit an order, add a round, pay, move,
-// close or clear. None of those RPCs are reachable from here - `pos_move_table`,
-// `pos_close_table`, `pos_clear_table` and `pos_pay_table` are not even in the
-// `PosRpcName` union yet.
+// What it can do: open a table (2A), build and send rounds (2B), and move, close
+// or clear a table (2C).
+//
+// What it deliberately still does NOT do: take payment. `pos_pay_table` is not
+// in the `PosRpcName` union, so `callPosRpc` will not accept it, and Close
+// refusing an unpaid bill is the SERVER saying settlement is missing. That
+// refusal is surfaced with its own hint, never worked around.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "@/components/toast";
@@ -21,7 +24,18 @@ import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
-import { canOpenTable } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canMoveTable, canOpenTable } from "@/lib/pos/access";
+import { ClearTableDialog, CloseTableDialog, MoveTableDialog } from "@/components/pos/TableOpsDialogs";
+import {
+  clearOutcomeMessage,
+  clearTable,
+  closeOutcomeMessage,
+  closeTable,
+  moveOutcomeMessage,
+  moveTable,
+  tableOpGate,
+  type TableOpKind,
+} from "@/lib/pos/tableOps";
 import {
   addItemsGate as computeAddItemsGate,
   describeBillChange,
@@ -102,6 +116,16 @@ export function useDineInWorkspace(input: {
   // different operations and must not block one another.
   const roundInFlight = useRef(false);
 
+  // --- Level 2C table operations ----------------------------------------------
+  // Which confirmation is open, if any. One piece of state rather than three
+  // booleans, so two dialogs cannot be open at once.
+  const [opDialog, setOpDialog] = useState<TableOpKind | null>(null);
+  const [opError, setOpError] = useState<string | null>(null);
+  const [opBusy, setOpBusy] = useState(false);
+  // Its own latch: moving, closing and clearing must not be double-fired, and
+  // must not be blocked by an unrelated round submission.
+  const opInFlight = useRef(false);
+
   const ctx = useMemo(
     () => ({ tenantId: pos.tenantId, branchId: pos.branch.id }),
     [pos.tenantId, pos.branch.id],
@@ -134,6 +158,17 @@ export function useDineInWorkspace(input: {
     return { allowed: true, reason: null };
   }, [pos.access, hasOpenShift, selected]);
 
+  // Level 2C gates. Each combines the permission-map answer with the desktop's
+  // own preconditions (shift, connection, an actual bill to act on).
+  const opGates = useMemo(() => {
+    const common = { table: selected, hasOpenShift, online: input.online };
+    return {
+      move: tableOpGate({ kind: "move", permitted: canMoveTable(pos.access), ...common }),
+      close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
+      clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
+    };
+  }, [pos.access, selected, hasOpenShift, input.online]);
+
   const select = useCallback(
     (id: string) => {
       setFocusedId(id);
@@ -141,6 +176,84 @@ export function useDineInWorkspace(input: {
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
     [ctx],
+  );
+
+  /**
+   * Run one table operation and re-read the server.
+   *
+   * Every one of these ends with the table in a state only the server knows, so
+   * none of them patches the map locally: `runOp` refreshes and then re-reads the
+   * selection from the refreshed map. A cleared table that stayed "occupied" on
+   * screen would invite a second clear of a bill that is already void.
+   */
+  const runOp = useCallback(
+    async (kind: TableOpKind, run: () => Promise<string>, options?: { selectAfter?: string | null }) => {
+      if (opInFlight.current) return;
+      opInFlight.current = true;
+      setOpBusy(true);
+      setOpError(null);
+      try {
+        const message = await run();
+        setOpDialog(null);
+        await tables.refresh(ctx);
+        // Move follows the bill to its new table; Close and Clear leave the
+        // operator on a table that is now free, which is what they just did.
+        if (options?.selectAfter) {
+          await tables.select(options.selectAfter, ctx);
+          setFocusedId(options.selectAfter);
+        } else {
+          await tables.loadBill(ctx);
+        }
+        toast.push({ tone: kind === "clear" ? "info" : "success", message, detail: null });
+      } catch (e) {
+        const c = classifyError(e);
+        setOpError(c.hint ? `${c.message} ${c.hint}` : c.message);
+      } finally {
+        opInFlight.current = false;
+        setOpBusy(false);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [ctx, toast],
+  );
+
+  const confirmMove = useCallback(
+    (destinationId: string) => {
+      if (!selected || !opGates.move.allowed) return;
+      const from = selected.name;
+      const to = tables.map.tables.find((t) => t.id === destinationId)?.name ?? "the new table";
+      void runOp(
+        "move",
+        async () => moveOutcomeMessage(await moveTable({ fromTableId: selected.id, toTableId: destinationId }), from, to),
+        // Follow the bill: the operator's attention belongs where the money went.
+        { selectAfter: destinationId },
+      );
+    },
+    [selected, opGates.move.allowed, tables.map.tables, runOp],
+  );
+
+  const confirmClose = useCallback(() => {
+    if (!selected || !opGates.close.allowed) return;
+    const name = selected.name;
+    void runOp("close", async () => closeOutcomeMessage(await closeTable({ tableId: selected.id }), name));
+  }, [selected, opGates.close.allowed, runOp]);
+
+  const confirmClear = useCallback(
+    (reason: string) => {
+      if (!selected || !opGates.clear.allowed) return;
+      const name = selected.name;
+      void runOp("clear", async () => clearOutcomeMessage(await clearTable({ tableId: selected.id, reason }), name));
+    },
+    [selected, opGates.clear.allowed, runOp],
+  );
+
+  /** Open a confirmation. The shortcut and the button both come through here. */
+  const requestOp = useCallback(
+    (kind: TableOpKind) => {
+      setOpError(null);
+      setOpDialog(kind);
+    },
+    [],
   );
 
   const confirmOpen = useCallback(
@@ -294,7 +407,9 @@ export function useDineInWorkspace(input: {
 
       if (!outcome.ok) throw outcome.error;
 
-      setBillChange(describeBillChange(before, useTables.getState().bill));
+      // Discount the batch WE just added, or every successful submit would
+      // report itself as somebody else's concurrent round.
+      setBillChange(describeBillChange(before, useTables.getState().bill, outcome.result.idempotent ? 0 : 1));
       const { message, detail } = roundOutcomeMessage(outcome.result);
       toast.push({ tone: outcome.result.idempotent ? "info" : "success", message, detail });
     } catch (e) {
@@ -348,6 +463,12 @@ export function useDineInWorkspace(input: {
         if (openGate.allowed) setSeatOpen(true);
       },
       addItems: () => void enterAddItems(),
+      // Level 2C. Each OPENS its confirmation - a chord never performs the
+      // operation, so a mistyped Ctrl+Shift+X cannot void a bill on its own.
+      // The gate is re-checked at confirm time, not only here.
+      moveTable: () => opGates.move.allowed && requestOp("move"),
+      closeTable: () => opGates.close.allowed && requestOp("close"),
+      clearTable: () => opGates.clear.allowed && requestOp("clear"),
     },
     active && view === "map",
   );
@@ -376,8 +497,6 @@ export function useDineInWorkspace(input: {
         tables.clearSelection();
         setFocusedId(null);
       },
-      // moveTable / closeTable / clearTable are deliberately absent: an
-      // unregistered id does nothing at all.
     },
     active,
   );
@@ -425,10 +544,16 @@ export function useDineInWorkspace(input: {
           setSeatOpen(true);
         }}
         onOpenShift={input.onOpenShift}
+        moveGate={opGates.move}
+        closeGate={opGates.close}
+        clearGate={opGates.clear}
+        onMove={() => requestOp("move")}
+        onClose={() => requestOp("close")}
+        onClear={() => requestOp("clear")}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp],
   );
 
   const roundPanel = useCallback(
@@ -466,6 +591,38 @@ export function useDineInWorkspace(input: {
 
   const dialogs = (
     <>
+      <MoveTableDialog
+        open={opDialog === "move"}
+        table={selected}
+        tables={tables.map.tables}
+        busy={opBusy}
+        gate={opGates.move}
+        error={opError}
+        onCancel={() => setOpDialog(null)}
+        onConfirm={confirmMove}
+      />
+
+      <CloseTableDialog
+        open={opDialog === "close"}
+        table={selected}
+        busy={opBusy}
+        gate={opGates.close}
+        error={opError}
+        onCancel={() => setOpDialog(null)}
+        onConfirm={confirmClose}
+      />
+
+      <ClearTableDialog
+        open={opDialog === "clear"}
+        table={selected}
+        currency={input.currency}
+        busy={opBusy}
+        gate={opGates.clear}
+        error={opError}
+        onCancel={() => setOpDialog(null)}
+        onConfirm={confirmClear}
+      />
+
       <SeatCountDialog
         open={seatOpen}
         table={selected}

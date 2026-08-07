@@ -52,20 +52,26 @@ function allowedRpcNames(): string[] {
 }
 
 /** RPCs that would mutate or settle a table. None may be reachable in Level 2A. */
-const FORBIDDEN_RPCS = ["pos_move_table", "pos_close_table", "pos_clear_table", "pos_pay_table"];
+/**
+ * The RPC that must stay unreachable.
+ *
+ * Level 2C added `pos_move_table`, `pos_close_table` and `pos_clear_table` to
+ * the allow-list, so they are no longer forbidden. `pos_pay_table` is - it is
+ * the one that takes the customer's money, and it belongs to Level 2D.
+ */
+const FORBIDDEN_RPCS = ["pos_pay_table"];
 
 /**
  * Every action that must stay non-functional.
  *
- * Level 2B shipped Add items and Submit round, so they are gone from this list -
- * they now have real gates in `lib/pos/tableRounds.ts`. What is left is
- * everything that MOVES or SETTLES a bill.
+ * Level 2B shipped Add items and Submit round; Level 2C shipped Move, Close and
+ * Clear. What is left is SETTLEMENT.
  */
-const MUST_BE_DISABLED: DeferredTableActionKey[] = ["move", "close", "clear", "pay"];
+const MUST_BE_DISABLED: DeferredTableActionKey[] = ["pay"];
 
 // --- Layer 1: the pure decision ---------------------------------------------
 
-test("the deferred list covers every action Level 2A must not perform", () => {
+test("the deferred list covers every action this level must not perform", () => {
   const keys = DEFERRED_TABLE_ACTIONS.map((a) => a.key);
   for (const key of MUST_BE_DISABLED) {
     assert.ok(keys.includes(key), `${key} is not declared as a deferred action`);
@@ -110,11 +116,16 @@ test("every deferred action explains itself by level, never by permission", () =
   }
 });
 
-test("ordering actions are no longer deferred - Level 2B shipped them", () => {
+test("shipped actions leave the deferred list as each level lands", () => {
   const keys = DEFERRED_TABLE_ACTIONS.map((a) => String(a.key));
+  // Level 2B.
   assert.equal(keys.includes("addItems"), false, "Add items is a real gated action now");
   assert.equal(keys.includes("submitRound"), false, "Submit round is a real gated action now");
-  assert.equal(keys.length, 4, `expected exactly move/close/clear/pay, got ${keys.join(", ")}`);
+  // Level 2C.
+  assert.equal(keys.includes("move"), false, "Move is a real gated action now");
+  assert.equal(keys.includes("close"), false, "Close is a real gated action now");
+  assert.equal(keys.includes("clear"), false, "Clear is a real gated action now");
+  assert.deepEqual(keys, ["pay"], `only settlement should remain, got ${keys.join(", ")}`);
 });
 
 // --- Layer 2: the wiring -----------------------------------------------------
@@ -180,18 +191,25 @@ test("the deferred buttons carry no click handler at all", () => {
   assert.doesNotMatch(block, /onClick/, "a deferred action was given a click handler");
 });
 
-test("the reserved dine-in shortcuts have no handler anywhere in the app", () => {
-  // A registered id fires; an unregistered one does nothing. These must stay
-  // unregistered, or Ctrl+Shift+C would reach a half-built close-table path.
+test("the live table-operation shortcuts open a confirmation, never the operation", () => {
+  // These are handled as of Level 2C. What must remain true is that the chord
+  // reaches a DIALOG, not the RPC - so a mistyped Ctrl+Shift+X cannot void a
+  // bill without the operator reading what it is about to do and typing why.
+  const source = read("screens", "pos", "DineInWorkspace.tsx");
+  for (const id of ["moveTable", "closeTable", "clearTable"]) {
+    assert.match(source, new RegExp(`${id}: \\(\\) =>[^\\n]*requestOp\\(`), `${id} does not route through requestOp`);
+  }
+  assert.match(source, /const requestOp = useCallback\(/, "requestOp is gone - the chords may act directly now");
+  assert.match(source, /setOpDialog\(kind\)/, "requestOp no longer opens a dialog");
+});
+
+test("no shortcut exists for the one action still deferred", () => {
   const sources = [
     read("screens", "pos", "DineInWorkspace.tsx"),
     read("screens", "pos", "PosWorkspace.tsx"),
     read("components", "pos", "TableBillPanel.tsx"),
-    read("components", "pos", "TableMap.tsx"),
   ].join("\n");
-  for (const id of ["moveTable", "closeTable", "clearTable"]) {
-    assert.doesNotMatch(sources, new RegExp(`\\b${id}\\s*:\\s*\\(`), `${id} has a shortcut handler registered`);
-  }
+  assert.doesNotMatch(sources, /\bpayTable\s*:\s*\(/, "a pay-table shortcut handler appeared");
 });
 
 test("the dine-in workspace calls no mutating table RPC", () => {
@@ -213,17 +231,20 @@ test("the dine-in workspace calls no mutating table RPC", () => {
 
 // --- Layer 3: reachability ---------------------------------------------------
 
-test("the mutating table RPCs are not in PosRpcName, so callPosRpc cannot accept them", () => {
+test("the settlement RPC is not in PosRpcName, so callPosRpc cannot accept it", () => {
   const members = allowedRpcNames();
 
   for (const rpc of FORBIDDEN_RPCS) {
     assert.equal(members.includes(rpc), false, `${rpc} became callable`);
   }
-  // Positive control: the two table RPCs Level 2A DOES use are present, so this
+  // Positive control: the table RPCs this level DOES use are present, so this
   // test cannot pass merely because the parse found nothing.
   assert.ok(members.includes("pos_table_map"));
   assert.ok(members.includes("pos_open_table"));
-  assert.equal(members.length, 8, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.ok(members.includes("pos_move_table"));
+  assert.ok(members.includes("pos_close_table"));
+  assert.ok(members.includes("pos_clear_table"));
+  assert.equal(members.length, 11, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("every deferred action's future RPC is unreachable", () => {
@@ -233,14 +254,25 @@ test("every deferred action's future RPC is unreachable", () => {
   }
 });
 
-test("Level 2B added no RPC beyond the one Takeaway already used", () => {
+test("dine-in ordering still reuses Takeaway's RPC, under its own guard", () => {
   // pos_submit_order was already in the allow-list for Takeaway; dine-in rounds
-  // reuse it. No new RPC name may appear for ordering.
+  // reuse it rather than adding a name. Level 2C's three additions are table
+  // OPERATIONS, not a second ordering path.
   const members = allowedRpcNames();
   assert.ok(members.includes("pos_submit_order"));
-  assert.equal(members.length, 8, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.equal(members.filter((m) => m.includes("submit")).length, 1, "a second submit RPC appeared");
   // And the dine-in guard that keeps that shared RPC safe is still in place.
   assert.match(read("lib", "pos", "orders.ts"), /throw new TableRequiredError\(\)/, "the dine-in submit guard was removed");
+});
+
+test("the table operations cannot be reached without going through tableOps", () => {
+  // The three new RPC names must appear in exactly one module, so there is one
+  // place where the reason requirement and the latch are enforced.
+  const callers = ["lib/pos/tableOps.ts", "lib/pos/tables.ts", "lib/pos/orders.ts", "lib/pos/payments.ts", "lib/pos/shifts.ts"];
+  for (const rpc of ["pos_move_table", "pos_close_table", "pos_clear_table"]) {
+    const hits = callers.filter((f) => new RegExp(`callPosRpc\\(\\s*"${rpc}"`).test(read(...f.split("/"))));
+    assert.deepEqual(hits, ["lib/pos/tableOps.ts"], `${rpc} is called from ${hits.join(", ") || "nowhere"}`);
+  }
 });
 
 test("no offline queue is reachable from the dine-in round path", () => {

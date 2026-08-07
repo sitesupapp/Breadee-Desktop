@@ -181,10 +181,39 @@ export function canOpenTable(ctx: PosAccessContext, hasOpenShift: boolean): Gate
 }
 
 /**
- * Declared for Level 2C. Deliberately returns a not-yet-available reason so a
- * disabled control can explain itself honestly, rather than implying the user
- * lacks a permission they may well hold.
+ * Declared for the levels that have not landed yet. Deliberately returns a
+ * not-yet-available reason so a disabled control can explain itself honestly,
+ * rather than implying the user lacks a permission they may well hold.
  */
 export function tableActionNotYetAvailable(action: string, level: string): Gate {
   return { allowed: false, reason: `${action} arrives in ${level}.` };
+}
+
+// --- Table operations (Level 2C) ---------------------------------------------
+//
+// Each mirrors the `_pos_require(tenant, 'pos.tables.X')` the RPC itself runs.
+// Viewing tables is a prerequisite for all of them: an operator who cannot see
+// the map has no business moving or voiding what is on it.
+
+function tableOpGate(ctx: PosAccessContext, key: string, refusal: string): Gate {
+  const view = canViewTables(ctx);
+  if (!view.allowed) return view;
+  return gate(perm(ctx, key), refusal);
+}
+
+export function canMoveTable(ctx: PosAccessContext): Gate {
+  return tableOpGate(ctx, POS_PERMISSIONS.TABLES_MOVE, "You do not have permission to move tables.");
+}
+
+export function canCloseTable(ctx: PosAccessContext): Gate {
+  return tableOpGate(ctx, POS_PERMISSIONS.TABLES_CLOSE, "You do not have permission to close tables.");
+}
+
+/**
+ * Clearing VOIDS an open bill, so this is the most consequential dine-in
+ * permission the desktop exposes. It is still just a permission-map lookup -
+ * the server re-checks it, and no role name is consulted here either.
+ */
+export function canClearTable(ctx: PosAccessContext): Gate {
+  return tableOpGate(ctx, POS_PERMISSIONS.TABLES_CLEAR, "You do not have permission to clear tables.");
 }

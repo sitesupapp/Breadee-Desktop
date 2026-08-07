@@ -463,6 +463,24 @@ test("a round added by another cashier is described rather than silently absorbe
   const change = describeBillChange(mk([1]), mk([1, 2]));
   assert.match(change ?? "", /Another round was added/);
   assert.equal(describeBillChange(mk([1]), mk([1])), null, "an unchanged bill reports no change");
+
+  // Staging verification, 2026-08-07: this fired on EVERY successful submit.
+  // The operator's own round grows the batch count, and the notice accused them
+  // of a concurrent change they had just made themselves. A warning that cries
+  // wolf on the happy path trains people to ignore the one that matters.
+  assert.equal(
+    describeBillChange(mk([1]), mk([1, 2]), 1),
+    null,
+    "the operator's own round must not be reported as somebody else's",
+  );
+  // A genuine concurrent round alongside our own is still reported.
+  assert.match(
+    describeBillChange(mk([1]), mk([1, 2, 3]), 1) ?? "",
+    /Another round was added/,
+    "a concurrent round hidden behind our own must still surface",
+  );
+  // An idempotent replay adds nothing, so nothing is discounted.
+  assert.equal(describeBillChange(mk([1, 2]), mk([1, 2]), 0), null);
 });
 
 test("a bill that disappeared under the operator is reported, not ignored", () => {

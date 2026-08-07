@@ -269,14 +269,27 @@ export function billMatchesTable(bill: TableBill | null, table: TableSummary | n
 }
 
 /**
- * What changed under the operator while a round was being prepared. Used to tell
- * them BEFORE the round is sent, rather than surprising them afterwards.
+ * What changed under the operator while a round was being prepared - by SOMEONE
+ * ELSE. Used to tell them before the round is sent, rather than surprising them
+ * afterwards.
+ *
+ * `ownBatchesAdded` is what the operator's own submission just contributed, and
+ * it is discounted before anything is reported. Without it this fired on the
+ * normal path: after a successful submit the batch count has grown by exactly
+ * the round the operator just sent, and the notice accused them of a concurrent
+ * change they had made themselves. Staging verification hit it on every submit.
+ * A warning that cries wolf on the happy path trains people to ignore the one
+ * that matters, which is the entire value of this function.
  */
-export function describeBillChange(before: TableBill | null, after: TableBill | null): string | null {
+export function describeBillChange(
+  before: TableBill | null,
+  after: TableBill | null,
+  ownBatchesAdded = 0,
+): string | null {
   const beforeBatches = before?.batches.length ?? 0;
   const afterBatches = after?.batches.length ?? 0;
-  if (afterBatches > beforeBatches) {
-    const added = afterBatches - beforeBatches;
+  const added = afterBatches - beforeBatches - ownBatchesAdded;
+  if (added > 0) {
     return `Another round was added to this table${added > 1 ? ` (${added} rounds)` : ""}. The bill below is up to date.`;
   }
   const beforeOrder = before?.orders[0]?.order_number ?? null;

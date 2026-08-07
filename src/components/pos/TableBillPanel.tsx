@@ -24,6 +24,13 @@ export type TableBillPanelProps = {
   onOpenTable: () => void;
   onOpenShift: () => void;
   shiftOpen: boolean;
+  /** Level 2C table operations. Each opens a confirmation - none acts directly. */
+  moveGate: Gate;
+  closeGate: Gate;
+  clearGate: Gate;
+  onMove: () => void;
+  onClose: () => void;
+  onClear: () => void;
 };
 
 /** A submitted time, shown short. The server's timestamp, never a local clock. */
@@ -201,12 +208,32 @@ export function TableBillPanel(props: TableBillPanelProps) {
           </GatedButton>
         )}
 
-        {/* Honest placeholders, from the single deferred-action list in
-            `lib/pos/dineInActions.ts`. Each renders `disabled` with NO onClick,
-            and the RPC each will eventually call is absent from `PosRpcName` -
-            so there is no handler, and no reachable server call, behind any of
-            them. */}
+        {/* Level 2C operations. Move and Close sit together; Clear is separated
+            below because it VOIDS the bill, and a destructive action one pixel
+            from a routine one is a mis-tap waiting to happen. */}
         <div className="grid grid-cols-2 gap-2">
+          <GatedButton gate={props.moveGate} variant="ghost" size="lg" onClick={props.onMove}>
+            Move
+          </GatedButton>
+          <GatedButton gate={props.closeGate} variant="ghost" size="lg" onClick={props.onClose}>
+            Close
+          </GatedButton>
+        </div>
+
+        <div className="mt-2 border-t border-dashed border-line pt-2">
+          <GatedButton
+            gate={props.clearGate}
+            variant="danger"
+            size="lg"
+            className="w-full"
+            onClick={props.onClear}
+          >
+            Clear (voids the bill)
+          </GatedButton>
+        </div>
+
+        {/* Still deferred. One action left, and its RPC is still not reachable. */}
+        <div className="mt-2 grid grid-cols-2 gap-2">
           {DEFERRED_TABLE_ACTIONS.map((a) => (
             <button
               key={a.key}
@@ -225,7 +252,7 @@ export function TableBillPanel(props: TableBillPanelProps) {
         </div>
         <p className="mt-2 flex items-center gap-1 text-[11px] text-sub">
           <StatusDot tone="slate" />
-          Moving, closing, clearing and payment for dine-in are not enabled yet.
+          Taking payment for a table is not enabled yet.
         </p>
       </div>
     </section>
