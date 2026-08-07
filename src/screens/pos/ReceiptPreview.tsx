@@ -22,6 +22,12 @@ export function ReceiptPaper({ data }: { data: ReceiptData }) {
         <span>{data.orderType}</span>
         <span>#{data.orderNumber}</span>
       </div>
+      {data.tableName && (
+        <div className="flex justify-between text-[11px] text-sub">
+          <span>Table {data.tableName}</span>
+          {data.seats != null && <span>{data.seats} seats</span>}
+        </div>
+      )}
       <div className="flex justify-between text-[11px] text-sub">
         <span>{data.at}</span>
         {data.staffName && <span className="truncate pl-2">{data.staffName}</span>}

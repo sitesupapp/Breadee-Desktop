@@ -48,12 +48,6 @@ import type { MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftEx
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
 
-/**
- * The handler for a control that must do nothing at all. Named so a reader can
- * see the intent, and so nothing gets "temporarily" wired into the Pay slot.
- */
-const NO_OP = () => {};
-
 export function PosWorkspace() {
   return (
     <KeyboardProvider>
@@ -221,6 +215,13 @@ function PosWorkspaceInner() {
     onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
     onBillDrawerOpen: () => setCartDrawerOpen(true),
+    rate,
+    // The receipt goes to the same store-owned layer takeaway uses, which is
+    // mounted outside this component's loading states on purpose.
+    onPresentReceipt: (receipt) => receiptStore.present(receipt),
+    // Authoritative cash-box re-read after a table payment. Same call takeaway
+    // makes; the desktop never adds the cash to the drawer itself.
+    refreshCashBox: () => shiftStore.refreshCashBox(),
   });
   /** Add Items borrows the menu; the cart buffer then belongs to that table. */
   const addingToTable = dineInActive && dineIn.view === "add_items";
@@ -584,13 +585,14 @@ function PosWorkspaceInner() {
         cartSummary={
           dineInActive
             ? {
-                // The disabled state is decided in `lib/pos/dineInActions.ts`, not
-                // by a literal here - `payDisabled` is the Pay button's `disabled`
-                // attribute, and this slot must stay dead until Level 2D. The bill
-                // is still one tap away: the summary button opens the drawer.
-                ...dineInBottomBar(dineIn.summary),
+                // The disabled state is decided in `lib/pos/dineInActions.ts`,
+                // not by a literal here - and it is derived from the SAME
+                // `payTableGate` result the bill panel and F4 use, so the bottom
+                // bar cannot hold a different opinion about whether this bill may
+                // be settled. `onPay` opens the dialog; it never charges.
+                ...dineInBottomBar({ summary: dineIn.summary, payGate: dineIn.payGate }),
                 currency,
-                onPay: NO_OP,
+                onPay: dineIn.requestPay,
               }
             : {
                 itemCount,

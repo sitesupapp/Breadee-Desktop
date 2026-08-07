@@ -1,14 +1,17 @@
-// The selected table's bill - READ ONLY in Level 2A.
+// The selected table's bill.
 //
 // The bill shown here is the SERVER's, re-read from `pos_orders`. The cart is
-// never displayed as the bill, and nothing in this panel can mutate anything:
-// every forward action is rendered disabled with the level that will deliver it.
+// never displayed as the bill, and every figure on screen comes from the server.
+//
+// Level 2D added the last action: Pay. Its gate is NOT computed here - the panel
+// receives the one `payTableGate` result that the bottom bar and F4 also render
+// from, so there is a single answer to "can this bill be settled". The button
+// opens the payment dialog; it never settles anything by itself.
 
-import { Badge, Button, EmptyState, GatedButton, PanelTitle, Skeleton, StatusDot, cn, type Gate } from "@/components/ui";
+import { Badge, Button, EmptyState, GatedButton, PanelTitle, Skeleton, type Gate } from "@/components/ui";
 import { formatMoney } from "@/lib/currency";
 import { linesByBatch, billItemCount } from "@/lib/pos/tableBill";
 import { lineTotals } from "@/lib/pos/modifiers";
-import { DEFERRED_TABLE_ACTIONS, deferredActionReason } from "@/lib/pos/dineInActions";
 import { sentRoundLabel } from "@/lib/pos/tableRounds";
 import type { TableBill, TableSummary } from "@/types/tables";
 
@@ -31,6 +34,10 @@ export type TableBillPanelProps = {
   onMove: () => void;
   onClose: () => void;
   onClear: () => void;
+  /** Level 2D. The SHARED `payTableGate` result - never recomputed in this panel. */
+  payGate: Gate;
+  /** Opens the payment dialog. Settling happens there, behind the same gate. */
+  onPay: () => void;
 };
 
 /** A submitted time, shown short. The server's timestamp, never a local clock. */
@@ -193,9 +200,18 @@ export function TableBillPanel(props: TableBillPanelProps) {
           </p>
         )}
 
-        {/* Level 2B. Deliberately ABOVE and visually separate from the deferred
-            grid below - the action that adds food must never sit in the same row
-            as the ones that move or settle a bill. */}
+        {/* Level 2D. The money action, at the TOP of the action stack and as far
+            from Clear as the panel allows - Pay collects the bill, Clear voids
+            it, and those two must never be adjacent on a touch screen. */}
+        {table && bill && bill.orders.length > 0 && (
+          <GatedButton gate={props.payGate} size="lg" className="mb-3 w-full" onClick={props.onPay}>
+            Pay (F4)
+          </GatedButton>
+        )}
+
+        {/* Level 2B. Deliberately separated from the operations below - the
+            action that adds food must never sit in the same row as the ones that
+            move or void a bill. */}
         {table && (
           <GatedButton
             gate={props.addItemsGate}
@@ -231,29 +247,6 @@ export function TableBillPanel(props: TableBillPanelProps) {
             Clear (voids the bill)
           </GatedButton>
         </div>
-
-        {/* Still deferred. One action left, and its RPC is still not reachable. */}
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          {DEFERRED_TABLE_ACTIONS.map((a) => (
-            <button
-              key={a.key}
-              type="button"
-              disabled
-              aria-disabled
-              title={deferredActionReason(a)}
-              className={cn(
-                "min-h-[44px] cursor-not-allowed rounded-xl border border-line bg-slate-50 px-3",
-                "text-sm font-semibold text-slate-400",
-              )}
-            >
-              {a.label}
-            </button>
-          ))}
-        </div>
-        <p className="mt-2 flex items-center gap-1 text-[11px] text-sub">
-          <StatusDot tone="slate" />
-          Taking payment for a table is not enabled yet.
-        </p>
       </div>
     </section>
   );
