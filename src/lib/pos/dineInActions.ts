@@ -16,7 +16,7 @@
 // `pos_clear_table` and `pos_pay_table` are not in `PosRpcName`, so `callPosRpc`
 // will not accept them. Nothing in this file can reach the server.
 
-export type DeferredTableActionKey = "addItems" | "submitRound" | "move" | "close" | "clear" | "pay";
+export type DeferredTableActionKey = "move" | "close" | "clear" | "pay";
 
 export type DeferredTableAction = {
   key: DeferredTableActionKey;
@@ -29,11 +29,13 @@ export type DeferredTableAction = {
 
 /**
  * Every dine-in action that exists in the product but not in this level.
- * Ordered as a server would meet them: order, then move/settle.
+ *
+ * Level 2B delivered Add items and Submit round, so they are gone from this list
+ * - they are now real controls behind real gates in `lib/pos/tableRounds.ts`.
+ * What remains is everything that MOVES or SETTLES a bill, and each of those
+ * still has no reachable RPC.
  */
 export const DEFERRED_TABLE_ACTIONS: DeferredTableAction[] = [
-  { key: "addItems", label: "Add items", level: "Level 2B", rpc: "pos_submit_order" },
-  { key: "submitRound", label: "Submit round", level: "Level 2B", rpc: "pos_submit_order" },
   { key: "move", label: "Move", level: "Level 2C", rpc: "pos_move_table" },
   { key: "close", label: "Close", level: "Level 2C", rpc: "pos_close_table" },
   { key: "clear", label: "Clear", level: "Level 2C", rpc: "pos_clear_table" },
@@ -41,9 +43,14 @@ export const DEFERRED_TABLE_ACTIONS: DeferredTableAction[] = [
 ];
 
 /**
- * Whether a dine-in action may run. In Level 2A this is unconditionally false -
- * it takes no arguments precisely so no permission, shift or bill state can ever
- * be mistaken for an authorisation to run one.
+ * Whether a deferred dine-in action may run. Still unconditionally false - it
+ * takes no arguments precisely so no permission, shift or bill state can ever be
+ * mistaken for an authorisation to move or settle a bill.
+ *
+ * Level 2B's real actions (Add items, Submit round) do NOT come through here.
+ * They have their own gates in `lib/pos/tableRounds.ts`, which is the point: a
+ * shipped action is gated on its actual preconditions, a deferred one is gated
+ * on nothing at all because it cannot run.
  */
 export function isTableActionEnabled(_key: DeferredTableActionKey): boolean {
   return false;

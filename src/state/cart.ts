@@ -18,6 +18,23 @@ import { newClientOpId } from "@/lib/pos/orders";
 
 export type RemovedLine = { line: CartLine; index: number };
 
+/**
+ * Which context the buffer currently belongs to.
+ *
+ * Level 2B reuses this ONE cart as the dine-in round buffer - there is
+ * deliberately no second cart store. That makes ownership load-bearing: without
+ * it, half-built takeaway lines would appear inside a table's round (and vice
+ * versa), and the cashier would send someone else's food to a table. Recording
+ * the owner makes that state unrepresentable rather than merely unlikely.
+ */
+export type CartOwner = { kind: "takeaway" } | { kind: "table"; tableId: string };
+
+export function sameOwner(a: CartOwner | null, b: CartOwner | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.kind !== b.kind) return false;
+  return a.kind === "takeaway" || b.kind === "takeaway" || a.tableId === b.tableId;
+}
+
 type CartState = {
   lines: CartLine[];
   selectedKey: string | null;
@@ -26,6 +43,8 @@ type CartState = {
   savedOrder: SubmitOrderResult | null;
   /** Last removed line, for a single-level undo. */
   lastRemoved: RemovedLine | null;
+  /** Null while the buffer is empty and unclaimed. */
+  owner: CartOwner | null;
 
   addLine: (input: { menuItemId: string; name: string; basePrice: number; quantity?: number; modifiers?: SelectedModifier[]; note?: string | null }) => string;
   setQuantity: (key: string, quantity: number) => void;
@@ -35,6 +54,12 @@ type CartState = {
   undoRemove: () => void;
   select: (key: string | null) => void;
   moveSelection: (delta: number) => void;
+  /**
+   * Claim the buffer for a context. Succeeds when the buffer is empty or already
+   * belongs to that context; returns false when someone else's work is in it, so
+   * the caller can refuse rather than silently mixing two orders together.
+   */
+  claim: (owner: CartOwner) => boolean;
   /** Ensure an operation id exists for the current cart; returns it. */
   ensureOpId: () => string;
   setSavedOrder: (order: SubmitOrderResult | null) => void;
@@ -63,6 +88,16 @@ export const useCart = create<CartState>((set, get) => ({
   clientOpId: null,
   savedOrder: null,
   lastRemoved: null,
+  owner: null,
+
+  claim: (owner) => {
+    const state = get();
+    if (state.lines.length === 0) {
+      set({ owner });
+      return true;
+    }
+    return sameOwner(state.owner, owner);
+  },
 
   addLine: ({ menuItemId, name, basePrice, quantity = 1, modifiers = [], note = null }) => {
     const state = get();
@@ -152,7 +187,8 @@ export const useCart = create<CartState>((set, get) => ({
 
   invalidateSavedOrder: () => set({ savedOrder: null }),
 
-  reset: () => set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null }),
+  reset: () =>
+    set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null, owner: null }),
 }));
 
 /** Subtotal as the server computes it. Exported for components and tests. */

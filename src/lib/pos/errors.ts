@@ -22,6 +22,12 @@ export type RefusalKind =
   | "table_occupied"
   | "table_no_open_order"
   | "feature_disabled"
+  // Dine-In rounds (Level 2B)
+  | "empty_round"
+  | "modifier_required"
+  | "round_in_flight"
+  | "stale_bill"
+  | "append_refused"
   | "unknown";
 
 export type ClassifiedError = {
@@ -35,8 +41,41 @@ export type ClassifiedError = {
 };
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
-  // --- Dine-In tables. Listed FIRST because several of these also contain the
-  // words matched by the generic permission/branch rules further down.
+  // --- Dine-In rounds (Level 2B). These are client-side refusals raised before
+  // a request is made, so they are listed first and matched on our own wording.
+  {
+    kind: "empty_round",
+    test: /this round has no items/i,
+    hint: "Add at least one item before sending the round.",
+    expected: true,
+  },
+  {
+    kind: "modifier_required",
+    test: /choose a |choose at least |choose only one |choose at most |is not available for this item/i,
+    hint: "Open the item and complete its required options.",
+    expected: true,
+  },
+  {
+    kind: "round_in_flight",
+    test: /round is already being sent/i,
+    hint: "Wait for the current round to finish before sending again.",
+    expected: true,
+  },
+  {
+    kind: "stale_bill",
+    test: /bill changed|table's bill was settled|open order changed/i,
+    hint: "The bill was refreshed. Check what changed, then send the round again.",
+    expected: true,
+  },
+  {
+    kind: "append_refused",
+    // The server refuses to append to a bill it cannot lock or resolve.
+    test: /cannot append|could not resolve the active bill|order is not open/i,
+    hint: "Refresh the table map. Do NOT retry against a different table - the bill may have moved.",
+    expected: true,
+  },
+  // --- Dine-In tables. Listed before the generic rules because several of these
+  // also contain the words matched by the permission/branch rules further down.
   {
     kind: "table_not_configured",
     // pos_open_table raises this with errcode 22023 on a configured branch.
@@ -46,7 +85,9 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
   },
   {
     kind: "table_not_found",
-    test: /table not found|enter a table number or name/i,
+    // The last alternative is our own TableRequiredError: a dine-in round that
+    // reached submission without a table would have opened a SECOND bill.
+    test: /table not found|enter a table number or name|not attached to a table/i,
     hint: "Refresh the table map and try again.",
     expected: true,
   },
