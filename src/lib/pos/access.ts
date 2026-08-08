@@ -54,6 +54,12 @@ export const POS_PERMISSIONS = {
   TABLES_MOVE: "pos.tables.move",
   TABLES_CLEAR: "pos.tables.clear",
   TABLES_CLOSE: "pos.tables.close",
+  // Delivery customers (Level 3A). There is deliberately no `pos.delivery.*`
+  // key: the server has none. Delivery order-taking is gated by the ordinary
+  // POS permissions plus the `pos.delivery` sub-feature, and only the CUSTOMER
+  // record has keys of its own.
+  CUSTOMERS_VIEW: "pos.customers.view",
+  CUSTOMERS_MANAGE: "pos.customers.manage",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -216,4 +222,43 @@ export function canCloseTable(ctx: PosAccessContext): Gate {
  */
 export function canClearTable(ctx: PosAccessContext): Gate {
   return tableOpGate(ctx, POS_PERMISSIONS.TABLES_CLEAR, "You do not have permission to clear tables.");
+}
+
+// --- Delivery (Level 3A) -----------------------------------------------------
+
+/**
+ * Entering the Delivery workspace: POS access + the `pos.delivery` sub-feature.
+ *
+ * Exactly the shape `canViewTables` uses for Dine-in, because the server treats
+ * the two the same way: `pos.delivery` is a sub-feature in `feature_registry`
+ * and the web gates its Delivery route on it. There is no delivery permission
+ * key to check here - what an operator may DO once inside is decided by the
+ * ordinary POS keys and, for the customer record, by the two customer keys.
+ */
+export function canViewDelivery(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY)) {
+    return { allowed: false, reason: "Delivery is not enabled for this plan." };
+  }
+  return { allowed: true, reason: null };
+}
+
+/** Reading the customer book. */
+export function canViewCustomers(ctx: PosAccessContext): boolean {
+  return perm(ctx, POS_PERMISSIONS.CUSTOMERS_VIEW);
+}
+
+/**
+ * Creating or editing a customer.
+ *
+ * `pos_upsert_customer` accepts EITHER `pos.customers.manage` OR
+ * `pos.create_orders`, so a cashier who takes delivery orders can capture the
+ * caller without a second permission. Mirrored exactly - the desktop is never
+ * more permissive than the RPC, and never stricter either, or it would block
+ * work the server allows.
+ */
+export function canManageCustomers(ctx: PosAccessContext): boolean {
+  return perm(ctx, POS_PERMISSIONS.CUSTOMERS_MANAGE) || perm(ctx, POS_PERMISSIONS.CREATE_ORDERS);
 }
