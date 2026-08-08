@@ -43,7 +43,11 @@ export const MODULES: ModuleEntry[] = [
     key: "pos",
     label: "Point of Sale",
     icon: "🧾",
-    desc: "Shifts, takeaway orders, modifiers, discounts and cash payment. Dine-in, delivery and printing coming next.",
+    // Kept current with what the desktop actually ships. The old wording still
+    // deferred Dine-in months after it landed, which the app then contradicted
+    // one screen away. Delivery and printing are named as NOT here, because
+    // they are not - the Delivery route is rendered disabled.
+    desc: "Takeaway and Dine-in POS: shifts, tables, modifiers, discounts, cash payment and receipts. Delivery and printing are not available yet.",
     availability: "desktop",
     to: "/pos",
     // Feature + `pos.access` + the owner exclusion, exactly as the server decides.
