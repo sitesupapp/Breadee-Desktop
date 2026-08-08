@@ -17,3 +17,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Desktop only. A POS terminal must never run two tills at once - see the
+# single-instance guard in `src/lib.rs`. Scoped by target rather than added to
+# the shared list because the crate is itself compiled out on android/ios, so a
+# mobile build would fail to resolve it.
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"

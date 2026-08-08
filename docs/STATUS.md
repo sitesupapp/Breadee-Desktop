@@ -244,9 +244,20 @@ Two Level 2C assertions were **retargeted** by Level 2D, deliberately only after
 
 Both were left failing during implementation rather than relaxed in advance. A size assertion loosened before its feature lands stops being a guard and becomes a comment.
 
-## 7. Pull request
+## 7. Level 2D integration — MERGED
 
-Not opened. Level 2D is local-only by instruction; integration into `desktop-staging` is a separate task.
+Level 2D is **merged into `desktop-staging`**, via **PR #7** (`feature/desktop-pos-level-2d-payment`), squashed as **`6b7f365`**.
+
+| | |
+|---|---|
+| Windows CI (PR and post-merge) | green — 394 tests / 0 failures, typecheck, frontend build, `cargo check --locked` |
+| NSIS installer workflow | green; artifact `breadee-desktop-windows-installer` (2,065,887 bytes) from run `31245012570` |
+| Packaged Windows smoke | **PASS** — installed from that artifact and verified end to end |
+| Real Dine-In payment | verified twice: dev build (order `260807-0002`) and **packaged build** (order `260808-0001`, $7.00 USD cash, 1 payment row, 0 duplicates, shift balanced $0.00) |
+| Delivery | still disabled |
+| `origin/main` | untouched at `d3f093d` |
+
+No release or tag was created; the installer is an internal CI artifact only.
 
 ## 8. Level 2D staging verification — PASSED (2026-08-07)
 
@@ -287,3 +298,9 @@ Both are pinned by regression tests in `test/pos-table-payment-wiring.test.ts`. 
 ### Not covered by this run
 
 Deliberately single-payment, so these remain covered by tests only, not by a live charge: discount variants, LBP tender, mixed-currency and split-shift refusals, and the ambiguous/lost-response recovery path (the brief explicitly forbids manufacturing a network failure to test it).
+
+## 9. Single-instance guard (packaged Windows)
+
+Packaged QA found that launching the installed app again started a **second full instance** — three concurrent processes were opened. The server refused the duplicate settlement, so this was never a double-charge defect, but each process carried its own cart, selected table and in-memory payment latch, which is two tills on one terminal.
+
+`src-tauri` now registers `tauri-plugin-single-instance` (desktop targets only, registered first). A second launch does not create a window: it unminimises, shows and focuses the running instance, then exits. The callback deliberately does nothing else — no navigation, no reload, no event, no state reset — because the running instance may be mid-order or mid-payment. The second process's argv/cwd are ignored, since the app has no deep-link handling and acting on them would be a way to drive the POS from outside it.
