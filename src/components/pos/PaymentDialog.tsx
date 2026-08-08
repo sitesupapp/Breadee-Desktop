@@ -28,12 +28,29 @@ export type PaymentDialogProps = {
   payGate: Gate;
   /** Set once the order exists; a retry pays THIS order rather than creating one. */
   orderNumber: string | null;
+  /**
+   * Dine-In context. Absent for Takeaway, whose behaviour is unchanged.
+   *
+   * This dialog is REUSED rather than duplicated: the discount validator, the
+   * currency conversion, the tender/change arithmetic and the keypad are the
+   * same code taking the same decisions for both order types. Only the identity
+   * shown at the top differs, which is exactly the part that should.
+   */
+  dineIn?: { tableName: string; seats: number | null; orderCount: number } | null;
   error: string | null;
   onCancel: () => void;
   onConfirm: (input: {
     method: PaymentMethod;
     currency: CurrencyCode;
     discount: Record<string, unknown>;
+    /**
+     * The same discount, unpacked. Dine-In re-validates it through
+     * `validateTableDiscount` so its payload is assembled key by key rather than
+     * spread from a record - see `lib/pos/tablePayment.ts`. The value is already
+     * converted to the PRIMARY currency.
+     */
+    discountType: DiscountType;
+    discountValue: string;
     /** What the cashier actually handed over, in the tender currency. */
     tendered: number | null;
   }) => void;
@@ -87,21 +104,40 @@ export function PaymentDialog(props: PaymentDialogProps) {
 
   function confirm() {
     if (!canConfirm) return;
+    const permitted = props.discountGate.allowed ? discountType : "none";
     props.onConfirm({
       method,
       currency,
       discount: discountPayload(props.discountGate.allowed, props.subtotal, discountType, discountInPrimary),
+      discountType: permitted,
+      discountValue: permitted === "none" ? "" : discountInPrimary,
       tendered: tendered.trim() === "" ? null : tenderedNum,
     });
   }
 
   useShortcuts({ confirmPayment: confirm }, props.open);
 
+  const dineIn = props.dineIn ?? null;
+  const title = dineIn
+    ? `Payment - ${dineIn.tableName}`
+    : props.orderNumber
+      ? `Payment - order ${props.orderNumber}`
+      : "Payment";
+  const subtitle = dineIn
+    ? // Said plainly because it is the one thing that differs from takeaway:
+      // settling a table completes its orders and frees it in the same call.
+      `Settles ${dineIn.orderCount === 1 ? "the open bill" : `all ${dineIn.orderCount} open orders`}${
+        props.orderNumber ? ` (#${props.orderNumber})` : ""
+      } and frees the table.`
+    : props.orderNumber
+      ? "Retrying will settle this same order - it never creates a second one."
+      : null;
+
   return (
     <Modal
       open={props.open}
-      title={props.orderNumber ? `Payment - order ${props.orderNumber}` : "Payment"}
-      subtitle={props.orderNumber ? "Retrying will settle this same order - it never creates a second one." : null}
+      title={title}
+      subtitle={subtitle}
       size="lg"
       onClose={props.onCancel}
       footer={
@@ -125,6 +161,14 @@ export function PaymentDialog(props: PaymentDialogProps) {
         <div className="space-y-4">
           {/* Totals */}
           <div className="rounded-xl border border-line p-3">
+            {dineIn && (
+              <div className="mb-2 flex items-baseline justify-between border-b border-line pb-2">
+                <span className="text-sm font-bold text-ink">{dineIn.tableName}</span>
+                <span className="text-xs font-semibold text-sub">
+                  {dineIn.seats != null ? `${dineIn.seats} seats` : "seats not set"}
+                </span>
+              </div>
+            )}
             <Row label="Subtotal" value={formatMoney(props.subtotal, props.primaryCurrency)} />
             {discount.amount > 0 && (
               <Row label="Discount" value={`- ${formatMoney(discount.amount, props.primaryCurrency)}`} tone="amber" />

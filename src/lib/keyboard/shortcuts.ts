@@ -66,7 +66,10 @@ export type ShortcutSpec = {
 export const SHORTCUTS: ShortcutSpec[] = [
   { id: "help", keys: ["F1"], label: "Shortcut help", group: "Window", display: "F1", worksInInput: true },
   { id: "newOrder", keys: ["F2"], label: "New order", group: "Order", display: "F2", worksInInput: true },
-  { id: "openPayment", keys: ["F4"], label: "Open payment", group: "Order", display: "F4", worksInInput: true },
+  // F4 is shared by Takeaway and Dine-in, and in BOTH it only opens the payment
+  // dialog - it never charges. Which one it opens is decided by the active mode,
+  // the same convention as lineUp/lineDown and Ctrl+Enter.
+  { id: "openPayment", keys: ["F4"], label: "Open payment (order or table)", group: "Order", display: "F4", worksInInput: true },
   { id: "ordersList", keys: ["F6"], label: "Orders list", group: "Order", display: "F6", worksInInput: true },
   { id: "holdOrder", keys: ["F7"], label: "Hold order", group: "Order", display: "F7", worksInInput: true },
   {

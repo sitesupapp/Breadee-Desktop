@@ -48,6 +48,13 @@ export type ReceiptData = {
   exchangeRate?: number | null;
   /** Operational reference so a paper receipt can be tied back to a shift. */
   shiftRef?: string | null;
+  /**
+   * Dine-In identity. Absent on a takeaway receipt, which is why both are
+   * optional rather than nullable-required: the takeaway path is untouched.
+   * `tableName` is the tenant's own stored label, printed verbatim (m256).
+   */
+  tableName?: string | null;
+  seats?: number | null;
 };
 
 export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType"> & {

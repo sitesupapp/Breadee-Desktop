@@ -1,17 +1,22 @@
-// Dine-In workspace (Levels 2A-2C).
+// Dine-In workspace (Levels 2A-2D).
 //
 // This is a HOOK, not a second shell. Takeaway and Dine-in render into the same
 // `PosShell` with the same status bar, layout resolver and drawer machinery; all
 // this contributes is the work region (table map or the borrowed menu), the
 // right panel (server bill or the round being prepared) and their dialogs.
 //
-// What it can do: open a table (2A), build and send rounds (2B), and move, close
-// or clear a table (2C).
+// What it can do: open a table (2A), build and send rounds (2B), move, close or
+// clear a table (2C), and settle a table (2D).
 //
-// What it deliberately still does NOT do: take payment. `pos_pay_table` is not
-// in the `PosRpcName` union, so `callPosRpc` will not accept it, and Close
-// refusing an unpaid bill is the SERVER saying settlement is missing. That
-// refusal is surfaced with its own hint, never worked around.
+// PAYMENT, in one paragraph. There is exactly one gate (`payTableGate`) and one
+// synchronous latch, and every path that can settle - the bill panel's Pay
+// button, the bottom bar's PAY slot, F4 and the dialog's own confirm - goes
+// through both. F4 only OPENS the dialog; it never charges. The bill is re-read
+// from the server immediately before submitting, because the amount on screen is
+// not authority to charge. And because `pos_pay_table` has no idempotency key, a
+// lost response is resolved by asking the server what happened
+// (`lib/pos/tablePayment.ts`) rather than by retrying - a blind retry is the one
+// thing that could take a customer's money twice.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "@/components/toast";
@@ -46,12 +51,26 @@ import {
   type RoundMenu,
 } from "@/lib/pos/tableRounds";
 import { submitOrder } from "@/lib/pos/orders";
+import { PaymentDialog } from "@/components/pos/PaymentDialog";
+import {
+  buildTablePaymentPayload,
+  createPaymentLatch,
+  payTable,
+  payTableGate,
+  performTablePayment,
+  validateTableDiscount,
+  type TablePaymentResult,
+} from "@/lib/pos/tablePayment";
+import { billIsCleared, buildTablePaymentReceipt } from "@/lib/pos/tablePaymentCompletion";
+import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
-import type { CurrencyCode } from "@/lib/currency";
+import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import type { DiscountType } from "@/lib/pos/discounts";
+import type { ReceiptData } from "@/lib/receipt";
 import type { CartLine } from "@/types/pos";
 import type { TableBill, TableSummary } from "@/types/tables";
 
@@ -71,6 +90,13 @@ export type DineInWorkspace = {
   hasUnsentRound: boolean;
   /** Ask to leave Add Items; may open a confirmation instead of leaving. */
   requestLeaveAddItems: () => void;
+  /**
+   * THE payment gate. Exported so the shell's bottom bar renders from the exact
+   * same result the bill panel and F4 use - never a second opinion.
+   */
+  payGate: Gate;
+  /** Opens the payment dialog. Never settles anything on its own. */
+  requestPay: () => void;
 };
 
 export function useDineInWorkspace(input: {
@@ -91,6 +117,16 @@ export function useDineInWorkspace(input: {
   onEditNote: (key: string) => void;
   onOpenShift: () => void;
   onBillDrawerOpen: () => void;
+  /** Tenant USD->LBP rate. Payment in LBP is refused without one - never guessed. */
+  rate: number | null;
+  /**
+   * Receipt presentation. Routed through the caller so it reaches the SAME
+   * store-owned layer takeaway uses, which is mounted outside the workspace's
+   * loading states on purpose (see `state/receipt.ts`).
+   */
+  onPresentReceipt: (receipt: ReceiptData) => void;
+  /** Authoritative cash-box re-read. The desktop never increments it locally. */
+  refreshCashBox: () => Promise<void>;
 }): DineInWorkspace {
   const { pos, hasOpenShift, active } = input;
   const toast = useToast();
@@ -125,6 +161,22 @@ export function useDineInWorkspace(input: {
   // Its own latch: moving, closing and clearing must not be double-fired, and
   // must not be blocked by an unrelated round submission.
   const opInFlight = useRef(false);
+
+  // --- Level 2D settlement ----------------------------------------------------
+  const [payOpen, setPayOpen] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [paying, setPaying] = useState(false);
+  /**
+   * The one latch every submit path shares. A ref, not state: two clicks in the
+   * same tick would both read a stale `paying === false`, and `setState` cannot
+   * settle that race. `paying` exists only to re-render the gate.
+   */
+  const payLatch = useRef(createPaymentLatch());
+  /**
+   * Ensures the completion sequence runs once per payment. Reset when a NEW
+   * payment attempt begins, never on a re-render.
+   */
+  const completionDone = useRef(false);
 
   const ctx = useMemo(
     () => ({ tenantId: pos.tenantId, branchId: pos.branch.id }),
@@ -168,6 +220,28 @@ export function useDineInWorkspace(input: {
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
     };
   }, [pos.access, selected, hasOpenShift, input.online]);
+
+  /**
+   * THE payment gate. Computed once, here, and handed to every surface that can
+   * start a payment. Nothing downstream re-derives "can pay" from its own parts.
+   *
+   * `pos.apply_discounts` is deliberately NOT part of it: a cashier without that
+   * permission may still settle a bill at full price. Discount permission is
+   * enforced only when a discount is actually entered.
+   */
+  const payGate: Gate = useMemo(
+    () =>
+      payTableGate({
+        takePayments: pos.gates.takePayments,
+        table: selected,
+        bill: tables.bill,
+        hasOpenShift,
+        online: input.online,
+        settling: paying,
+        branchId: pos.branch.id,
+      }),
+    [pos.gates.takePayments, pos.branch.id, selected, tables.bill, hasOpenShift, input.online, paying],
+  );
 
   const select = useCallback(
     (id: string) => {
@@ -427,6 +501,229 @@ export function useDineInWorkspace(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast]);
 
+  // --- Level 2D: settlement ---------------------------------------------------
+
+  /** The store's current view of the selected table, as one authoritative pair. */
+  const readTableState = useCallback(() => {
+    const s = useTables.getState();
+    return { bill: s.bill, table: pickSelected(s) };
+  }, []);
+
+  /**
+   * Open the payment dialog.
+   *
+   * This is ALL that the Pay button, the bottom-bar PAY slot and F4 do. None of
+   * them charges anything, and all three are disabled by the same `payGate`, so
+   * there is no surface from which payment can start under weaker conditions
+   * than any other.
+   */
+  const requestPay = useCallback(() => {
+    if (!payGate.allowed) return;
+    setPayError(null);
+    setPayOpen(true);
+  }, [payGate.allowed]);
+
+  /**
+   * The locked completion sequence (2D-09).
+   *
+   * Runs at most once per payment, for BOTH a directly confirmed and a recovered
+   * settlement. The order is the one pinned in `tablePaymentCompletion.ts`: the
+   * server's view of the table is refreshed and checked BEFORE anything is shown
+   * as settled, the cash box is re-read rather than incremented, and the receipt
+   * is presented before the dialog closes so the teardown cannot race it.
+   */
+  const runCompletion = useCallback(
+    async (
+      result: TablePaymentResult | null,
+      snapshot: {
+        bill: TableBill;
+        table: TableSummary;
+        method: PaymentMethod;
+        primaryCurrency: CurrencyCode;
+        tenderCurrency: CurrencyCode;
+        tendered: number | null;
+        requestedDiscount: number;
+      },
+    ) => {
+      if (completionDone.current) return;
+      completionDone.current = true;
+
+      // 1 + 2. The server's word on the table, then proof the bill is gone.
+      //        No local "mark it available" - `pos_pay_table` frees the table
+      //        itself, and `pos_close_table` is NOT called after payment.
+      await tables.refresh(ctx);
+      const after = readTableState();
+      const cleared = billIsCleared(after.bill, after.table);
+
+      // 3. Authoritative cash box. Never incremented locally.
+      await input.refreshCashBox();
+
+      // 4. Receipt, from the PRE-payment bill (identity) + the server's figures.
+      input.onPresentReceipt(
+        buildTablePaymentReceipt({
+          bill: snapshot.bill,
+          table: snapshot.table,
+          result,
+          requestedDiscount: snapshot.requestedDiscount,
+          method: snapshot.method,
+          tenantName: pos.tenantName,
+          branchName: pos.branch.name,
+          operatorName: pos.userName,
+          primaryCurrency: snapshot.primaryCurrency,
+          tenderCurrency: snapshot.tenderCurrency,
+          rate: input.rate,
+          tenderedInput: snapshot.tendered,
+          shiftId: input.shiftId,
+          at: new Date().toLocaleString(),
+        }),
+      );
+
+      // 5 + 6. Close, and drop the selected payment state.
+      setPayOpen(false);
+      setPayError(null);
+
+      if (!cleared) {
+        // The payment reported success but the table still shows an open bill.
+        // Said out loud rather than smoothed over - it is the one shape that
+        // could invite a second payment.
+        toast.push({
+          tone: "warning",
+          message: "The payment went through, but this table still shows an open bill",
+          detail: "Refresh the table map and check it before taking any further payment.",
+        });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ctx, readTableState, pos.tenantName, pos.branch.name, pos.userName, input.rate, input.shiftId, toast],
+  );
+
+  /**
+   * Settle the table. Exactly one submit, ever.
+   *
+   * The gate is re-checked here as well as at the button: the dialog can sit open
+   * while another terminal adds a round, and the state that made Pay legal may
+   * not be the state at confirm time. The re-read inside `performTablePayment`
+   * then makes the same point about the AMOUNT.
+   */
+  const confirmPay = useCallback(
+    async (dialog: {
+      method: PaymentMethod;
+      currency: CurrencyCode;
+      discountType: DiscountType;
+      discountValue: string;
+      tendered: number | null;
+    }) => {
+      const table = selected;
+      const shownBill = useTables.getState().bill;
+      if (!table || !shownBill || !payGate.allowed) return;
+
+      // The bill's OWN currency is what the server settles in. The dialog's
+      // currency is the TENDER currency at the drawer - a different thing.
+      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
+      const subtotal = shownBill.subtotal ?? 0;
+
+      let discount: ReturnType<typeof validateTableDiscount>;
+      try {
+        discount = validateTableDiscount({
+          canDiscount: pos.gates.applyDiscounts,
+          subtotal,
+          type: dialog.discountType,
+          value: dialog.discountValue,
+        });
+      } catch (e) {
+        const c = classifyError(e);
+        setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        return;
+      }
+
+      // LBP with no tenant rate is refused before the request, never guessed.
+      const rateBlock = paymentBlockedReason(dialog.currency, input.rate);
+      if (rateBlock) {
+        setPayError(rateBlock);
+        return;
+      }
+
+      const payload = buildTablePaymentPayload({
+        tableId: table.id,
+        method: dialog.method,
+        currency: primaryCurrency,
+        discount: discount.fields,
+      });
+
+      completionDone.current = false;
+      setPaying(true);
+      setPayError(null);
+      try {
+        const outcome = await performTablePayment({
+          shownBill,
+          table,
+          payload,
+          latch: payLatch.current,
+          // 2D-02: the map AND the bill, from the server, immediately before the
+          // charge. `refresh` reloads the bill for the surviving selection.
+          reReadBill: async () => {
+            await tables.refresh(ctx);
+            return readTableState();
+          },
+          submit: payTable,
+          // Used ONLY when the response was lost. This is what turns "did it go
+          // through?" into a question the server answers.
+          recoverRead: async () => {
+            await tables.refresh(ctx);
+            return readTableState();
+          },
+          complete: (result) =>
+            runCompletion(result, {
+              bill: shownBill,
+              table,
+              method: dialog.method,
+              primaryCurrency,
+              tenderCurrency: dialog.currency,
+              tendered: dialog.tendered,
+              requestedDiscount: discount.amount,
+            }),
+          // Final authoritative bill read, so Pay is no longer reachable.
+          refresh: async () => {
+            setFocusedId(table.id);
+            await tables.loadBill(ctx);
+          },
+        });
+
+        if (outcome.ok) {
+          toast.push({
+            tone: "success",
+            message: outcome.recovered
+              ? `${table.name} was already settled`
+              : `${table.name} paid - ${formatMoney(outcome.result.amount, outcome.result.currency_code)}`,
+            detail: outcome.recovered
+              ? "The response to the earlier payment was lost, but the server shows the bill settled. No second payment was taken."
+              : null,
+          });
+          return;
+        }
+
+        const c = classifyError(outcome.error);
+        setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        if (!outcome.retryable) {
+          // Stale bill and ambiguous response are BOTH non-retryable, for
+          // opposite reasons: one needs the operator to re-read the bill, the
+          // other needs them to not touch anything. Neither offers "try again".
+          toast.push({ tone: c.expected ? "warning" : "error", message: c.message, detail: c.hint });
+        }
+      } finally {
+        setPaying(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, payGate.allowed, pos.gates.applyDiscounts, input.currency, input.rate, ctx, readTableState, runCompletion, toast],
+  );
+
+  // A payment dialog left open over a table that is no longer selected would
+  // settle nothing and confuse everything.
+  useEffect(() => {
+    if (payOpen && !selected) setPayOpen(false);
+  }, [payOpen, selected]);
+
   // A selection that moves out from under an unsent round would silently retarget
   // the food. Leaving Add Items is the safe response.
   useEffect(() => {
@@ -469,6 +766,10 @@ export function useDineInWorkspace(input: {
       moveTable: () => opGates.move.allowed && requestOp("move"),
       closeTable: () => opGates.close.allowed && requestOp("close"),
       clearTable: () => opGates.clear.allowed && requestOp("clear"),
+      // Level 2D. F4 OPENS the dialog and nothing else - it never charges - and
+      // it is refused by the same gate that disables the buttons, so the
+      // keyboard cannot reach a payment the mouse could not.
+      openPayment: () => payGate.allowed && requestPay(),
     },
     active && view === "map",
   );
@@ -550,10 +851,12 @@ export function useDineInWorkspace(input: {
         onMove={() => requestOp("move")}
         onClose={() => requestOp("close")}
         onClear={() => requestOp("clear")}
+        payGate={payGate}
+        onPay={requestPay}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay],
   );
 
   const roundPanel = useCallback(
@@ -591,6 +894,28 @@ export function useDineInWorkspace(input: {
 
   const dialogs = (
     <>
+      {/* The SAME dialog Takeaway uses. Not a copy: one discount validator, one
+          currency conversion, one tender/change calculation, one keypad. Only
+          the identity at the top differs, which is the part that should. */}
+      <PaymentDialog
+        open={payOpen}
+        busy={paying}
+        subtotal={tables.bill?.subtotal ?? 0}
+        primaryCurrency={tables.bill?.currency ?? input.currency}
+        rate={input.rate}
+        discountGate={pos.gates.applyDiscounts}
+        payGate={payGate}
+        orderNumber={tables.bill?.orders.map((o) => o.order_number).filter(Boolean).join(", ") || null}
+        dineIn={
+          selected
+            ? { tableName: selected.name, seats: selected.seats, orderCount: tables.bill?.orders.length ?? 0 }
+            : null
+        }
+        error={payError}
+        onCancel={() => setPayOpen(false)}
+        onConfirm={(i) => void confirmPay(i)}
+      />
+
       <MoveTableDialog
         open={opDialog === "move"}
         table={selected}
@@ -672,6 +997,8 @@ export function useDineInWorkspace(input: {
     dialogs,
     hasUnsentRound,
     requestLeaveAddItems,
+    payGate,
+    requestPay,
     summary: {
       itemCount: tables.bill?.orders.reduce((s, o) => s + o.lines.length, 0) ?? 0,
       subtotal: tables.bill?.total ?? 0,

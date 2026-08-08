@@ -31,12 +31,16 @@ export type PosRpcName =
   // Level 2A - Dine-In table foundation. Read + open.
   | "pos_table_map"
   | "pos_open_table"
-  // Level 2C - table operations. `pos_pay_table` is deliberately STILL absent:
-  // settling a table is Level 2D, and Close refusing an unpaid bill is the
-  // server telling us so. That refusal is surfaced, never worked around.
+  // Level 2C - table operations.
   | "pos_move_table"
   | "pos_close_table"
-  | "pos_clear_table";
+  | "pos_clear_table"
+  // Level 2D - settlement. Note this RPC has NO idempotency key, unlike
+  // `pos_submit_order`: duplicate-payment safety is state-based on the server
+  // (a second call finds no open unpaid order), and the client must recover a
+  // lost response by authoritative re-read rather than by retrying blindly.
+  // See `lib/pos/tablePayment.ts`.
+  | "pos_pay_table";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

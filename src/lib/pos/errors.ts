@@ -22,6 +22,17 @@ export type RefusalKind =
   | "table_occupied"
   | "table_no_open_order"
   | "feature_disabled"
+  // Dine-In settlement (Level 2D)
+  | "no_open_bill_to_pay"
+  | "stale_bill_total"
+  | "payment_in_progress"
+  | "payment_ambiguous"
+  | "payment_recovered"
+  | "tender_too_low"
+  | "invalid_discount"
+  | "discount_permission"
+  | "split_shift"
+  | "mixed_currency"
   // Dine-In table operations (Level 2C)
   | "close_needs_payment"
   | "same_table"
@@ -46,6 +57,75 @@ export type ClassifiedError = {
 };
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
+  // --- Dine-In settlement (Level 2D). Listed first: several of these contain
+  // words the generic payment/permission rules further down would swallow.
+  {
+    kind: "no_open_bill_to_pay",
+    // After a successful payment this is what a duplicate call gets. On its own
+    // it is NOT proof of anything - `tablePayment.ts` pairs it with an
+    // authoritative re-read before calling a payment settled.
+    test: /no open order on this table to pay/i,
+    hint: "This table has nothing left to settle. Refresh the map - the bill may already have been paid.",
+    expected: true,
+  },
+  {
+    kind: "stale_bill_total",
+    test: /the bill changed before payment/i,
+    hint: "Review the refreshed bill before taking payment. The amount on screen was out of date.",
+    expected: true,
+  },
+  {
+    kind: "payment_in_progress",
+    test: /payment is already being sent/i,
+    hint: "Wait for the current payment to finish. Do not send it again.",
+    expected: true,
+  },
+  {
+    kind: "payment_ambiguous",
+    test: /could not confirm whether the payment/i,
+    hint: "Do NOT take payment again. Refresh the table map and check whether the bill is already settled.",
+    expected: false,
+  },
+  {
+    kind: "payment_recovered",
+    // Raised by nothing - matched when the recovery path reports a settlement it
+    // proved after the fact, so the toast reads as success rather than failure.
+    test: /was already settled|no second payment was taken/i,
+    hint: "The bill is settled. Do not take payment again.",
+    expected: true,
+  },
+  {
+    kind: "tender_too_low",
+    test: /tendered amount is less than the amount due|does not cover the bill/i,
+    hint: "Collect the full amount, or enter the correct tendered value.",
+    expected: true,
+  },
+  {
+    kind: "discount_permission",
+    // Listed ABOVE the generic permission rule so a discount refusal keeps its
+    // own hint: the payment itself is still allowed, at full price.
+    test: /permission to apply discounts/i,
+    hint: "Take the payment at full price, or ask a manager to apply the discount.",
+    expected: true,
+  },
+  {
+    kind: "invalid_discount",
+    test: /this discount cannot be applied|percentage cannot exceed|discount cannot exceed the subtotal|discount cannot be negative/i,
+    hint: "Percent must be 0-100, and a fixed amount cannot be more than the subtotal.",
+    expected: true,
+  },
+  {
+    kind: "split_shift",
+    test: /span multiple shifts or branches/i,
+    hint: "Settle each order separately - a bill cannot straddle two shifts.",
+    expected: true,
+  },
+  {
+    kind: "mixed_currency",
+    test: /different currency settings/i,
+    hint: "Settle or clear each order separately - the server will not add raw USD to raw LBP.",
+    expected: true,
+  },
   // --- Dine-In table operations (Level 2C). The server's own wording is good
   // here, so these only add the next step - and, for Close, the honest fact that
   // paying a table from the desktop is not possible yet.
@@ -151,6 +231,15 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     kind: "no_shift",
     test: /not attached to an open shift/i,
     hint: "Open a shift, then place the order again.",
+    expected: true,
+  },
+  {
+    // The desktop's OWN shift gates, which refuse before a request is made.
+    // Listed after the server's wording so the server keeps precedence, and
+    // given a hint that fits any of them rather than assuming an order.
+    kind: "no_shift",
+    test: /open a shift before/i,
+    hint: "Open a shift from the status bar, then try again.",
     expected: true,
   },
   {
