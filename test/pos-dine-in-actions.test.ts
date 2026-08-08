@@ -237,7 +237,15 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   for (const rpc of ["pos_table_map", "pos_open_table", "pos_move_table", "pos_close_table", "pos_clear_table"]) {
     assert.ok(members.includes(rpc), `${rpc} disappeared from the allow-list`);
   }
-  assert.equal(members.length, 12, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // RETARGETED BY LEVEL 3A: 12 -> 13, for `pos_upsert_customer`. Left failing
+  // until that RPC was genuinely wired, on the same principle as Level 2D's
+  // 11 -> 12 - a size assertion loosened before its feature lands stops being a
+  // guard and becomes a comment. The point of the number is that a NEW RPC
+  // cannot arrive unnoticed, so it is bumped by exactly one, deliberately.
+  assert.equal(members.length, 13, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
+  // Level 3A added no order or money RPC.
+  assert.equal(members.filter((m) => /submit|pay|void|refund/.test(m)).length, 3);
 });
 
 test("pos_pay_table is called from exactly one module", () => {

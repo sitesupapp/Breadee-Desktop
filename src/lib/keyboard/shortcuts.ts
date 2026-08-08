@@ -89,7 +89,7 @@ export const SHORTCUTS: ShortcutSpec[] = [
   { id: "search", keys: ["/"], label: "Search the menu", group: "Navigation", display: "/" },
   { id: "routeTakeaway", keys: ["1"], alt: true, label: "Takeaway", group: "Navigation", display: "Alt+1", worksInInput: true },
   { id: "routeDineIn", keys: ["2"], alt: true, label: "Dine-in", group: "Navigation", display: "Alt+2", worksInInput: true },
-  { id: "routeDelivery", keys: ["3"], alt: true, label: "Delivery (later phase)", group: "Navigation", display: "Alt+3", worksInInput: true },
+  { id: "routeDelivery", keys: ["3"], alt: true, label: "Delivery", group: "Navigation", display: "Alt+3", worksInInput: true },
   { id: "prevCategory", keys: ["ArrowLeft"], alt: true, label: "Previous category", group: "Navigation", display: "Alt+Left", worksInInput: true },
   { id: "nextCategory", keys: ["ArrowRight"], alt: true, label: "Next category", group: "Navigation", display: "Alt+Right", worksInInput: true },
   // Vertical selection is shared: cart lines in Takeaway, table rows in Dine-in.

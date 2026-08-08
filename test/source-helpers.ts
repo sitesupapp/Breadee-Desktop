@@ -22,7 +22,18 @@ export function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "");
 }
 
-/** Same, plus JSX `{/* ... *​/}` blocks, which survive the plain block strip. */
+/**
+ * Same, plus JSX `{/* ... *​/}` blocks, which survive the plain block strip.
+ *
+ * NB the braces are anchored TIGHT to the delimiters. An earlier `\{\s*\/\*`
+ * would start matching at an ordinary object-literal brace followed by a JSDoc
+ * block - `= {\n  /** ... ` - and, being lazy, run on until the next `*​/}`
+ * anywhere below, deleting real code in between. Level 3A hit exactly that: a
+ * type declaration and a whole render function vanished from a source assertion,
+ * which then failed against a file that was correct. JSX comments in this repo
+ * are always written `{/* ... *​/}` with no inner padding, so requiring it costs
+ * nothing and removes the ambiguity.
+ */
 export function stripJsxComments(source: string): string {
-  return stripComments(source.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, ""));
+  return stripComments(source.replace(/\{\/\*[\s\S]*?\*\/\}/g, ""));
 }

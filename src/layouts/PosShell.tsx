@@ -45,8 +45,15 @@ export type PosShellProps = {
   cart: (layout: LayoutSpec) => ReactNode;
   /** Label for the drawer + its bottom bar. Differs by mode (cart vs bill). */
   cartTitle?: string;
-  /** Bottom-bar summary used only when the cart is a drawer. */
-  cartSummary: {
+  /**
+   * Bottom-bar summary used only when the cart is a drawer.
+   *
+   * OPTIONAL on purpose: a mode with nothing to settle (Delivery in Level 3A,
+   * which holds no cart and takes no money) passes nothing, and the bar - Pay
+   * button included - is not rendered at all. A disabled Pay would still be a
+   * Pay, and this workspace has no payment path behind it.
+   */
+  cartSummary?: {
     itemCount: number;
     subtotal: number;
     currency: CurrencyCode;
@@ -187,8 +194,9 @@ export function PosShell(props: PosShellProps) {
           )}
         </div>
 
-        {/* Below the fixed-cart threshold: the total and Pay stay on screen. */}
-        {layout.cartAsDrawer && (
+        {/* Below the fixed-cart threshold: the total and Pay stay on screen -
+            but only for a mode that has something to settle. */}
+        {layout.cartAsDrawer && props.cartSummary && (
           <div className="flex shrink-0 items-center gap-3 border-t border-line bg-white px-3 py-2">
             <button
               type="button"
