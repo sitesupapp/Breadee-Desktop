@@ -328,6 +328,35 @@ Live unpaid orders are re-read from `pos_orders` under RLS whenever a customer i
 
 Four inherited assertions were retargeted, each because Level 3B deliberately changed what they described, and each to the property that actually mattered: "no menu/cart in Delivery" → "nothing re-implemented, and still no Pay"; "no shift" → "no payment, cash box or receipt"; the menu shortcut layer now follows the menu into Add Items while the takeaway payment layer stays off; and Ctrl+Enter's help label names its third owner rather than leaving it undocumented.
 
+### Staging verification — PASSED (2026-08-09)
+
+One delivery order on **staging**, tenant **Dominos Pizza** / **Main Branch**, as `cashier@dominos.com`, from the Level 3B dev build. Production never contacted.
+
+| | |
+|---|---|
+| QA shift | `74192728-9ac0-4f48-b6f3-af9be0be5adb`, float **$3.00** |
+| Order | `eb828401-…` / **260809-0001**, `delivery`, **`sent_to_kitchen`** / **`unpaid`**, batch **1** |
+| Customer / address | `5940fc3d-…` / `91b3903b-…` — both as selected |
+| Shift / branch | the QA shift / Main Branch, `table_id` null, `payment_method` null |
+| Item | Margherita ×1, base $7.00, required modifier **Small** (+$0.00), kitchen note "No olives" |
+| Order note | `Desktop Level 3B delivery ordering verification`, stored verbatim and separate from the item note |
+| Money | subtotal $7.00, discount $0, total **$7.00 USD** |
+| `client_op_id` | `8aacbc88-c7ac-4822-8714-d310afb0894d` — **one** `pos_order_submissions` row |
+
+Orders 41 → **42**, submissions 43 → **44**, **payments 36 → 36**. Zero duplicates; exactly one order carries the note. The only two writes in the window were `shift_opened` and `order_saved`.
+
+Confirmed live: the delivery basket cleared while Takeaway stayed empty and Dine-in untouched; the sent-order panel showed number, customer, address, note, total, `Unpaid` and `Sent to kitchen`; **no Pay control anywhere**, and F4 and Ctrl+Enter were inert afterwards. After route-away/return **and a full reload**, the order was rediscovered from the server — *"1 unpaid delivery order for this customer — #260809-0001 · Sent to kitchen · unpaid"* — with history refreshed to "1 previous order", and no resubmit: order and submission counts unchanged.
+
+**One defect found and fixed before the order was sent.** The identity strip lived in `work()`'s `add_items` branch, but the shell owns the work area there and renders the menu — so `work()` was never called and the strip was dead code. The one screen where a cashier picks the food never said whose delivery it was for. It is now returned as `identity` and pinned by the shell beside "Back to customer"; two regression tests pin both the rendering and the absence of the dead branch. Fixed in `4aead40`.
+
+### Shift closure — a real product constraint
+
+Ending the QA shift is **refused**: *"Cannot close this shift: 1 order(s) still open. Resolve them before ending the shift."* The drawer maths is right — opening float $3.00, **cash taken $0.00**, expected $3.00, **0 paid orders this shift**, difference "Balanced $0.00" — only the open-order rule blocks it.
+
+This is correct current behaviour, not a Level 3B fault: an unpaid `sent_to_kitchen` delivery order is genuinely still open, and resolving it needs either payment (Level 3C) or a void path (deliberately not built). **Shift `74192728-…` is therefore left OPEN**, and order **260809-0001** is left as labelled staging QA data. Nothing was forced, paid or voided.
+
+This is the first concrete argument for Level 3C: until delivery can be settled, any delivery order taken on the desktop pins its shift open.
+
 ### Still deferred
 
 Delivery payment and receipt, discount, printing, order editing, cancellation/void, the daily delivery operational workspace, driver assignment, and offline delivery.
@@ -386,7 +415,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 `npm install` (once) → `npm run dev` (http://localhost:5173). `npm run typecheck`, `npm run test`, `npm run build`. Tests use Node's built-in runner with its native TypeScript support — no test framework dependency is installed. Node ≥ 22.18 is required for the runner's TypeScript support; CI pins Node 24.
 
-Current gate results on `feature/desktop-pos-level-3b-delivery-ordering`: **555 tests, 0 failures** (499 baseline + 56 Level 3B); typecheck clean; production build clean. Run as two halves (267 + 288) under the known spawn instability.
+Current gate results on `feature/desktop-pos-level-3b-delivery-ordering`: **557 tests, 0 failures** (499 baseline + 58 Level 3B, including the two regression tests for the identity-strip defect); typecheck clean; production build clean. Run as two halves under the known spawn instability.
 
 Previous gate results on `feature/desktop-pos-level-3a-delivery-foundation`: **499 tests, 0 failures** (up from 408 on `desktop-staging`); typecheck clean; production build clean. Level 3A added **91** tests across `pos-phone`, `pos-customer-contract`, `pos-customer-search`, `pos-customer-create` and `pos-delivery-wiring`.
 
