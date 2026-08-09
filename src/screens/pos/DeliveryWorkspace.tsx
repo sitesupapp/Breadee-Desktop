@@ -117,6 +117,15 @@ export type DeliveryWorkspace = {
   hasCart: boolean;
   /** Leave Add Items. May open a confirmation instead of leaving. */
   requestLeaveAddItems: () => void;
+  /**
+   * Who the order being composed is for.
+   *
+   * Rendered by the SHELL, because while Add Items is open the shell owns the
+   * work area and shows the menu there. Returning it as a node rather than
+   * drawing it inside `work()` is the only way it can appear on the one screen
+   * where it matters most - the screen where items are being chosen.
+   */
+  identity: React.ReactNode;
 };
 
 export function useDeliveryWorkspace(input: {
@@ -724,20 +733,11 @@ export function useDeliveryWorkspace(input: {
     </div>
   );
 
-  const work = (layout: LayoutSpec) =>
-    view === "add_items" ? (
-      <div className="flex min-h-0 flex-1 flex-col gap-2">
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Button variant="ghost" size="lg" onClick={requestLeaveAddItems}>
-            Back to customer
-          </Button>
-          {identityStrip}
-        </div>
-        {/* The MENU itself is rendered by the shell, which owns the one grid
-            Takeaway and Dine-in also use. Nothing is duplicated here. */}
-        <div className="min-h-0 flex-1" />
-      </div>
-    ) : (
+  // NB there is no `add_items` branch here. While Add Items is open the SHELL
+  // owns the work area and renders the menu into it; this function is not
+  // called at all. The identity strip is returned as `identity` instead, so the
+  // shell can pin it above that menu - see `PosWorkspace`.
+  const work = (layout: LayoutSpec) => (
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         <div className="rounded-2xl border border-line bg-white p-4">
           <p className="text-sm font-extrabold text-ink">Delivery customer</p>
@@ -782,9 +782,9 @@ export function useDeliveryWorkspace(input: {
           </div>
         )}
 
-        {layout.cartAsDrawer && card}
-      </div>
-    );
+      {layout.cartAsDrawer && card}
+    </div>
+  );
 
   const panel = (_layout: LayoutSpec) => (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto border-l border-line bg-slate-50/60 p-3">
@@ -890,5 +890,6 @@ export function useDeliveryWorkspace(input: {
     cartOwner,
     hasCart,
     requestLeaveAddItems,
+    identity: identityStrip,
   };
 }

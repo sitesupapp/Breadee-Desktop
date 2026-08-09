@@ -96,6 +96,35 @@ test("Delivery Add Items borrows the shell's menu rather than bypassing it", () 
   assert.match(code, /const addingToDelivery = deliveryActive && delivery\.view === "add_items"/);
 });
 
+// REGRESSION, found by the staging smoke before any order was sent.
+//
+// The identity strip was built inside `work()`'s add_items branch - but while
+// Add Items is open the SHELL owns the work area and renders the menu there, so
+// `work()` is never called and the strip was dead code. The one screen where a
+// cashier picks the food was the one screen that never said whose delivery it
+// was for. The strip is now returned as `identity` and pinned by the shell.
+test("the customer and address stay visible while items are being chosen", () => {
+  const workspace = stripJsxComments(stripComments(workspaceSrc));
+  // The shell renders it, in the Add Items header beside Back to customer.
+  assert.match(workspace, /addingToDelivery && \([\s\S]{0,400}\{delivery\.identity\}/);
+
+  const delivery = stripJsxComments(stripComments(deliverySrc));
+  assert.match(delivery, /identity: identityStrip/);
+  // And the strip actually carries name, phone and the chosen address.
+  const strip = delivery.slice(delivery.indexOf("const identityStrip"), delivery.indexOf("const cartPanel"));
+  assert.match(strip, /customers\.selected\?\.name/);
+  assert.match(strip, /customers\.selected\?\.phone/);
+  assert.match(strip, /addressLine\(address\)/);
+});
+
+test("work() no longer pretends to render an Add Items view", () => {
+  // If this branch came back, the strip would silently stop rendering again -
+  // the shell would win and nothing would say so.
+  const delivery = stripJsxComments(stripComments(deliverySrc));
+  const work = delivery.slice(delivery.indexOf("const work = (layout"), delivery.indexOf("const panel = ("));
+  assert.equal(/view === "add_items" \?/.test(work), false);
+});
+
 test("the cart buffer is claimed for the DELIVERY CUSTOMER", () => {
   const code = stripComments(workspaceSrc);
   assert.match(code, /addingToDelivery && delivery\.cartOwner\s*\?\s*delivery\.cartOwner/);

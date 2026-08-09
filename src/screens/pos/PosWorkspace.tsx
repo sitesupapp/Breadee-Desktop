@@ -692,9 +692,15 @@ function PosWorkspaceInner() {
                   </span>
                 )}
                 {addingToDelivery && (
-                  <Button variant="ghost" onClick={delivery.requestLeaveAddItems}>
-                    Back to customer
-                  </Button>
+                  <>
+                    <Button variant="ghost" onClick={delivery.requestLeaveAddItems}>
+                      Back to customer
+                    </Button>
+                    {/* WHO this order is for, pinned above the menu. Without it
+                        the one screen where items are chosen is also the one
+                        screen that never says whose delivery they are for. */}
+                    {delivery.identity}
+                  </>
                 )}
                 <Input
                   ref={searchRef}
