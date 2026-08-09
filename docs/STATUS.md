@@ -361,6 +361,49 @@ This is the first concrete argument for Level 3C: until delivery can be settled,
 
 Delivery payment and receipt, discount, printing, order editing, cancellation/void, the daily delivery operational workspace, driver assignment, and offline delivery.
 
+## 1g. Level 3C — Delivery settlement (contract checkpoint)
+
+On `feature/desktop-pos-level-3c-delivery-settlement`, based on `desktop-staging` @ `1112c5e`. **Phase 2 only so far: the authoritative settlement contract, read from the staging definitions. No implementation, no financial write.**
+
+Level 3B integrated via **PR #10**, squashed as **`1112c5e`**, 557 tests green on CI. It deliberately left one real unpaid delivery order and its still-open shift behind; Level 3C inherits both:
+
+- shift `74192728-9ac0-4f48-b6f3-af9be0be5adb`, open, float $3.00, 0 paid orders
+- order `eb828401-…` / **260809-0001**, `delivery` / `sent_to_kitchen` / **`unpaid`**, $7.00 USD, 0 payment rows
+
+### The settlement RPC
+
+**`pos_pay_order(p_payload jsonb)` — the same RPC Takeaway already uses.** There is no delivery-specific payment function. It reads `order_id`, `method` (default `cash`), `currency_code` (USD/LBP), `discount_type`, `discount_value`, `exchange_rate`, and returns `order_id, paid, method, subtotal, discount, amount, order_number, loyalty, currency_code, original_amount, exchange_rate`.
+
+It locks the order `FOR UPDATE`, asserts operator, asserts branch access, requires `pos.take_payments`, and locks **the ORDER's shift** through `_pos_lock_open_shift` — which raises on a null shift. It refuses an already-paid order and a voided/cancelled/refunded one. `pos.apply_discounts` is required **only** when `discount_type` is percent/amount and `discount_value > 0`.
+
+**`tendered` and `change` are not in the payload and have no columns — they are UI-only** and must not be sent, exactly as in Level 2D.
+
+**There is no idempotency key.** Safety is state-based: a second call finds the order already paid and raises. That is Level 2D's model, so the recovery pattern is the same — one synchronous latch, `submit` at most once, and a lost response resolved by authoritative re-read rather than retry.
+
+### The lifecycle question, answered
+
+**Payment completes the delivery order. There is no separate collection step.**
+
+`pos_pay_order` sets `payment_status = 'paid'` **and** `status = 'completed'` in the same statement. A schema-wide search found **no** `pos_collect_*`, `pos_complete_*` or any delivery-completion function, and the only statuses in use across `pos_orders` are `sent_to_kitchen`, `completed`, `voided`, `refunded` — **there is no `collected` state to reach.**
+
+Three consequences follow directly, and none of them needs the desktop to invent financial state:
+
+| Question | Answer |
+|---|---|
+| What releases the shift-close blocker? | `pos_shift_unresolved_orders` treats an order as resolved when `status='completed' AND payment_status='paid'`, or it is voided/cancelled/refunded. **Paying the order releases it.** |
+| What makes inventory usage eligible? | `pos_order_eligible_for_usage` requires `completed` **and** `paid` — the state payment produces. Usage becomes eligible at payment, server-side; the client never writes inventory. |
+| Is a second "Collected" action needed? | **No.** Adding one would invent a transition the server does not model. |
+
+So Level 3C is a settlement level only: pay the order, and the order is finished.
+
+### Contract stop conditions — none triggered
+
+No migration is required; delivery settlement is fully expressible through the existing RPC; the lifecycle is unambiguous; duplicate-payment protection is available (state-based refusal + latch + authoritative re-read); and shift closure becomes possible once the order is paid.
+
+### Still deferred
+
+Native printing, broad delivery operational reporting, order editing, cancellation/void.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
