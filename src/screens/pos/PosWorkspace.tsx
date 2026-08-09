@@ -230,9 +230,25 @@ function PosWorkspaceInner() {
   /** Add Items borrows the menu; the cart buffer then belongs to that table. */
   const addingToTable = dineInActive && dineIn.view === "add_items";
 
-  // Level 3A. Customers only: no cart, no shift, no order, no money - which is
-  // why it needs none of the arguments Dine-in does.
-  const delivery = useDeliveryWorkspace({ pos, active: deliveryActive, online });
+  // Level 3B. Delivery now takes ORDERS, so it needs the same shift, menu and
+  // cart wiring Dine-in does - but still no payment argument of any kind.
+  const delivery = useDeliveryWorkspace({
+    pos,
+    active: deliveryActive,
+    online,
+    shiftId,
+    createOrders: pos.gates.createOrders,
+    currency,
+    cartLines: cart.lines,
+    cartSelectedKey: cart.selectedKey,
+    onSelectLine: cart.select,
+    onAdjustLine: cart.adjustQuantity,
+    onRemoveLine: (key) => removeLine(key),
+    onEditNote: setNoteKey,
+    onOpenShift: () => setOpenShiftOpen(true),
+  });
+  /** Delivery Add Items borrows the shell's menu, exactly as Dine-in does. */
+  const addingToDelivery = deliveryActive && delivery.view === "add_items";
 
   // Table state is tenant/branch scoped; drop it when the operator leaves POS.
   useEffect(() => () => tableStore.reset(), []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -251,8 +267,14 @@ function PosWorkspaceInner() {
    * there is one cart, and it serves one context at a time.
    */
   const claimBuffer = useCallback((): boolean => {
+    // Delivery's owner carries the CUSTOMER, so a basket built for one caller
+    // can never be claimed - and therefore never sent - for another.
     const owner: CartOwner =
-      addingToTable && dineIn.selected ? { kind: "table", tableId: dineIn.selected.id } : { kind: "takeaway" };
+      addingToDelivery && delivery.cartOwner
+        ? delivery.cartOwner
+        : addingToTable && dineIn.selected
+          ? { kind: "table", tableId: dineIn.selected.id }
+          : { kind: "takeaway" };
     if (useCart.getState().claim(owner)) return true;
     toast.push({
       tone: "warning",
@@ -260,7 +282,7 @@ function PosWorkspaceInner() {
       detail: "Send or clear the current order before starting another one.",
     });
     return false;
-  }, [addingToTable, dineIn.selected, toast]);
+  }, [addingToDelivery, delivery.cartOwner, addingToTable, dineIn.selected, toast]);
 
   const addItem = useCallback(
     (item: SearchableItem, price: number) => {
@@ -511,7 +533,10 @@ function PosWorkspaceInner() {
       qtyDown: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, -1),
       removeLine: () => cart.selectedKey && removeLine(cart.selectedKey),
     },
-    (!dineInActive || addingToTable) && !deliveryActive,
+    // Live wherever the MENU is: Takeaway, Dine-in Add Items, and now Delivery
+    // Add Items. Still off on the Delivery customer half, where the arrows and
+    // Ctrl+K belong to the customer search rather than a menu that is not shown.
+    (!dineInActive || addingToTable) && (!deliveryActive || addingToDelivery),
   );
 
   // Takeaway-only. New order, payment and the receipt belong to a takeaway
@@ -649,12 +674,12 @@ function PosWorkspaceInner() {
             openShiftReason={pos.gates.openShift.reason}
           />
         )}
-        /* One menu implementation, used by Takeaway AND by Dine-in Add Items.
-           A second menu would be a second place for prices to drift. */
+        /* One menu implementation, used by Takeaway, Dine-in Add Items AND
+           Delivery Add Items. A second menu would be a second place for prices
+           to drift. */
         work={(layout) =>
-          deliveryActive ? (
-            /* Delivery renders its own work area. The menu grid is not reached
-               from here at all, so no item can be added to anything. */
+          deliveryActive && !addingToDelivery ? (
+            /* Customer half of Delivery: no menu grid is reachable from here. */
             delivery.work(layout)
           ) : dineInActive && dineIn.view === "map" ? (
             dineIn.work(layout)
@@ -665,6 +690,11 @@ function PosWorkspaceInner() {
                   <span className="rounded-lg bg-brand-soft px-3 py-2 text-xs font-extrabold text-brand-dark">
                     Adding to {dineIn.selected?.name}
                   </span>
+                )}
+                {addingToDelivery && (
+                  <Button variant="ghost" onClick={delivery.requestLeaveAddItems}>
+                    Back to customer
+                  </Button>
                 )}
                 <Input
                   ref={searchRef}
@@ -719,9 +749,9 @@ function PosWorkspaceInner() {
         }
         cart={(layout) =>
           deliveryActive ? (
-            /* The side panel shows the CUSTOMER, not a cart. `CartPanel` is
-               never mounted in this mode, so Send to kitchen and Pay do not
-               exist on screen rather than being disabled. */
+            /* The side panel is Delivery's own: the customer, then the cart,
+               then the order that was sent. It mounts `CartPanel` WITHOUT a
+               `payGate`, so Pay is not rendered at all rather than disabled. */
             delivery.panel(layout)
           ) : dineInActive ? (
             dineIn.view === "add_items" ? (

@@ -20,15 +20,27 @@ export type CartPanelProps = {
   busy: boolean;
   savedOrderNumber: string | null;
   createGate: Gate;
-  payGate: Gate;
+  /**
+   * OPTIONAL on purpose (Level 3B).
+   *
+   * Delivery reuses this panel - there is deliberately no second cart - but it
+   * has no payment path at all until Level 3C. Passing a permanently-denied gate
+   * would still render a Pay button, and a disabled Pay is still a Pay: it tells
+   * a cashier that settling here is a thing that exists. Omitting the gate
+   * removes the control from the DOM instead. Takeaway passes it and is
+   * byte-for-byte unchanged.
+   */
+  payGate?: Gate;
   onSelect: (key: string) => void;
   onAdjust: (key: string, delta: number) => void;
   onRemove: (key: string) => void;
   onEditNote: (key: string) => void;
   onSendToKitchen: () => void;
-  onPay: () => void;
+  onPay?: () => void;
   onOpenShift: () => void;
   onNewOrder: () => void;
+  /** Label for the primary action. Delivery sends; it never pays. */
+  sendLabel?: string;
 };
 
 export function CartPanel(props: CartPanelProps) {
@@ -99,19 +111,23 @@ export function CartPanel(props: CartPanelProps) {
           <span className="text-2xl font-extrabold tabular-nums text-ink">{formatMoney(props.subtotal, props.currency)}</span>
         </div>
 
-        <div className="grid grid-cols-2 gap-2">
+        {/* One column when there is no payment action, so Delivery's Send is not
+            a half-width button sitting beside a gap where Pay used to be. */}
+        <div className={props.payGate ? "grid grid-cols-2 gap-2" : "grid grid-cols-1"}>
           <GatedButton
             gate={props.createGate}
-            variant="ghost"
+            variant={props.payGate ? "ghost" : "primary"}
             size="lg"
             disabled={empty || props.busy || blocked}
             onClick={props.onSendToKitchen}
           >
-            Send to kitchen
+            {props.busy && !props.payGate ? "Sending..." : (props.sendLabel ?? "Send to kitchen")}
           </GatedButton>
-          <GatedButton gate={props.payGate} size="lg" disabled={empty || props.busy || blocked} onClick={props.onPay}>
-            {props.busy ? "Working..." : "Pay (F4)"}
-          </GatedButton>
+          {props.payGate && (
+            <GatedButton gate={props.payGate} size="lg" disabled={empty || props.busy || blocked} onClick={props.onPay}>
+              {props.busy ? "Working..." : "Pay (F4)"}
+            </GatedButton>
+          )}
         </div>
       </div>
     </section>

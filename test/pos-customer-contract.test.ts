@@ -165,16 +165,36 @@ test("customer writes are never queued offline", () => {
   assert.ok(customersSrc.includes("needs a connection"));
 });
 
-test("the delivery workspace holds no cart and claims no buffer", () => {
+// RETARGETED BY LEVEL 3B. Delivery now takes orders, so it legitimately holds a
+// cart, reuses the shared cart panel and carries a shift id - all three were
+// scope statements about Level 3A, not safety properties. It still builds no
+// menu or cart of its own, which is the part that mattered: a second cart would
+// be a second place for someone else's food to end up.
+test("the delivery workspace re-implements neither the menu nor the cart", () => {
   const code = stripComments(workspaceSrc);
-  for (const token of ["useCart", "claimBuffer", "CartOwner", "addLine", "CartPanel", "MenuItemGrid"]) {
-    assert.equal(code.includes(token), false, `${token} must not appear in the delivery workspace`);
+  for (const token of ["MenuItemGrid", "CategoryNavigation", "ModifierDialog", "loadMenu"]) {
+    assert.equal(code.includes(token), false, `${token} must not be re-implemented for Delivery`);
   }
+  // It imports the shared panel rather than declaring one.
+  assert.match(code, /import \{ CartPanel \} from "@\/components\/pos\/CartPanel"/);
 });
 
-test("the delivery workspace has no shift, cash box or receipt path", () => {
+// RETARGETED BY LEVEL 3B for the same reason: a delivery order must carry a
+// shift, because an order with a null shift can never be paid
+// (`_pos_lock_open_shift`). What must still be absent is everything that
+// belongs to SETTLEMENT.
+test("the delivery workspace has no payment, cash box or receipt path", () => {
   const code = stripComments(workspaceSrc);
-  for (const token of ["useShift", "shiftId", "refreshCashBox", "ReceiptData", "presentReceipt", "PaymentDialog"]) {
+  for (const token of [
+    "refreshCashBox",
+    "ReceiptData",
+    "presentReceipt",
+    "receiptStore",
+    "PaymentDialog",
+    "openPayment",
+    "pos_pay_order",
+    "pos_pay_table",
+  ]) {
     assert.equal(code.includes(token), false, `${token} must not appear in the delivery workspace`);
   }
 });

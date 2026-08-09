@@ -75,12 +75,14 @@ export const SHORTCUTS: ShortcutSpec[] = [
   {
     // Shared id, same convention as lineUp/lineDown: ONE binding, and the active
     // screen decides what it confirms. The payment dialog registers it while
-    // open; Dine-in Add Items registers it to send the round. They never coexist
-    // - a payment dialog is not reachable from Add Items in Level 2B.
+    // open; Dine-in Add Items registers it to send the round; Delivery Add Items
+    // registers it to send the delivery order. They never coexist - no payment
+    // dialog is reachable from either Add Items screen, and Delivery has no
+    // payment path at all.
     id: "confirmPayment",
     keys: ["Enter"],
     ctrl: true,
-    label: "Confirm payment / Submit round",
+    label: "Confirm payment / Submit round / Send delivery order",
     group: "Order",
     display: "Ctrl+Enter",
     worksInInput: true,

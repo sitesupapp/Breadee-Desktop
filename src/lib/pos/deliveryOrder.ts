@@ -45,6 +45,23 @@ import type { Gate } from "@/components/ui";
 /** Order states that are still live: not settled, not voided. */
 export const OPEN_DELIVERY_STATUSES = ["draft", "sent_to_kitchen"] as const;
 
+/**
+ * The server's status, in words an operator can act on.
+ *
+ * Lives here rather than beside the component because the test runner only
+ * loads `.ts` - and because a label that decides whether a cashier believes an
+ * order is finished deserves to be tested directly rather than by reading JSX.
+ * "completed" is never used for an unpaid order: the server only sets it at
+ * settlement.
+ */
+export function kitchenStateLabel(status: string): string {
+  if (status === "sent_to_kitchen") return "Sent to kitchen";
+  if (status === "draft") return "Not sent yet";
+  if (status === "completed") return "Completed";
+  if (status === "voided" || status === "cancelled") return "Cancelled";
+  return status;
+}
+
 // --- errors ------------------------------------------------------------------
 
 /** The selected customer is gone, or was never this tenant's to begin with. */
