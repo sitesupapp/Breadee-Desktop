@@ -61,11 +61,17 @@ test("vertical movement is ONE shared id, so it can never do two things at once"
   assert.match(vertical[0].label, /cart \/ tables/);
 });
 
-test("the route switch reaches Dine-in and is no longer labelled as a later phase", () => {
+// RETARGETED BY LEVEL 3A. The Delivery half of this asserted that Alt+3 still
+// SAID "later phase" - true and useful while the route was dead. Level 3A opens
+// it, so the label must no longer defer a shipped route; the shortcut is still
+// pinned to its key, and the route's own gate is asserted in
+// `pos-delivery-wiring.test.ts`.
+test("both route switches are bound and neither label defers a shipped route", () => {
   assert.equal(press("2", { alt: true }), "routeDineIn");
-  const spec = SHORTCUTS.find((s) => s.id === "routeDineIn");
-  assert.doesNotMatch(spec?.label ?? "", /later phase/i);
-  assert.match(SHORTCUTS.find((s) => s.id === "routeDelivery")?.label ?? "", /later phase/i);
+  assert.equal(press("3", { alt: true }), "routeDelivery");
+  for (const id of ["routeDineIn", "routeDelivery"] as const) {
+    assert.doesNotMatch(SHORTCUTS.find((s) => s.id === id)?.label ?? "", /later phase/i);
+  }
 });
 
 test("table navigation never fires while the operator is typing in the search box", () => {

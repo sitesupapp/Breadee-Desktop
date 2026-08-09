@@ -217,13 +217,22 @@ test("Move, Close and Clear still go through tableOps, with Clear's reason intac
   }
 });
 
-test("Delivery is still disabled", () => {
+// RETARGETED BY LEVEL 3A, for the same reason as its twin in
+// `desktop-single-instance.test.ts`. What Level 2D actually needed to guarantee
+// was that no OTHER route could reach a payment path it had not built. Delivery
+// now exists, and still cannot: the assertion moved from "the route is off" to
+// "the route takes no money", which is the property that mattered.
+test("the Delivery route is gated, and reaches no payment path", () => {
   const source = read("screens", "pos", "PosWorkspace.tsx");
-  assert.match(
-    source,
-    /key: "delivery",[^}]*enabled: false/,
-    "the Delivery route became enabled",
-  );
+  assert.match(source, /key: "delivery",[^}]*enabled: deliveryGate\.allowed/, "the Delivery route lost its gate");
+  // Comments stripped: that file DOCUMENTS which RPCs it must never call, and a
+  // raw search cannot tell the prose from the behaviour it describes.
+  const delivery = stripJsxComments(read("screens", "pos", "DeliveryWorkspace.tsx"));
+  for (const rpc of ["pos_pay_table", "pos_pay_order", "pos_submit_order"]) {
+    assert.doesNotMatch(delivery, new RegExp(rpc), `${rpc} reached the delivery workspace`);
+  }
+  // And the shell renders no Pay control for it at all - not even a disabled one.
+  assert.match(source, /cartSummary=\{\s*deliveryActive\s*\?\s*undefined/);
 });
 
 test("offline payment does not exist, and sync replay is still review-only", () => {

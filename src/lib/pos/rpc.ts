@@ -40,7 +40,17 @@ export type PosRpcName =
   // (a second call finds no open unpaid order), and the client must recover a
   // lost response by authoritative re-read rather than by retrying blindly.
   // See `lib/pos/tablePayment.ts`.
-  | "pos_pay_table";
+  | "pos_pay_table"
+  // Level 3A - Delivery customer foundation. The ONLY write the customer flow
+  // performs: `pos_customers` and `pos_customer_addresses` are read directly
+  // under RLS but never written directly, because this RPC owns the phone
+  // matching, the address defaulting and the activity log.
+  //
+  // Note what is still absent: Delivery ORDERING and PAYMENT reuse
+  // `pos_submit_order` / `pos_pay_order`, which are already listed above - so
+  // Level 3A adds no order or money RPC, and the delivery workspace calls
+  // neither. Those arrive with Levels 3B and 3C.
+  | "pos_upsert_customer";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

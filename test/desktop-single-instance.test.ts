@@ -146,7 +146,14 @@ test("the POS module still points at the real route and keeps its own gate", () 
   assert.equal(typeof pos.show, "function");
 });
 
-test("Delivery is still disabled in the workspace itself", () => {
+// RETARGETED BY LEVEL 3A. This asserted `enabled: false` while Delivery did not
+// exist, which was the right guard then. Level 3A ships the Delivery customer
+// foundation, so the invariant it protected - the route is never hard-enabled -
+// is now expressed as "enabled by a gate", not "enabled by a literal". Relaxing
+// it to nothing would have left the rail unguarded; this was left failing until
+// the route genuinely landed.
+test("the Delivery route is enabled by a gate, never by a literal", () => {
   const workspace = read("src", "screens", "pos", "PosWorkspace.tsx");
-  assert.match(workspace, /key: "delivery",[^}]*enabled: false/, "the Delivery route became enabled");
+  assert.doesNotMatch(workspace, /key: "delivery",[^}]*enabled: true/, "the Delivery route was hard-enabled");
+  assert.match(workspace, /key: "delivery",[^}]*enabled: deliveryGate\.allowed/, "the Delivery route lost its gate");
 });

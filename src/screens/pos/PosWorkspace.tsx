@@ -38,8 +38,10 @@ import type { ReceiptData } from "@/lib/receipt";
 import { useReceipt, shouldShowReceipt } from "@/state/receipt";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canViewTables } from "@/lib/pos/access";
+import { canViewDelivery, canViewTables } from "@/lib/pos/access";
+import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
+import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
@@ -190,9 +192,11 @@ function PosWorkspaceInner() {
 
   // Which order type the workspace is showing. Takeaway and Dine-in share one
   // shell instance, so this is a mode rather than a router route.
-  const [mode, setMode] = useState<"takeaway" | "dine_in">("takeaway");
+  const [mode, setMode] = useState<"takeaway" | "dine_in" | "delivery">("takeaway");
   const tablesGate = canViewTables(pos.access);
   const dineInActive = mode === "dine_in" && tablesGate.allowed;
+  const deliveryGate = canViewDelivery(pos.access);
+  const deliveryActive = mode === "delivery" && deliveryGate.allowed;
   const tableStore = useTables();
   const roundMenu = useMemo(
     () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options }),
@@ -226,8 +230,14 @@ function PosWorkspaceInner() {
   /** Add Items borrows the menu; the cart buffer then belongs to that table. */
   const addingToTable = dineInActive && dineIn.view === "add_items";
 
+  // Level 3A. Customers only: no cart, no shift, no order, no money - which is
+  // why it needs none of the arguments Dine-in does.
+  const delivery = useDeliveryWorkspace({ pos, active: deliveryActive, online });
+
   // Table state is tenant/branch scoped; drop it when the operator leaves POS.
   useEffect(() => () => tableStore.reset(), []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Same for the customer book: a delivery customer must not survive the POS.
+  useEffect(() => () => useCustomers.getState().reset(), []);
 
   // Synchronous latch: three fast clicks must not reach the server three times.
   // The server is still the authority (m224); this only avoids the round trips.
@@ -478,6 +488,7 @@ function PosWorkspaceInner() {
   useShortcuts({
     routeTakeaway: () => setMode("takeaway"),
     routeDineIn: () => tablesGate.allowed && setMode("dine_in"),
+    routeDelivery: () => deliveryGate.allowed && setMode("delivery"),
     openShift: () => !shiftId && setOpenShiftOpen(true),
     endShift: () => shiftId && void startEndShift(),
     fullscreen: () => void toggleFullscreen(),
@@ -486,7 +497,9 @@ function PosWorkspaceInner() {
   // Menu + buffer bindings. Live whenever the MENU is on screen - Takeaway, or
   // Dine-in Add Items - because in both cases these keys edit the same buffer.
   // Disabled on the table map so the arrows drive the grid instead: one binding,
-  // one owner, decided by what the operator can actually see.
+  // one owner, decided by what the operator can actually see. Delivery excluded
+  // outright: it shows no menu and holds no buffer, so a key that edited one
+  // would be editing something invisible.
   useShortcuts(
     {
       search: () => searchRef.current?.focus(),
@@ -498,18 +511,19 @@ function PosWorkspaceInner() {
       qtyDown: () => cart.selectedKey && cart.adjustQuantity(cart.selectedKey, -1),
       removeLine: () => cart.selectedKey && removeLine(cart.selectedKey),
     },
-    !dineInActive || addingToTable,
+    (!dineInActive || addingToTable) && !deliveryActive,
   );
 
   // Takeaway-only. New order, payment and the receipt belong to a takeaway
-  // order; a dine-in round has none of them in Level 2B.
+  // order; a dine-in round has none of them in Level 2B, and Delivery has no
+  // order at all in Level 3A - F4 must not be able to open a payment there.
   useShortcuts(
     {
       newOrder,
       openPayment,
       print: () => receiptStore.reopen(),
     },
-    !dineInActive,
+    !dineInActive && !deliveryActive,
   );
 
   // --- gates -----------------------------------------------------------------
@@ -570,7 +584,16 @@ function PosWorkspaceInner() {
       active: mode === "dine_in",
       onSelect: () => setMode("dine_in"),
     },
-    { key: "delivery", label: "Delivery", icon: "V", to: "/pos", enabled: false, reason: "Delivery arrives in the next phase." },
+    {
+      key: "delivery",
+      label: "Delivery",
+      icon: "V",
+      to: "/pos",
+      enabled: deliveryGate.allowed,
+      reason: deliveryGate.reason,
+      active: mode === "delivery",
+      onSelect: () => setMode("delivery"),
+    },
   ];
 
   return (
@@ -581,9 +604,14 @@ function PosWorkspaceInner() {
         onToggleFullscreen={() => void toggleFullscreen()}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
-        cartTitle={dineInActive ? "Table bill" : "Current order"}
+        cartTitle={deliveryActive ? "Customer" : dineInActive ? "Table bill" : "Current order"}
+        /* Delivery passes NO summary, so the drawer-width bottom bar - Pay
+           included - is not rendered at all. Level 3A has no order to settle,
+           and a disabled Pay would still suggest there is one. */
         cartSummary={
-          dineInActive
+          deliveryActive
+            ? undefined
+            : dineInActive
             ? {
                 // The disabled state is decided in `lib/pos/dineInActions.ts`,
                 // not by a literal here - and it is derived from the SAME
@@ -624,7 +652,11 @@ function PosWorkspaceInner() {
         /* One menu implementation, used by Takeaway AND by Dine-in Add Items.
            A second menu would be a second place for prices to drift. */
         work={(layout) =>
-          dineInActive && dineIn.view === "map" ? (
+          deliveryActive ? (
+            /* Delivery renders its own work area. The menu grid is not reached
+               from here at all, so no item can be added to anything. */
+            delivery.work(layout)
+          ) : dineInActive && dineIn.view === "map" ? (
             dineIn.work(layout)
           ) : (
             <>
@@ -686,7 +718,12 @@ function PosWorkspaceInner() {
           )
         }
         cart={(layout) =>
-          dineInActive ? (
+          deliveryActive ? (
+            /* The side panel shows the CUSTOMER, not a cart. `CartPanel` is
+               never mounted in this mode, so Send to kitchen and Pay do not
+               exist on screen rather than being disabled. */
+            delivery.panel(layout)
+          ) : dineInActive ? (
             dineIn.view === "add_items" ? (
               dineIn.roundPanel(layout)
             ) : (
@@ -717,6 +754,7 @@ function PosWorkspaceInner() {
       />
 
       {dineInActive && dineIn.dialogs}
+      {deliveryActive && delivery.dialogs}
 
       <ModifierDialog
         open={Boolean(pickerItem)}

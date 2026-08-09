@@ -33,6 +33,15 @@ export type RefusalKind =
   | "discount_permission"
   | "split_shift"
   | "mixed_currency"
+  // Delivery customers (Level 3A)
+  | "customer_permission"
+  | "customer_offline"
+  | "invalid_phone"
+  | "duplicate_phone"
+  | "customer_in_progress"
+  | "customer_ambiguous"
+  | "customer_missing"
+  | "address_invalid"
   // Dine-In table operations (Level 2C)
   | "close_needs_payment"
   | "same_table"
@@ -57,6 +66,58 @@ export type ClassifiedError = {
 };
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
+  // --- Delivery customers (Level 3A). Listed first: several contain words the
+  // generic permission/offline rules further down would swallow.
+  {
+    kind: "duplicate_phone",
+    // The gap this whole flow is built around: the server is unique on the RAW
+    // phone only, so an equivalent number is a duplicate waiting to happen.
+    test: /customer with this phone number already exists/i,
+    hint: "Open the existing customer instead of creating a second record for the same number.",
+    expected: true,
+  },
+  {
+    kind: "customer_ambiguous",
+    test: /could not confirm whether the customer/i,
+    hint: "Search for the phone number first. Do NOT create the customer again until you know.",
+    expected: false,
+  },
+  {
+    kind: "customer_in_progress",
+    test: /customer is already being saved/i,
+    hint: "Wait for the current save to finish.",
+    expected: true,
+  },
+  {
+    kind: "customer_offline",
+    test: /saving a customer needs a connection/i,
+    hint: "Reconnect before adding or editing a customer - customer records are never queued offline.",
+    expected: true,
+  },
+  {
+    kind: "invalid_phone",
+    test: /valid phone number|phone number is not valid|phone number is required to create/i,
+    hint: "Use a local number (7-8 digits) or an international one with its country code.",
+    expected: true,
+  },
+  {
+    kind: "address_invalid",
+    test: /address needs at least a street/i,
+    hint: "Enter the street. Area, building and floor are optional.",
+    expected: true,
+  },
+  {
+    kind: "customer_missing",
+    test: /customer not found|customer is no longer available/i,
+    hint: "Search for the customer again - they may belong to another branch.",
+    expected: true,
+  },
+  {
+    kind: "customer_permission",
+    test: /permission to (view|add or edit) customers|pos\.customers\.manage required/i,
+    hint: "Ask a manager for customer access, or have them capture the customer.",
+    expected: true,
+  },
   // --- Dine-In settlement (Level 2D). Listed first: several of these contain
   // words the generic payment/permission rules further down would swallow.
   {

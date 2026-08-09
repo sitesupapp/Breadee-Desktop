@@ -110,7 +110,10 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 
 // --- the allow-list ----------------------------------------------------------
 
-test("the RPC allow-list contains exactly the twelve expected names", () => {
+// RETARGETED BY LEVEL 3A: `pos_upsert_customer` was added, so the expected set
+// grows by exactly one name. The list is spelled out rather than counted so a
+// new RPC cannot slip in under an unchanged total.
+test("the RPC allow-list contains exactly the thirteen expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -131,10 +134,11 @@ test("the RPC allow-list contains exactly the twelve expected names", () => {
       "pos_shift_expected",
       "pos_submit_order",
       "pos_table_map",
+      "pos_upsert_customer",
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 12);
+  assert.equal(members.length, 13);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

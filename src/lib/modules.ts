@@ -45,9 +45,9 @@ export const MODULES: ModuleEntry[] = [
     icon: "🧾",
     // Kept current with what the desktop actually ships. The old wording still
     // deferred Dine-in months after it landed, which the app then contradicted
-    // one screen away. Delivery and printing are named as NOT here, because
-    // they are not - the Delivery route is rendered disabled.
-    desc: "Takeaway and Dine-in POS: shifts, tables, modifiers, discounts, cash payment and receipts. Delivery and printing are not available yet.",
+    // one screen away. Level 3A opened the Delivery route for CUSTOMERS only,
+    // so the copy now draws that line rather than claiming Delivery either way.
+    desc: "Takeaway and Dine-in POS: shifts, tables, modifiers, discounts, cash payment and receipts. Delivery covers customers and addresses only - delivery ordering and printing are not available yet.",
     availability: "desktop",
     to: "/pos",
     // Feature + `pos.access` + the owner exclusion, exactly as the server decides.

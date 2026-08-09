@@ -9,7 +9,8 @@ _Source of truth: the Breadee web app (Next.js 16 + Supabase). This desktop clie
 - **Level 2A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2A` (branch `feature/desktop-pos-level-2a-tables`) — **merged** as `c8ccbb5` via PR #4, kept for reference.
 - **Level 2B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2B` (branch `feature/desktop-pos-level-2b-rounds`) — **merged** as `27410bb` via PR #5, kept for reference.
 - **Level 2C worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2C` (branch `feature/desktop-pos-level-2c-table-ops`).
-- **Level 2D worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2D` (branch `feature/desktop-pos-level-2d-payment`, based on `origin/desktop-staging` @ `f03c091`).
+- **Level 2D worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2D` (branch `feature/desktop-pos-level-2d-payment`, based on `origin/desktop-staging` @ `f03c091`) — **merged** as `6b7f365` via PR #7.
+- **Level 3A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3A` (branch `feature/desktop-pos-level-3a-delivery-foundation`, based on `desktop-staging` @ `d3fea84`).
 - `C:\Users\User\Claude\Projects\Breadee\Breadee-Desktop` is a **read-only fallback copy** of the pre-migration state. Do not work in it.
 - GitHub remote: `github.com/sitesupapp/Breadee-Desktop` (the repo exists and `desktop-staging` is pushed — an earlier version of this document said otherwise).
 
@@ -188,6 +189,95 @@ Payment requires a connection, stated by the gate itself. Nothing is enqueued, `
 
 **PASSED, 2026-08-07.** One real Dine-In payment taken on staging. See §8.
 
+## 1e. Level 3A — Delivery customer foundation (this change set)
+
+On `feature/desktop-pos-level-3a-delivery-foundation`, local only (not pushed, no PR). This level makes a delivery customer **findable, creatable and correctable**. It deliberately does not make a delivery order possible.
+
+The RPC allow-list grows from 12 names to **13**, and `pos_upsert_customer` is the thirteenth. No order or money RPC was added: Delivery ordering and payment will reuse `pos_submit_order` / `pos_pay_order`, which were already on the list since Level 1 — and which the delivery path calls **nowhere**.
+
+### The phone model, and the gap it exists for
+
+`pos_upsert_customer` derives `pos_customers.phone_e164` itself via `_phone_normalize_e164`. So why does the desktop carry its own port of that function (`lib/pos/phone.ts`)?
+
+Because of the data model:
+
+| Constraint | Column | Uniqueness |
+|---|---|---|
+| `uq_pos_customer_phone` | `phone` — the **raw** typed string | **UNIQUE** per tenant |
+| (index only) | `phone_e164` — the normalised form | **non-unique** |
+
+"03 123 456", "+9613123456" and "009613123456" are one human being and three legal rows. **The database will not stop the third one being created.** The unique constraint fires only when a cashier types the number the same way twice, which is the case that needed protecting least.
+
+This is a **P0 risk that the desktop cannot fix** — the constraint lives in the shared schema, and this level is forbidden from touching migrations. So the desktop must not rely on one. The mitigation is stated once, as a pure function:
+
+```
+decideCreate({ query, candidates }) -> create | select | choose | refused
+```
+
+- **`select`** — an equivalent number is already on file, however either side was typed. Open that customer. Never insert.
+- **`choose`** — several equivalent rows exist (a duplicate the constraint already permitted). Show them; do not guess which one a delivery should go to.
+- **`refused`** — not phone-like enough (a name-only query) or not normalisable. A name-only search **never** offers to create, which is how a customer book fills with rows nobody can look up by phone again.
+- **`create`** — only when a raw *and* a normalised search both came back empty.
+
+"Find / create" is therefore a **search that may end in a create**, never a create that falls back to a search — and it re-reads the shortlist at press time rather than trusting the debounced one on screen. A row written before `phone_e164` existed still participates, via its raw phone normalised client-side. The port mirrors the SQL exactly, including where the SQL returns null; two unparseable numbers are **not** equivalent, or junk in the search box would match everything.
+
+### One latch, and a re-read
+
+Level 2D's payment recovery had a safety net this level does not have. A second `pos_pay_table` finds no open unpaid order and refuses — the server is safe by *state*. `pos_upsert_customer` has no equivalent: a second insert with a differently-typed phone simply succeeds.
+
+So the two mechanisms carry the whole weight:
+
+- **A synchronous closure latch** (`createCustomerLatch`, module-level in `state/customers.ts`, not in the store). Zustand updates are asynchronous like any React state, so two clicks in the same tick would both read a stale `saving === false`. The `saving` flag exists only to re-render the gate.
+- **An authoritative re-read after a failure**, never a blind retry. `performCustomerCreate` calls `submit` **at most once**; a lost response is resolved by searching for the phone. Found once → the write landed, treated as recovered. Found several times → `DuplicatePhoneError`, and the operator chooses. Found none → nothing was written, retry is safe. Re-read itself failed → **ambiguous**, which refuses both retry and completion and tells the operator to search before trying again.
+
+### What Level 3A can and cannot do
+
+| Can | Cannot |
+|---|---|
+| Search by name or phone (raw **and** normalised passes) | Add a menu item |
+| Create a customer | Hold a cart or claim the shared buffer |
+| Edit name, notes, phone | Submit an order / send to kitchen |
+| Add and edit addresses, choose the delivery address | Take payment, print a receipt, touch the cash box |
+| Read past orders | Reorder, edit, void or refund a past order |
+
+The Delivery route is now **enabled** behind `canViewDelivery` (POS access + the `pos.delivery` sub-feature), replacing the Level 1 placeholder that read *"Delivery arrives in the next phase."* Enabling a route inside a **shared** shell is the structural risk of this level, so the exclusions are wired rather than hidden:
+
+- The workspace renders **no** `MenuItemGrid` and **no** `CartPanel` — they are not mounted, rather than mounted and disabled.
+- `PosShell.cartSummary` became **optional**, and Delivery passes nothing. The drawer-width bottom bar — Pay button included — is not rendered at all. A disabled Pay would still be a Pay, and there is no payment path behind it.
+- The menu/buffer shortcut layer and the takeaway `newOrder` / `openPayment` / `print` layer are both disabled while Delivery is active, so **F4 cannot open a payment** there.
+- `Alt+3` now switches to Delivery and is no longer labelled a later phase.
+
+`test/pos-customer-contract.test.ts` asserts all of this statically as well: none of `pos_submit_order`, `pos_pay_order`, `pos_pay_table`, `pos_void_order`, `pos_edit_order` appears anywhere in the delivery path, and `pos_upsert_customer` is the only RPC the customer library calls.
+
+### Permissions
+
+There is deliberately **no** `pos.delivery.*` permission key — the server has none. What an operator may do inside Delivery comes from the ordinary POS keys plus two customer keys:
+
+- `pos.customers.view` — reading the customer book.
+- `pos.customers.manage` **OR** `pos.create_orders` — creating or editing. Mirrored exactly from the RPC, which accepts either: a cashier who takes delivery orders must be able to capture the caller without a second permission. The desktop is never more permissive than the RPC here, and never stricter either.
+
+No shift is required. Looking a caller up, or fixing their address, is reasonable work with no till open; Level 3B's ordering path brings the shift gate with it.
+
+### Addresses and history
+
+- **Addresses are written only through `pos_upsert_customer`.** `pos_customers` and `pos_customer_addresses` are read directly under RLS (tenant-scoped, and branch-scoped for customers) but never written directly — the RPC owns the matching rules, the activity log and the address defaulting.
+- **`street` is required client-side.** `_customer_capture` silently ignores an address object without one; a save that appears to work and changes nothing is worse than a refusal.
+- **`is_default` is sent only when true**, so saving an address never demotes another one that nobody asked to change.
+- **The chosen address is never moved implicitly.** It is the address a delivery would be sent to, so a background re-read keeps the operator's explicit choice when it still exists and falls back to the server's default only when it does not.
+- **Order history is read only** and says so on the dialog. No reorder, no edit, no void, no refund — Level 3A has no order path to offer them through.
+
+### Online only
+
+Customer writes require a connection, stated by the write gate itself. Nothing is enqueued, `enqueue()` still has zero call sites, and sync replay remains `review`. A queued customer would be one whose duplicate check ran against a stale world — the single thing this level exists to prevent.
+
+### Staging verification status
+
+**PASSED, 2026-08-09.** Customer-only smoke on staging; zero financial writes. See §10.
+
+### Explicitly deferred to Level 3B and beyond
+
+Delivery cart and `CartOwner` extension, `pos_submit_order` with `order_type: delivery`, delivery payment, delivery receipt, the cash box, the delivery order list, driver assignment, delivery fees and totals, and any change to the phone uniqueness constraint.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -200,7 +290,9 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.
-- Delivery, customers, orders workspace, edit/void/refund, reports, KDS, loyalty, Google OAuth deep-link, encrypted local storage.
+- **Delivery ORDERING and PAYMENT — not implemented.** Level 3A ships the customer foundation only (see §1e). The Delivery route is enabled, but it cannot add an item, submit an order or take money, and it calls no order or payment RPC.
+- **Customer de-duplication at the database level — not fixed, and not fixable here.** `uq_pos_customer_phone` is unique on the raw phone; `phone_e164` is only indexed. The desktop mitigates before the write (§1e); it does not repair the constraint, and existing duplicate rows are surfaced for the operator to choose between rather than merged.
+- Orders workspace, edit/void/refund, reports, KDS, loyalty, driver assignment, Google OAuth deep-link, encrypted local storage.
 
 ## 4. Security checklist
 
@@ -218,12 +310,19 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - [x] A lost payment response is resolved by authoritative re-read, never by a blind retry; an unresolvable state refuses both retry and completion.
 - [x] No invented `client_op_id` on payment — the RPC has no idempotency key and the client does not pretend otherwise.
 - [x] Tendered and change never reach the server; an exact-payload test fails if either is added.
+- [x] Customer records are written **only** through `pos_upsert_customer`; `pos_customers` and `pos_customer_addresses` are never inserted, updated or deleted directly.
+- [x] `phone_e164` is never sent — the server derives it, so a row whose raw and normalised forms disagree cannot originate here.
+- [x] No customer is created without a raw **and** a normalised search first; a name-only query can never create one.
+- [x] One synchronous latch across the create path, `submit` called at most once, and a lost response resolved by re-read rather than retry.
+- [x] The Delivery route reaches no order, payment or void RPC — asserted statically, not merely by absent buttons.
+- [x] Customer writes reach no offline queue; they are refused while offline instead.
 - [x] No production migration; production Supabase untouched.
 - [ ] Local IndexedDB is not yet encrypted at rest.
 - [ ] Audit records are local-only until sync RPC wiring lands.
 
 ## 5. Known gaps / risks
 
+- **Customer phone uniqueness is on the wrong column (P0, schema-level).** `uq_pos_customer_phone` is unique on the raw `phone`; `phone_e164` carries only a non-unique index. Any client that has not ported `_phone_normalize_e164` — including the web app's own quick-capture paths — can create a second customer for a number already on file, and the database will accept it. The desktop mitigates this before every write (§1e). The real fix is a normalised unique constraint plus a de-duplication pass, and it belongs to the shared schema, not here.
 - **Generated DB types are stale.** `src/lib/database.types.ts` predates m212/m213 (price metadata) and m216/m224 (`pos_submit_order`, `pos_void_order.p_refund`). POS RPCs therefore go through the single documented boundary in `lib/pos/rpc.ts`, and the two menu selects re-type their rows. Regenerating the schema types is the clean fix.
 - **Google OAuth** needs a registered redirect + a Tauri deep-link handler. Email/password is the working path.
 - **Native build not verified** — `tauri build` has not been run here.
@@ -233,7 +332,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 `npm install` (once) → `npm run dev` (http://localhost:5173). `npm run typecheck`, `npm run test`, `npm run build`. Tests use Node's built-in runner with its native TypeScript support — no test framework dependency is installed. Node ≥ 22.18 is required for the runner's TypeScript support; CI pins Node 24.
 
-Current gate results on `feature/desktop-pos-level-2d-payment`: **394 tests, 0 failures** (up from a 266 baseline); typecheck clean; production build clean.
+Current gate results on `feature/desktop-pos-level-3a-delivery-foundation`: **499 tests, 0 failures** (up from 408 on `desktop-staging`); typecheck clean; production build clean. Level 3A added **91** tests across `pos-phone`, `pos-customer-contract`, `pos-customer-search`, `pos-customer-create` and `pos-delivery-wiring`.
 
 Note on this machine: roughly one process spawn in three dies with `EPERM uv_spawn`, `0xC0000005`, `Access is denied` or esbuild's `The service was stopped`. A test *file* reported as failed while listing no failing assertion is that crash, not a real failure — re-run the file alone to tell them apart. Level 2D's full-suite runs hit this on every single-command attempt, each time on a *different* random file; running the suite in two halves completed cleanly (170 + 221 = 391). CI is the authoritative full-suite gate.
 
@@ -243,6 +342,20 @@ Two Level 2C assertions were **retargeted** by Level 2D, deliberately only after
 - `DEFERRED_TABLE_ACTIONS`, `["pay"]` → `[]`.
 
 Both were left failing during implementation rather than relaxed in advance. A size assertion loosened before its feature lands stops being a guard and becomes a comment.
+
+Level 3A retargeted **five** inherited assertions on the same principle, each only after the Delivery route was genuinely wired:
+
+| Assertion | Was | Now |
+|---|---|---|
+| `pos-table-payment-contract` — the expected name list | 12 names, spelled out | 13, `pos_upsert_customer` added |
+| `pos-table-ops` / `pos-dine-in-actions` — allow-list size | `12` | `13` |
+| `desktop-single-instance` — "Delivery is still disabled" | `enabled: false` | enabled by a **gate**, never a literal |
+| `pos-table-payment-wiring` — "Delivery is still disabled" | `enabled: false` | gated **and** reaches no payment path |
+| `pos-table-shortcuts` — Alt+3's label | must say "later phase" | must **not** defer a shipped route |
+
+Two of those are more than a number change. "The route is off" was only ever a proxy for "no other route can reach a payment path Level 2D did not build" — so the replacement asserts the real property (no order/payment RPC in the delivery path, and no Pay control rendered) rather than the proxy, which would otherwise have been deleted and nothing left in its place.
+
+A latent bug in the shared test helper surfaced here and was fixed: `stripJsxComments` matched `\{\s*\/\*`, so it began matching at an ordinary object-literal brace followed by a JSDoc block and — being lazy — ran on to the next `*/}` anywhere below, deleting real code from the string under assertion. A source test then failed against a file that was correct. The braces are now anchored tight to the delimiters.
 
 ## 7. Level 2D integration — MERGED
 
@@ -304,3 +417,59 @@ Deliberately single-payment, so these remain covered by tests only, not by a liv
 Packaged QA found that launching the installed app again started a **second full instance** — three concurrent processes were opened. The server refused the duplicate settlement, so this was never a double-charge defect, but each process carried its own cart, selected table and in-memory payment latch, which is two tills on one terminal.
 
 `src-tauri` now registers `tauri-plugin-single-instance` (desktop targets only, registered first). A second launch does not create a window: it unminimises, shows and focuses the running instance, then exits. The callback deliberately does nothing else — no navigation, no reload, no event, no state reset — because the running instance may be mid-order or mid-payment. The second process's argv/cwd are ignored, since the app has no deep-link handling and acting on them would be a way to drive the POS from outside it.
+
+## 10. Level 3A staging verification — PASSED (2026-08-09)
+
+Customer-foundation smoke on **staging** (`azjxprewycygsocusxjn`), tenant **Dominos Pizza** (#8, `2c924171-…`), **Main Branch** (`ae600a17-…`), as **`cashier@dominos.com`** (`71f24774-…`), from the Level 3A dev build at `http://localhost:5186` (worktree @ `76be0a0`). Production (`cltlqfqormkhppmbvyrv`) was never contacted.
+
+**No financial write of any kind.** Before and after the run: shifts **7 → 7** (none open, newest 2026-08-08), orders **41 → 41**, payments **36 → 36**. Opening the Delivery route issued **zero** network requests — not a shift read, not an order read, nothing until a query was typed.
+
+### The only three writes, from `activity_logs`
+
+| # | Action | Record |
+|---|---|---|
+| 1 | `customer_created` | `pos_customers` `5940fc3d-…`, `{name: "Desktop Level 3A QA", phone: "03 111 999", source: "pos_delivery"}` |
+| 2 | `customer_address_saved` | `pos_customer_addresses` `91b3903b-…` (add) |
+| 3 | `customer_address_saved` | the **same** `91b3903b-…` (edit — an update, not a second row) |
+
+`source: "pos_delivery"` is stamped **by the server**, which is exactly why it is on the client's forbidden-field list.
+
+### QA customer — test data, left in place deliberately
+
+`5940fc3d-d8a8-4e67-ab89-39629d9b8f56` · **Desktop Level 3A QA** · raw `03 111 999` · `phone_e164` `+9613111999` · notes *"Test data - Level 3A staging verification. Do not delete."* · one address `91b3903b-…` (`QA, Hamra, QA Street 2, Bldg QA`, default). Not deleted: there is no supported archive/delete action in the product, and direct SQL cleanup is out of bounds.
+
+### Search, on live data
+
+| Query | Finds | Why it matters |
+|---|---|---|
+| `70111222` | Ahmad Khoury (1) | raw phone |
+| `+9613555666` | Sara Haddad (1) | her stored raw is **`03 555 666`** — a raw-only `ilike` could never have matched. The normalised pass is doing real work against real rows. |
+| `Sara` | Sara Haddad (1) | name |
+
+Selecting her showed 2 addresses and 4 orders, matching the database exactly, and the card printed **"Dials as +9613555666"** beneath the stored raw string — the affordance that makes an invisible duplicate visible to a cashier.
+
+### The P0 duplicate check, live
+
+The QA number was typed back in four legal alternative forms. **Every one selected the existing customer; none opened the create dialog.**
+
+`+9613111999` · `009613111999` · `3111999` · `+961 03 111 999`
+
+Two of them raised *"This number is already on file — Opened the existing customer."* Authoritative row count for that logical number afterwards: **1**, by `phone_e164`, by digit-suffix, and by name. `activity_logs` contains exactly **one** `customer_created` for the whole session. Tenant customers went 3 → 4.
+
+Before creating, both required searches were proven empty in the UI — raw `03 111 999` and normalised `+9613111999` — each showing *"No customer found. Find / create will add this number."*
+
+**Not covered live:** the `choose` branch (several equivalent rows for one number). Reaching it needs a pre-existing normalised duplicate, and manufacturing one would mean creating a second QA customer or writing SQL directly — both forbidden, and both would be the exact defect this level exists to prevent. It stays covered by tests.
+
+### Gates observed in the running app
+
+- **No menu grid, no cart panel, no bottom bar, no Pay control** in Delivery — not present, not merely disabled.
+- **F4, Ctrl+K and Ctrl+Enter did nothing** in Delivery, and issued zero requests.
+- **No shift was needed** and none was created; the status bar read "No open shift" throughout.
+- **Cart ownership held.** A Takeaway line ($3.00 French Fries) was left buffered, Delivery was entered — it showed no cart — and the line was still intact on return. Delivery neither claimed nor cleared the buffer.
+- **Takeaway and Dine-in remain intact**: menu, cart and shift gates on one; the table map (9 free / 1 occupied / 10 configured) and Move/Close/Clear on the other.
+- A full reload returned to Takeaway with an empty cart and no customer selected — nothing is persisted locally — and re-searching the same raw string then **selected** the QA customer rather than creating a second one.
+- Empty history for the QA customer read *"This customer has no orders yet."*; the dialog's footer states it is read only, and carries no reorder, edit, void or refund control.
+
+### One observation, not a Level 3A defect
+
+The dashboard tile renders the branch as **"Branch ae60"** — an id fragment — while the POS status bar correctly reads **"Main Branch"**. §1 of this document claims no UUID fragments appear in the UI, so the dashboard's branch-name fallback is firing where it should not. It predates Level 3A and is outside its scope; worth a separate look.
