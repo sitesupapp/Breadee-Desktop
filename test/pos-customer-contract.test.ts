@@ -183,18 +183,17 @@ test("the delivery workspace re-implements neither the menu nor the cart", () =>
 // shift, because an order with a null shift can never be paid
 // (`_pos_lock_open_shift`). What must still be absent is everything that
 // belongs to SETTLEMENT.
-test("the delivery workspace has no payment, cash box or receipt path", () => {
+// RETARGETED BY LEVEL 3C. Settlement is the point of this level, so payment, the
+// cash box and the receipt now legitimately appear on the delivery path. What
+// must still hold is that delivery reaches money only through its own audited
+// adapter, and never through a TABLE's settlement or an offline queue.
+test("the delivery workspace settles only through its own adapter", () => {
   const code = stripComments(workspaceSrc);
-  for (const token of [
-    "refreshCashBox",
-    "ReceiptData",
-    "presentReceipt",
-    "receiptStore",
-    "PaymentDialog",
-    "openPayment",
-    "pos_pay_order",
-    "pos_pay_table",
-  ]) {
+  for (const token of ["pos_pay_table", "pos_pay_order", "enqueue", "outbox", "tableId"]) {
     assert.equal(code.includes(token), false, `${token} must not appear in the delivery workspace`);
+  }
+  // The adapter owns the re-read, the latch and the recovery model.
+  for (const fn of ["checkSettlementTarget", "performDeliverySettlement", "payDeliveryOrder"]) {
+    assert.ok(code.includes(fn), `${fn} should be how delivery reaches settlement`);
   }
 });
