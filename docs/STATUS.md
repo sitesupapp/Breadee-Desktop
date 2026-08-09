@@ -278,6 +278,89 @@ Customer writes require a connection, stated by the write gate itself. Nothing i
 
 Delivery cart and `CartOwner` extension, `pos_submit_order` with `order_type: delivery`, delivery payment, delivery receipt, the cash box, the delivery order list, driver assignment, delivery fees and totals, and any change to the phone uniqueness constraint.
 
+## 1f. Level 3B — Delivery ordering (this change set)
+
+On `feature/desktop-pos-level-3b-delivery-ordering`, based on `desktop-staging` @ `9378b66`. Level 3A made a delivery customer findable; Level 3B makes an order **placeable** — and stops short of payment.
+
+### The contract, read from the staging definitions
+
+`pos_submit_order(p_payload)` is a thin idempotency wrapper: with a `client_op_id` it advisory-locks (tenant, op), looks the id up in `pos_order_submissions`, and **replays the stored result with `idempotent: true`**. Without one it calls `pos_save_order` directly — a new order every time. The id is not optional.
+
+The delivery payload is `order_type`, `status`, `shift_id`, `client_op_id`, `notes`, `customer_id`, `address_id`, `items[]` (with `kitchen_note` and `modifiers[]`). `branch_id` is sent but **ignored** for non-super users — the server derives it from `current_user_branch_id()`.
+
+| Question | Answer |
+|---|---|
+| Sent unpaid? | Yes — `sent_to_kitchen` / `unpaid` |
+| Shift required by the server? | **No** — but see below |
+| Inventory effect on submit? | **None.** `pos_order_eligible_for_usage` requires `completed` **and** `paid` |
+| Batch | Always 1. The append path is dine-in only, keyed on `table_id` |
+| Discount | **`pos_pay_order` owns it** — it recomputes the subtotal and overwrites `discount_amount`/`total_amount` at settlement. Deferred to 3C |
+| Recovery | No active-delivery RPC exists. `pos_delivery_client_orders` answers a different question (completed+paid or cancelled, behind `pos.delivery_clients.view`) |
+
+**Two findings shaped everything else.**
+
+1. **`pos_save_order` validates neither `customer_id` nor `address_id`.** It stores both raw — no tenant check on the customer, no ownership check on the address. `revalidateTarget()` re-reads both immediately before every send and is the only place that relationship is ever verified.
+2. **A shift is required after all**, but not for the reason the server gives. `pos_pay_order` locks *the order's* shift via `_pos_lock_open_shift`, which raises on null — so a shift-less delivery order **can never be paid** and is invisible to the cash box. The web POS refuses the same case for every order type, so this is current product behaviour, not a stricter desktop rule.
+
+### The wrong-customer guard, at three layers
+
+A latent bug surfaced while extending cart ownership. `sameOwner` ended in `a.kind === "takeaway" || b.kind === "takeaway" || a.tableId === b.tableId` — correct for two kinds, and silently wrong for a third: two **delivery** owners fell through to `undefined === undefined` and compared **equal**. Build a basket for customer A, switch to B, press Send, and B is billed for A's food at B's address. Rewritten as an exhaustive switch.
+
+- **Ownership** carries the customer id, so `claim` refuses another customer's basket.
+- **Switching** a customer with a basket loaded opens a confirmation. It neither re-points nor discards silently — both silent options can be the wrong one.
+- **`send()` snapshots** customer, address, shift, branch, lines and the op id *before* its first await, so a switch landing mid-flight cannot reach the payload, and the response attaches to the identity actually submitted.
+
+The **address** is deliberately not part of ownership: a caller may change where the same basket goes, and forcing a rebuild would be hostile. It is revalidated at submit instead.
+
+### One menu, one cart, no payment
+
+Delivery borrows the shell's menu grid exactly as Dine-in Add Items does, and reuses `CartPanel`. `CartPanel`'s `payGate`/`onPay` became **optional**; Delivery passes neither, so Pay is **not in the DOM** — a disabled Pay is still a Pay. No bottom-bar summary, so no bottom-bar Pay either. F4 stays inert. Ctrl+Enter sends through the same gate and latch as the button, and only while an order is being composed.
+
+The submit gate requires delivery access, `pos.create_orders`, a customer, an address, items, an open shift, a connection and no send in flight. It deliberately does **not** consult `pos.take_payments` or `pos.apply_discounts` — a cashier who may take delivery orders but not money must still be able to work here.
+
+### Idempotency, completion and recovery
+
+One op id per intended order, minted on the first line, held across retries, cleared only when an order is definitively accepted — and reset along with the cart when the customer changes, so the next send cannot replay under the previous order's key. A synchronous latch stops the second click in the same tick. Completion runs once, and clears **only** the delivery basket, **after** the server accepts.
+
+Live unpaid orders are re-read from `pos_orders` under RLS whenever a customer is opened. That is the recovery model: after a reload the operator finds the order they sent rather than sending it again.
+
+### Retargeted assertions
+
+Four inherited assertions were retargeted, each because Level 3B deliberately changed what they described, and each to the property that actually mattered: "no menu/cart in Delivery" → "nothing re-implemented, and still no Pay"; "no shift" → "no payment, cash box or receipt"; the menu shortcut layer now follows the menu into Add Items while the takeaway payment layer stays off; and Ctrl+Enter's help label names its third owner rather than leaving it undocumented.
+
+### Staging verification — PASSED (2026-08-09)
+
+One delivery order on **staging**, tenant **Dominos Pizza** / **Main Branch**, as `cashier@dominos.com`, from the Level 3B dev build. Production never contacted.
+
+| | |
+|---|---|
+| QA shift | `74192728-9ac0-4f48-b6f3-af9be0be5adb`, float **$3.00** |
+| Order | `eb828401-…` / **260809-0001**, `delivery`, **`sent_to_kitchen`** / **`unpaid`**, batch **1** |
+| Customer / address | `5940fc3d-…` / `91b3903b-…` — both as selected |
+| Shift / branch | the QA shift / Main Branch, `table_id` null, `payment_method` null |
+| Item | Margherita ×1, base $7.00, required modifier **Small** (+$0.00), kitchen note "No olives" |
+| Order note | `Desktop Level 3B delivery ordering verification`, stored verbatim and separate from the item note |
+| Money | subtotal $7.00, discount $0, total **$7.00 USD** |
+| `client_op_id` | `8aacbc88-c7ac-4822-8714-d310afb0894d` — **one** `pos_order_submissions` row |
+
+Orders 41 → **42**, submissions 43 → **44**, **payments 36 → 36**. Zero duplicates; exactly one order carries the note. The only two writes in the window were `shift_opened` and `order_saved`.
+
+Confirmed live: the delivery basket cleared while Takeaway stayed empty and Dine-in untouched; the sent-order panel showed number, customer, address, note, total, `Unpaid` and `Sent to kitchen`; **no Pay control anywhere**, and F4 and Ctrl+Enter were inert afterwards. After route-away/return **and a full reload**, the order was rediscovered from the server — *"1 unpaid delivery order for this customer — #260809-0001 · Sent to kitchen · unpaid"* — with history refreshed to "1 previous order", and no resubmit: order and submission counts unchanged.
+
+**One defect found and fixed before the order was sent.** The identity strip lived in `work()`'s `add_items` branch, but the shell owns the work area there and renders the menu — so `work()` was never called and the strip was dead code. The one screen where a cashier picks the food never said whose delivery it was for. It is now returned as `identity` and pinned by the shell beside "Back to customer"; two regression tests pin both the rendering and the absence of the dead branch. Fixed in `4aead40`.
+
+### Shift closure — a real product constraint
+
+Ending the QA shift is **refused**: *"Cannot close this shift: 1 order(s) still open. Resolve them before ending the shift."* The drawer maths is right — opening float $3.00, **cash taken $0.00**, expected $3.00, **0 paid orders this shift**, difference "Balanced $0.00" — only the open-order rule blocks it.
+
+This is correct current behaviour, not a Level 3B fault: an unpaid `sent_to_kitchen` delivery order is genuinely still open, and resolving it needs either payment (Level 3C) or a void path (deliberately not built). **Shift `74192728-…` is therefore left OPEN**, and order **260809-0001** is left as labelled staging QA data. Nothing was forced, paid or voided.
+
+This is the first concrete argument for Level 3C: until delivery can be settled, any delivery order taken on the desktop pins its shift open.
+
+### Still deferred
+
+Delivery payment and receipt, discount, printing, order editing, cancellation/void, the daily delivery operational workspace, driver assignment, and offline delivery.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -332,7 +415,9 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 `npm install` (once) → `npm run dev` (http://localhost:5173). `npm run typecheck`, `npm run test`, `npm run build`. Tests use Node's built-in runner with its native TypeScript support — no test framework dependency is installed. Node ≥ 22.18 is required for the runner's TypeScript support; CI pins Node 24.
 
-Current gate results on `feature/desktop-pos-level-3a-delivery-foundation`: **499 tests, 0 failures** (up from 408 on `desktop-staging`); typecheck clean; production build clean. Level 3A added **91** tests across `pos-phone`, `pos-customer-contract`, `pos-customer-search`, `pos-customer-create` and `pos-delivery-wiring`.
+Current gate results on `feature/desktop-pos-level-3b-delivery-ordering`: **557 tests, 0 failures** (499 baseline + 58 Level 3B, including the two regression tests for the identity-strip defect); typecheck clean; production build clean. Run as two halves under the known spawn instability.
+
+Previous gate results on `feature/desktop-pos-level-3a-delivery-foundation`: **499 tests, 0 failures** (up from 408 on `desktop-staging`); typecheck clean; production build clean. Level 3A added **91** tests across `pos-phone`, `pos-customer-contract`, `pos-customer-search`, `pos-customer-create` and `pos-delivery-wiring`.
 
 Note on this machine: roughly one process spawn in three dies with `EPERM uv_spawn`, `0xC0000005`, `Access is denied` or esbuild's `The service was stopped`. A test *file* reported as failed while listing no failing assertion is that crash, not a real failure — re-run the file alone to tell them apart. Level 2D's full-suite runs hit this on every single-command attempt, each time on a *different* random file; running the suite in two halves completed cleanly (170 + 221 = 391). CI is the authoritative full-suite gate.
 
@@ -469,6 +554,14 @@ Before creating, both required searches were proven empty in the UI — raw `03 
 - **Takeaway and Dine-in remain intact**: menu, cart and shift gates on one; the table map (9 free / 1 occupied / 10 configured) and Move/Close/Clear on the other.
 - A full reload returned to Takeaway with an empty cart and no customer selected — nothing is persisted locally — and re-searching the same raw string then **selected** the QA customer rather than creating a second one.
 - Empty history for the QA customer read *"This customer has no orders yet."*; the dialog's footer states it is read only, and carries no reorder, edit, void or refund control.
+
+### Packaged Level 3A verification — PASSED (2026-08-09)
+
+Verified from the **post-merge** installer built from merged `desktop-staging` @ `9378b66` (run `31305930866`, artifact `9035971946`, `Breadee_0.1.0_x64-setup.exe`, SHA-256 `07C2E143A59B0359E6E740136A11BE250182954E70C2DDC2A9E5048ABAB63797`). Installed over the previous build — the on-disk binary hash changed — and run with **no dev server listening**, so localhost independence is genuine.
+
+Deltas across the whole packaged run: **customers +0, addresses +0, shifts +0, orders +0, payments +0.** The single `activity_logs` row in that window was another user's inventory edit in the web app.
+
+Confirmed packaged: normalised phone lookup finds a customer whose stored raw phone is formatted differently (`+9613555666` → a row stored as `03 555 666`), all four alternate spellings of the QA number selected the existing customer with no create dialog, the edited QA address persisted, history is read-only, F4/Ctrl+Enter/Ctrl+K are inert in Delivery, the single-instance guard holds, and a buffered Takeaway line survived a Delivery round-trip untouched.
 
 ### One observation, not a Level 3A defect
 

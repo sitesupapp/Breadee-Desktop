@@ -142,9 +142,12 @@ test("A is live in Level 2B and no longer advertised as a later phase", () => {
 test("Ctrl+Enter is one binding whose owner is the visible screen", () => {
   assert.equal(press("Enter", { ctrl: true }), "confirmPayment");
   const spec = SHORTCUTS.find((s) => s.id === "confirmPayment");
-  // The help sheet must name both meanings, since a cashier reads only that.
-  assert.match(spec?.label ?? "", /Submit round/i);
+  // The help sheet must name EVERY meaning, since a cashier reads only that.
+  // Level 3B added a third owner (Delivery Add Items), so the label grew with it
+  // rather than leaving one of the three undocumented.
   assert.match(spec?.label ?? "", /Confirm payment/i);
+  assert.match(spec?.label ?? "", /Submit round/i);
+  assert.match(spec?.label ?? "", /delivery/i);
 });
 
 test("the Add Items layer registers submit, and the map layer registers Add Items", () => {

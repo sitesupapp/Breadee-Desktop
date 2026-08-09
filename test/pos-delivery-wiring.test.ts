@@ -94,20 +94,30 @@ test("Alt+3 is no longer labelled a later phase", () => {
   assert.match(stripComments(workspaceSrc), /routeDelivery: \(\) => deliveryGate\.allowed && setMode\("delivery"\)/);
 });
 
-test("the menu, cart and takeaway payment shortcuts are all disabled in Delivery", () => {
+// RETARGETED BY LEVEL 3B. Delivery now takes orders, so the MENU layer follows
+// the menu into Delivery Add Items - that half of the assertion was a statement
+// about Level 3A's scope, not a safety property. What must survive is the other
+// half: the takeaway ORDER/PAYMENT layer stays off, so F4 cannot pay a delivery.
+test("the takeaway payment shortcuts stay disabled in Delivery", () => {
   const code = stripComments(workspaceSrc);
-  // Menu/buffer bindings.
-  assert.match(code, /\(!dineInActive \|\| addingToTable\) && !deliveryActive/);
-  // newOrder / openPayment / print.
+  // newOrder / openPayment / print - unchanged, and still excluding Delivery.
   assert.match(code, /!dineInActive && !deliveryActive/);
+  // The menu layer is live only on the Add Items half, never on the customer half.
+  assert.match(code, /\(!dineInActive \|\| addingToTable\) && \(!deliveryActive \|\| addingToDelivery\)/);
 });
 
-test("Delivery renders no menu grid and no cart panel", () => {
+// RETARGETED BY LEVEL 3B, same reasoning. Delivery deliberately reuses the one
+// menu grid and the one cart panel - building a second of either was the thing
+// Level 3B was told NOT to do. The property that mattered was never "no cart",
+// it was "no payment", so that is what is asserted now.
+test("Delivery reuses the shared menu and cart, and still exposes no Pay", () => {
   const code = stripJsxComments(stripComments(workspaceSrc));
-  // Both branches begin with the delivery check, so neither the menu fallback
-  // nor `CartPanel` is reachable while Delivery is active.
-  assert.match(code, /work=\{\(layout\) =>\s*deliveryActive \? \(/);
+  // The customer half still bypasses the menu entirely.
+  assert.match(code, /work=\{\(layout\) =>\s*deliveryActive && !addingToDelivery \? \(/);
+  // The side panel is Delivery's own, which mounts CartPanel without a pay gate.
   assert.match(code, /cart=\{\(layout\) =>\s*deliveryActive \? \(/);
+  // And no bottom-bar Pay, exactly as before.
+  assert.match(code, /cartSummary=\{\s*deliveryActive\s*\?\s*undefined/);
 });
 
 test("Delivery passes no bottom-bar summary, so there is no Pay button at all", () => {
