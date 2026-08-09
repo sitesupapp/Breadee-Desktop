@@ -272,7 +272,7 @@ Customer writes require a connection, stated by the write gate itself. Nothing i
 
 ### Staging verification status
 
-See §10.
+**PASSED, 2026-08-09.** Customer-only smoke on staging; zero financial writes. See §10.
 
 ### Explicitly deferred to Level 3B and beyond
 
@@ -417,3 +417,59 @@ Deliberately single-payment, so these remain covered by tests only, not by a liv
 Packaged QA found that launching the installed app again started a **second full instance** — three concurrent processes were opened. The server refused the duplicate settlement, so this was never a double-charge defect, but each process carried its own cart, selected table and in-memory payment latch, which is two tills on one terminal.
 
 `src-tauri` now registers `tauri-plugin-single-instance` (desktop targets only, registered first). A second launch does not create a window: it unminimises, shows and focuses the running instance, then exits. The callback deliberately does nothing else — no navigation, no reload, no event, no state reset — because the running instance may be mid-order or mid-payment. The second process's argv/cwd are ignored, since the app has no deep-link handling and acting on them would be a way to drive the POS from outside it.
+
+## 10. Level 3A staging verification — PASSED (2026-08-09)
+
+Customer-foundation smoke on **staging** (`azjxprewycygsocusxjn`), tenant **Dominos Pizza** (#8, `2c924171-…`), **Main Branch** (`ae600a17-…`), as **`cashier@dominos.com`** (`71f24774-…`), from the Level 3A dev build at `http://localhost:5186` (worktree @ `76be0a0`). Production (`cltlqfqormkhppmbvyrv`) was never contacted.
+
+**No financial write of any kind.** Before and after the run: shifts **7 → 7** (none open, newest 2026-08-08), orders **41 → 41**, payments **36 → 36**. Opening the Delivery route issued **zero** network requests — not a shift read, not an order read, nothing until a query was typed.
+
+### The only three writes, from `activity_logs`
+
+| # | Action | Record |
+|---|---|---|
+| 1 | `customer_created` | `pos_customers` `5940fc3d-…`, `{name: "Desktop Level 3A QA", phone: "03 111 999", source: "pos_delivery"}` |
+| 2 | `customer_address_saved` | `pos_customer_addresses` `91b3903b-…` (add) |
+| 3 | `customer_address_saved` | the **same** `91b3903b-…` (edit — an update, not a second row) |
+
+`source: "pos_delivery"` is stamped **by the server**, which is exactly why it is on the client's forbidden-field list.
+
+### QA customer — test data, left in place deliberately
+
+`5940fc3d-d8a8-4e67-ab89-39629d9b8f56` · **Desktop Level 3A QA** · raw `03 111 999` · `phone_e164` `+9613111999` · notes *"Test data - Level 3A staging verification. Do not delete."* · one address `91b3903b-…` (`QA, Hamra, QA Street 2, Bldg QA`, default). Not deleted: there is no supported archive/delete action in the product, and direct SQL cleanup is out of bounds.
+
+### Search, on live data
+
+| Query | Finds | Why it matters |
+|---|---|---|
+| `70111222` | Ahmad Khoury (1) | raw phone |
+| `+9613555666` | Sara Haddad (1) | her stored raw is **`03 555 666`** — a raw-only `ilike` could never have matched. The normalised pass is doing real work against real rows. |
+| `Sara` | Sara Haddad (1) | name |
+
+Selecting her showed 2 addresses and 4 orders, matching the database exactly, and the card printed **"Dials as +9613555666"** beneath the stored raw string — the affordance that makes an invisible duplicate visible to a cashier.
+
+### The P0 duplicate check, live
+
+The QA number was typed back in four legal alternative forms. **Every one selected the existing customer; none opened the create dialog.**
+
+`+9613111999` · `009613111999` · `3111999` · `+961 03 111 999`
+
+Two of them raised *"This number is already on file — Opened the existing customer."* Authoritative row count for that logical number afterwards: **1**, by `phone_e164`, by digit-suffix, and by name. `activity_logs` contains exactly **one** `customer_created` for the whole session. Tenant customers went 3 → 4.
+
+Before creating, both required searches were proven empty in the UI — raw `03 111 999` and normalised `+9613111999` — each showing *"No customer found. Find / create will add this number."*
+
+**Not covered live:** the `choose` branch (several equivalent rows for one number). Reaching it needs a pre-existing normalised duplicate, and manufacturing one would mean creating a second QA customer or writing SQL directly — both forbidden, and both would be the exact defect this level exists to prevent. It stays covered by tests.
+
+### Gates observed in the running app
+
+- **No menu grid, no cart panel, no bottom bar, no Pay control** in Delivery — not present, not merely disabled.
+- **F4, Ctrl+K and Ctrl+Enter did nothing** in Delivery, and issued zero requests.
+- **No shift was needed** and none was created; the status bar read "No open shift" throughout.
+- **Cart ownership held.** A Takeaway line ($3.00 French Fries) was left buffered, Delivery was entered — it showed no cart — and the line was still intact on return. Delivery neither claimed nor cleared the buffer.
+- **Takeaway and Dine-in remain intact**: menu, cart and shift gates on one; the table map (9 free / 1 occupied / 10 configured) and Move/Close/Clear on the other.
+- A full reload returned to Takeaway with an empty cart and no customer selected — nothing is persisted locally — and re-searching the same raw string then **selected** the QA customer rather than creating a second one.
+- Empty history for the QA customer read *"This customer has no orders yet."*; the dialog's footer states it is read only, and carries no reorder, edit, void or refund control.
+
+### One observation, not a Level 3A defect
+
+The dashboard tile renders the branch as **"Branch ae60"** — an id fragment — while the POS status bar correctly reads **"Main Branch"**. §1 of this document claims no UUID fragments appear in the UI, so the dashboard's branch-name fallback is firing where it should not. It predates Level 3A and is outside its scope; worth a separate look.
