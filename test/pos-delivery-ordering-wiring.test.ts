@@ -209,12 +209,30 @@ test("an unpaid order is never labelled completed", () => {
   assert.equal(kitchenStateLabel("completed"), "Completed");
 });
 
-test("the summary states unpaid in words and offers no payment control", () => {
+// RETARGETED BY LEVEL 3C. Adding Pay to this panel is the whole point of the
+// settlement level, so "offers no payment control" was a scope statement rather
+// than a safety property. What must hold now is narrower and more useful: Pay
+// appears ONLY while the order is unpaid and only when a gate is supplied, and a
+// settled order offers nothing to press again.
+test("the summary offers Pay only while the order is unpaid", () => {
   const code = stripJsxComments(summarySrc);
   assert.match(code, /Unpaid/);
-  assert.match(code, /not available on the desktop yet/i);
-  for (const token of ["onPay", "payGate", "Pay (F4)", "PaymentDialog"]) {
-    assert.equal(code.includes(token), false, `${token} must not appear on the sent-order summary`);
+  // Paid branch first: a settled order gets a statement, not a button.
+  assert.match(code, /\{paid \? \(/);
+  assert.match(code, /Paid and completed/i);
+  // Pay is behind BOTH the paid check and the presence of a gate.
+  assert.match(code, /\) : props\.payGate \? \([\s\S]{0,200}Pay \(F4\)/);
+  // And the panel still mounts no payment dialog of its own.
+  assert.equal(code.includes("PaymentDialog"), false);
+});
+
+test("the summary never offers a collection or completion action", () => {
+  // `pos_pay_order` sets paid AND completed in one statement, and the schema has
+  // no `collected` status - a second action would model a transition that does
+  // not exist.
+  const code = stripJsxComments(summarySrc);
+  for (const token of ["Collected", "Awaiting collection", "Mark complete", "pos_collect"]) {
+    assert.equal(code.includes(token), false, `${token} must not appear - the server has no such state`);
   }
 });
 
