@@ -26,13 +26,51 @@ export type RemovedLine = { line: CartLine; index: number };
  * it, half-built takeaway lines would appear inside a table's round (and vice
  * versa), and the cashier would send someone else's food to a table. Recording
  * the owner makes that state unrepresentable rather than merely unlikely.
+ *
+ * LEVEL 3B: delivery ownership carries the CUSTOMER, not just the kind.
+ *
+ * A delivery cart is only meaningful for the person it was built for. If the
+ * owner were `{ kind: "delivery" }` alone, then building a basket for customer A,
+ * switching to customer B and pressing Send would submit A's food against B's
+ * name and B's address - the customer-facing equivalent of sending one table's
+ * order to another. The customer id is therefore part of the identity, and
+ * `claim` refuses on any mismatch.
+ *
+ * The ADDRESS is deliberately NOT part of ownership: a caller may legitimately
+ * change their mind about where the same basket should go, and forcing them to
+ * rebuild it would be hostile. The address is re-validated against the customer
+ * at submit time instead (see `lib/pos/deliveryOrder.ts`).
  */
-export type CartOwner = { kind: "takeaway" } | { kind: "table"; tableId: string };
+export type CartOwner =
+  | { kind: "takeaway" }
+  | { kind: "table"; tableId: string }
+  | { kind: "delivery"; customerId: string };
 
+/**
+ * Do two owners denote the same work?
+ *
+ * Written as an exhaustive switch on purpose. The previous form ended in
+ *
+ *   a.kind === "takeaway" || b.kind === "takeaway" || a.tableId === b.tableId
+ *
+ * which was correct for the two kinds that existed, but silently wrong the
+ * moment a third arrived: for two DELIVERY owners neither disjunct matches and
+ * the comparison fell through to `a.tableId === b.tableId`, i.e.
+ * `undefined === undefined`, i.e. **true for every pair of customers**. That is
+ * precisely the wrong-customer submission this level has to make impossible, so
+ * the shape that allowed it is gone rather than patched.
+ */
 export function sameOwner(a: CartOwner | null, b: CartOwner | null): boolean {
   if (a === null || b === null) return a === b;
   if (a.kind !== b.kind) return false;
-  return a.kind === "takeaway" || b.kind === "takeaway" || a.tableId === b.tableId;
+  switch (a.kind) {
+    case "takeaway":
+      return true;
+    case "table":
+      return a.tableId === (b as { kind: "table"; tableId: string }).tableId;
+    case "delivery":
+      return a.customerId === (b as { kind: "delivery"; customerId: string }).customerId;
+  }
 }
 
 type CartState = {

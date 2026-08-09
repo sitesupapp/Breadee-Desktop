@@ -53,6 +53,15 @@ export type SubmitOrderPayload = {
    * byte what it was in Level 1.
    */
   table_id?: string;
+  /**
+   * Delivery only. `pos_save_order` stores both of these RAW - it does not check
+   * that the customer belongs to the tenant, nor that the address belongs to the
+   * customer. There is no server-side guard here at all, so the desktop must
+   * re-read and validate both before submitting (see `lib/pos/deliveryOrder.ts`).
+   * Omitted entirely for takeaway and dine-in so those payloads are unchanged.
+   */
+  customer_id?: string;
+  address_id?: string;
   items: SubmitOrderItem[];
 };
 
@@ -68,6 +77,35 @@ export class TableRequiredError extends Error {
   constructor() {
     super("This dine-in order is not attached to a table");
     this.name = "TableRequiredError";
+  }
+}
+
+/**
+ * A delivery submission with no customer.
+ *
+ * `pos_save_order` would accept it - `customer_id` is nullable and unchecked -
+ * and produce a delivery order nobody can be delivered to, invisible to the
+ * customer's history. Refused before the request exists.
+ */
+export class CustomerRequiredError extends Error {
+  constructor() {
+    super("This delivery order is not attached to a customer");
+    this.name = "CustomerRequiredError";
+  }
+}
+
+/**
+ * A delivery submission with no address.
+ *
+ * Also accepted by the server, and also a dead end: the kitchen prepares food
+ * with nowhere to send it. The WEB POS refuses the same case ("Attach a customer
+ * with a delivery address first"), so this matches current product behaviour
+ * rather than inventing a stricter desktop rule.
+ */
+export class AddressRequiredError extends Error {
+  constructor() {
+    super("This delivery order is not attached to a delivery address");
+    this.name = "AddressRequiredError";
   }
 }
 
@@ -90,9 +128,16 @@ export function buildSubmitPayload(input: {
   status?: string;
   /** Dine-in only. Required for `dine_in`, rejected implicitly for takeaway. */
   tableId?: string | null;
+  /** Delivery only. Both required for `delivery`, absent for every other type. */
+  customerId?: string | null;
+  addressId?: string | null;
 }): SubmitOrderPayload {
   if (!input.shiftId) throw new ShiftRequiredError();
   if (input.orderType === "dine_in" && !input.tableId) throw new TableRequiredError();
+  if (input.orderType === "delivery") {
+    if (!input.customerId) throw new CustomerRequiredError();
+    if (!input.addressId) throw new AddressRequiredError();
+  }
   return {
     branch_id: input.branchId,
     order_type: input.orderType,
@@ -102,6 +147,13 @@ export function buildSubmitPayload(input: {
     notes: input.orderNote && input.orderNote.trim() !== "" ? input.orderNote.trim() : null,
     // Present ONLY for dine-in, so the takeaway payload is unchanged.
     ...(input.orderType === "dine_in" && input.tableId ? { table_id: input.tableId } : {}),
+    // Present ONLY for delivery, for the same reason. Named individually rather
+    // than spread from a customer object: the delivery workspace holds the whole
+    // profile - phone, notes, every address, the order history - and none of that
+    // belongs in an order payload.
+    ...(input.orderType === "delivery" && input.customerId && input.addressId
+      ? { customer_id: input.customerId, address_id: input.addressId }
+      : {}),
     items: input.lines.map((l) => ({
       menu_item_id: l.menu_item_id,
       name: l.name,
