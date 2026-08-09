@@ -24,6 +24,7 @@ import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull }
 import { computeDiscount, type DiscountType } from "@/lib/pos/discounts";
 import { OPEN_DELIVERY_STATUSES, type OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
 import type { CurrencyCode } from "@/lib/currency";
+import type { ReceiptLine, ReceiptModifier } from "@/lib/receipt";
 import type { PaymentMethod } from "@/lib/pos/payments";
 import type { Gate } from "@/components/ui";
 
@@ -392,6 +393,59 @@ export async function countPaymentRows(orderId: string): Promise<number> {
     .eq("order_id", orderId);
   if (error) throw new Error(error.message);
   return count ?? 0;
+}
+
+/**
+ * The order's lines, for the receipt.
+ *
+ * Read from the SERVER rather than rebuilt from the cart: by the time a delivery
+ * order is paid the cart has been cleared for some time, and a receipt assembled
+ * from local memory could disagree with what the kitchen actually made.
+ */
+export async function readOrderReceiptLines(orderId: string): Promise<ReceiptLine[]> {
+  const { supabase } = await import("@/lib/supabase");
+  const items = await supabase
+    .from("pos_order_items")
+    .select("id, name_snapshot, quantity, line_total, kitchen_note")
+    .eq("order_id", orderId);
+  if (items.error) throw new Error(items.error.message);
+  const ids = ((items.data ?? []) as unknown[]).map((raw) => strOrNull(asRecord(raw).id)).filter((i): i is string => !!i);
+  const byItem = new Map<string, ReceiptModifier[]>();
+  if (ids.length > 0) {
+    const mods = await supabase
+      .from("pos_order_item_modifiers")
+      .select("order_item_id, name_snapshot, price_delta, quantity")
+      .in("order_item_id", ids);
+    if (mods.error) throw new Error(mods.error.message);
+    for (const raw of (mods.data ?? []) as unknown[]) {
+      const r = asRecord(raw);
+      const id = strOrNull(r.order_item_id);
+      if (!id) continue;
+      byItem.set(id, [
+        ...(byItem.get(id) ?? []),
+        { name: str(r.name_snapshot, "Extra"), price_delta: num(r.price_delta), quantity: num(r.quantity, 1) },
+      ]);
+    }
+  }
+  return ((items.data ?? []) as unknown[])
+    .map((raw) => {
+      const r = asRecord(raw);
+      const id = strOrNull(r.id);
+      if (!id) return null;
+      const qty = num(r.quantity, 1);
+      const lineTotal = num(r.line_total);
+      return {
+        name: str(r.name_snapshot, "Item"),
+        qty,
+        // The server's own line total divided by quantity - never a price
+        // recomputed from the menu, which may have moved since the order.
+        unitPrice: qty > 0 ? lineTotal / qty : lineTotal,
+        lineTotal,
+        modifiers: byItem.get(id) ?? [],
+        note: strOrNull(r.kitchen_note),
+      } as ReceiptLine;
+    })
+    .filter((l): l is ReceiptLine => l !== null);
 }
 
 /** The settled order, re-read authoritatively. Never the local copy. */

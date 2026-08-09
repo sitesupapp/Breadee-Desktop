@@ -65,6 +65,23 @@ import {
   revalidateTarget,
   type OpenDeliveryOrder,
 } from "@/lib/pos/deliveryOrder";
+import {
+  buildDeliveryPaymentPayload,
+  checkSettlementTarget,
+  countPaymentRows,
+  createSettlementLatch,
+  deliveryIsSettled,
+  deliveryPaymentGate,
+  payDeliveryOrder,
+  performDeliverySettlement,
+  readOrderReceiptLines,
+  readSettledOrder,
+  validateDeliveryDiscount,
+} from "@/lib/pos/deliverySettlement";
+import { PaymentDialog } from "@/components/pos/PaymentDialog";
+import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
+import { buildReceipt, type ReceiptData } from "@/lib/receipt";
+import type { DiscountType } from "@/lib/pos/discounts";
 import { submitOrder } from "@/lib/pos/orders";
 import { cartSubtotal } from "@/lib/pos/orders";
 import { CartPanel } from "@/components/pos/CartPanel";
@@ -143,6 +160,19 @@ export function useDeliveryWorkspace(input: {
   onRemoveLine: (key: string) => void;
   onEditNote: (key: string) => void;
   onOpenShift: () => void;
+  /** Level 3C. Settlement needs the payment permission and the tenant rate. */
+  takePayments: Gate;
+  applyDiscounts: Gate;
+  /** Tenant USD->LBP rate. LBP is refused without one - never guessed. */
+  rate: number | null;
+  /**
+   * Receipt presentation, routed through the caller so it reaches the SAME
+   * store-owned layer takeaway and dine-in use - mounted outside this
+   * component's loading states on purpose.
+   */
+  onPresentReceipt: (receipt: ReceiptData) => void;
+  /** Authoritative cash-box re-read. The desktop never increments it locally. */
+  refreshCashBox: () => Promise<void>;
 }): DeliveryWorkspace {
   const { pos, active, online } = input;
   const toast = useToast();
@@ -163,6 +193,19 @@ export function useDeliveryWorkspace(input: {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ order: OpenDeliveryOrder; recovered: boolean } | null>(null);
+
+  // --- Level 3C settlement state ---------------------------------------------
+  const [payOpen, setPayOpen] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [paying, setPaying] = useState(false);
+  /**
+   * The one latch every settlement path shares - the Pay button, F4 and the
+   * dialog's own confirm. A ref, not state: two confirms in the same tick would
+   * both read a stale `paying === false`, and for money that is a second charge.
+   */
+  const payLatch = useRef(createSettlementLatch());
+  /** Ensures the completion sequence - receipt included - runs once per payment. */
+  const settleDone = useRef(false);
   const [openOrders, setOpenOrders] = useState<OpenDeliveryOrder[]>([]);
   /** Customer the operator wants to switch to while a Delivery cart is loaded. */
   const [switchTo, setSwitchTo] = useState<string | null>(null);
@@ -608,6 +651,162 @@ export function useDeliveryWorkspace(input: {
 
   const requestLeaveAddItems = useCallback(() => setView("customer"), []);
 
+  // --- Level 3C: settlement ---------------------------------------------------
+
+  /**
+   * THE settlement gate. One result for the Pay button, F4 and the dialog's own
+   * confirm, so no surface can hold a different opinion about whether this order
+   * may be settled.
+   */
+  const payGate: Gate = useMemo(
+    () =>
+      deliveryPaymentGate({
+        deliveryAccess: accessGate,
+        takePayments: input.takePayments,
+        order: submitted?.order ?? null,
+        // `pos_pay_order` locks the ORDER's shift. The order was created in this
+        // session's shift, so an open shift here is that same shift.
+        hasOpenShift: Boolean(input.shiftId),
+        online,
+        currencyBlockedReason: paymentBlockedReason(input.currency, input.rate),
+        paying,
+      }),
+    [accessGate, input.takePayments, submitted?.order, input.shiftId, online, input.currency, input.rate, paying],
+  );
+
+  /** Opens the dialog. Never charges - F4 and the button share this exactly. */
+  const requestPay = useCallback(() => {
+    if (!payGate.allowed) return;
+    setPayError(null);
+    setPayOpen(true);
+  }, [payGate.allowed]);
+
+  const settle = useCallback(
+    async (confirm: {
+      method: PaymentMethod;
+      currency: CurrencyCode;
+      discountType: DiscountType;
+      discountValue: string;
+      tendered: number | null;
+    }) => {
+      const order = submitted?.order;
+      if (!order || !payGate.allowed) return;
+      const intended = {
+        orderId: order.id,
+        customerId: order.customer_id,
+        addressId: order.address_id,
+        total: order.total_amount ?? 0,
+      };
+      setPayError(null);
+      setPaying(true);
+      settleDone.current = false;
+      try {
+        // The amount on screen is not authority to charge. Re-read first, and
+        // refuse on ANY change to identity or money.
+        const fresh = await readSettledOrder(intended.orderId);
+        checkSettlementTarget(intended, fresh);
+
+        const discount = validateDeliveryDiscount({
+          canDiscount: input.applyDiscounts,
+          subtotal: fresh?.total_amount ?? intended.total,
+          type: confirm.discountType,
+          value: confirm.discountValue,
+        });
+
+        const outcome = await performDeliverySettlement({
+          payload: buildDeliveryPaymentPayload({
+            orderId: intended.orderId,
+            method: confirm.method,
+            currency: confirm.currency,
+            // Named fields only - `tendered` travels in the same object and has
+            // no column on `pos_payments`.
+            discount: discount.fields,
+          }),
+          submit: payDeliveryOrder,
+          // Used only after a failure, and it asks BOTH questions: what the
+          // order says, and whether a payment row exists.
+          reread: async () => ({
+            order: await readSettledOrder(intended.orderId),
+            paymentRows: await countPaymentRows(intended.orderId),
+          }),
+          latch: payLatch.current,
+        });
+
+        if (!outcome.ok) {
+          const c = classifyError(outcome.error);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+          return;
+        }
+        if (settleDone.current) return;
+        settleDone.current = true;
+
+        // Completion, in the sequence `DELIVERY_COMPLETION_SEQUENCE` states, and
+        // once. The order is re-read and CHECKED before anything is presented as
+        // settled - a recovered payment has no response to trust.
+        const settled = await readSettledOrder(intended.orderId);
+        if (!deliveryIsSettled(settled)) {
+          setPayError(
+            "The payment was accepted but the order does not show as paid yet. Refresh before taking payment again.",
+          );
+          return;
+        }
+        await input.refreshCashBox().catch(() => {});
+        await useCustomers.getState().refresh();
+
+        const money = outcome.result;
+        const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
+        input.onPresentReceipt(
+          buildReceipt({
+            businessName: pos.tenantName,
+            branchName: pos.branch.name,
+            staffName: pos.userName,
+            orderNumber: settled!.order_number ?? "",
+            at: new Date().toLocaleString(),
+            paid: true,
+            method: money?.method ?? confirm.method,
+            currency: (money?.currency_code ?? input.currency) as CurrencyCode,
+            lines,
+            // Server figures win over anything computed here.
+            subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
+            discount: money?.discount ?? 0,
+            total: money?.amount ?? settled!.total_amount ?? 0,
+            tenderCurrency: confirm.currency,
+            tenderTotal: money?.original_amount ?? null,
+            tendered: confirm.tendered,
+            change:
+              confirm.tendered == null
+                ? null
+                : computeChange(money?.original_amount ?? 0, confirm.tendered, confirm.currency).change,
+            exchangeRate: money?.exchange_rate ?? null,
+            shiftRef: input.shiftId,
+            customerName: customers.selected?.name ?? null,
+            customerPhone: customers.selected?.phone ?? null,
+            deliveryAddress: address ? addressLine(address) : null,
+          }),
+        );
+
+        setSubmitted({ order: settled!, recovered: outcome.recovered });
+        setPayOpen(false);
+        toast.push({
+          tone: "success",
+          message: outcome.recovered
+            ? `Order #${settled!.order_number ?? ""} was already paid`
+            : `Delivery order #${settled!.order_number ?? ""} paid`,
+          detail: outcome.recovered ? "No second payment was taken." : "Completed.",
+        });
+      } catch (e) {
+        const c = classifyError(e);
+        setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+      } finally {
+        setPaying(false);
+      }
+    },
+    [submitted?.order, payGate.allowed, input, pos.branch.name, pos.userName, customers.selected, address, toast],
+  );
+
+  // F4 OPENS the dialog and never charges, through the same gate as the button.
+  useShortcuts({ openPayment: requestPay }, active && view === "customer" && payGate.allowed);
+
   const startNewOrder = useCallback(() => {
     setSubmitted(null);
     setSendError(null);
@@ -796,6 +995,10 @@ export function useDeliveryWorkspace(input: {
           currency={input.currency}
           recovered={submitted.recovered}
           onStartNewOrder={startNewOrder}
+          /* The SAME gate F4 uses. The component renders Pay only while the
+             order is unpaid, so a settled order has nothing to press again. */
+          payGate={payGate}
+          onPay={requestPay}
         />
       ) : view === "add_items" ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
@@ -839,6 +1042,29 @@ export function useDeliveryWorkspace(input: {
           setDialog({ kind: "none" });
           setDialogError(null);
         }}
+      />
+
+      {/* The SHARED payment dialog - not a delivery copy. Only the identity at
+          the top differs, which is exactly the part that should. */}
+      <PaymentDialog
+        open={payOpen}
+        busy={paying}
+        subtotal={submitted?.order.total_amount ?? 0}
+        primaryCurrency={input.currency}
+        rate={input.rate}
+        discountGate={input.applyDiscounts}
+        payGate={payGate}
+        orderNumber={submitted?.order.order_number ?? null}
+        delivery={{
+          customerName: customers.selected?.name ?? "Customer",
+          address: address ? addressLine(address) : null,
+        }}
+        error={payError}
+        onCancel={() => {
+          setPayOpen(false);
+          setPayError(null);
+        }}
+        onConfirm={(v) => void settle(v)}
       />
 
       <CustomerHistoryDialog
