@@ -759,6 +759,9 @@ export function useDeliveryWorkspace(input: {
           buildReceipt({
             businessName: pos.tenantName,
             branchName: pos.branch.name,
+            // Without this the receipt inherits the default and calls a delivery
+            // "Takeaway" - wrong on the one document the customer keeps.
+            orderType: "Delivery",
             staffName: pos.userName,
             orderNumber: settled!.order_number ?? "",
             at: new Date().toLocaleString(),
@@ -941,8 +944,8 @@ export function useDeliveryWorkspace(input: {
         <div className="rounded-2xl border border-line bg-white p-4">
           <p className="text-sm font-extrabold text-ink">Delivery customer</p>
           <p className="mt-0.5 text-xs text-sub">
-            Find or add the caller, confirm their address, then add items. Taking payment for a delivery order is not
-            available on the desktop yet.
+            Find or add the caller, confirm their address, then add items. An unpaid order can be opened below and
+            settled here.
           </p>
           <div className="mt-3">{search}</div>
         </div>
@@ -971,10 +974,20 @@ export function useDeliveryWorkspace(input: {
             <p className="text-xs font-bold text-amber-900">
               {openOrders.length} unpaid delivery order{openOrders.length === 1 ? "" : "s"} for this customer
             </p>
+            {/* Clickable, because a RECOVERED order is the normal case after a
+                reload: without this the only payable order would be one sent in
+                this same session, and an order sent before a crash could never
+                be settled from the desktop at all. */}
             <ul className="mt-1 space-y-0.5">
               {openOrders.map((o) => (
-                <li key={o.id} className="text-[11px] text-amber-900">
-                  #{o.order_number ?? o.id.slice(0, 8)} · {kitchenStateLabel(o.status)} · unpaid
+                <li key={o.id}>
+                  <button
+                    type="button"
+                    onClick={() => setSubmitted({ order: o, recovered: true })}
+                    className="min-h-[44px] w-full rounded-lg px-2 text-left text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+                  >
+                    #{o.order_number ?? o.id.slice(0, 8)} · {kitchenStateLabel(o.status)} · unpaid — open to take payment
+                  </button>
                 </li>
               ))}
             </ul>

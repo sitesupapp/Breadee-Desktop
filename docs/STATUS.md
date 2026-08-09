@@ -400,6 +400,41 @@ So Level 3C is a settlement level only: pay the order, and the order is finished
 
 No migration is required; delivery settlement is fully expressible through the existing RPC; the lifecycle is unambiguous; duplicate-payment protection is available (state-based refusal + latch + authoritative re-read); and shift closure becomes possible once the order is paid.
 
+### Implementation
+
+`lib/pos/deliverySettlement.ts` holds the whole settlement contract: one gate (shared by the Pay button, F4 and the dialog's confirm), an authoritative pre-payment re-read, an explicit payload, a synchronous latch and the recovery model. The workspace wires it into the Level 3B submitted-order panel; the shared `PaymentDialog` is reused with a delivery identity slot rather than copied.
+
+- **The payload names every field.** `tendered`/`change` head the forbidden list — the dialog returns them in the same object as the discount, `pos_payments` has no column for either, and a spread is all it would take. `client_op_id` is next: sending one would imply an idempotency guarantee `pos_pay_order` does not give.
+- **`pos.apply_discounts` is not in the gate.** A cashier who cannot discount may still settle at full price; permission is checked only when a discount is entered.
+- **Recovery requires both halves to agree**: order paid **and** completed, **and** a payment row exists. Paid-with-no-row, or a row against an unpaid order, is a contradiction that blocks rather than being smoothed over. `submit` is called at most once; there is no retry loop, timer or queue.
+- **The cash box is re-read**, never incremented locally. The receipt is built from the server — the order's own items and modifiers are re-read, because by settlement time the cart is long cleared.
+- **F4 opens the dialog and never charges**, through the same gate as the button, and is inert once the order is paid.
+
+### Staging settlement — PASSED (2026-08-09)
+
+The inherited Level 3B order was settled. **No new order was created.**
+
+| | |
+|---|---|
+| Order | `eb828401-…` / **260809-0001** → **`completed` / `paid` / `cash`**, `completed_at` stamped |
+| Payment | **1 row** `9516dd7f-…`, $7.00 USD, original 7, shift `74192728-…`. Payments 36 → **37** |
+| Money | subtotal $7.00, discount $0, total **$7.00 USD**, tendered $7.00, change $0.00 |
+| Cash box | float $3.00 + cash $7.00 = **expected $10.00**, `payment_count` 1 — read from the server, never computed |
+| Orders | 42 → **42**. No new order, no resubmit |
+| Usage batches | 0 → **0**. The desktop wrote no inventory; none was expected for this item's material setup |
+| Unresolved orders for the shift | 1 → **0** |
+
+F4 opened the dialog with **zero** payment rows written, then one confirmation produced exactly one payment. After a full reload the order stayed `completed`/`paid`, the payment row count stayed **1**, F4 was inert, no Pay appeared and history read "1 previous order".
+
+**The shift closed normally** — the Level 3B blocker is gone. Opening float $3.00, cash sales $7.00, expected $10.00, counted $10.00, **difference $0.00**, 1 order, gross $7.00, net $7.00, 0 cancelled, 0 refunded. Final status **`pending_manager_review`** (normal lifecycle; not self-approved).
+
+### Two defects found and fixed
+
+1. **A recovered order could not be paid.** The summary panel is driven by state only a same-session send sets, so after a reload the recovered unpaid order appeared in the list with no way into the panel — and therefore no Pay. An order sent before a crash could never have been settled. The recovered rows are now buttons that open the order for payment. Found during the preflight, **before** any payment.
+2. **The receipt said "Takeaway" and carried no customer or address.** Money was correct; the document was not. `orderType` is now passed explicitly and the preview renders customer, phone and delivery address. Found on the real receipt, **after** settlement — presentation only, so nothing was re-paid.
+
+Both are pinned by regression tests.
+
 ### Still deferred
 
 Native printing, broad delivery operational reporting, order editing, cancellation/void.

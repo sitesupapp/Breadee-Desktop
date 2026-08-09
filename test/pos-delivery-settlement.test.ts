@@ -402,6 +402,45 @@ test("the completion sequence verifies BEFORE it presents", () => {
   assert.ok(seq.indexOf("present-receipt") < seq.indexOf("clear-payment-state"));
 });
 
+// REGRESSION, found during the staging preflight before any payment was taken.
+//
+// The summary panel is driven by `submitted`, which only a send in the same
+// session sets. After a reload the recovered unpaid order appeared in the list
+// but had no way into the panel - so it had no Pay, and an order sent before a
+// crash could never have been settled from the desktop at all. The recovered
+// rows are now buttons that open the order for payment.
+test("a recovered unpaid order can be opened for payment", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("../src/screens/pos/DeliveryWorkspace.tsx", import.meta.url).pathname.replace(/^\//, ""),
+      "utf8",
+    ),
+  );
+  assert.match(src, /onClick=\{\(\) => setSubmitted\(\{ order: o, recovered: true \}\)\}/);
+  assert.match(src, /open to take payment/i);
+  // And the stale Level 3B copy is gone.
+  assert.equal(/Taking payment for a delivery order is not\s+available on the desktop yet/.test(src), false);
+});
+
+// REGRESSION, found on the real staging receipt after settlement. Money was
+// correct; the document was not. It printed "Takeaway" for a delivery order, and
+// carried neither the customer nor the address - the two things a delivery
+// receipt exists to carry.
+test("the delivery receipt names Delivery and carries the customer and address", async () => {
+  const fs = await import("node:fs");
+  const read = (p: string) =>
+    fs.readFileSync(new URL(p, import.meta.url).pathname.replace(/^\//, ""), "utf8");
+  const workspace = read("../src/screens/pos/DeliveryWorkspace.tsx");
+  assert.match(workspace, /orderType: "Delivery"/);
+  assert.match(workspace, /customerName: customers\.selected\?\.name/);
+  assert.match(workspace, /customerPhone: customers\.selected\?\.phone/);
+  assert.match(workspace, /deliveryAddress: address \? addressLine\(address\) : null/);
+  // And the preview actually renders them - the type alone was not enough.
+  const preview = read("../src/screens/pos/ReceiptPreview.tsx");
+  assert.match(preview, /data\.customerName/);
+  assert.match(preview, /data\.deliveryAddress/);
+});
+
 test("settled means paid AND completed - the state payment itself produces", () => {
   assert.equal(deliveryIsSettled(order({ payment_status: "paid", status: "completed" })), true);
   assert.equal(deliveryIsSettled(order({ payment_status: "paid" })), false);
