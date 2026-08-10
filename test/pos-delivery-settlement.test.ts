@@ -432,9 +432,18 @@ test("the delivery receipt names Delivery and carries the customer and address",
     fs.readFileSync(new URL(p, import.meta.url).pathname.replace(/^\//, ""), "utf8");
   const workspace = read("../src/screens/pos/DeliveryWorkspace.tsx");
   assert.match(workspace, /orderType: "Delivery"/);
-  assert.match(workspace, /customerName: customers\.selected\?\.name/);
-  assert.match(workspace, /customerPhone: customers\.selected\?\.phone/);
-  assert.match(workspace, /deliveryAddress: address \? addressLine\(address\) : null/);
+  // RETARGETED BY LEVEL 3D. The three identity fields were pinned to
+  // `customers.selected` here, which was correct while the only payable order
+  // was the one just sent for the customer on screen. Level 3D can settle an
+  // order opened from the queue, and then the SELECTION is the wrong source -
+  // it would print the currently-open caller's name onto someone else's
+  // delivery. The enduring property is that the receipt carries the identity of
+  // the order being paid, so that is what is asserted now, and it is stricter.
+  assert.match(workspace, /customerName: who\.customerName/);
+  assert.match(workspace, /customerPhone: who\.customerPhone/);
+  assert.match(workspace, /deliveryAddress: who\.addressText/);
+  assert.match(workspace, /const who = receiptIdentity\(order\)/);
+  assert.match(workspace, /if \(selected && selected\.id === order\.customer_id\)/);
   // And the preview actually renders them - the type alone was not enough.
   const preview = read("../src/screens/pos/ReceiptPreview.tsx");
   assert.match(preview, /data\.customerName/);
