@@ -50,7 +50,25 @@ export type PosRpcName =
   // `pos_submit_order` / `pos_pay_order`, which are already listed above - so
   // Level 3A adds no order or money RPC, and the delivery workspace calls
   // neither. Those arrive with Levels 3B and 3C.
-  | "pos_upsert_customer";
+  | "pos_upsert_customer"
+  // Level 3D - Delivery order management. The two mutations the web's delivery
+  // panel already exposes, and nothing else.
+  //
+  // `pos_edit_order` changes an order's note, and its discount while unpaid. It
+  // takes no shift lock and writes no payment row.
+  //
+  // `pos_void_order` is the financial one, and it is TWO actions behind one
+  // name: on an unpaid order it voids, and on a paid order it refunds - the
+  // server refuses to void a paid order without the refund flag. Unusually for
+  // this codebase it is IDEMPOTENT, keyed per order in
+  // `pos_operation_idempotency`, so a repeat replays the first result instead of
+  // reversing the money twice.
+  //
+  // Still absent, deliberately: `pos_remove_order_item`. Removing a line from a
+  // paid order re-settles it, and that belongs with its own verification rather
+  // than riding along here.
+  | "pos_edit_order"
+  | "pos_void_order";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {
