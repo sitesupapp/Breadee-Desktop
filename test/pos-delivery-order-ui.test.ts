@@ -511,6 +511,49 @@ test("opening a past receipt writes nothing", () => {
   assert.match(history, /readOrderPayment\(input\.order\.id\)/);
 });
 
+// Found on staging: the queue is scoped to the open shift, or to today when
+// there is none, so an order from a previous day is not reachable from it at
+// all. With the detail panel as the only entry point, a delivery receipt could
+// be reopened for a few hours and then never again - the "read-only receipt
+// gap" this level exists to close was only closed for today. The customer's
+// order history is the one surface that does list older orders, so the entry
+// point belongs there too.
+test("a receipt can be reopened from the customer's history, not only from today's queue", () => {
+  const dialogs = stripJsxComments(read("components", "pos", "CustomerDialogs.tsx"));
+  assert.match(dialogs, /onReceipt\?: \(orderId: string\) => void;/);
+  assert.match(dialogs, /props\.onReceipt && o\.order_type === "delivery"/);
+  assert.match(workspace, /onReceipt=\{\(orderId\) => void openHistoricalReceiptById\(orderId\)\}/);
+});
+
+test("a history receipt re-reads the order rather than trusting the history row", () => {
+  // The row carries no subtotal, discount, note or shift. A receipt assembled
+  // from it would be a document with invented figures on it.
+  const fn = workspace.slice(workspace.indexOf("const openHistoricalReceiptById"), workspace.indexOf("// F4 OPENS"));
+  assert.match(fn, /const order = await readDeliveryOrder\(orderId\)/);
+  assert.match(fn, /await openHistoricalReceipt\(order\)/);
+  // Same builder as the queue path - not a second receipt implementation.
+  assert.equal((workspace.match(/readHistoricalReceipt\(/g) ?? []).length, 1);
+});
+
+test("the history receipt is offered for delivery orders only", () => {
+  // The rebuilt receipt names itself a Delivery receipt, so offering it on a
+  // takeaway row would print the wrong order type onto a real document.
+  const dialogs = stripJsxComments(read("components", "pos", "CustomerDialogs.tsx"));
+  const guard = dialogs.slice(dialogs.indexOf("props.onReceipt &&"), dialogs.indexOf("props.onReceipt &&") + 200);
+  assert.match(guard, /o\.order_type === "delivery"/);
+});
+
+test("reopening a receipt from history still writes nothing, and says so", () => {
+  const dialogs = stripJsxComments(read("components", "pos", "CustomerDialogs.tsx"));
+  for (const token of ["callPosRpc", "pos_pay_order", "pos_void_order", "pos_edit_order", "insert", "update"]) {
+    assert.equal(dialogs.includes(token), false, `the history dialog must not ${token}`);
+  }
+  // The footer no longer claims refunding is unavailable "yet" - Level 3D
+  // added it, on the detail panel where the gates live - but it still says
+  // plainly that this list reorders and edits nothing.
+  assert.match(dialogs, /Read only\. Reordering and editing a past order from here are not available/);
+});
+
 test("a reprint carries the order's own time, not the moment it was reprinted", () => {
   assert.match(workspace, /at: order\.created_at \? new Date\(order\.created_at\)\.toLocaleString\(\) : ""/);
 });

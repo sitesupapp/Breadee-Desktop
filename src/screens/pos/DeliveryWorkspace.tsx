@@ -283,6 +283,8 @@ export function useDeliveryWorkspace(input: {
   const [voidBusy, setVoidBusy] = useState(false);
   const [voidError, setVoidError] = useState<string | null>(null);
   const [receiptBusy, setReceiptBusy] = useState(false);
+  /** Which history row is assembling a receipt, so only that one shows busy. */
+  const [receiptBusyId, setReceiptBusyId] = useState<string | null>(null);
   /**
    * One latch per mutation, held synchronously. Same reason as payment's: two
    * confirms in the same tick both read a stale `busy === false`, and for a
@@ -1273,6 +1275,34 @@ export function useDeliveryWorkspace(input: {
     [receiptIdentity, pos.tenantName, pos.branch.name, pos.userName, input, toast],
   );
 
+  /**
+   * The same receipt, reached from the customer's order history.
+   *
+   * The order is re-read by id rather than taken from the history row, because
+   * that row carries no subtotal, discount, note or shift - and a receipt
+   * assembled from a partial row would be a document with invented figures on
+   * it. This is the only path to an order older than today: the queue is scoped
+   * to the open shift, or to today when there is none.
+   */
+  const openHistoricalReceiptById = useCallback(
+    async (orderId: string) => {
+      setReceiptBusyId(orderId);
+      try {
+        const order = await readDeliveryOrder(orderId);
+        if (!order) {
+          toast.push({ tone: "warning", message: "That order is no longer available" });
+          return;
+        }
+        await openHistoricalReceipt(order);
+      } catch (e) {
+        toast.push({ tone: "error", message: "Could not open the receipt", detail: classifyError(e).message });
+      } finally {
+        setReceiptBusyId(null);
+      }
+    },
+    [openHistoricalReceipt, toast],
+  );
+
   // F4 OPENS the dialog and never charges, through the same gate as the button.
   // Live on the customer half AND on the Orders queue, because both resolve to
   // the same `payTarget` and the same Level 3C settlement path. Off in Add Items,
@@ -1690,6 +1720,10 @@ export function useDeliveryWorkspace(input: {
         customer={customers.selected}
         loading={customers.historyLoading}
         onClose={customers.closeHistory}
+        /* Level 3D. Still read only - this reopens a receipt, it does not
+           reorder, edit or refund anything. */
+        onReceipt={(orderId) => void openHistoricalReceiptById(orderId)}
+        receiptBusyId={receiptBusyId}
       />
 
       {/* A populated basket belongs to the customer it was built for. Switching
