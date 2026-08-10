@@ -544,7 +544,7 @@ Six in total. Four allow-list guards moved 13 → 15, each also asserting `pos_r
 
 The machine's spawn instability was unusually severe during this level's final gates: a dozen full-suite runs each reported a *different* random set of file-level crashes naming no assertion, the best reaching **699 pass / 1 crash**. Every crashed file was then verified green — individually or in focused batches of 8 and 14 — with no code change in between, and the focused Level 3D suite is **64 / 64**. Per the established policy this is environmental, and CI remains the authoritative full-suite gate.
 
-### Staging verification — PARTIAL (2026-08-10)
+### Staging verification — PASSED (2026-08-10)
 
 Run on **staging** (`azjxprewycygsocusxjn`), tenant **Dominos Pizza**, **Main Branch**, as **`cashier@dominos.com`**, from the Level 3D dev build at `http://localhost:5188`. Production never contacted. Prior shift `74192728-…` was verified **approved** before any write.
 
@@ -584,11 +584,38 @@ That `voided_no_refund` outcome is the server's own record that **`p_refund` arr
 
 The queue is scoped to the open shift, or to today. The detail panel was the only route to the receipt entry point, so **an order older than today was unreachable** — `260809-0001` could not be opened from the Level 3D UI at all, and a delivery receipt could be reopened for a few hours and then never again. That is the read-only receipt gap moved, not closed. The customer's order history already lists past orders, so it gained a **Receipt** action per delivery row, routed to the same `readHistoricalReceipt`. The order is re-read by id rather than taken from the history row, which carries no subtotal, discount, note or shift. Fixed in `e2037f9` with four regression tests, and verified live afterwards on `260809-0001`.
 
-#### Not completed, and why
+#### Shift close, with someone else's orders in the drawer
 
-**Shift close and the today-fallback could not be run.** Between 15:57 and 16:53 UTC — hours after the Level 3D writes ended at 12:13 — **five unrelated orders were created on the same `cashier@dominos.com` account and attached to this QA shift**: one takeaway and four dine-in, including two payments ($14.50 LBP, $24.50 USD). The shift therefore no longer holds only the QA float, and three of those orders are unpaid, which blocks closure through `pos_shift_unresolved_orders`.
+Five unrelated orders were created manually on the same account during the run and attached to this QA shift — one takeaway and four dine-in, two of them paid. They were **confirmed by the operator as authorised staging test data**, so the shift was closed on its real totals rather than forced back to the original $3.00 plan.
 
-Closing it would mean counting someone else's takings; resolving those orders would mean paying or voiding work that is not this level's to touch. **Shift `91b15fe2-…` is deliberately left open**, and the today-fallback check that depends on closing it is not run. The Level 3D QA order itself is `voided` and therefore already resolved — it is not what blocks the close.
+The three unpaid dine-in test bills were resolved through the **normal Level 2C Clear lifecycle** — the product's own "Test / verification bill" reason, one table at a time. Clear voids only OPEN UNPAID orders, so each dialog named exactly the unpaid figure ($17.00, $47.50, $1.50) and the two **paid** orders kept their money and their payment rows. No payment was invented to clear anything, and no direct SQL or service-role write was used.
+
+| | |
+|---|---|
+| Opening float | **$3.00** |
+| Cash sales (server) | **$39.00** |
+| Expected / counted | **$42.00 / $42.00** |
+| Difference | **Balanced $0.00** |
+| Paid orders | **2** (both pre-existing test orders) |
+| Cancelled / void | **4** — the Level 3D delivery cancel + three cleared test bills |
+| Refunded | **0** |
+| Final status | **`pending_manager_review`** — not self-approved |
+
+#### Today-fallback — PASSED
+
+With no shift open, the queue moved to the today scope by itself. The sentence on screen changed to *"Today's delivery orders for this branch, newest first"*, and the request dropped `shift_id` and carried **local-day bounds** instead — `created_at gte 2026-08-09T21:00:00Z, lt 2026-08-10T21:00:00Z`, i.e. local midnight at UTC+3, not the UTC day. Tenant, branch, `order_type=eq.delivery`, `created_at.desc` and `limit=200` were unchanged. The cancelled Level 3D order remained discoverable; `260809-0001` correctly did not, being yesterday locally.
+
+#### Final write audit
+
+| | Before | After | Delta |
+|---|---|---|---|
+| Orders | 42 | 48 | **+1 Level 3D**, +5 operator's manual tests |
+| Payments | 37 | 39 | **+0 Level 3D**, +2 operator's |
+| Refunds | 0 | 0 | **0** |
+| Shifts | 8 | 9 | +1 (the QA shift) |
+| Customers | 4 | 4 | 0 |
+
+Level 3D QA order `260810-0001` ends **`voided / unpaid`** with **0** payment rows. Settled `260809-0001` ends **`completed / paid`** with **1** payment row and `updated_at` still 2026-08-09 — untouched throughout.
 
 ### Explicitly deferred
 
