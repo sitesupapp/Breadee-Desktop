@@ -304,9 +304,10 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // The one that takes money. Present now, and present ONCE.
   assert.equal(members.filter((m) => m === "pos_pay_table").length, 1, "pos_pay_table is not listed exactly once");
   assert.equal(new Set(members).size, members.length, "an RPC name is declared twice");
-  // RETARGETED AGAIN IN LEVEL 3A: 12 -> 13, for `pos_upsert_customer`. Same
+  // RETARGETED AGAIN IN LEVEL 3A: 12 -> 13, for `pos_upsert_customer`, and
+  // AGAIN IN LEVEL 3D: 13 -> 15, for the two order-management RPCs. Same
   // discipline as the 11 -> 12 bump above.
-  assert.equal(members.length, 13, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.equal(members.length, 15, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

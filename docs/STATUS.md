@@ -10,7 +10,10 @@ _Source of truth: the Breadee web app (Next.js 16 + Supabase). This desktop clie
 - **Level 2B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2B` (branch `feature/desktop-pos-level-2b-rounds`) — **merged** as `27410bb` via PR #5, kept for reference.
 - **Level 2C worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2C` (branch `feature/desktop-pos-level-2c-table-ops`).
 - **Level 2D worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-2D` (branch `feature/desktop-pos-level-2d-payment`, based on `origin/desktop-staging` @ `f03c091`) — **merged** as `6b7f365` via PR #7.
-- **Level 3A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3A` (branch `feature/desktop-pos-level-3a-delivery-foundation`, based on `desktop-staging` @ `d3fea84`).
+- **Level 3A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3A` (branch `feature/desktop-pos-level-3a-delivery-foundation`, based on `desktop-staging` @ `d3fea84`) — **merged** as `9378b66` via PR #9.
+- **Level 3B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3B` (branch `feature/desktop-pos-level-3b-delivery-ordering`) — **merged** as `1112c5e` via PR #10.
+- **Level 3C worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3C` (branch `feature/desktop-pos-level-3c-delivery-settlement`) — **merged** as `ec48785` via PR #11.
+- **Level 3D worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3D` (branch `feature/desktop-pos-level-3d-delivery-order-management`, based on `desktop-staging` @ `ec48785`) — local only, not pushed.
 - `C:\Users\User\Claude\Projects\Breadee\Breadee-Desktop` is a **read-only fallback copy** of the pre-migration state. Do not work in it.
 - GitHub remote: `github.com/sitesupapp/Breadee-Desktop` (the repo exists and `desktop-staging` is pushed — an earlier version of this document said otherwise).
 
@@ -439,6 +442,185 @@ Both are pinned by regression tests.
 
 Native printing, broad delivery operational reporting, order editing, cancellation/void.
 
+## 1h. Level 3D — Delivery order management (this change set)
+
+On `feature/desktop-pos-level-3d-delivery-order-management`, based on `desktop-staging` @ `ec48785`. Local only — not pushed, no PR. Level 3C made a delivery order payable; Level 3D makes the orders already taken **findable, correctable, cancellable and refundable**, and closes the receipt gap.
+
+The RPC allow-list grows from 13 names to **15**: `pos_edit_order` and `pos_void_order`. **`pos_remove_order_item` is deliberately not among them**, asserted in five places.
+
+### The gap this closes
+
+After Level 3C a delivery order could be taken and settled, and then it was gone. The only route back to one was to reopen the customer who placed it, and the only way to see a receipt was to have just paid for it. There was no way to correct a note, cancel a mistake, or reverse a payment from the desktop at all.
+
+### The two contracts, read from the staging definitions
+
+**`pos_edit_order(p_payload jsonb) → { ok, order_id }`** reads `order_id`, and optionally `note` and the `discount_type`/`discount_value` pair. Both optionals are detected by **key presence** (`p_payload ? 'note'`), not by value.
+
+| | |
+|---|---|
+| Omit `note` | The column is left alone |
+| Send `note: ""` | The note is **cleared** |
+| Permissions | `pos.edit_orders`; `pos.apply_discounts` **only** when a discount key is present |
+| Paid order | Note **yes**, discount **no** — refused by the server |
+| Terminal order | Refused outright |
+| Shift lock / payment rows | Neither |
+| Idempotency key | **None** — but every field is a SET, so a replay converges rather than compounding |
+
+**`pos_void_order(p_order, p_reason, p_refund)`** is positional, not a payload, and requires `pos.cancel_orders`. It returns `order_id, voided, status, was_paid, refunded, refund_usd, refund_amount, refund_id`.
+
+> **It is idempotent per order.** It derives a key from the order id and stores its result in `pos_operation_idempotency`, so a second call **replays** the first result with `idempotent_replay: true` rather than reversing money twice. That makes it the safest financial mutation in the app — safer than `pos_pay_order`, which has no key at all.
+
+**Neither RPC re-checks the branch.** Both assert only the tenant and the permission, exactly as `pos_save_order` does with customer and address. `checkOrderContext()` is therefore the only place a branch is ever verified for these two mutations, and it is mandatory before every one.
+
+### Cancel and refund are two actions, never one flag
+
+| | Unpaid — **Cancel order** | Paid — **Refund order** |
+|---|---|---|
+| `p_refund` | `false` | `true` (the server **refuses** `false` on a paid order) |
+| Shift lock | None | Locks the **ORDER's** shift |
+| Payment rows | None | A **negative** `pos_payments` row + a `pos_refunds` row |
+| Result | `status → voided`, `payment_status` untouched | `status` **and** `payment_status` → `refunded` |
+
+The desktop never offers one control with a boolean. `voidActionFor(order)` returns a **name** derived from the order's payment state, `refundFlagFor(action)` derives the flag from the name, and no file on the delivery surface contains the string `p_refund` or sets a refund boolean — a test fails if one ever does. The action is re-derived a second time against the freshly read order immediately before the RPC, so an order paid on another terminal while the Cancel dialog sat open stops rather than sending the wrong action.
+
+### The queue
+
+A view *inside* the existing Delivery workspace — same shell, same status bar, same payment dialog, same receipt layer — reached by a **Customers / New order · Orders** switch. Not a cross-order-type Orders workspace, and not a second POS architecture.
+
+Scope is fixed and stated on screen: **an open shift means that shift's delivery orders; no shift means today's**, always this tenant and branch as RLS scopes them, `order_type = delivery`, newest first, limit 200. The sentence the operator reads is derived from the same condition the reader branches on, so the list cannot describe itself wrongly, and the limit is announced rather than silently truncating.
+
+**No row carries a mutation control.** Every risky action lives one tap further in, on the detail panel — a Cancel button inside a scrolling list of near-identical rows is a mis-tap waiting to void the wrong order. The queue component never sees a tenant, a branch or a query at all.
+
+### The detail
+
+Built from an authoritative re-read of `pos_orders` + `pos_order_items` + `pos_order_item_modifiers`, never from the row that was clicked or from a cart. Shows the order number, time, customer, phone, address, items with modifiers and kitchen notes, the delivery note, subtotal / discount / total, payment method and status, order status and the shift reference.
+
+What it deliberately cannot do: add an item, change a quantity or modifier, remove a line, or move the order to a different customer, address or branch. A terminal order stays fully readable and loses every mutation control.
+
+### Pay reuses Level 3C, and two things were corrected in the process
+
+There is exactly one settlement call site. The pay target is resolved once — the order just sent, or the one open in the queue — and both reach Level 3C's gate, dialog, pre-payment re-read, latch, recovery, cash-box refresh and receipt untouched. There is still no collection lifecycle: the label is **Pay**, and no file says "Mark collected", "Collected" or "Awaiting collection".
+
+Two Level 3C assumptions were true only while the sole payable order was one sent in this session, and both are now read rather than assumed:
+
+1. **The shift.** `pos_pay_order` locks the ORDER's shift. A queue order may belong to a shift that has since closed, so the order's own shift status is read and the payment gate uses that. (The *send* gate still asks about the cashier's own shift, and rightly.)
+2. **The receipt's identity.** It came from `customers.selected`. Settling a queue order while a different caller is open on screen would have printed that caller's name and address onto someone else's delivery. It now comes from the ORDER's customer and address ids, falling back to the queue's own lookup keyed by order id, and to blanks — never to whoever happens to be selected.
+
+### Edit sends what was touched, not what is on the form
+
+An untouched note is omitted, an emptied one is sent as `""`, and the discount pair travels only when the operator explicitly opts into changing it. All three states are said out loud under the field. A paid order shows **no discount control at all** rather than a disabled one — the server refuses it, and a greyed box only invites "why not?".
+
+Recovery after a lost response asks whether the order already says what was requested, and asserts **only the keys that were actually sent**: a note-only edit is not judged against a discount it never mentioned. A cleared note reads back as `null` rather than `""`, and the comparison normalises both. There is no timer, no queue and no automatic retry anywhere on the path.
+
+### The refund gate, and why it is stated in words
+
+A refund additionally requires the **order's** shift to be open. The gate is re-evaluated against a freshly read shift state immediately before the RPC, so a closed-shift refund never reaches `pos_void_order`. The refusal is printed as a sentence rather than left as a disabled button, because a cashier who only sees grey will reasonably try opening their own till — and that is not the shift the server locks.
+
+The Refund dialog is red, names the amount, warns that a negative payment and a refund record are written against the shift that took the money, and requires an acknowledgement on top of the mandatory reason. Cancel says in plain words that no money is involved. **A reason is mandatory for both**, though the server accepts an empty one — "no reason given" is not an acceptable audit entry against a reversed payment.
+
+### The receipt for a past order
+
+Three reads and no writes: the order's lines, its payment row if it has one, and the identity it was sent to. It takes no payment and needs none. `orderType` is stated explicitly, so a reprint says **Delivery** rather than inheriting the "Takeaway" default. `tendered` and `change` stay blank — they are captured at the till, stored nowhere, and inventing them would put unsupported numbers on a document the customer keeps. A refunded order shows the original charge, not the reversal. Nothing here routes to a printer.
+
+### Permissions
+
+Three separate gates, because the server checks three separate things: `pos.view_orders` for the queue, `pos.edit_orders` for the note, `pos.cancel_orders` for both cancel and refund. Correcting a note is not the same authority as reversing a payment, and they are not collapsed.
+
+### Dashboard copy
+
+The tile had deferred Dine-in months after it landed, and then deferred Delivery the same way. It now reads:
+
+> Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment and on-screen receipts. Printing is not available yet.
+
+Its test was **retargeted** rather than deleted: "the dashboard does not claim Delivery is available" was defending a claim the app had outgrown, so it now pins the enduring property — the tile must not promise a capability the desktop lacks, and printing is the only one left.
+
+### Retargeted assertions
+
+Six in total. Four allow-list guards moved 13 → 15, each also asserting `pos_remove_order_item` stays out; `pos-dine-in-actions`'s money-moving-name **count** became an explicit list, since `void` now legitimately matches. The sixth is the Level 3C receipt assertion that pinned the identity fields to `customers.selected` — replaced with the stricter property that the receipt carries the identity of the order **being paid**.
+
+### Gates
+
+**710 tests** (600 baseline + 46 adapter + 64 UI/wiring); typecheck clean; production frontend build clean.
+
+The machine's spawn instability was unusually severe during this level's final gates: a dozen full-suite runs each reported a *different* random set of file-level crashes naming no assertion, the best reaching **699 pass / 1 crash**. Every crashed file was then verified green — individually or in focused batches of 8 and 14 — with no code change in between, and the focused Level 3D suite is **64 / 64**. Per the established policy this is environmental, and CI remains the authoritative full-suite gate.
+
+### Staging verification — PASSED (2026-08-10)
+
+Run on **staging** (`azjxprewycygsocusxjn`), tenant **Dominos Pizza**, **Main Branch**, as **`cashier@dominos.com`**, from the Level 3D dev build at `http://localhost:5188`. Production never contacted. Prior shift `74192728-…` was verified **approved** before any write.
+
+| | |
+|---|---|
+| QA shift | `91b15fe2-60f6-42b5-9553-e32d7e4b84b4`, float **$3.00** |
+| QA order | `33ef1c40-…` / **260810-0001**, delivery, `sent_to_kitchen` / `unpaid`, $7.00 USD |
+| `client_op_id` | `145b07e3-…` — **one** submission row, zero duplicates |
+| Item | Margherita ×1 + required modifier **Small** |
+| Customer / address | `5940fc3d-…` / `91b3903b-…`, as selected |
+
+**Queue scope, proven on the wire.** The request carried `tenant_id=eq.…`, `branch_id=eq.…`, `order_type=eq.delivery`, `order=created_at.desc`, `limit=200` and `shift_id=eq.91b15fe2-…`. Four requests, **all GET** — loading the queue mutates nothing. The scope sentence on screen read "This shift's delivery orders, newest first."
+
+**The type filter got a real negative control.** Unrelated takeaway and dine-in work later landed on the same QA shift (see below), leaving it holding six orders. The Level 3D queue continued to show **exactly one row** — the delivery order — with counts `0 unpaid / 0 paid / 1 cancelled`. There is no cross-order-type leakage.
+
+**Detail** showed order number, timestamp, customer, phone, address, delivery note, `1 x Margherita` with `+ Small`, subtotal, total, currency, payment status, order status and the shift reference. Exactly five controls existed on the panel — Back, Pay, Edit order, Receipt preview, Cancel order — and **no** quantity, modifier, line-removal, customer, address or branch control.
+
+**Note-only edit.** The dialog opened saying *"The note is unchanged and will not be sent"* with **Save disabled**; after editing it said *"The note will be replaced"*. One confirmation changed the note to `… — edited` **exactly**, and nothing else moved: status, payment status, subtotal, discount, total, customer, address, shift, branch, items and modifiers all identical, orders and payments unchanged. The discount was deliberately not touched on staging.
+
+**Cancel.** The action was labelled **Cancel order**; the dialog named the customer and the $7.00 total, stated *"This order has not been paid, so no money is involved"*, required a reason, and offered **no refund control of any kind**. One confirmation produced:
+
+| Evidence | Value |
+|---|---|
+| `pos_orders.status` | **`voided`** |
+| `payment_status` | **`unpaid`** — untouched, exactly as the unpaid branch specifies |
+| Reason | appended as `[void: Desktop Level 3D cancellation verification]` |
+| `pos_operation_idempotency` | **1 row**, `operation_type: void_order`, **`outcome: voided_no_refund`**, `refunded: false`, `refund_id: null` |
+| Payment rows / refund rows for the order | **0 / 0** |
+
+That `voided_no_refund` outcome is the server's own record that **`p_refund` arrived as false** — the cancel/refund distinction verified end to end, from a UI that never names the flag. Duplicate void count **0**; Cancel was deliberately not re-sent, since replay is covered by tests.
+
+**Terminal handling.** The queue chip flipped to `Cancelled`, counts moved to `0/0/1`, and the detail's action stack collapsed to **Back + Receipt preview** — Pay, Edit and Cancel all gone — under *"This order is cancelled. It can be read, but not changed."*
+
+**Historical receipt — both branches.** The cancelled QA order rendered `Delivery`, the identity, `1x Margherita / + Small`, server figures and **Unpaid**. The settled Level 3B/3C order **260809-0001** rendered `Delivery`, `#260809-0001`, customer, phone, address, `1x Margherita / + Small / No olives`, `$7.00`, **`Paid - cash`**, `USD` and its own shift `74192728-…`, stamped with the order's own 8/9 timestamp. **Print is disabled** behind *"Native printing arrives in the printing phase."* No native routing exists. Opening either wrote nothing: orders, payments and refunds unchanged, and `260809-0001` still `completed / paid` with **1** payment row and its `updated_at` still 2026-08-09.
+
+#### One defect found and fixed at runtime
+
+The queue is scoped to the open shift, or to today. The detail panel was the only route to the receipt entry point, so **an order older than today was unreachable** — `260809-0001` could not be opened from the Level 3D UI at all, and a delivery receipt could be reopened for a few hours and then never again. That is the read-only receipt gap moved, not closed. The customer's order history already lists past orders, so it gained a **Receipt** action per delivery row, routed to the same `readHistoricalReceipt`. The order is re-read by id rather than taken from the history row, which carries no subtotal, discount, note or shift. Fixed in `e2037f9` with four regression tests, and verified live afterwards on `260809-0001`.
+
+#### Shift close, with someone else's orders in the drawer
+
+Five unrelated orders were created manually on the same account during the run and attached to this QA shift — one takeaway and four dine-in, two of them paid. They were **confirmed by the operator as authorised staging test data**, so the shift was closed on its real totals rather than forced back to the original $3.00 plan.
+
+The three unpaid dine-in test bills were resolved through the **normal Level 2C Clear lifecycle** — the product's own "Test / verification bill" reason, one table at a time. Clear voids only OPEN UNPAID orders, so each dialog named exactly the unpaid figure ($17.00, $47.50, $1.50) and the two **paid** orders kept their money and their payment rows. No payment was invented to clear anything, and no direct SQL or service-role write was used.
+
+| | |
+|---|---|
+| Opening float | **$3.00** |
+| Cash sales (server) | **$39.00** |
+| Expected / counted | **$42.00 / $42.00** |
+| Difference | **Balanced $0.00** |
+| Paid orders | **2** (both pre-existing test orders) |
+| Cancelled / void | **4** — the Level 3D delivery cancel + three cleared test bills |
+| Refunded | **0** |
+| Final status | **`pending_manager_review`** — not self-approved |
+
+#### Today-fallback — PASSED
+
+With no shift open, the queue moved to the today scope by itself. The sentence on screen changed to *"Today's delivery orders for this branch, newest first"*, and the request dropped `shift_id` and carried **local-day bounds** instead — `created_at gte 2026-08-09T21:00:00Z, lt 2026-08-10T21:00:00Z`, i.e. local midnight at UTC+3, not the UTC day. Tenant, branch, `order_type=eq.delivery`, `created_at.desc` and `limit=200` were unchanged. The cancelled Level 3D order remained discoverable; `260809-0001` correctly did not, being yesterday locally.
+
+#### Final write audit
+
+| | Before | After | Delta |
+|---|---|---|---|
+| Orders | 42 | 48 | **+1 Level 3D**, +5 operator's manual tests |
+| Payments | 37 | 39 | **+0 Level 3D**, +2 operator's |
+| Refunds | 0 | 0 | **0** |
+| Shifts | 8 | 9 | +1 (the QA shift) |
+| Customers | 4 | 4 | 0 |
+
+Level 3D QA order `260810-0001` ends **`voided / unpaid`** with **0** payment rows. Settled `260809-0001` ends **`completed / paid`** with **1** payment row and `updated_at` still 2026-08-09 — untouched throughout.
+
+### Explicitly deferred
+
+Native printing and printer routing (Level 3E), `pos_remove_order_item`, a cross-order-type Orders workspace, the Delivery Clients Book, KDS, reports, call-centre routing, driver/dispatcher, cross-branch behaviour, customer/address reassignment after submit, and offline mutations.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -451,7 +633,8 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.
-- **Delivery ORDERING and PAYMENT — not implemented.** Level 3A ships the customer foundation only (see §1e). The Delivery route is enabled, but it cannot add an item, submit an order or take money, and it calls no order or payment RPC.
+- **Delivery ORDERING and PAYMENT — implemented in Levels 3B and 3C** (§1f, §1g), and **order management in Level 3D** (§1h). The line above described Level 3A only and is superseded; it is kept because the Level 3A section still states that scope accurately.
+- **Removing a line from a submitted order — not implemented, deliberately.** `pos_remove_order_item` exists on the server and is **absent** from the desktop's RPC allow-list. Level 3D's editing surface is the order note and, while unpaid, the discount. Nothing else about a submitted order can be changed from here.
 - **Customer de-duplication at the database level — not fixed, and not fixable here.** `uq_pos_customer_phone` is unique on the raw phone; `phone_e164` is only indexed. The desktop mitigates before the write (§1e); it does not repair the constraint, and existing duplicate rows are surfaced for the operator to choose between rather than merged.
 - Orders workspace, edit/void/refund, reports, KDS, loyalty, driver assignment, Google OAuth deep-link, encrypted local storage.
 
@@ -475,7 +658,12 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - [x] `phone_e164` is never sent — the server derives it, so a row whose raw and normalised forms disagree cannot originate here.
 - [x] No customer is created without a raw **and** a normalised search first; a name-only query can never create one.
 - [x] One synchronous latch across the create path, `submit` called at most once, and a lost response resolved by re-read rather than retry.
-- [x] The Delivery route reaches no order, payment or void RPC — asserted statically, not merely by absent buttons.
+- [x] `p_refund` is never written as a literal and never offered as a choice: the void ACTION is derived from the order's payment state, the flag from the action, and no UI file names the parameter at all.
+- [x] The branch is verified before every edit, cancel and refund — `checkOrderContext()` is the only place it happens, because neither RPC checks it.
+- [x] A closed-shift refund never reaches `pos_void_order`: the gate is re-evaluated against a freshly read shift state immediately before the call.
+- [x] `pos_remove_order_item` is absent from the RPC allow-list, so no call site can reach it.
+- [x] A receipt carries the identity of the order it belongs to, resolved from that order's own customer and address ids — never from whoever is selected on screen.
+- [x] Reopening a past receipt performs three reads and no writes; it can never trigger a payment.
 - [x] Customer writes reach no offline queue; they are refused while offline instead.
 - [x] No production migration; production Supabase untouched.
 - [ ] Local IndexedDB is not yet encrypted at rest.

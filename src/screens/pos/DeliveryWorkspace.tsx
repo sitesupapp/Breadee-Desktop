@@ -40,7 +40,14 @@ import {
   type AddressFormValues,
   type CustomerFormValues,
 } from "@/components/pos/CustomerDialogs";
-import { canManageCustomers, canViewCustomers, canViewDelivery } from "@/lib/pos/access";
+import {
+  canCancelOrders,
+  canEditOrders,
+  canManageCustomers,
+  canViewCustomers,
+  canViewDelivery,
+  canViewOrders,
+} from "@/lib/pos/access";
 import { classifyError } from "@/lib/pos/errors";
 import {
   buildAddressPayload,
@@ -78,6 +85,39 @@ import {
   readSettledOrder,
   validateDeliveryDiscount,
 } from "@/lib/pos/deliverySettlement";
+import {
+  buildEditPayload as buildOrderEditPayload,
+  checkOrderContext,
+  createMutationLatch,
+  editDeliveryOrder,
+  editOrderGate,
+  loadDeliveryOrderLines,
+  loadDeliveryQueue,
+  performEdit,
+  performVoid,
+  queueCounts,
+  readDeliveryOrder,
+  validateVoidReason,
+  voidActionFor,
+  voidDeliveryOrder,
+  voidOrderGate,
+  OrderChangedError,
+  type DeliveryOrderLine,
+  type DeliveryQueueOrder,
+} from "@/lib/pos/deliveryOrderManagement";
+import {
+  editReached,
+  loadOrderParties,
+  loadShiftOpenMap,
+  orderShiftOpen,
+  readHistoricalReceipt,
+  toOpenDeliveryOrder,
+  type OrderParty,
+} from "@/lib/pos/deliveryHistory";
+import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
+import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
+import { EditOrderDialog, VoidOrderDialog, type EditOrderIntent } from "@/components/pos/DeliveryOrderDialogs";
+import { computeDiscount } from "@/lib/pos/discounts";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
@@ -87,7 +127,7 @@ import { cartSubtotal } from "@/lib/pos/orders";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { DeliveryOrderSummary } from "@/components/pos/DeliveryOrderSummary";
 import { addressLine } from "@/components/pos/CustomerCard";
-import { Button, GatedButton, Textarea } from "@/components/ui";
+import { Button, EmptyState, GatedButton, Textarea } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { useShortcuts } from "@/lib/keyboard/provider";
@@ -105,8 +145,16 @@ type DeliveryDialog =
   | { kind: "customer"; mode: "create" | "edit"; initial: CustomerFormValues }
   | { kind: "address"; mode: "create" | "edit"; addressId: string | null; initial: AddressFormValues };
 
-/** Which half of Delivery is on screen. Add Items borrows the shell's menu. */
-export type DeliveryView = "customer" | "add_items";
+/**
+ * Which part of Delivery is on screen.
+ *
+ * `orders` is Level 3D's operational queue. It is a VIEW of this workspace, not
+ * a second POS architecture: the same shell, the same status bar, the same
+ * payment dialog and the same receipt layer. A cross-order-type Orders screen is
+ * deliberately out of scope - this one shows deliveries, which is what the
+ * person answering the phone is responsible for.
+ */
+export type DeliveryView = "customer" | "add_items" | "orders";
 
 export type DeliveryWorkspace = {
   view: DeliveryView;
@@ -217,6 +265,34 @@ export function useDeliveryWorkspace(input: {
   /** Ensures the completion sequence runs once per accepted order. */
   const completionDone = useRef(false);
 
+  // --- Level 3D order management state ---------------------------------------
+  const [queue, setQueue] = useState<DeliveryQueueOrder[]>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
+  const [parties, setParties] = useState<Map<string, OrderParty>>(new Map());
+  /** Which of the queue's shifts are still open. Refunds depend on it. */
+  const [shiftOpenMap, setShiftOpenMap] = useState<Map<string, boolean>>(new Map());
+  const [detail, setDetail] = useState<DeliveryQueueOrder | null>(null);
+  const [detailLines, setDetailLines] = useState<DeliveryOrderLine[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editBusy, setEditBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [voidOpen, setVoidOpen] = useState(false);
+  const [voidBusy, setVoidBusy] = useState(false);
+  const [voidError, setVoidError] = useState<string | null>(null);
+  const [receiptBusy, setReceiptBusy] = useState(false);
+  /** Which history row is assembling a receipt, so only that one shows busy. */
+  const [receiptBusyId, setReceiptBusyId] = useState<string | null>(null);
+  /**
+   * One latch per mutation, held synchronously. Same reason as payment's: two
+   * confirms in the same tick both read a stale `busy === false`, and for a
+   * refund that is a second reversal request against a customer's money.
+   */
+  const editLatch = useRef(createMutationLatch());
+  const voidLatch = useRef(createMutationLatch());
+
   const branchId = pos.branch.id;
 
   // --- gates -----------------------------------------------------------------
@@ -237,6 +313,44 @@ export function useDeliveryWorkspace(input: {
         saving,
       }),
     [accessGate, pos.access, pos.gates.createOrders.allowed, online, saving],
+  );
+
+  // Level 3D. Three separate keys because the server checks three separate
+  // things: reading the queue, editing an order, and cancelling or refunding it.
+  const viewOrdersGate = useMemo(() => canViewOrders(pos.access), [pos.access]);
+  const editOrdersPermission = useMemo(() => canEditOrders(pos.access), [pos.access]);
+  const cancelOrdersPermission = useMemo(() => canCancelOrders(pos.access), [pos.access]);
+
+  const editGate: Gate = useMemo(
+    () =>
+      editOrderGate({
+        deliveryAccess: accessGate,
+        canEditOrders: editOrdersPermission,
+        order: detail,
+        online,
+        busy: editBusy,
+      }),
+    [accessGate, editOrdersPermission, detail, online, editBusy],
+  );
+
+  /**
+   * Cancel OR refund - one gate, and the action inside it is derived from the
+   * order's payment state. The refund branch asks whether the ORDER's shift is
+   * open, never the operator's: `pos_void_order` locks the shift that took the
+   * money, so a cashier at an open till cannot refund yesterday's order and must
+   * not be shown a button that says otherwise.
+   */
+  const voidGate: Gate = useMemo(
+    () =>
+      voidOrderGate({
+        deliveryAccess: accessGate,
+        canCancelOrders: cancelOrdersPermission,
+        order: detail,
+        orderShiftOpen: orderShiftOpen(detail, shiftOpenMap),
+        online,
+        busy: voidBusy,
+      }),
+    [accessGate, cancelOrdersPermission, detail, shiftOpenMap, online, voidBusy],
   );
 
   // --- Level 3B: the order under construction --------------------------------
@@ -651,6 +765,80 @@ export function useDeliveryWorkspace(input: {
 
   const requestLeaveAddItems = useCallback(() => setView("customer"), []);
 
+  // --- Level 3D: the operational queue ---------------------------------------
+
+  /**
+   * Re-read the queue, and with it the two things a row cannot answer alone:
+   * who the order is for, and whether its shift is still open.
+   *
+   * Scope is decided entirely by `loadDeliveryQueue` - this shift when one is
+   * open, today otherwise - and nothing here widens the tenant or the branch.
+   */
+  const refreshQueue = useCallback(async () => {
+    setQueueLoading(true);
+    setQueueError(null);
+    try {
+      const rows = await loadDeliveryQueue({
+        tenantId: pos.tenantId,
+        branchId,
+        shiftId: input.shiftId,
+        now: new Date(),
+      });
+      setQueue(rows);
+      const [who, shifts] = await Promise.all([
+        loadOrderParties(rows).catch(() => new Map<string, OrderParty>()),
+        loadShiftOpenMap(rows.map((o) => o.shift_id)).catch(() => new Map<string, boolean>()),
+      ]);
+      setParties(who);
+      setShiftOpenMap(shifts);
+    } catch (e) {
+      setQueueError(classifyError(e).message);
+    } finally {
+      setQueueLoading(false);
+    }
+  }, [pos.tenantId, branchId, input.shiftId]);
+
+  /** Re-read ONE order and its lines. The authority behind every 3D control. */
+  const refreshDetail = useCallback(async (orderId: string) => {
+    setDetailLoading(true);
+    setDetailError(null);
+    try {
+      const [fresh, lines] = await Promise.all([readDeliveryOrder(orderId), loadDeliveryOrderLines(orderId)]);
+      setDetail(fresh);
+      setDetailLines(lines);
+      if (fresh?.shift_id) {
+        const shifts = await loadShiftOpenMap([fresh.shift_id]).catch(() => new Map<string, boolean>());
+        setShiftOpenMap((prev) => new Map([...prev, ...shifts]));
+      }
+    } catch (e) {
+      setDetailError(classifyError(e).message);
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
+
+  const openDetail = useCallback(
+    (order: DeliveryQueueOrder) => {
+      // The row is shown immediately so the panel is never blank, then replaced
+      // by an authoritative re-read - the list may be seconds old, and every
+      // action on this panel is decided by the fresh copy.
+      setDetail(order);
+      setDetailLines([]);
+      setEditError(null);
+      setVoidError(null);
+      void refreshDetail(order.id);
+    },
+    [refreshDetail],
+  );
+
+  // Load the queue when Orders is opened, and whenever the shift changes under
+  // it - opening or closing a shift changes which orders the operator is
+  // answerable for, and therefore which list this is.
+  useEffect(() => {
+    if (!active || view !== "orders" || !viewOrdersGate.allowed) return;
+    void refreshQueue();
+  }, [active, view, viewOrdersGate.allowed, refreshQueue]);
+
   // --- Level 3C: settlement ---------------------------------------------------
 
   /**
@@ -658,20 +846,73 @@ export function useDeliveryWorkspace(input: {
    * confirm, so no surface can hold a different opinion about whether this order
    * may be settled.
    */
+  /**
+   * WHICH order Pay would settle, and whether its own shift is open.
+   *
+   * Two surfaces can now ask for payment - the order just sent on the customer
+   * half, and an order opened from the Level 3D queue - and they must reach the
+   * SAME settlement path. So the target is resolved once here rather than each
+   * surface passing its own order down: one gate, one dialog, one latch.
+   *
+   * The shift question differs between them, and that difference is real. An
+   * order sent in this session belongs to this session's shift, so the open
+   * shift is that shift. An order from the queue may belong to a shift that has
+   * since closed, and `pos_pay_order` locks the ORDER's shift - so that one is
+   * read rather than assumed.
+   */
+  const payTarget = useMemo(() => {
+    if (view === "orders" && detail) {
+      return {
+        order: toOpenDeliveryOrder(detail),
+        shiftOpen: orderShiftOpen(detail, shiftOpenMap),
+        fromQueue: true,
+      };
+    }
+    return { order: submitted?.order ?? null, shiftOpen: Boolean(input.shiftId), fromQueue: false };
+  }, [view, detail, shiftOpenMap, submitted?.order, input.shiftId]);
+
   const payGate: Gate = useMemo(
     () =>
       deliveryPaymentGate({
         deliveryAccess: accessGate,
         takePayments: input.takePayments,
-        order: submitted?.order ?? null,
-        // `pos_pay_order` locks the ORDER's shift. The order was created in this
-        // session's shift, so an open shift here is that same shift.
-        hasOpenShift: Boolean(input.shiftId),
+        order: payTarget.order,
+        hasOpenShift: payTarget.shiftOpen,
         online,
         currencyBlockedReason: paymentBlockedReason(input.currency, input.rate),
         paying,
       }),
-    [accessGate, input.takePayments, submitted?.order, input.shiftId, online, input.currency, input.rate, paying],
+    [accessGate, input.takePayments, payTarget, online, input.currency, input.rate, paying],
+  );
+
+  /**
+   * WHOSE order this is, for a receipt.
+   *
+   * Resolved from the ORDER's own customer and address ids - never from whoever
+   * happens to be selected on the customer half of the workspace. Paying or
+   * reprinting an order from the queue while a different caller is open on
+   * screen would otherwise print that caller's name and address onto someone
+   * else's delivery, which is the one mistake a receipt cannot survive.
+   */
+  const receiptIdentity = useCallback(
+    (order: { id: string; customer_id: string | null; address_id: string | null }) => {
+      const selected = useCustomers.getState().selected;
+      if (selected && selected.id === order.customer_id) {
+        const a = selected.addresses.find((x) => x.id === order.address_id) ?? null;
+        return {
+          customerName: selected.name ?? null,
+          customerPhone: selected.phone ?? null,
+          addressText: a ? addressLine(a) : null,
+        };
+      }
+      const p = parties.get(order.id);
+      return {
+        customerName: p?.customerName ?? null,
+        customerPhone: p?.customerPhone ?? null,
+        addressText: p?.addressText ?? null,
+      };
+    },
+    [parties],
   );
 
   /** Opens the dialog. Never charges - F4 and the button share this exactly. */
@@ -689,8 +930,9 @@ export function useDeliveryWorkspace(input: {
       discountValue: string;
       tendered: number | null;
     }) => {
-      const order = submitted?.order;
+      const order = payTarget.order;
       if (!order || !payGate.allowed) return;
+      const fromQueue = payTarget.fromQueue;
       const intended = {
         orderId: order.id,
         customerId: order.customer_id,
@@ -782,13 +1024,26 @@ export function useDeliveryWorkspace(input: {
                 : computeChange(money?.original_amount ?? 0, confirm.tendered, confirm.currency).change,
             exchangeRate: money?.exchange_rate ?? null,
             shiftRef: input.shiftId,
-            customerName: customers.selected?.name ?? null,
-            customerPhone: customers.selected?.phone ?? null,
-            deliveryAddress: address ? addressLine(address) : null,
+            ...(() => {
+              const who = receiptIdentity(order);
+              return {
+                customerName: who.customerName,
+                customerPhone: who.customerPhone,
+                deliveryAddress: who.addressText,
+              };
+            })(),
           }),
         );
 
-        setSubmitted({ order: settled!, recovered: outcome.recovered });
+        // Where the operator was decides what gets refreshed. A queue-driven
+        // payment must leave the QUEUE authoritative, not swap the workspace
+        // over to the customer half behind their back.
+        if (fromQueue) {
+          await refreshDetail(intended.orderId);
+          void refreshQueue();
+        } else {
+          setSubmitted({ order: settled!, recovered: outcome.recovered });
+        }
         setPayOpen(false);
         toast.push({
           tone: "success",
@@ -804,11 +1059,255 @@ export function useDeliveryWorkspace(input: {
         setPaying(false);
       }
     },
-    [submitted?.order, payGate.allowed, input, pos.branch.name, pos.userName, customers.selected, address, toast],
+    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
+  );
+
+  // --- Level 3D: edit ---------------------------------------------------------
+
+  /**
+   * Apply one edit.
+   *
+   * The order is re-read and re-checked immediately before the RPC, because a
+   * gate that passed while the dialog was open says nothing about an order
+   * another terminal has since paid or voided. `checkOrderContext` is the branch
+   * check NEITHER RPC performs - it is mandatory here, not decorative.
+   */
+  const submitOrderEdit = useCallback(
+    async (intent: EditOrderIntent) => {
+      const target = detail;
+      if (!target || !editGate.allowed) return;
+      setEditBusy(true);
+      setEditError(null);
+      try {
+        const fresh = await readDeliveryOrder(target.id);
+        checkOrderContext(fresh, { orderId: target.id, branchOrderIds: new Set(queue.map((o) => o.id)) });
+        const order = fresh as DeliveryQueueOrder;
+        // Identity is not editable at this level, so it moving is a reason to
+        // stop rather than something to write through.
+        if (order.customer_id !== target.customer_id || order.address_id !== target.address_id) {
+          throw new OrderChangedError("the customer or address changed");
+        }
+
+        const subtotal = order.subtotal ?? order.total_amount ?? 0;
+        const payload = buildOrderEditPayload({
+          orderId: order.id,
+          note: intent.note,
+          discount: intent.discount,
+          isPaid: order.payment_status === "paid",
+          canDiscount: input.applyDiscounts,
+          subtotal,
+        });
+        // What the sent discount should compute to, so a lost response can be
+        // resolved by looking rather than by re-sending.
+        const expectedDiscountAmount =
+          intent.discount === null
+            ? null
+            : intent.discount.type === "none"
+              ? 0
+              : computeDiscount(subtotal, intent.discount.type, intent.discount.value).amount;
+
+        const outcome = await performEdit({
+          payload,
+          submit: editDeliveryOrder,
+          reread: () => readDeliveryOrder(order.id),
+          matches: (o) => editReached({ payload, expectedDiscountAmount, order: o }),
+          latch: editLatch.current,
+        });
+
+        if (!outcome.ok) {
+          const c = classifyError(outcome.error);
+          setEditError(
+            outcome.retryable
+              ? `${c.message} Nothing was changed - you can try again.`
+              : c.hint
+                ? `${c.message} ${c.hint}`
+                : c.message,
+          );
+          return;
+        }
+
+        setEditOpen(false);
+        await refreshDetail(order.id);
+        void refreshQueue();
+        toast.push({
+          tone: "success",
+          message: outcome.recovered ? "That change was already saved" : "Order updated",
+          detail: outcome.recovered ? "No second edit was sent." : undefined,
+        });
+      } catch (e) {
+        const c = classifyError(e);
+        setEditError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        // A refused edit means the screen is stale, so it is refreshed rather
+        // than left showing the state the operator acted on.
+        void refreshDetail(target.id);
+      } finally {
+        setEditBusy(false);
+      }
+    },
+    [detail, editGate.allowed, queue, input.applyDiscounts, refreshDetail, refreshQueue, toast],
+  );
+
+  // --- Level 3D: cancel / refund ----------------------------------------------
+
+  /**
+   * Cancel an unpaid order, or refund a paid one.
+   *
+   * The action is derived from the order's payment state - twice. Once when the
+   * dialog is opened, and again against the FRESH read here: if the order was
+   * paid on another terminal while this dialog sat open, the operator's "cancel"
+   * is no longer the action the server would perform, and it stops.
+   *
+   * The refund gate is also re-evaluated against a freshly read shift state, so
+   * a refund whose shift has closed never reaches `pos_void_order` at all.
+   */
+  const submitOrderVoid = useCallback(
+    async (rawReason: string) => {
+      const target = detail;
+      if (!target) return;
+      const intendedAction = voidActionFor(target);
+      setVoidBusy(true);
+      setVoidError(null);
+      try {
+        const reason = validateVoidReason(rawReason);
+
+        const fresh = await readDeliveryOrder(target.id);
+        checkOrderContext(fresh, { orderId: target.id, branchOrderIds: new Set(queue.map((o) => o.id)) });
+        const order = fresh as DeliveryQueueOrder;
+        if (voidActionFor(order) !== intendedAction) {
+          throw new OrderChangedError("its payment state changed - check the order again");
+        }
+
+        const shifts = await loadShiftOpenMap([order.shift_id]);
+        const gate = voidOrderGate({
+          deliveryAccess: accessGate,
+          canCancelOrders: cancelOrdersPermission,
+          order,
+          orderShiftOpen: orderShiftOpen(order, shifts),
+          online,
+          busy: false,
+        });
+        setShiftOpenMap((prev) => new Map([...prev, ...shifts]));
+        if (!gate.allowed) throw new Error(gate.reason ?? "This action is not available for this order.");
+
+        const outcome = await performVoid({
+          orderId: order.id,
+          reason,
+          // NOT a boolean. `p_refund` is derived from this by the adapter, so no
+          // surface here can ask for a refund on an unpaid order or a bare void
+          // on a paid one.
+          action: intendedAction,
+          submit: voidDeliveryOrder,
+          reread: () => readDeliveryOrder(order.id),
+          latch: voidLatch.current,
+        });
+
+        if (!outcome.ok) {
+          const c = classifyError(outcome.error);
+          setVoidError(
+            outcome.retryable
+              ? `${c.message} Nothing was changed - check the order before trying again.`
+              : c.hint
+                ? `${c.message} ${c.hint}`
+                : c.message,
+          );
+          return;
+        }
+
+        setVoidOpen(false);
+        await refreshDetail(order.id);
+        void refreshQueue();
+        // A recovered void is a REPLAY, not a second reversal - the server keys
+        // this operation per order, so saying so is accurate and worth saying.
+        toast.push({
+          tone: "success",
+          message: outcome.recovered
+            ? intendedAction === "refund"
+              ? "That refund had already been recorded"
+              : "That order was already cancelled"
+            : intendedAction === "refund"
+              ? "Refund recorded"
+              : "Order cancelled",
+          detail: outcome.recovered ? "Nothing was reversed twice." : undefined,
+        });
+      } catch (e) {
+        const c = classifyError(e);
+        setVoidError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        void refreshDetail(target.id);
+      } finally {
+        setVoidBusy(false);
+      }
+    },
+    [detail, queue, accessGate, cancelOrdersPermission, online, refreshDetail, refreshQueue, toast],
+  );
+
+  // --- Level 3D: the receipt for a past order ---------------------------------
+
+  /**
+   * Reopen a past order's receipt.
+   *
+   * Three reads and no writes: the order's lines, its payment row if it has one,
+   * and the identity it was sent to. It takes no payment and needs none - the
+   * gap this closes is that until now the ONLY way to see a delivery receipt was
+   * to have just paid for it.
+   */
+  const openHistoricalReceipt = useCallback(
+    async (order: DeliveryQueueOrder) => {
+      setReceiptBusy(true);
+      try {
+        const receipt = await readHistoricalReceipt({
+          order,
+          party: receiptIdentity(order),
+          tenantName: pos.tenantName,
+          branchName: pos.branch.name,
+          staffName: pos.userName,
+          fallbackCurrency: input.currency,
+          // The order's OWN time. A reprint that stamps itself with the current
+          // clock claims the sale happened when it was reprinted.
+          at: order.created_at ? new Date(order.created_at).toLocaleString() : "",
+        });
+        input.onPresentReceipt(receipt);
+      } catch (e) {
+        toast.push({ tone: "error", message: "Could not open the receipt", detail: classifyError(e).message });
+      } finally {
+        setReceiptBusy(false);
+      }
+    },
+    [receiptIdentity, pos.tenantName, pos.branch.name, pos.userName, input, toast],
+  );
+
+  /**
+   * The same receipt, reached from the customer's order history.
+   *
+   * The order is re-read by id rather than taken from the history row, because
+   * that row carries no subtotal, discount, note or shift - and a receipt
+   * assembled from a partial row would be a document with invented figures on
+   * it. This is the only path to an order older than today: the queue is scoped
+   * to the open shift, or to today when there is none.
+   */
+  const openHistoricalReceiptById = useCallback(
+    async (orderId: string) => {
+      setReceiptBusyId(orderId);
+      try {
+        const order = await readDeliveryOrder(orderId);
+        if (!order) {
+          toast.push({ tone: "warning", message: "That order is no longer available" });
+          return;
+        }
+        await openHistoricalReceipt(order);
+      } catch (e) {
+        toast.push({ tone: "error", message: "Could not open the receipt", detail: classifyError(e).message });
+      } finally {
+        setReceiptBusyId(null);
+      }
+    },
+    [openHistoricalReceipt, toast],
   );
 
   // F4 OPENS the dialog and never charges, through the same gate as the button.
-  useShortcuts({ openPayment: requestPay }, active && view === "customer" && payGate.allowed);
+  // Live on the customer half AND on the Orders queue, because both resolve to
+  // the same `payTarget` and the same Level 3C settlement path. Off in Add Items,
+  // where Ctrl+Enter owns the keyboard and there is no order to pay yet.
+  useShortcuts({ openPayment: requestPay }, active && view !== "add_items" && payGate.allowed);
 
   const startNewOrder = useCallback(() => {
     setSubmitted(null);
@@ -935,12 +1434,71 @@ export function useDeliveryWorkspace(input: {
     </div>
   );
 
+  /**
+   * The one switch between taking an order and managing the ones already taken.
+   *
+   * Two buttons rather than a new route: Delivery is a single workspace with a
+   * single shell, and an operator answering a phone must be able to move between
+   * "who is calling" and "where is that order" without leaving what they are in
+   * the middle of. Nothing about the cart, the customer or the shift changes
+   * when this flips.
+   */
+  const viewSwitch = (
+    <div className="flex shrink-0 gap-2">
+      <Button
+        variant={view === "orders" ? "ghost" : "primary"}
+        size="lg"
+        className="flex-1"
+        onClick={() => setView("customer")}
+      >
+        Customers / New order
+      </Button>
+      <GatedButton
+        gate={viewOrdersGate}
+        variant={view === "orders" ? "primary" : "ghost"}
+        size="lg"
+        className="flex-1"
+        onClick={() => setView("orders")}
+      >
+        Orders
+      </GatedButton>
+    </div>
+  );
+
+  const counts = useMemo(() => queueCounts(queue), [queue]);
+
   // NB there is no `add_items` branch here. While Add Items is open the SHELL
   // owns the work area and renders the menu into it; this function is not
   // called at all. The identity strip is returned as `identity` instead, so the
   // shell can pin it above that menu - see `PosWorkspace`.
-  const work = (layout: LayoutSpec) => (
+  const work = (layout: LayoutSpec) =>
+    view === "orders" ? (
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {viewSwitch}
+        {viewOrdersGate.allowed ? (
+          <DeliveryOrderQueue
+            orders={queue}
+            parties={parties}
+            counts={counts}
+            /* The scope sentence is derived from the SAME condition the reader
+               uses, so the list can never describe itself wrongly. */
+            shiftScoped={Boolean(input.shiftId)}
+            currency={input.currency}
+            loading={queueLoading}
+            error={queueError}
+            selectedId={detail?.id ?? null}
+            onSelect={openDetail}
+            onRefresh={() => void refreshQueue()}
+          />
+        ) : (
+          <div className="rounded-2xl border border-line bg-white p-4">
+            <EmptyState title="Orders are not available for this account" hint={viewOrdersGate.reason ?? undefined} />
+          </div>
+        )}
+      </div>
+    ) : (
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+        {viewSwitch}
         <div className="rounded-2xl border border-line bg-white p-4">
           <p className="text-sm font-extrabold text-ink">Delivery customer</p>
           <p className="mt-0.5 text-xs text-sub">
@@ -1000,7 +1558,43 @@ export function useDeliveryWorkspace(input: {
 
   const panel = (_layout: LayoutSpec) => (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto border-l border-line bg-slate-50/60 p-3">
-      {submitted && customers.selected ? (
+      {view === "orders" ? (
+        detail ? (
+          <DeliveryOrderDetail
+            order={detail}
+            party={parties.get(detail.id) ?? null}
+            lines={detailLines}
+            linesLoading={detailLoading}
+            linesError={detailError}
+            currency={input.currency}
+            /* Derived from the order's payment state. The panel is TOLD which
+               action this is; it never works it out from a checkbox. */
+            voidAction={voidActionFor(detail)}
+            editGate={editGate}
+            voidGate={voidGate}
+            payGate={payGate}
+            receiptBusy={receiptBusy}
+            onBack={() => setDetail(null)}
+            onEdit={() => {
+              setEditError(null);
+              setEditOpen(true);
+            }}
+            onVoid={() => {
+              setVoidError(null);
+              setVoidOpen(true);
+            }}
+            /* The SAME entry point F4 and the customer half use. */
+            onPay={requestPay}
+            onReceipt={() => void openHistoricalReceipt(detail)}
+          />
+        ) : (
+          <EmptyState
+            icon="-"
+            title="Select an order"
+            hint="Open an order from the list to see its items, edit it, take payment or cancel it."
+          />
+        )
+      ) : submitted && customers.selected ? (
         <DeliveryOrderSummary
           order={submitted.order}
           customer={customers.selected}
@@ -1062,15 +1656,19 @@ export function useDeliveryWorkspace(input: {
       <PaymentDialog
         open={payOpen}
         busy={paying}
-        subtotal={submitted?.order.total_amount ?? 0}
+        /* Everything below comes from the resolved pay TARGET, so the dialog
+           describes the order that would actually be charged - whether it was
+           just sent, or opened from the Level 3D queue while a different
+           customer happens to be selected behind it. */
+        subtotal={payTarget.order?.total_amount ?? 0}
         primaryCurrency={input.currency}
         rate={input.rate}
         discountGate={input.applyDiscounts}
         payGate={payGate}
-        orderNumber={submitted?.order.order_number ?? null}
+        orderNumber={payTarget.order?.order_number ?? null}
         delivery={{
-          customerName: customers.selected?.name ?? "Customer",
-          address: address ? addressLine(address) : null,
+          customerName: payTarget.order ? (receiptIdentity(payTarget.order).customerName ?? "Customer") : "Customer",
+          address: payTarget.order ? receiptIdentity(payTarget.order).addressText : null,
         }}
         error={payError}
         onCancel={() => {
@@ -1080,11 +1678,52 @@ export function useDeliveryWorkspace(input: {
         onConfirm={(v) => void settle(v)}
       />
 
+      {/* Level 3D. Both are opened only from the detail panel, and both re-read
+          the order authoritatively before the RPC - the dialog's own state is
+          never the authority for a mutation. */}
+      <EditOrderDialog
+        open={editOpen}
+        order={detail}
+        currency={input.currency}
+        discountGate={input.applyDiscounts}
+        saveGate={editGate}
+        busy={editBusy}
+        error={editError}
+        onCancel={() => {
+          setEditOpen(false);
+          setEditError(null);
+        }}
+        onSubmit={(intent) => void submitOrderEdit(intent)}
+      />
+
+      <VoidOrderDialog
+        open={voidOpen}
+        /* Not a prop the dialog can argue with: an unpaid order gets Cancel, a
+           paid one gets Refund, and `p_refund` is derived from that by the
+           adapter rather than chosen anywhere in the UI. */
+        action={detail ? voidActionFor(detail) : "cancel"}
+        order={detail}
+        customerName={detail ? (parties.get(detail.id)?.customerName ?? null) : null}
+        currency={input.currency}
+        gate={voidGate}
+        busy={voidBusy}
+        error={voidError}
+        onCancel={() => {
+          setVoidOpen(false);
+          setVoidError(null);
+        }}
+        onConfirm={(reason) => void submitOrderVoid(reason)}
+      />
+
       <CustomerHistoryDialog
         open={customers.historyOpen}
         customer={customers.selected}
         loading={customers.historyLoading}
         onClose={customers.closeHistory}
+        /* Level 3D. Still read only - this reopens a receipt, it does not
+           reorder, edit or refund anything. */
+        onReceipt={(orderId) => void openHistoricalReceiptById(orderId)}
+        receiptBusyId={receiptBusyId}
       />
 
       {/* A populated basket belongs to the customer it was built for. Switching

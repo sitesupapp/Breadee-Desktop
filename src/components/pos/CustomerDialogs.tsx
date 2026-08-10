@@ -304,6 +304,19 @@ export type CustomerHistoryDialogProps = {
   customer: CustomerProfile | null;
   loading: boolean;
   onClose: () => void;
+  /**
+   * Reopen a past DELIVERY order's receipt (Level 3D). Optional, so a build
+   * without the historical receipt path renders no such control.
+   *
+   * This list is the only place an order older than today can be reached at
+   * all: the Level 3D queue is scoped to the open shift, or to today when there
+   * is none. Without an entry point here, a receipt could be reopened for a few
+   * hours and then never again - which is not "the read-only receipt gap is
+   * closed", it is the gap moved somewhere less obvious.
+   */
+  onReceipt?: (orderId: string) => void;
+  /** Which order is being assembled right now, if any. */
+  receiptBusyId?: string | null;
 };
 
 export function CustomerHistoryDialog(props: CustomerHistoryDialogProps) {
@@ -318,9 +331,10 @@ export function CustomerHistoryDialog(props: CustomerHistoryDialogProps) {
       onClose={props.onClose}
       footer={
         <div className="flex items-center justify-between gap-2">
-          {/* Said plainly rather than implied by absent buttons. */}
+          {/* Said plainly rather than implied by absent buttons. Reopening a
+              receipt is a READ, so it does not contradict this. */}
           <p className="text-[11px] text-sub">
-            Read only. Reordering, editing and refunding a past order are not available on the desktop yet.
+            Read only. Reordering and editing a past order from here are not available on the desktop.
           </p>
           <Button variant="ghost" size="lg" onClick={props.onClose}>
             Close
@@ -360,6 +374,19 @@ export function CustomerHistoryDialog(props: CustomerHistoryDialogProps) {
                     {o.currency ? ` ${o.currency}` : ""}
                   </p>
                   <Badge tone={orderTone(o)}>{o.payment_status}</Badge>
+                  {/* Delivery only: the receipt this rebuilds names itself a
+                      Delivery receipt, so offering it on a takeaway row would
+                      print the wrong order type onto a real document. */}
+                  {props.onReceipt && o.order_type === "delivery" && (
+                    <Button
+                      variant="ghost"
+                      className="mt-1"
+                      disabled={props.receiptBusyId === o.id}
+                      onClick={() => props.onReceipt?.(o.id)}
+                    >
+                      {props.receiptBusyId === o.id ? "Opening..." : "Receipt"}
+                    </Button>
+                  )}
                 </div>
               </li>
             );

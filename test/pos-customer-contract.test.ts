@@ -132,14 +132,21 @@ test("pos_upsert_customer is the only RPC the customer library calls", () => {
   assert.deepEqual(calls, ["pos_upsert_customer"]);
 });
 
-test("the RPC allow-list is 13 names and includes pos_upsert_customer", () => {
+// RETARGETED BY LEVEL 3D: 13 -> 15, for `pos_edit_order` and `pos_void_order`.
+// Same discipline as every previous bump - the number is a guard against an RPC
+// arriving unnoticed, so it moves by exactly the two that were reviewed.
+test("the RPC allow-list is 15 names and includes pos_upsert_customer", () => {
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
-  assert.equal(names.length, 13);
+  assert.equal(names.length, 15);
   assert.ok(names.includes("pos_upsert_customer"));
   // Level 3A added exactly one name, and it is not an order or money RPC.
   assert.equal(names.filter((n) => n.includes("customer")).length, 1);
+  // Level 3D's two, and not the third one it deliberately left behind.
+  assert.ok(names.includes("pos_edit_order"));
+  assert.ok(names.includes("pos_void_order"));
+  assert.equal(names.includes("pos_remove_order_item"), false);
 });
 
 test("customer tables are never written directly - only read", () => {

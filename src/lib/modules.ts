@@ -43,11 +43,12 @@ export const MODULES: ModuleEntry[] = [
     key: "pos",
     label: "Point of Sale",
     icon: "🧾",
-    // Kept current with what the desktop actually ships. The old wording still
-    // deferred Dine-in months after it landed, which the app then contradicted
-    // one screen away. Level 3A opened the Delivery route for CUSTOMERS only,
-    // so the copy now draws that line rather than claiming Delivery either way.
-    desc: "Takeaway and Dine-in POS: shifts, tables, modifiers, discounts, cash payment and receipts. Delivery covers customers and addresses only - delivery ordering and printing are not available yet.",
+    // Kept current with what the desktop actually ships. This copy has now been
+    // wrong twice - it deferred Dine-in months after it landed, and it still
+    // said Delivery was customers-only after 3B added ordering and 3C added
+    // settlement. Delivery is now a full order type, so it is named as one, and
+    // printing is the only thing still deferred.
+    desc: "Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment and on-screen receipts. Printing is not available yet.",
     availability: "desktop",
     to: "/pos",
     // Feature + `pos.access` + the owner exclusion, exactly as the server decides.
