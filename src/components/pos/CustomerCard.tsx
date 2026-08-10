@@ -9,12 +9,20 @@
 // the operator picks one. Nothing here re-defaults it behind their back.
 
 import { Badge, Button, GatedButton, PanelTitle, Skeleton, cn, type Gate } from "@/components/ui";
+import { addressText } from "@/lib/pos/deliveryHistory";
 import type { CustomerAddress, CustomerProfile } from "@/lib/pos/customers";
 
+/**
+ * RE-EXPORTED, not re-implemented (Level 3D).
+ *
+ * The queue row, the detail panel and the reprinted receipt all render an
+ * address too, and they cannot import from a `.tsx` module. Rather than let a
+ * second formatter exist - and eventually disagree with this one about where the
+ * building number goes - the single implementation moved to `deliveryHistory.ts`
+ * and every caller of `addressLine` keeps working unchanged.
+ */
 export function addressLine(a: CustomerAddress): string {
-  return [a.address_label, a.area, a.street, a.building && `Bldg ${a.building}`, a.floor && `Fl ${a.floor}`]
-    .filter(Boolean)
-    .join(", ");
+  return addressText(a);
 }
 
 /** Latest order date, shown short. The server's timestamp, never a local clock. */

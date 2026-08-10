@@ -60,6 +60,12 @@ export const POS_PERMISSIONS = {
   // record has keys of its own.
   CUSTOMERS_VIEW: "pos.customers.view",
   CUSTOMERS_MANAGE: "pos.customers.manage",
+  // Order management (Level 3D). These three are the keys `pos_edit_order` and
+  // `pos_void_order` check for themselves; VIEW_ORDERS guards the queue, which
+  // is a read of `pos_orders` that RLS already scopes.
+  VIEW_ORDERS: "pos.view_orders",
+  EDIT_ORDERS: "pos.edit_orders",
+  CANCEL_ORDERS: "pos.cancel_orders",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -243,6 +249,37 @@ export function canViewDelivery(ctx: PosAccessContext): Gate {
     return { allowed: false, reason: "Delivery is not enabled for this plan." };
   }
   return { allowed: true, reason: null };
+}
+
+// --- Delivery order management (Level 3D) ------------------------------------
+//
+// Three separate keys, mirroring the three separate things the server checks.
+// They are deliberately not collapsed into one "manage orders" gate: a cashier
+// who may correct a note is not thereby a cashier who may reverse a payment, and
+// the server agrees - `pos_edit_order` demands `pos.edit_orders` while
+// `pos_void_order` demands `pos.cancel_orders`.
+
+/** Seeing the delivery order queue at all. */
+export function canViewOrders(ctx: PosAccessContext): Gate {
+  const delivery = canViewDelivery(ctx);
+  if (!delivery.allowed) return delivery;
+  return gate(perm(ctx, POS_PERMISSIONS.VIEW_ORDERS), "You do not have permission to view orders.");
+}
+
+/** Editing an order's note or discount - exactly `pos_edit_order`'s own check. */
+export function canEditOrders(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.EDIT_ORDERS), "You do not have permission to edit orders.");
+}
+
+/**
+ * Cancelling an unpaid order, or refunding a paid one.
+ *
+ * `pos_void_order` gates BOTH on this single key, so the desktop does too. What
+ * separates the two actions is the order's payment state, never a permission -
+ * see `voidActionFor`.
+ */
+export function canCancelOrders(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.CANCEL_ORDERS), "You do not have permission to cancel or refund orders.");
 }
 
 /** Reading the customer book. */
