@@ -246,6 +246,14 @@ function PosWorkspaceInner() {
     onRemoveLine: (key) => removeLine(key),
     onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
+    // Level 3C settlement. The receipt goes to the same store-owned layer
+    // takeaway and dine-in use, and the cash box is RE-READ rather than
+    // incremented here.
+    takePayments: pos.gates.takePayments,
+    applyDiscounts: pos.gates.applyDiscounts,
+    rate,
+    onPresentReceipt: (receipt) => receiptStore.present(receipt),
+    refreshCashBox: () => shiftStore.refreshCashBox(),
   });
   /** Delivery Add Items borrows the shell's menu, exactly as Dine-in does. */
   const addingToDelivery = deliveryActive && delivery.view === "add_items";

@@ -55,6 +55,14 @@ export type ReceiptData = {
    */
   tableName?: string | null;
   seats?: number | null;
+  /**
+   * Delivery identity (Level 3C). Optional for the same reason as the dine-in
+   * pair: takeaway and dine-in receipts are untouched. The address is what makes
+   * a delivery receipt useful to a driver, so it is printed as stored.
+   */
+  customerName?: string | null;
+  customerPhone?: string | null;
+  deliveryAddress?: string | null;
 };
 
 export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType"> & {

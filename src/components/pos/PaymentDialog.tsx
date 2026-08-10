@@ -37,6 +37,14 @@ export type PaymentDialogProps = {
    * shown at the top differs, which is exactly the part that should.
    */
   dineIn?: { tableName: string; seats: number | null; orderCount: number } | null;
+  /**
+   * Delivery context (Level 3C). Same reuse argument as `dineIn`: the discount
+   * validator, the currency conversion, the tender arithmetic and the keypad are
+   * identical, and only the identity at the top differs - which is exactly the
+   * part that should. Absent for Takeaway and Dine-in, whose behaviour is
+   * unchanged.
+   */
+  delivery?: { customerName: string; address: string | null } | null;
   error: string | null;
   onCancel: () => void;
   onConfirm: (input: {
@@ -118,20 +126,27 @@ export function PaymentDialog(props: PaymentDialogProps) {
   useShortcuts({ confirmPayment: confirm }, props.open);
 
   const dineIn = props.dineIn ?? null;
+  const delivery = props.delivery ?? null;
   const title = dineIn
     ? `Payment - ${dineIn.tableName}`
-    : props.orderNumber
-      ? `Payment - order ${props.orderNumber}`
-      : "Payment";
+    : delivery
+      ? `Delivery payment - order ${props.orderNumber ?? ""}`.trim()
+      : props.orderNumber
+        ? `Payment - order ${props.orderNumber}`
+        : "Payment";
   const subtitle = dineIn
     ? // Said plainly because it is the one thing that differs from takeaway:
       // settling a table completes its orders and frees it in the same call.
       `Settles ${dineIn.orderCount === 1 ? "the open bill" : `all ${dineIn.orderCount} open orders`}${
         props.orderNumber ? ` (#${props.orderNumber})` : ""
       } and frees the table.`
-    : props.orderNumber
-      ? "Retrying will settle this same order - it never creates a second one."
-      : null;
+    : delivery
+      ? // Who the money is being taken for, and where the food is going - both
+        // visible at the moment of charging, not two screens back.
+        `${delivery.customerName}${delivery.address ? ` - ${delivery.address}` : ""}. Paying completes this delivery order.`
+      : props.orderNumber
+        ? "Retrying will settle this same order - it never creates a second one."
+        : null;
 
   return (
     <Modal

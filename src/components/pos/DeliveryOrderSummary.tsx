@@ -11,7 +11,7 @@
 // order is accepted, and a total the client worked out itself is not the total
 // the customer owes.
 
-import { Badge, Button, PanelTitle } from "@/components/ui";
+import { Badge, Button, GatedButton, PanelTitle, type Gate } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { addressLine } from "@/components/pos/CustomerCard";
 import type { CustomerAddress, CustomerProfile } from "@/lib/pos/customers";
@@ -25,6 +25,13 @@ export type DeliveryOrderSummaryProps = {
   /** True when this order was found by a re-read rather than a direct response. */
   recovered?: boolean;
   onStartNewOrder: () => void;
+  /**
+   * Settlement (Level 3C). OPTIONAL, and Pay is rendered only when a gate is
+   * supplied AND the order is still unpaid - so a settled order shows no Pay to
+   * press again, and a build without settlement shows none at all.
+   */
+  payGate?: Gate;
+  onPay?: () => void;
 };
 
 export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
@@ -65,10 +72,22 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
         </span>
       </div>
 
-      {/* Said in words, because the absence of a button is not a message. */}
-      <p className="mt-2 text-[11px] font-semibold text-amber-800">
-        Not paid. Taking payment for a delivery order is not available on the desktop yet.
-      </p>
+      {paid ? (
+        // Paying IS the completion: `pos_pay_order` sets paid and completed in
+        // one statement, so there is no "collected" step to offer next.
+        <p className="mt-2 text-[11px] font-semibold text-brand-dark">
+          Paid and completed. Nothing further is needed for this order.
+        </p>
+      ) : props.payGate ? (
+        <GatedButton gate={props.payGate} size="lg" className="mt-3 w-full" onClick={props.onPay}>
+          Pay (F4)
+        </GatedButton>
+      ) : (
+        // Said in words, because the absence of a button is not a message.
+        <p className="mt-2 text-[11px] font-semibold text-amber-800">
+          Not paid. Taking payment for a delivery order is not available on the desktop yet.
+        </p>
+      )}
 
       <Button variant="ghost" size="lg" className="mt-3 w-full" onClick={props.onStartNewOrder}>
         Start another delivery order

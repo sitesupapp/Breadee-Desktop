@@ -144,10 +144,16 @@ test("order history is read only and says so", () => {
   }
 });
 
+// RETARGETED BY LEVEL 3C. The boundary this pinned - "taking payment is not
+// available yet" - is no longer true, and leaving it would have kept a false
+// promise in the UI. The property that still matters is that the workspace says
+// what an operator can do NEXT: an unpaid order can be opened and settled here.
 test("the workspace states its own boundary to the operator", () => {
   // Whitespace-collapsed: the copy is wrapped across lines in the source.
   const code = stripJsxComments(deliverySrc).replace(/\s+/g, " ");
-  assert.match(code, /not available on the desktop yet/i);
+  assert.match(code, /An unpaid order can be opened below and settled here/i);
+  // And the retired claim is gone rather than merely unasserted.
+  assert.equal(/Taking payment for a delivery order is not available/i.test(code), false);
 });
 
 // --- refusal classification --------------------------------------------------

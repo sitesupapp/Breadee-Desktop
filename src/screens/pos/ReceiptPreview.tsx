@@ -34,6 +34,20 @@ export function ReceiptPaper({ data }: { data: ReceiptData }) {
           {data.seats != null && <span>{data.seats} seats</span>}
         </div>
       )}
+      {/* Delivery identity. Without it the receipt says who took the money but
+          not who the food is for or where it goes - the two things a delivery
+          receipt exists to carry. */}
+      {(data.customerName || data.deliveryAddress) && (
+        <div className="text-[11px] text-sub">
+          {data.customerName && (
+            <div className="flex justify-between">
+              <span className="truncate">{data.customerName}</span>
+              {data.customerPhone && <span className="pl-2">{data.customerPhone}</span>}
+            </div>
+          )}
+          {data.deliveryAddress && <p className="mt-0.5">{data.deliveryAddress}</p>}
+        </div>
+      )}
       <div className="flex justify-between text-[11px] text-sub">
         <span>{data.at}</span>
         {data.staffName && <span className="truncate pl-2">{data.staffName}</span>}
