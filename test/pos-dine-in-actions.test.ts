@@ -242,10 +242,18 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // 11 -> 12 - a size assertion loosened before its feature lands stops being a
   // guard and becomes a comment. The point of the number is that a NEW RPC
   // cannot arrive unnoticed, so it is bumped by exactly one, deliberately.
-  assert.equal(members.length, 13, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // RETARGETED AGAIN BY LEVEL 3D: 13 -> 15, for pos_edit_order and
+  // pos_void_order. Bumped by exactly the two that were reviewed.
+  assert.equal(members.length, 15, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
-  // Level 3A added no order or money RPC.
-  assert.equal(members.filter((m) => /submit|pay|void|refund/.test(m)).length, 3);
+  // The money-moving names, counted so a fourth cannot arrive unnoticed:
+  // submit, the two pays, and - since Level 3D - void, which refunds a paid
+  // order. `pos_remove_order_item` would be the fifth and is deliberately absent.
+  assert.deepEqual(
+    members.filter((m) => /submit|pay|void|refund/.test(m)).sort(),
+    ["pos_pay_order", "pos_pay_table", "pos_submit_order", "pos_void_order"],
+  );
 });
 
 test("pos_pay_table is called from exactly one module", () => {

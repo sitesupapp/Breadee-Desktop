@@ -129,14 +129,20 @@ test("the POS module no longer defers Dine-in", () => {
   assert.match(pos!.desc, /dine-?in/i, "the dashboard no longer mentions Dine-in at all");
 });
 
-test("the dashboard does not claim Delivery is available", () => {
+// RETARGETED BY LEVEL 3D. This required Delivery to be named only as something
+// NOT here - correct while the route was customers-only, and false since 3B
+// added ordering and 3C added settlement. Leaving it would have kept the test
+// defending a claim the app had already outgrown, which is how this copy came to
+// be wrong twice. The enduring property is narrower: the tile must not promise a
+// capability the desktop does not have, and the only one left is PRINTING.
+test("the dashboard names Delivery, and still does not claim printing exists", () => {
   const pos = MODULES.find((m) => m.key === "pos")!;
-  // Delivery may be NAMED, but only as something that is not here. The route
-  // itself is still rendered disabled in PosWorkspace.
-  if (/delivery/i.test(pos.desc)) {
-    assert.match(pos.desc, /delivery[^.]*(not available|not yet)/i, "Delivery is mentioned without saying it is unavailable");
-  }
-  assert.doesNotMatch(pos.desc, /delivery[^.]*(available now|supported|enabled)/i);
+  assert.match(pos.desc, /delivery/i, "Delivery is a shipped order type and should be named");
+  // The retired deferral is gone rather than merely unasserted.
+  assert.doesNotMatch(pos.desc, /delivery[^.]*(not available|not yet)/i);
+  // Printing is the one thing still deferred, and it must say so.
+  assert.match(pos.desc, /printing is not available/i);
+  assert.doesNotMatch(pos.desc, /printing[^.]*(available now|supported|enabled)/i);
 });
 
 test("the POS module still points at the real route and keeps its own gate", () => {
