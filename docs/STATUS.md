@@ -540,11 +540,55 @@ Six in total. Four allow-list guards moved 13 → 15, each also asserting `pos_r
 
 ### Gates
 
-**706 tests, 0 failures** (600 baseline + 46 adapter + 60 UI/wiring); typecheck clean; production frontend build clean. Two full-suite runs reported file-level crashes naming no assertion — the known Windows spawn instability; each suite passed identically when run alone, and the third full run was green with no code change in between.
+**710 tests** (600 baseline + 46 adapter + 64 UI/wiring); typecheck clean; production frontend build clean.
 
-### Staging verification status
+The machine's spawn instability was unusually severe during this level's final gates: a dozen full-suite runs each reported a *different* random set of file-level crashes naming no assertion, the best reaching **699 pass / 1 crash**. Every crashed file was then verified green — individually or in focused batches of 8 and 14 — with no code change in between, and the focused Level 3D suite is **64 / 64**. Per the established policy this is environmental, and CI remains the authoritative full-suite gate.
 
-**NOT YET RUN — blocked on manual sign-in.** The prior Level 3C QA shift `74192728-…` has been approved by a manager, so the approval gate is clear. The Level 3D dev build is up at `http://localhost:5188`, connected to staging, and sits at the sign-in screen. Credentials are not handled here, so the smoke stops at that screen rather than working around it.
+### Staging verification — PARTIAL (2026-08-10)
+
+Run on **staging** (`azjxprewycygsocusxjn`), tenant **Dominos Pizza**, **Main Branch**, as **`cashier@dominos.com`**, from the Level 3D dev build at `http://localhost:5188`. Production never contacted. Prior shift `74192728-…` was verified **approved** before any write.
+
+| | |
+|---|---|
+| QA shift | `91b15fe2-60f6-42b5-9553-e32d7e4b84b4`, float **$3.00** |
+| QA order | `33ef1c40-…` / **260810-0001**, delivery, `sent_to_kitchen` / `unpaid`, $7.00 USD |
+| `client_op_id` | `145b07e3-…` — **one** submission row, zero duplicates |
+| Item | Margherita ×1 + required modifier **Small** |
+| Customer / address | `5940fc3d-…` / `91b3903b-…`, as selected |
+
+**Queue scope, proven on the wire.** The request carried `tenant_id=eq.…`, `branch_id=eq.…`, `order_type=eq.delivery`, `order=created_at.desc`, `limit=200` and `shift_id=eq.91b15fe2-…`. Four requests, **all GET** — loading the queue mutates nothing. The scope sentence on screen read "This shift's delivery orders, newest first."
+
+**The type filter got a real negative control.** Unrelated takeaway and dine-in work later landed on the same QA shift (see below), leaving it holding six orders. The Level 3D queue continued to show **exactly one row** — the delivery order — with counts `0 unpaid / 0 paid / 1 cancelled`. There is no cross-order-type leakage.
+
+**Detail** showed order number, timestamp, customer, phone, address, delivery note, `1 x Margherita` with `+ Small`, subtotal, total, currency, payment status, order status and the shift reference. Exactly five controls existed on the panel — Back, Pay, Edit order, Receipt preview, Cancel order — and **no** quantity, modifier, line-removal, customer, address or branch control.
+
+**Note-only edit.** The dialog opened saying *"The note is unchanged and will not be sent"* with **Save disabled**; after editing it said *"The note will be replaced"*. One confirmation changed the note to `… — edited` **exactly**, and nothing else moved: status, payment status, subtotal, discount, total, customer, address, shift, branch, items and modifiers all identical, orders and payments unchanged. The discount was deliberately not touched on staging.
+
+**Cancel.** The action was labelled **Cancel order**; the dialog named the customer and the $7.00 total, stated *"This order has not been paid, so no money is involved"*, required a reason, and offered **no refund control of any kind**. One confirmation produced:
+
+| Evidence | Value |
+|---|---|
+| `pos_orders.status` | **`voided`** |
+| `payment_status` | **`unpaid`** — untouched, exactly as the unpaid branch specifies |
+| Reason | appended as `[void: Desktop Level 3D cancellation verification]` |
+| `pos_operation_idempotency` | **1 row**, `operation_type: void_order`, **`outcome: voided_no_refund`**, `refunded: false`, `refund_id: null` |
+| Payment rows / refund rows for the order | **0 / 0** |
+
+That `voided_no_refund` outcome is the server's own record that **`p_refund` arrived as false** — the cancel/refund distinction verified end to end, from a UI that never names the flag. Duplicate void count **0**; Cancel was deliberately not re-sent, since replay is covered by tests.
+
+**Terminal handling.** The queue chip flipped to `Cancelled`, counts moved to `0/0/1`, and the detail's action stack collapsed to **Back + Receipt preview** — Pay, Edit and Cancel all gone — under *"This order is cancelled. It can be read, but not changed."*
+
+**Historical receipt — both branches.** The cancelled QA order rendered `Delivery`, the identity, `1x Margherita / + Small`, server figures and **Unpaid**. The settled Level 3B/3C order **260809-0001** rendered `Delivery`, `#260809-0001`, customer, phone, address, `1x Margherita / + Small / No olives`, `$7.00`, **`Paid - cash`**, `USD` and its own shift `74192728-…`, stamped with the order's own 8/9 timestamp. **Print is disabled** behind *"Native printing arrives in the printing phase."* No native routing exists. Opening either wrote nothing: orders, payments and refunds unchanged, and `260809-0001` still `completed / paid` with **1** payment row and its `updated_at` still 2026-08-09.
+
+#### One defect found and fixed at runtime
+
+The queue is scoped to the open shift, or to today. The detail panel was the only route to the receipt entry point, so **an order older than today was unreachable** — `260809-0001` could not be opened from the Level 3D UI at all, and a delivery receipt could be reopened for a few hours and then never again. That is the read-only receipt gap moved, not closed. The customer's order history already lists past orders, so it gained a **Receipt** action per delivery row, routed to the same `readHistoricalReceipt`. The order is re-read by id rather than taken from the history row, which carries no subtotal, discount, note or shift. Fixed in `e2037f9` with four regression tests, and verified live afterwards on `260809-0001`.
+
+#### Not completed, and why
+
+**Shift close and the today-fallback could not be run.** Between 15:57 and 16:53 UTC — hours after the Level 3D writes ended at 12:13 — **five unrelated orders were created on the same `cashier@dominos.com` account and attached to this QA shift**: one takeaway and four dine-in, including two payments ($14.50 LBP, $24.50 USD). The shift therefore no longer holds only the QA float, and three of those orders are unpaid, which blocks closure through `pos_shift_unresolved_orders`.
+
+Closing it would mean counting someone else's takings; resolving those orders would mean paying or voiding work that is not this level's to touch. **Shift `91b15fe2-…` is deliberately left open**, and the today-fallback check that depends on closing it is not run. The Level 3D QA order itself is `voided` and therefore already resolved — it is not what blocks the close.
 
 ### Explicitly deferred
 
