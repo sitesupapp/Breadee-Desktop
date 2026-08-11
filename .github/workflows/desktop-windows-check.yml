@@ -109,3 +109,13 @@ jobs:
       - name: Cargo check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked
+
+      # 9. Rust unit tests (Level 3E-A). The native printing module keeps its
+      #    validation, page building and spooler SEQUENCING behind traits, so
+      #    these run on the runner with no printer attached and produce no
+      #    paper - nothing here opens a device. Added because the local dev
+      #    machine crashes rustc with 0xC0000005 and cannot be trusted to run
+      #    them; this runner is the authoritative Rust gate.
+      - name: Cargo test (src-tauri)
+        working-directory: src-tauri
+        run: cargo test --locked

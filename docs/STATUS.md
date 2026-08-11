@@ -13,7 +13,8 @@ _Source of truth: the Breadee web app (Next.js 16 + Supabase). This desktop clie
 - **Level 3A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3A` (branch `feature/desktop-pos-level-3a-delivery-foundation`, based on `desktop-staging` @ `d3fea84`) — **merged** as `9378b66` via PR #9.
 - **Level 3B worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3B` (branch `feature/desktop-pos-level-3b-delivery-ordering`) — **merged** as `1112c5e` via PR #10.
 - **Level 3C worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3C` (branch `feature/desktop-pos-level-3c-delivery-settlement`) — **merged** as `ec48785` via PR #11.
-- **Level 3D worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3D` (branch `feature/desktop-pos-level-3d-delivery-order-management`, based on `desktop-staging` @ `ec48785`) — local only, not pushed.
+- **Level 3D worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3D` (branch `feature/desktop-pos-level-3d-delivery-order-management`, based on `desktop-staging` @ `ec48785`) — **merged** as `5cca812` via PR #12.
+- **Level 3E-A worktree:** `D:\Claude\Projects\Breadee\Breadee-Desktop-Level-3E-A` (branch `feature/desktop-pos-level-3e-a-native-print-foundation`, based on `desktop-staging` @ `5cca812`) — local only, not pushed.
 - `C:\Users\User\Claude\Projects\Breadee\Breadee-Desktop` is a **read-only fallback copy** of the pre-migration state. Do not work in it.
 - GitHub remote: `github.com/sitesupapp/Breadee-Desktop` (the repo exists and `desktop-staging` is pushed — an earlier version of this document said otherwise).
 
@@ -621,6 +622,61 @@ Level 3D QA order `260810-0001` ends **`voided / unpaid`** with **0** payment ro
 
 Native printing and printer routing (Level 3E), `pos_remove_order_item`, a cross-order-type Orders workspace, the Delivery Clients Book, KDS, reports, call-centre routing, driver/dispatcher, cross-branch behaviour, customer/address reassignment after submit, and offline mutations.
 
+## 1i. Level 3E-A — Native printing foundation (this change set)
+
+On `feature/desktop-pos-level-3e-a-native-print-foundation`, based on `desktop-staging` @ `5cca812`. Level 3D is merged and packaged-verified; this is the first slice of native printing.
+
+**It does not print a receipt.** It proves the desktop app can reach a Windows printer at all, and gives an operator a way to find out why one is not working — enumeration, the branch's configured registry, the binding between them, and a synthetic test page. POS receipts still show on screen only, and the dashboard still says printing is not available yet, because from a cashier's point of view that remains true.
+
+### The first IPC surface
+
+The app had **no `invoke_handler` at all** before this change. It now has one, two commands wide:
+
+| Command | Takes | Does |
+|---|---|---|
+| `list_printers` | nothing | enumerates printers for this user session |
+| `print_test_page` | printer name, `58mm｜80mm`, copies 1..=5 | prints one synthetic diagnostic page |
+
+The input shape is the security argument. The webview runs with `csp: null`, so the honest assumption is that anything the frontend can send, injected script can send. `print_test_page` accepts a NAME (re-checked against a live enumeration), an enumerated width and a small integer — **no bytes, no path, no address, no port, no command string** — and it prints content the Rust side owns rather than content the caller supplies. There is no argument shape that expresses "write these bytes to that device". The capability list is unchanged at `core:default` + `opener:default`: no shell, no filesystem, no HTTP, no process.
+
+### No new dependency
+
+`windows` **0.61.3 was already in `Cargo.lock`**, pulled in transitively by tauri → wry → webview2-com. The Cargo change names that same version and turns on five feature modules; **the lockfile diff is one line** — `windows` added to this crate's dependency list. No crate added, no version moved, no unrelated churn, and Tauri untouched at 2.11.5.
+
+### Why GDI, and not ESC/POS
+
+The obvious way to drive a thermal printer is RAW spooler mode plus ESC/POS. For this product that is a trap. ESC/POS text mode picks glyphs from a codepage held in printer firmware: no contextual shaping, no bidirectional reordering, and no guarantee an Arabic page exists at all. Breadee runs in Lebanese restaurants where one line is routinely Arabic and English together, so a path that renders Arabic as disconnected letters in reverse order is not a compromise, it is unusable.
+
+Printing through a **device context** hands the text to Windows' own layout engine instead: `DrawTextW` shapes the run and applies the bidirectional algorithm, and the driver rasterises the result. Arabic, English and mixed lines come out as the OS draws them. It needs no new crate, no bundled font (Tahoma ships with Windows and contains Arabic) and no hand-written raster renderer — which were the alternatives. The cost is that this path serves `connection_type = system` printers; direct network ESC/POS is a later phase and will have to solve Arabic by rasterising, which is exactly why it is not in this one.
+
+### Acceptance is not paper
+
+`EndDoc` returning a job id means the **spooler queued the document**. Cable, power, roll, driver and the printer's own memory are all invisible from here. So the outcome type says `accepted`, the UI says **"Print job accepted by Windows."**, and a test asserts the string "printed successfully" appears nowhere. Physical output is a separate observation made by a human looking at the paper.
+
+Copies are **separate spool documents**, one per copy. Driver copy-count handling is inconsistent across thermal drivers; N documents is slower and predictable, and for a diagnostic someone is standing over, predictable wins.
+
+### Server registry — read only
+
+`pos_printer_settings` is read for the tenant and branch and never written. Its select policy is tenant + branch with **no permission and no feature gate**, so an ordinary cashier session can read it and no `kitchen_ops` subscription is involved. The screen reports three states without repairing any of them: configured-and-installed, configured-but-missing, and no-Windows-name-recorded. A terminal that quietly rewrote `system_printer_name` to whatever it found locally is how one branch's configuration ends up describing one particular till.
+
+Matching is **exact**. A near-match is a different device, and in a restaurant the other device may be in the kitchen.
+
+The staging fixture (`QA Test Printer (delete me)`, `system_printer_name` NULL) renders calmly as "No Windows printer recorded yet" rather than failing anything.
+
+### Deliberately absent
+
+No `print_jobs` row, no `printer_diagnostic_logs` write, no `kitchen_ops` dependency, no routing tables, no auto-print, no network or USB path, no cash drawer, and no wiring into Takeaway, Dine-in, Delivery, payment or the receipt preview. Test print is manual and repetition is intentional, so exactly-once print semantics are irrelevant to this slice. The legacy `src/lib/printers.ts` localStorage model is left in place but is **not read by the native path** — asserted by test; retiring it is documented debt for a later slice.
+
+**A print failure cannot touch a POS transaction.** Nothing below the IPC boundary reads or writes an order, a payment or a shift.
+
+### Gates
+
+710 baseline + **36** TypeScript = **746**. Rust unit tests cover validation, page building and the full spooler sequence — including open/write/finish failures and that the handle is closed on every exit path — behind traits, so they run with no printer attached and produce no paper. `cargo test --locked` was added to the Windows CI workflow, because the local machine crashes rustc with `0xC0000005` and cannot be trusted to run them; that runner is the authoritative Rust gate.
+
+### Physical verification status
+
+**NOT RUN.** Enumeration is a pure read and needs no permission; putting paper through a printer does. No test page has been sent, and the first one will go to a printer the operator names explicitly.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -629,7 +685,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
-- **Native printing — pending.** The receipt preview is on-screen only; the Print control is disabled rather than silently doing nothing. Printer discovery, routing to hardware and ESC/POS are untouched.
+- **Native printing — foundation only (Level 3E-A, §1i).** The desktop can now enumerate Windows printers and print a synthetic diagnostic page, and it reads the branch's configured printer registry. It still prints **no receipt and no kitchen ticket**: the receipt preview remains on-screen only with its Print control disabled, no POS event triggers printing, and printer routing, network/USB printers, auto-print and the cash drawer are untouched.
 - **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.
@@ -664,6 +720,12 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 - [x] `pos_remove_order_item` is absent from the RPC allow-list, so no call site can reach it.
 - [x] A receipt carries the identity of the order it belongs to, resolved from that order's own customer and address ids — never from whoever is selected on screen.
 - [x] Reopening a past receipt performs three reads and no writes; it can never trigger a payment.
+- [x] The native IPC surface is two printing commands wide, and the capability list grants no shell, filesystem, HTTP or process access.
+- [x] The frontend cannot hand native code bytes, a file path, an address, a port or a command string — the request type has no field for any of them.
+- [x] Native printing reads no order, payment or shift, so a printer failure cannot reach a POS transaction.
+- [x] A printer is opened only by a name that matched a live enumeration exactly; no fuzzy matching.
+- [x] Printing happens only on an explicit operator confirmation naming the target printer — never on mount, on a timer, or as a side effect.
+- [x] `pos_printer_settings` is read and never written by the desktop.
 - [x] Customer writes reach no offline queue; they are refused while offline instead.
 - [x] No production migration; production Supabase untouched.
 - [ ] Local IndexedDB is not yet encrypted at rest.
