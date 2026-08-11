@@ -171,9 +171,13 @@ mod tests {
         assert_eq!(req.printer_name, "Xprinter XP-80");
         assert_eq!(req.paper_width, PaperWidth::Mm80);
         assert_eq!(req.copies, 1);
+        // The field SET, not the order. `serde_json`'s default map is sorted, so
+        // asserting declaration order tests the serialiser rather than the
+        // envelope - the same trap 3E-A's test-print request fell into.
         let round_trip = serde_json::to_value(&req).unwrap();
-        let keys: Vec<&str> = round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        assert_eq!(keys, vec!["printerName", "paperWidth", "copies", "receipt"]);
+        let mut keys: Vec<&str> = round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["copies", "paperWidth", "printerName", "receipt"]);
     }
 
     #[test]
