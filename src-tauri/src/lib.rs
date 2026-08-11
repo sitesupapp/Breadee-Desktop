@@ -39,7 +39,10 @@ pub fn run() {
         // the way they are.
         .invoke_handler(tauri::generate_handler![
             printing::list_printers,
-            printing::print_test_page
+            printing::print_test_page,
+            // Level 3E-B. Manual cashier receipts only - never called on
+            // payment, submission or a timer.
+            printing::print_receipt
         ])
         .run(tauri::generate_context!())
         .expect("error while running Breadee desktop application");

@@ -706,6 +706,36 @@ Exactly one page was printed, on one explicitly authorised printer. Nothing was 
 
 Node **746 / 746**, **Rust 38 / 38**, typecheck, frontend build, `cargo check --locked` and the installer all pass. CI earned its place twice here: `cargo check` does not compile `#[cfg(test)]` code, so the new `cargo test --locked` step caught an `E0716` borrow error and then a wrong assertion about serde's key ordering — neither of which the local machine could ever have surfaced, since it cannot complete a Rust test run at all.
 
+### Level 3E-B — cashier receipt printing (code complete, hardware pending)
+
+Built on 3E-A @ `10d4954`, unchanged: same Tauri 2.11.5, same `windows` 0.61.3 at the same features, **no new dependency**, no Tauri upgrade, no lockfile change at all.
+
+**One new command.** `print_receipt` joins `list_printers` and `print_test_page` — the IPC surface is now three commands wide and each arrived in its own reviewed phase. Capabilities are untouched: still `core:default` + `opener:default`, no shell, no filesystem, no network.
+
+**Manual only, and structurally so.** Nothing prints on payment, on order submission, on preview open or on a timer. `pos_receipt_settings.auto_print_customer` exists and defaults to `true`; it is deliberately **not** read anywhere in the desktop print path. Automatic paper is a duplicate-risk design of its own and belongs in its own slice — this renderer had never printed a real receipt when it was written.
+
+**Printing cannot reach a sale.** By the time the preview exists the payment has already succeeded and the receipt is built. The print path calls no RPC, touches no order, and reports failure only to the modal. A spooler fault cannot roll back, retry or duplicate a transaction, because the two share no code path.
+
+#### The cashier-printer contract, read from the product rather than assumed
+
+| Question | Answer, and where it came from |
+|---|---|
+| Permission | **`pos.print_receipts`** + the **`pos.printing`** feature. The registry documents the key as "Print or reprint receipts"; the web POS does not currently enforce it on its browser print, but the KDS does, and this produces physical paper — so the desktop enforces the documented rule. Stricter than the server, never looser. |
+| Branch | **Strict equality.** The web's Receipts & Printers screen queries `.eq("branch_id", …)` and always writes a branch on insert, so a tenant-wide NULL-branch row is not a product concept. Treating one as "every branch" would put paper in another site. |
+| Precedence | **None exists** — no `is_default`, no priority, no ordering anywhere in the schema or the web app. So with two eligible printers the desktop **refuses to choose** and the operator picks. |
+| Paper width | From the **printer row**, not `pos_receipt_settings.paper_size`. The web uses the receipt setting because it is rendering a design; this is driving a device, and the roll in that device is what the printer row describes. |
+| Unsupported width | **Refused.** The web silently falls back to 80mm; that is survivable in a browser preview and is not survivable when it clips a total off a 58mm roll. a4/custom/missing block with an actionable message. |
+| Copies | Printer row `default_copy_count`, bounded 1..=5, one spool job per copy. |
+| `desktop_connector` | Still undocumented anywhere in the web app, so still **unsupported** rather than guessed at. |
+
+**One integration point, four routes.** Takeaway, Dine-in, Delivery and Level 3D's historical reprint all present through the same store-owned receipt layer, so native printing was wired once in `ReceiptModal` and every route has it — with no per-route print code that could drift. A reprint is labelled as one, and repeating it is intentional: manual printing is never suppressed, and `print_jobs` is not used.
+
+`ReceiptData` is reused as-is; the Rust `ReceiptDoc` mirrors it, and the frontend maps it field by field rather than spreading, so a future UI-only field cannot cross the boundary. `tendered`/`change` pass through as whatever the caller holds — the live payment has them and 3D's historical path nulls them — and the renderer prints those lines only when they exist. Nothing is fabricated on a reprint, and no tax, service charge or receipt sequence is invented.
+
+#### Staging blocker (not a code defect)
+
+There are **zero configured cashier printers** for Dominos / Main Branch. The only printer row is `QA Test Printer (delete me)` — `printer_type = kitchen`, `system_printer_name = NULL` — which is correctly ineligible and is not reinterpreted. So the implementation is complete and the hardware receipt test is blocked on configuration, not on code. Nothing was mutated to make staging convenient.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -714,7 +744,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
-- **Native printing — foundation only (Level 3E-A, §1i).** The desktop can now enumerate Windows printers and print a synthetic diagnostic page, and it reads the branch's configured printer registry. It still prints **no receipt and no kitchen ticket**: the receipt preview remains on-screen only with its Print control disabled, no POS event triggers printing, and printer routing, network/USB printers, auto-print and the cash drawer are untouched.
+- **Native printing — cashier receipts, manually (Levels 3E-A/3E-B, §1i).** The desktop enumerates Windows printers, prints a diagnostic page, reads the branch's printer registry, and can now print or reprint a **cashier receipt** to a configured system printer when an operator asks it to. Still absent, deliberately: **kitchen tickets**, **automatic printing** (`auto_print_customer` is not read), **station/printer routing**, **network and USB printers**, the **cash drawer**, `print_jobs` persistence and printer diagnostic writes. The dashboard tile still says printing is not available, which remains true of the product as a whole while kitchen printing is missing.
 - **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.

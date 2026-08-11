@@ -1,14 +1,44 @@
-// 80mm-style receipt preview. DISPLAY ONLY - there is no native printing in this
-// level, and the Print control stays disabled rather than silently doing nothing.
+// The receipt preview, and (Level 3E-B) the one place a receipt reaches paper.
 //
-// The markup is intentionally a thin projection of `ReceiptData`, so the web
-// app's template renderer (blocks, paper widths, branding) can replace the body
-// during the printing phase without touching any caller.
+// WHY ALL FOUR ROUTES ARE COVERED BY EDITING ONE FILE. Takeaway, Dine-in,
+// Delivery and Level 3D's historical reprint all present their receipt through
+// the same store-owned layer, which renders this modal. So native printing is
+// wired once, here, and every route gets it with no per-route printing code -
+// and no route can end up with a subtly different print rule.
+//
+// MANUAL ONLY. Nothing on this screen prints on mount, on payment or on a
+// timer. `auto_print_customer` exists on the server and defaults to true; it is
+// deliberately NOT honoured yet, because automatic paper is a duplicate-risk
+// design of its own and this renderer has not yet printed a real receipt.
+//
+// PRINTING CANNOT REACH THE TRANSACTION. By the time this modal exists the
+// payment has already succeeded and the receipt has been built. Nothing below
+// calls an RPC, touches an order, or reports failure to anything except this
+// modal, so a spooler problem cannot roll back, retry or duplicate a sale.
 
+import { useCallback, useEffect, useState } from "react";
 import type { ReceiptData } from "@/lib/receipt";
 import { formatMoney } from "@/lib/currency";
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, GatedButton } from "@/components/ui";
 import { Modal } from "@/components/overlays";
+import { usePosContext } from "@/state/pos";
+import { canPrintReceipts } from "@/lib/pos/access";
+import {
+  ACCEPTED_MESSAGE,
+  isNativeAvailable,
+  listPrinters,
+  printReceipt,
+  type NativePrintError,
+  type PrintOutcome,
+} from "@/lib/nativePrinting";
+import { loadServerPrinters } from "@/lib/pos/printerRegistry";
+import {
+  blockMessage,
+  receiptPrintGate,
+  resolveCashierTarget,
+  type CashierResolution,
+  type CashierTarget,
+} from "@/lib/pos/cashierPrinter";
 
 export function ReceiptPaper({ data }: { data: ReceiptData }) {
   return (
@@ -122,21 +152,169 @@ export function ReceiptPaper({ data }: { data: ReceiptData }) {
 }
 
 export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: () => void }) {
+  const pos = usePosContext();
+  const native = isNativeAvailable();
+
+  const [resolution, setResolution] = useState<CashierResolution | null>(null);
+  const [chosen, setChosen] = useState<CashierTarget | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState<PrintOutcome | null>(null);
+  const [error, setError] = useState<NativePrintError | null>(null);
+
+  // Find a printer. This is a READ - two selects and a Windows enumeration -
+  // and it prints nothing. It runs on open so the operator can see where the
+  // receipt would go before deciding to send it.
+  useEffect(() => {
+    if (!native) return;
+    let cancelled = false;
+    void (async () => {
+      const [installed, configured] = await Promise.all([
+        listPrinters(),
+        loadServerPrinters({ tenantId: pos.tenantId, branchId: pos.branch.id }).catch(() => []),
+      ]);
+      if (cancelled) return;
+      setResolution(
+        resolveCashierTarget({
+          printers: configured,
+          installed: installed.ok ? installed.value : [],
+          branchId: pos.branch.id,
+        }),
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [native, pos.tenantId, pos.branch.id]);
+
+  // One eligible printer is preselected; more than one must be chosen, because
+  // nothing in the server model ranks them.
+  const target = chosen ?? (resolution?.kind === "single" ? resolution.target : null);
+
+  const gate = receiptPrintGate({
+    nativeAvailable: native,
+    canPrintReceipts: canPrintReceipts(pos.access),
+    resolution,
+    hasReceipt: data.lines.length > 0,
+    busy,
+  });
+
+  const send = useCallback(async () => {
+    if (!target || !gate.allowed) return;
+    setConfirming(false);
+    setBusy(true);
+    setError(null);
+    setOutcome(null);
+    const result = await printReceipt({
+      printerName: target.windowsName,
+      paperWidth: target.paperWidth,
+      copies: target.copies,
+      receipt: data,
+    });
+    if (result.ok) setOutcome(result.value);
+    else setError(result.error);
+    setBusy(false);
+  }, [target, gate.allowed, data]);
+
+  // A reprint of an order settled earlier is labelled as one. Repeating it is
+  // intentional and is never suppressed - see the manual-print contract.
+  const isReprint = data.tendered == null && data.paid;
+
   return (
     <Modal
       open
       title="Receipt preview"
-      subtitle="Native printing arrives in the printing phase."
+      subtitle={native ? undefined : "Native printing is available in the installed Desktop app."}
       size="sm"
       onClose={onClose}
       footer={
-        <div className="flex items-center justify-between gap-2">
-          <Badge tone="amber">Preview only</Badge>
-          <div className="flex gap-2">
-            <Button variant="ghost" disabled title="Native printing arrives in a later phase">
-              Print
-            </Button>
-            <Button onClick={onClose}>Close</Button>
+        <div className="space-y-2">
+          {/* Where this would go, stated before anything is sent. */}
+          {native && target && !confirming && !outcome && (
+            <p className="text-[11px] text-sub">
+              Print to <strong className="text-ink">{target.windowsName}</strong> · {target.paperWidth} ·{" "}
+              {target.copies} cop{target.copies === 1 ? "y" : "ies"}
+            </p>
+          )}
+
+          {native && resolution?.kind === "choice" && !target && (
+            <div className="space-y-1">
+              <p className="text-[11px] font-semibold text-ink">Choose a printer</p>
+              {resolution.targets.map((t) => (
+                <button
+                  key={t.printer.id}
+                  type="button"
+                  onClick={() => setChosen(t)}
+                  className="min-h-[44px] w-full rounded-lg border border-line px-3 text-left text-[11px] font-semibold text-ink hover:bg-slate-50"
+                >
+                  {t.printer.name} · {t.windowsName} · {t.paperWidth}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {native && resolution?.kind === "blocked" && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-900">
+              {blockMessage(resolution.block)}
+            </p>
+          )}
+
+          {confirming && target && (
+            <div className="rounded-xl border-2 border-brand bg-brand-soft p-3">
+              <p className="text-xs font-extrabold text-brand-dark">
+                {isReprint ? "Reprint this receipt?" : "Print this receipt?"}
+              </p>
+              <p className="mt-1 text-[11px] text-brand-dark">
+                Order #{data.orderNumber} · {target.copies} cop{target.copies === 1 ? "y" : "ies"} at{" "}
+                {target.paperWidth} to <strong>{target.windowsName}</strong>.
+              </p>
+              <div className="mt-2 flex justify-end gap-2">
+                <Button variant="ghost" onClick={() => setConfirming(false)}>
+                  Cancel
+                </Button>
+                <Button disabled={busy} onClick={() => void send()}>
+                  {busy ? "Sending to Windows..." : "Send"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {outcome && (
+            <div className="rounded-lg bg-brand-soft px-3 py-2">
+              {/* Never "printed successfully" - the spooler taking the job says
+                  nothing about paper. */}
+              <p className="text-[11px] font-bold text-brand-dark">{ACCEPTED_MESSAGE}</p>
+              <p className="text-[11px] text-brand-dark">
+                {outcome.copies_accepted} of {outcome.copies_requested} to {outcome.printer_name}. Check the printer.
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-lg bg-red-50 px-3 py-2">
+              <p className="text-[11px] font-bold text-red-700">{error.message}</p>
+              {/* An ambiguous transport result must not invite another tap. */}
+              {(error.code === "finish_document_failed" || error.code === "write_failed") && (
+                <p className="text-[11px] text-red-700">
+                  The printer may already have received the job. Check the printer before trying again.
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-2">
+            <Badge tone={native ? "slate" : "amber"}>{native ? "Receipt" : "Preview only"}</Badge>
+            <div className="flex gap-2">
+              <GatedButton
+                gate={gate}
+                variant="ghost"
+                disabled={busy || !target || confirming}
+                onClick={() => setConfirming(true)}
+              >
+                {busy ? "Sending..." : isReprint ? "Reprint" : "Print"}
+              </GatedButton>
+              <Button onClick={onClose}>Close</Button>
+            </div>
           </div>
         </div>
       }

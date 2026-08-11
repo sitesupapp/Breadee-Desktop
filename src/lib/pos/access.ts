@@ -66,6 +66,9 @@ export const POS_PERMISSIONS = {
   VIEW_ORDERS: "pos.view_orders",
   EDIT_ORDERS: "pos.edit_orders",
   CANCEL_ORDERS: "pos.cancel_orders",
+  // Native receipt printing (Level 3E-B). The registry documents this key as
+  // "Print or reprint receipts" under the `pos.printing` sub-feature.
+  PRINT_RECEIPTS: "pos.print_receipts",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -280,6 +283,29 @@ export function canEditOrders(ctx: PosAccessContext): Gate {
  */
 export function canCancelOrders(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.CANCEL_ORDERS), "You do not have permission to cancel or refund orders.");
+}
+
+/**
+ * Printing or reprinting a receipt (Level 3E-B).
+ *
+ * Both halves are required, in the order the server would refuse in: the
+ * `pos.printing` sub-feature, then the `pos.print_receipts` permission.
+ *
+ * The web POS does not currently check this permission before its browser
+ * print, but the registry documents the key precisely ("Print or reprint
+ * receipts") and the KDS does check it. This path produces PHYSICAL paper, so
+ * the desktop enforces the documented rule rather than copying the looser
+ * behaviour - stricter than the server, never looser, the same call the
+ * dine-in open-table gate makes.
+ */
+export function canPrintReceipts(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_PRINTING)) {
+    return { allowed: false, reason: "Receipt printing is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PRINT_RECEIPTS), "You do not have permission to print receipts.");
 }
 
 /** Reading the customer book. */
