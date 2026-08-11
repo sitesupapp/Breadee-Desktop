@@ -14,6 +14,8 @@
 // So the second launch must not become a second till. It hands focus back to
 // the instance that already exists and exits.
 
+pub mod printing;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -27,6 +29,18 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
+        // THE APP'S FIRST IPC SURFACE (Level 3E-A).
+        //
+        // Two commands, both in `printing`. Deliberately listed here in full
+        // rather than behind a generated macro over a module, so that widening
+        // the surface is a visible edit to this file and shows up in review as
+        // one. Neither command reads or writes an order, a payment, a shift or
+        // any server row - see `printing/mod.rs` for why the inputs are shaped
+        // the way they are.
+        .invoke_handler(tauri::generate_handler![
+            printing::list_printers,
+            printing::print_test_page
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Breadee desktop application");
 }

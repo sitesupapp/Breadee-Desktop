@@ -24,3 +24,31 @@ serde_json = "1"
 # mobile build would fail to resolve it.
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
+
+# Native printing (Level 3E-A), Windows only.
+#
+# NOT A NEW DEPENDENCY. `windows` is already in Cargo.lock at 0.61.3, pulled in
+# transitively by tauri -> wry -> webview2-com; this entry names that same
+# version and turns on the feature modules the printer path needs. So the
+# lockfile gains no crate and no version, and nothing unrelated is upgraded.
+#
+# Four features, and each is load-bearing:
+#   Win32_Graphics_Printing - EnumPrintersW / GetDefaultPrinterW / status bits
+#   Win32_Graphics_Gdi      - the printer DC, fonts, and DrawTextW, which is
+#                             what gives Arabic shaping and bidi for free
+#   Win32_Storage_Xps       - StartDocW / StartPage / EndPage / EndDoc / AbortDoc
+#   Win32_Security          - PRINTER_INFO_2W embeds a security descriptor, so
+#                             the struct will not compile without it
+#   Win32_Foundation        - RECT, used to lay each line out
+#
+# Deliberately absent: anything for shell, filesystem, sockets or process
+# control. This crate is enormous and feature-gated for exactly this reason -
+# taking printing must not quietly take the rest of Win32 with it.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Printing",
+  "Win32_Security",
+  "Win32_Storage_Xps",
+] }

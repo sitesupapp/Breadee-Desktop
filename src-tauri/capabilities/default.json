@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window.",
+  "description": "Default capability for the main window. Core, the opener plugin, and the two native printing commands (Level 3E-A) - nothing else. Application commands registered through invoke_handler are reachable from the app's own window without a plugin permission, so this list stays the record of what the window is allowed to touch: no shell, no filesystem, no HTTP, no process.",
   "windows": ["main"],
   "permissions": ["core:default", "opener:default"]
 }
