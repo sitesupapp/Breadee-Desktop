@@ -673,9 +673,26 @@ No `print_jobs` row, no `printer_diagnostic_logs` write, no `kitchen_ops` depend
 
 710 baseline + **36** TypeScript = **746**. Rust unit tests cover validation, page building and the full spooler sequence — including open/write/finish failures and that the handle is closed on every exit path — behind traits, so they run with no printer attached and produce no paper. `cargo test --locked` was added to the Windows CI workflow, because the local machine crashes rustc with `0xC0000005` and cannot be trusted to run them; that runner is the authoritative Rust gate.
 
-### Physical verification status
+### Hardware verification — SPOOLER PASS, PHYSICAL OUTPUT UNCONFIRMED (2026-08-11)
 
-**NOT RUN.** Enumeration is a pure read and needs no permission; putting paper through a printer does. No test page has been sent, and the first one will go to a printer the operator names explicitly.
+Run from a debug build of this branch against a real **Xprinter XP-80** (80mm thermal, USB002), on one explicitly authorised printer.
+
+| | |
+|---|---|
+| `list_printers` through Tauri | returned **AnyDesk Printer**, **Microsoft Print to PDF**, **Xprinter XP-80** — exactly what `Get-Printer` reports, with the XP-80 correctly flagged Windows default. No fabricated entries, no crash. |
+| Staging fixture | `QA Test Printer (delete me)` rendered as **"No Windows printer recorded yet"** — the NULL `system_printer_name` degrades calmly, as designed |
+| Confirmation | *"1 page at 80mm will be sent to Xprinter XP-80."* — the target is named before anything is sent |
+| Job | **accepted, job id 14**, 1 of 1, then drained from the queue with the printer reporting Normal |
+| Wording | **"Print job accepted by Windows."** |
+| Staging writes | **zero** — `print_jobs` 0, `printer_diagnostic_logs` 0, printer row `updated_at` unchanged |
+
+One useful negative result: the first click on the confirm button did not register, and **no job was sent** — provable because `runTestPrint` hides the confirmation box as its first act, and the box was still on screen with an empty print queue. The guard did its job rather than quietly double-sending.
+
+**Physical paper was not visually confirmed by the automation**, which has no camera. So Arabic shaping, bidirectional ordering and 80mm layout — the questions this page exists to answer — remain unverified by eye. Spooler acceptance is recorded; physical output is not, and is not claimed.
+
+### CI — green (PR #13, draft)
+
+Node **746 / 746**, **Rust 38 / 38**, typecheck, frontend build, `cargo check --locked` and the installer all pass. CI earned its place twice here: `cargo check` does not compile `#[cfg(test)]` code, so the new `cargo test --locked` step caught an `E0716` borrow error and then a wrong assertion about serde's key ordering — neither of which the local machine could ever have surfaced, since it cannot complete a Rust test run at all.
 
 ## 2. Toolchain
 
