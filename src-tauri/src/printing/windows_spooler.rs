@@ -27,9 +27,9 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::{
     CreateDCW, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDeviceCaps, SelectObject,
-    SetBkMode, ANSI_CHARSET, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY,
-    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING, DT_WORDBREAK, FF_DONTCARE, HDC,
-    HFONT, HGDIOBJ, LOGPIXELSX, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES, HORZRES,
+    SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DT_CALCRECT,
+    DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING, DT_WORDBREAK, FF_DONTCARE, HDC, HFONT, HGDIOBJ,
+    HORZRES, LOGPIXELSX, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES,
 };
 use windows::Win32::Graphics::Printing::{
     EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
@@ -159,8 +159,10 @@ fn default_printer_name() -> Option<String> {
         return None;
     }
     let mut buf = vec![0u16; len as usize];
+    // Returns a Win32 BOOL, not a Result: false simply means "no default
+    // printer", which is a normal state on a terminal with none installed.
     let ok = unsafe { GetDefaultPrinterW(Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut len) };
-    if ok.is_err() {
+    if !ok.as_bool() {
         return None;
     }
     let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
