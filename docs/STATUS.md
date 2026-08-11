@@ -673,7 +673,7 @@ No `print_jobs` row, no `printer_diagnostic_logs` write, no `kitchen_ops` depend
 
 710 baseline + **36** TypeScript = **746**. Rust unit tests cover validation, page building and the full spooler sequence — including open/write/finish failures and that the handle is closed on every exit path — behind traits, so they run with no printer attached and produce no paper. `cargo test --locked` was added to the Windows CI workflow, because the local machine crashes rustc with `0xC0000005` and cannot be trusted to run them; that runner is the authoritative Rust gate.
 
-### Hardware verification — SPOOLER PASS, PHYSICAL OUTPUT UNCONFIRMED (2026-08-11)
+### Hardware verification — PASS (2026-08-11)
 
 Run from a debug build of this branch against a real **Xprinter XP-80** (80mm thermal, USB002), on one explicitly authorised printer.
 
@@ -688,7 +688,19 @@ Run from a debug build of this branch against a real **Xprinter XP-80** (80mm th
 
 One useful negative result: the first click on the confirm button did not register, and **no job was sent** — provable because `runTestPrint` hides the confirmation box as its first act, and the box was still on screen with an empty print queue. The guard did its job rather than quietly double-sending.
 
-**Physical paper was not visually confirmed by the automation**, which has no camera. So Arabic shaping, bidirectional ordering and 80mm layout — the questions this page exists to answer — remain unverified by eye. Spooler acceptance is recorded; physical output is not, and is not claimed.
+**Physical output — CONFIRMED by the operator (2026-08-11).** The automation has no camera, so the page was inspected by eye and reported back. The single sheet from the XP-80 carried all of it, and the three questions this page exists to answer are answered:
+
+| Checked | Result |
+|---|---|
+| Arabic letters joined | **correct** — connected script, not isolated glyphs |
+| Arabic direction | **correct RTL**, not reversed character by character |
+| Mixed Arabic/English | **sensible bidi ordering**, readable |
+| 80mm layout | fits, **no clipping**, no runaway blank paper |
+| English | readable |
+
+That settles the governing constraint from the 3E discovery: **GDI `DrawTextW` on a printer DC renders shaped Arabic and mixed bidi correctly on a real thermal printer**, with no new dependency, no bundled font and no hand-written rasteriser. The rejection of raw ESC/POS text for this product is now backed by hardware evidence rather than reasoning alone.
+
+Exactly one page was printed, on one explicitly authorised printer. Nothing was reprinted to "check".
 
 ### CI — green (PR #13, draft)
 
