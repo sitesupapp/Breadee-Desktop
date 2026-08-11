@@ -317,8 +317,13 @@ mod tests {
             // fails: the struct has nowhere to put it.
             if let Ok(req) = parsed {
                 let round_trip = serde_json::to_value(&req).unwrap();
-                let keys: Vec<&str> = round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-                assert_eq!(keys, vec!["printer_name", "paper_width", "copies"]);
+                // serde_json's default map is a BTreeMap, so keys come back
+                // sorted rather than in declaration order. What matters is the
+                // SET of fields, not their order.
+                let mut keys: Vec<&str> =
+                    round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, vec!["copies", "paper_width", "printer_name"]);
             }
         }
     }
