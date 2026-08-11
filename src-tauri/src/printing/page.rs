@@ -121,7 +121,11 @@ mod tests {
 
     #[test]
     fn the_page_identifies_itself_the_printer_the_paper_and_the_time() {
-        let text: Vec<&str> = page().iter().map(|l| l.text.as_str()).collect();
+        // Bound to a local first: borrowing straight out of `page()` would let
+        // the Vec drop at the end of the statement while these &str still point
+        // into it.
+        let lines = page();
+        let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert!(text.contains(&"BREADEE"));
         assert!(text.contains(&"Native Printer Test"));
         assert!(text.contains(&"Star TSP100"));
@@ -132,7 +136,8 @@ mod tests {
 
     #[test]
     fn the_page_carries_english_arabic_and_mixed_samples() {
-        let text: Vec<&str> = page().iter().map(|l| l.text.as_str()).collect();
+        let lines = page();
+        let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert!(text.contains(&ENGLISH_SAMPLE));
         assert!(text.contains(&ARABIC_SAMPLE));
         assert!(text.contains(&MIXED_SAMPLE));
