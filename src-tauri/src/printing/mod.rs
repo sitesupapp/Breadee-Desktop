@@ -79,11 +79,12 @@ pub fn print_test_page(request: TestPrintRequest) -> Result<PrintOutcome, PrintE
             request.paper_width,
             request.copies as u32,
             &local_timestamp(),
+            request.context.as_ref(),
         )
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (&request.printer_name, request.paper_width, request.copies);
+        let _ = (&request.printer_name, request.paper_width, request.copies, &request.context);
         Err(PrintError::UnsupportedPlatform)
     }
 }
@@ -94,10 +95,14 @@ pub fn print_test_page(request: TestPrintRequest) -> Result<PrintOutcome, PrintE
 /// the whole safety argument for this phase is that it is two commands wide.
 pub const EXPOSED_COMMANDS: &[&str] = &["list_printers", "print_test_page"];
 
-/// Compile-time proof that the paper widths reaching Win32 are the two the
-/// renderer has a layout for.
+/// The preset rolls, kept as data so a test can pin them.
+///
+/// Custom widths are deliberately NOT enumerable: they are any whole
+/// millimetre inside `CUSTOM_PAPER_MIN_MM..=CUSTOM_PAPER_MAX_MM`, and the
+/// guarantee that matters is that every one of them has been validated by
+/// `PaperWidth::parse` before it can exist - see the tests below.
 #[allow(dead_code)]
-const fn supported_widths() -> [PaperWidth; 2] {
+const fn preset_widths() -> [PaperWidth; 2] {
     [PaperWidth::Mm58, PaperWidth::Mm80]
 }
 
@@ -123,8 +128,31 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_thermal_widths_are_supported() {
-        assert_eq!(supported_widths(), [PaperWidth::Mm58, PaperWidth::Mm80]);
+    fn the_presets_are_the_two_thermal_rolls() {
+        assert_eq!(preset_widths(), [PaperWidth::Mm58, PaperWidth::Mm80]);
+    }
+
+    #[test]
+    fn a_width_can_only_reach_the_renderer_through_validation() {
+        use types::{CUSTOM_PAPER_MAX_MM, CUSTOM_PAPER_MIN_MM};
+        // The request type carries a PaperWidth, and the only ways to build one
+        // from frontend input are `parse` (deserialisation) and `custom` - both
+        // of which range-check. This test states the property the safety of the
+        // custom width rests on.
+        let request: Result<TestPrintRequest, _> = serde_json::from_str(
+            r#"{"printer_name":"P","paper_width":"custom:400","copies":1}"#,
+        );
+        assert!(request.is_err(), "an out-of-range width must not deserialise");
+
+        let ok: TestPrintRequest = serde_json::from_str(
+            r#"{"printer_name":"P","paper_width":"custom:72","copies":1}"#,
+        )
+        .expect("72mm is printable");
+        assert_eq!(ok.paper_width, PaperWidth::CustomMm(72));
+
+        for mm in [CUSTOM_PAPER_MIN_MM, 72, CUSTOM_PAPER_MAX_MM] {
+            assert!(PaperWidth::custom(mm).is_ok(), "{mm}mm is inside the range");
+        }
     }
 
     #[cfg(not(target_os = "windows"))]

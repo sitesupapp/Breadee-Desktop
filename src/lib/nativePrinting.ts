@@ -22,9 +22,64 @@
 export const NATIVE_COMMANDS = ["list_printers", "print_test_page"] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
-/** Paper widths this phase can print. Mirrors the Rust `PaperWidth` enum. */
-export const PAPER_WIDTHS = ["58mm", "80mm"] as const;
-export type PaperWidth = (typeof PAPER_WIDTHS)[number];
+/** The two preset thermal rolls. Mirrors the Rust `PaperWidth` presets. */
+export const PAPER_PRESETS = ["58mm", "80mm"] as const;
+export type PaperPreset = (typeof PAPER_PRESETS)[number];
+
+/**
+ * Bounds on a custom roll, mirroring `CUSTOM_PAPER_MIN_MM`/`MAX_MM` in the web
+ * app's `lib/receipt.ts` and in `printing/types.rs`. Three copies of one number
+ * is not ideal; three DIFFERENT numbers would be worse, so the Rust tests and
+ * `test/native-printing.test.ts` both pin them to each other.
+ */
+export const CUSTOM_PAPER_MIN_MM = 40;
+export const CUSTOM_PAPER_MAX_MM = 120;
+
+/**
+ * A width the native layer will lay a page out for.
+ *
+ * `custom:<mm>` is the same spelling the web app already stores in
+ * `pos_receipt_settings.paper_size`, so the vocabulary is shared rather than
+ * translated. A printer sold as 80mm that marks 72mm is `custom:72`.
+ */
+export type PaperWidth = PaperPreset | `custom:${number}`;
+
+/** @deprecated Use `PAPER_PRESETS`. Kept so existing call sites keep compiling. */
+export const PAPER_WIDTHS = PAPER_PRESETS;
+
+/** Build a custom width, or null when it is outside the printable range. */
+export function customPaperWidth(mm: number): PaperWidth | null {
+  if (!Number.isInteger(mm) || mm < CUSTOM_PAPER_MIN_MM || mm > CUSTOM_PAPER_MAX_MM) return null;
+  return `custom:${mm}`;
+}
+
+/** The millimetres a width lays out against. */
+export function paperMillimetres(width: PaperWidth): number {
+  if (width === "58mm") return 58;
+  if (width === "80mm") return 80;
+  return Number(width.slice("custom:".length));
+}
+
+/**
+ * Is this a width the native side will accept?
+ *
+ * Deliberately as strict as the Rust parser: whole millimetres, inside the
+ * shared range. Anything else is refused here so the operator gets a sentence
+ * instead of a native error.
+ */
+export function isPaperWidth(value: unknown): value is PaperWidth {
+  if (typeof value !== "string") return false;
+  if (value === "58mm" || value === "80mm") return true;
+  const m = /^custom:(\d+)$/.exec(value);
+  return m ? customPaperWidth(Number(m[1])) !== null : false;
+}
+
+/** Operator-facing wording. `custom:72` reads as "72 mm printable". */
+export function paperWidthLabel(width: PaperWidth): string {
+  if (width === "58mm") return "58 mm";
+  if (width === "80mm") return "80 mm";
+  return `${paperMillimetres(width)} mm printable`;
+}
 
 export const MIN_COPIES = 1;
 export const MAX_COPIES = 5;
@@ -37,10 +92,28 @@ export type InstalledPrinter = {
   status: PrinterStatus;
 };
 
+/** What the printer is for. Mirrors `pos_printer_settings.printer_type`. */
+export type PrinterRole = "cashier" | "kitchen" | "other";
+
+/**
+ * Which Breadee printer a test page represents.
+ *
+ * Captions only - a business name, a branch name, the operator's alias for the
+ * printer. No order, customer, payment or shift data crosses this boundary, so
+ * a test page stays safe to leave lying on a printer.
+ */
+export type TestPageContext = {
+  business_name: string;
+  branch_name: string;
+  printer_alias: string;
+  role: PrinterRole;
+};
+
 export type TestPrintRequest = {
   printer_name: string;
   paper_width: PaperWidth;
   copies: number;
+  context: TestPageContext | null;
 };
 
 export type PrintOutcome = {
@@ -153,26 +226,32 @@ export function validateCopies(copies: number): NativePrintError | null {
   return null;
 }
 
-export function isPaperWidth(value: unknown): value is PaperWidth {
-  return typeof value === "string" && (PAPER_WIDTHS as readonly string[]).includes(value);
-}
-
 /**
  * Build the request.
  *
  * Named field by field rather than spread from a form object, for the same
  * reason the payment payloads are: a spread is all it would take for a stray UI
- * field to become part of a native call.
+ * field to become part of a native call. `context` is built the same way, and
+ * carries captions only - see `TestPageContext`.
  */
 export function buildTestPrintRequest(input: {
   printerName: string;
   paperWidth: PaperWidth;
   copies: number;
+  context?: TestPageContext | null;
 }): TestPrintRequest {
   return {
     printer_name: input.printerName,
     paper_width: input.paperWidth,
     copies: input.copies,
+    context: input.context
+      ? {
+          business_name: input.context.business_name,
+          branch_name: input.context.branch_name,
+          printer_alias: input.context.printer_alias,
+          role: input.context.role,
+        }
+      : null,
   };
 }
 
@@ -207,6 +286,7 @@ export async function printTestPage(input: {
   printerName: string;
   paperWidth: PaperWidth;
   copies: number;
+  context?: TestPageContext | null;
 }): Promise<NativeResult<PrintOutcome>> {
   if (!isNativeAvailable()) {
     return { ok: false, error: { code: "native_unavailable", message: MESSAGES.native_unavailable } };
