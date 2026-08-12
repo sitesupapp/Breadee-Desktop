@@ -134,6 +134,13 @@ export function Printers() {
     const validation = validateDraft(editing.form);
     if (!validation.ok) return setFormError(validation.error);
 
+    // A session with no tenant cannot own a printer row. Asserting non-null here
+    // would send `tenant_id: null`, which RLS refuses with a message about a
+    // policy rather than about the session that is actually missing.
+    if (!pos.tenantId) {
+      return setFormError("This session has no tenant, so a printer cannot be saved. Sign in again.");
+    }
+
     const clash = duplicateBinding({
       systemPrinterName: validation.draft.system_printer_name,
       configured,
@@ -150,7 +157,7 @@ export function Printers() {
     try {
       if (editing.kind === "new") {
         await createPrinter({
-          tenantId: pos.tenantId!,
+          tenantId: pos.tenantId,
           branchId: pos.branch.id,
           draft: validation.draft,
         });
