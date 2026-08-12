@@ -21,12 +21,16 @@ import {
   ACCEPTED_MESSAGE,
   MAX_COPIES,
   MIN_COPIES,
+  CUSTOM_PAPER_MAX_MM,
+  CUSTOM_PAPER_MIN_MM,
   NATIVE_COMMANDS,
-  PAPER_WIDTHS,
+  PAPER_PRESETS,
   buildTestPrintRequest,
+  customPaperWidth,
   isNativeAvailable,
   isPaperWidth,
   listPrinters,
+  paperMillimetres,
   printTestPage,
   toNativeError,
   validateCopies,
@@ -35,6 +39,7 @@ import {
 import {
   bindPrinters,
   bindingLabel,
+  toStoredPaper,
   unconfiguredPrinters,
   type ServerPrinter,
 } from "@/lib/pos/printerRegistry";
@@ -64,12 +69,14 @@ const configured = (over: Partial<ServerPrinter> = {}): ServerPrinter => ({
   connection_type: "system",
   system_printer_name: "Star TSP100",
   paper_width: "80mm",
+  custom_paper_width: null,
   default_copy_count: 1,
   auto_cut_enabled: false,
   cash_drawer_enabled: false,
   status: "unknown",
   station_id: null,
   branch_id: "b1",
+  is_active: true,
   ...over,
 });
 
@@ -79,22 +86,59 @@ test("the client knows exactly two commands", () => {
   assert.deepEqual([...NATIVE_COMMANDS], ["list_printers", "print_test_page"]);
 });
 
-test("the request carries a name, a width and a count - and nothing else", () => {
+test("the request carries a name, a width, a count and captions - nothing else", () => {
   const req = buildTestPrintRequest({ printerName: "Star TSP100", paperWidth: "80mm", copies: 2 });
-  assert.deepEqual(Object.keys(req).sort(), ["copies", "paper_width", "printer_name"]);
+  assert.deepEqual(Object.keys(req).sort(), ["context", "copies", "paper_width", "printer_name"]);
   assert.equal(req.printer_name, "Star TSP100");
   assert.equal(req.paper_width, "80mm");
   assert.equal(req.copies, 2);
+  assert.equal(req.context, null, "context is opt-in");
 });
 
-test("only the two thermal widths are accepted", () => {
-  assert.deepEqual([...PAPER_WIDTHS], ["58mm", "80mm"]);
+test("the test-page context carries captions only, never trading data", () => {
+  const req = buildTestPrintRequest({
+    printerName: "Xprinter XP-80",
+    paperWidth: "custom:72",
+    copies: 1,
+    context: {
+      business_name: "Dominos Pizza",
+      branch_name: "Main Branch",
+      printer_alias: "Front Cashier",
+      role: "cashier",
+    },
+  });
+  assert.deepEqual(Object.keys(req.context ?? {}).sort(), [
+    "branch_name",
+    "business_name",
+    "printer_alias",
+    "role",
+  ]);
+});
+
+test("the presets are the two thermal rolls, and custom widths are validated", () => {
+  assert.deepEqual([...PAPER_PRESETS], ["58mm", "80mm"]);
   assert.equal(isPaperWidth("58mm"), true);
   assert.equal(isPaperWidth("80mm"), true);
-  // Present in the server registry, but this phase has no layout for them.
-  for (const bad of ["a4", "custom", "120mm", "", null, undefined, 80]) {
+  // The XP-80 case: sold as 80mm, marks 72mm.
+  assert.equal(isPaperWidth("custom:72"), true);
+  assert.equal(paperMillimetres("custom:72"), 72);
+  // A4 is a sheet; a bare `custom` has no width to lay out against; anything
+  // outside the printable range is refused rather than clamped.
+  for (const bad of ["a4", "custom", "custom:", "custom:0", "custom:39", "custom:121",
+                     "custom:72.5", "120mm", "", null, undefined, 80]) {
     assert.equal(isPaperWidth(bad), false, `${String(bad)} must not be a paper width`);
   }
+});
+
+test("the custom range matches the web app's, and both ends are inclusive", () => {
+  // src/lib/receipt.ts in the Breadee web app declares exactly these.
+  assert.equal(CUSTOM_PAPER_MIN_MM, 40);
+  assert.equal(CUSTOM_PAPER_MAX_MM, 120);
+  assert.equal(customPaperWidth(CUSTOM_PAPER_MIN_MM), "custom:40");
+  assert.equal(customPaperWidth(CUSTOM_PAPER_MAX_MM), "custom:120");
+  assert.equal(customPaperWidth(CUSTOM_PAPER_MIN_MM - 1), null);
+  assert.equal(customPaperWidth(CUSTOM_PAPER_MAX_MM + 1), null);
+  assert.equal(customPaperWidth(72.5), null, "whole millimetres only");
 });
 
 test("copies are bounded, and non-integers are refused", () => {
@@ -229,14 +273,46 @@ test("a printer configured without a Windows name claims nothing", () => {
   assert.deepEqual(unclaimed.map((p) => p.name), ["Star TSP100"]);
 });
 
-test("the registry query is scoped, active-only and read-only", () => {
+test("the registry query is scoped, and hides disabled rows unless asked", () => {
   assert.match(registry, /\.eq\("tenant_id", input\.tenantId\)/);
-  assert.match(registry, /\.eq\("is_active", true\)/);
+  // Everything that PRINTS still sees active rows only; only setup opts in.
+  assert.match(registry, /if \(!input\.includeInactive\) query = query\.eq\("is_active", true\)/);
   // Tenant-wide rows (null branch) apply everywhere; branch rows must match.
   assert.match(registry, /p\.branch_id === null \|\| p\.branch_id === input\.branchId/);
-  for (const write of ["insert", "update", "upsert", "delete", "rpc("]) {
-    assert.equal(registry.includes(write), false, `the registry reader must not ${write}`);
+});
+
+test("the registry writes only pos_printer_settings, and never deletes", () => {
+  // Quick Setup made this module a writer (Level 3E-A's read-only rule was about
+  // owning a second source of truth, not about the desktop being read-only
+  // forever). The properties that still matter: one table, no RPC, no delete.
+  const tables = [...registry.matchAll(/\.from\("([^"]+)"\)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(tables)], ["pos_printer_settings"]);
+  assert.equal(registry.includes(".rpc("), false, "no RPC - RLS is the authority");
+  assert.equal(registry.includes(".delete("), false, "printers are disabled, never deleted");
+  assert.equal(registry.includes(".upsert("), false);
+});
+
+test("a write never invents a tenant, a branch or a connection type", () => {
+  // tenant/branch come from the session context, and the connection is fixed to
+  // the only kind this phase can actually drive.
+  assert.match(registry, /tenant_id: input\.tenantId/);
+  assert.match(registry, /branch_id: input\.branchId/);
+  assert.match(registry, /connection_type: "system" as const/);
+  for (const unsupported of ['"usb"', '"network"', '"desktop_connector"']) {
+    assert.equal(
+      registry.includes(`connection_type: ${unsupported}`),
+      false,
+      `${unsupported} must not be written by setup`,
+    );
   }
+});
+
+test("switching to a preset clears any stale custom width", () => {
+  // A row that was custom:72 and becomes 80mm must not keep 72 lying in the
+  // column for a later reader to mistake for the truth.
+  assert.deepEqual(toStoredPaper("80mm"), { paper_width: "80mm", custom_paper_width: null });
+  assert.deepEqual(toStoredPaper("58mm"), { paper_width: "58mm", custom_paper_width: null });
+  assert.deepEqual(toStoredPaper("custom:72"), { paper_width: "custom", custom_paper_width: 72 });
 });
 
 test("the native path does not read the legacy localStorage printer config", () => {
@@ -252,38 +328,49 @@ test("the native path does not read the legacy localStorage printer config", () 
 
 // --- the screen --------------------------------------------------------------
 
-test("the screen shows the configured list and the installed list separately", () => {
-  assert.match(screen, /Configured for this branch/);
-  assert.match(screen, /Installed on this Windows terminal/);
+test("the screen shows what is set up and what this PC detected, separately", () => {
+  assert.match(screen, /Set up for \{pos\.branch\.name\}/);
+  assert.match(screen, /Detected on this PC/);
   assert.match(screen, /loadServerPrinters\(/);
   assert.match(screen, /listPrinters\(\)/);
 });
 
-test("the screen says plainly that configuration lives in the web app", () => {
-  assert.match(screen, /Read only here/);
+test("detection runs when the screen opens, without a button", () => {
+  // The first question a technician has is "does this PC see it" - making them
+  // ask for the answer is a step that exists only because it was easier.
+  assert.match(screen, /useEffect\(\(\) => \{\s*void refresh\(\);/);
+  assert.match(screen, /Refresh printers/);
 });
 
-test("nothing prints without an explicit selection and a confirmation", () => {
-  // Two gates: a printer must be chosen, and the confirmation names it.
-  assert.match(screen, /disabled=\{!selected \|\| printing\}/);
-  assert.match(screen, /setConfirming\(true\)/);
-  assert.match(screen, /Send a test page to this printer\?/);
-  assert.match(screen, /onClick=\{\(\) => void runTestPrint\(\)\}/);
+test("nothing prints without an explicit request and a confirmation", () => {
+  // Two gates: a printer is chosen by pressing Test on one row, and the
+  // confirmation names the physical destination before anything is sent.
+  assert.match(screen, /setPendingTest\(\{ entry \}\)/);
+  assert.match(screen, /Send a test page\?/);
+  assert.match(screen, /onClick=\{\(\) => void runTest\(\)\}/);
+  // Saving a printer must never print as a side effect.
+  const saveBody = screen.slice(screen.indexOf("const save ="), screen.indexOf("const runTest ="));
+  assert.equal(saveBody.includes("printTestPage"), false, "saving must not print");
 });
 
 test("the confirmation names the exact printer, width and copy count", () => {
-  assert.match(screen, /will be sent to <strong>\{selected\}<\/strong>/);
-  assert.match(screen, /\{copies\} page/);
-  assert.match(screen, /at \{paper\}/);
+  assert.match(screen, /will be sent to\{" "\}\s*<strong>\{pendingTest\.entry\.installed\?\.name\}<\/strong>/);
+  assert.match(screen, /paperWidthLabel\(pendingTest\.entry\.paperWidth\)/);
+  assert.match(screen, /pendingTest\.entry\.printer\.default_copy_count\} page/);
+});
+
+test("only a printer this PC can actually reach can be tested", () => {
+  // `canTest` is the single gate, and it requires status === "ready", which
+  // means bound to an installed queue AND a width the renderer supports.
+  assert.match(screen, /mayTest && canTest\(entry\)/);
 });
 
 test("printing never happens on mount, on a timer, or as a side effect", () => {
-  // The only effect on this screen refreshes the two READ-ONLY lists.
   const effects = screen.match(/useEffect\(/g) ?? [];
   assert.equal(effects.length, 1, "one effect only");
-  const effectBody = screen.slice(screen.indexOf("useEffect("), screen.indexOf("const bindings"));
+  const effectBody = screen.slice(screen.indexOf("useEffect("), screen.indexOf("const entries"));
   assert.equal(effectBody.includes("printTestPage"), false);
-  assert.equal(effectBody.includes("runTestPrint"), false);
+  assert.equal(effectBody.includes("runTest"), false);
   assert.match(effectBody, /void refresh\(\)/);
   for (const timer of ["setTimeout", "setInterval", "requestAnimationFrame"]) {
     assert.equal(screen.includes(timer), false, `${timer} must not drive printing`);
@@ -306,7 +393,8 @@ test("no network or USB printing path is exposed by the UI", () => {
 });
 
 test("the screen states what this phase does not yet do", () => {
-  assert.match(screen, /Receipt and kitchen printing, automatic printing, station routing, network printers and the cash drawer are\s*not connected yet/);
+  assert.match(screen, /are not connected yet/);
+  assert.match(screen, /Receipts still print manually/);
 });
 
 // --- POS surfaces are untouched ---------------------------------------------
@@ -379,7 +467,15 @@ test("the frontend cannot supply bytes, a path, an address or a command", () => 
   // The only fields that exist on the wire.
   const requestType = client.slice(client.indexOf("export type TestPrintRequest"), client.indexOf("export type PrintOutcome"));
   const fields = [...requestType.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
-  assert.deepEqual(fields.sort(), ["copies", "paper_width", "printer_name"]);
+  assert.deepEqual(fields.sort(), ["context", "copies", "paper_width", "printer_name"]);
+
+  // ...and `context` itself is captions only. Nothing in it addresses a device.
+  const contextType = client.slice(
+    client.indexOf("export type TestPageContext"),
+    client.indexOf("export type TestPrintRequest"),
+  );
+  const contextFields = [...contextType.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+  assert.deepEqual(contextFields.sort(), ["branch_name", "business_name", "printer_alias", "role"]);
 });
 
 test("invoke is reached through this adapter only", () => {

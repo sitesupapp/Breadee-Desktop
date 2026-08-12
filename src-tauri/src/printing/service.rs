@@ -1,4 +1,4 @@
-//! Orchestration: validate, then drive a device through one document per copy.
+﻿//! Orchestration: validate, then drive a device through one document per copy.
 //!
 //! The platform lives behind two small traits, so the parts that are easy to get
 //! wrong - refusing an unknown printer, bounding the copy count, aborting a
@@ -9,6 +9,7 @@
 use super::page::{build_test_page, PageLine};
 use super::types::{
     resolve_printer, validate_copies, InstalledPrinter, PaperWidth, PrintError, PrintOutcome,
+    TestPageContext,
 };
 
 /// Enumerating printers.
@@ -86,6 +87,7 @@ pub fn list_printers<C: PrinterCatalogue>(catalogue: &C) -> Result<Vec<Installed
 /// per page rather than per document - so N copies is N spool jobs. It is
 /// slower and it is predictable, and for a diagnostic that a human is standing
 /// over, predictable wins.
+#[allow(clippy::too_many_arguments)]
 pub fn print_test_page<C, D, F>(
     catalogue: &C,
     make_device: F,
@@ -93,6 +95,7 @@ pub fn print_test_page<C, D, F>(
     paper: PaperWidth,
     copies_requested: u32,
     now: &str,
+    context: Option<&TestPageContext>,
 ) -> Result<PrintOutcome, PrintError>
 where
     C: PrinterCatalogue,
@@ -107,7 +110,7 @@ where
     let target = resolve_printer(printer_name, &installed)?;
     let name = target.name.clone();
 
-    let lines = build_test_page(&name, paper, now);
+    let lines = build_test_page(&name, paper, now, context);
 
     let mut job_ids = Vec::new();
     let mut first_error = None;
@@ -275,6 +278,7 @@ mod tests {
             PaperWidth::Mm80,
             copies,
             "2026-08-11 10:00",
+            None,
         );
         let recorded = steps.borrow().clone();
         (result, recorded)
@@ -302,7 +306,7 @@ mod tests {
         let steps = Rc::new(RefCell::new(Vec::new()));
         let s = Rc::clone(&steps);
         let mut device = MockDevice { fail_at: FailAt::Never, steps: s, next_job: 1 };
-        let lines = build_test_page("P", PaperWidth::Mm80, "t");
+        let lines = build_test_page("P", PaperWidth::Mm80, "t", None);
         print_one_copy(&mut device, "P", PaperWidth::Mm80, &lines).unwrap();
         assert!(lines.iter().any(|l| l.text == ARABIC_SAMPLE));
         assert!(lines.iter().any(|l| l.text == MIXED_SAMPLE));
@@ -377,8 +381,8 @@ mod tests {
     }
 
     #[test]
-    fn both_supported_widths_reach_the_device() {
-        for paper in [PaperWidth::Mm58, PaperWidth::Mm80] {
+    fn every_supported_width_reaches_the_device() {
+        for paper in [PaperWidth::Mm58, PaperWidth::Mm80, PaperWidth::CustomMm(72)] {
             let steps = Rc::new(RefCell::new(Vec::new()));
             let s = Rc::clone(&steps);
             let cat = catalogue(&["P"]);
@@ -389,6 +393,7 @@ mod tests {
                 paper,
                 1,
                 "t",
+                None,
             );
             assert!(out.unwrap().accepted, "{} must print", paper.label());
         }
