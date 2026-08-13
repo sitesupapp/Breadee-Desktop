@@ -24,11 +24,11 @@ import {
 } from "@/lib/nativePrinting";
 import {
   blockMessage,
-  cashierCandidates,
+  receiptOrderSource,
   receiptPrintGate,
-  resolveCashierTarget,
+  resolveReceiptTarget,
 } from "@/lib/pos/cashierPrinter";
-import type { ServerPrinter } from "@/lib/pos/printerRegistry";
+import type { ResolvedRoute } from "@/lib/pos/printRouteResolver";
 import { stripComments, stripJsxComments } from "./source-helpers.ts";
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -44,24 +44,45 @@ const capabilities = readTauri("capabilities", "default.json");
 const allow = { allowed: true, reason: null };
 const deny = { allowed: false, reason: "You do not have permission to print receipts." };
 
-const BRANCH = "b1";
-
 const installed = (name: string): InstalledPrinter => ({ name, is_default: false, status: "unknown" });
 
-const printer = (over: Partial<ServerPrinter> = {}): ServerPrinter => ({
-  id: "p1",
-  name: "Front counter",
+/**
+ * The routing answer for the branch that actually exists on staging: the XP-80,
+ * bound exactly, at a CUSTOM 72mm printable width, matched by the `any` default
+ * receipt route. This fixture is the reconciliation - before P2/P3-B the same
+ * printer was `80mm` and the target was chosen by scanning cashier rows.
+ */
+const route = (over: Partial<ResolvedRoute> = {}): ResolvedRoute => ({
+  resolved: true,
+  route_id: "r1",
+  printer_id: "p1",
+  printer_name: "Xprinter XP-80 (Customer receipts)",
   printer_type: "cashier",
   connection_type: "system",
   system_printer_name: "Xprinter XP-80",
-  paper_width: "80mm",
-  default_copy_count: 1,
-  auto_cut_enabled: false,
-  cash_drawer_enabled: false,
-  status: "unknown",
-  station_id: null,
-  branch_id: BRANCH,
+  paper_width: "custom",
+  custom_paper_width: 72,
+  copies: 1,
+  print_purpose: "receipt",
+  matched_order_source: "any",
+  used_default: true,
   ...over,
+});
+
+const unresolved = (): ResolvedRoute => ({
+  resolved: false,
+  route_id: null,
+  printer_id: null,
+  printer_name: null,
+  printer_type: null,
+  connection_type: null,
+  system_printer_name: null,
+  paper_width: null,
+  custom_paper_width: null,
+  copies: null,
+  print_purpose: "receipt",
+  matched_order_source: null,
+  used_default: null,
 });
 
 const receipt = () => ({
@@ -94,177 +115,166 @@ const receipt = () => ({
 
 // --- printer resolution ------------------------------------------------------
 
-test("one eligible cashier printer resolves to a single preselected target", () => {
-  const r = resolveCashierTarget({
-    printers: [printer()],
-    installed: [installed("Xprinter XP-80")],
-    branchId: BRANCH,
-  });
+test("the routed printer becomes the target, at its CUSTOM printable width", () => {
+  // The reconciliation in one assertion. P2 configured the XP-80 as `custom` +
+  // 72; P3-B routed receipts to it. Before this change the same printer was
+  // refused as "unsupported paper", because the old resolver accepted 58/80 only.
+  const r = resolveReceiptTarget({ route: route(), installed: [installed("Xprinter XP-80")] });
   assert.equal(r.kind, "single");
   if (r.kind !== "single") return;
+  assert.equal(r.target.printerName, "Xprinter XP-80 (Customer receipts)");
   assert.equal(r.target.windowsName, "Xprinter XP-80");
-  assert.equal(r.target.paperWidth, "80mm");
+  assert.equal(r.target.paperWidth, "custom:72");
   assert.equal(r.target.copies, 1);
+  assert.equal(r.target.usedDefault, true);
 });
 
-test("two eligible printers require an explicit choice - nothing is picked silently", () => {
-  // Nothing in the schema or the web app ranks cashier printers, so inventing a
-  // winner here would mean paper appearing in a room nobody chose.
-  const r = resolveCashierTarget({
-    printers: [printer(), printer({ id: "p2", name: "Back office", system_printer_name: "Star TSP100" })],
-    installed: [installed("Xprinter XP-80"), installed("Star TSP100")],
-    branchId: BRANCH,
-  });
-  assert.equal(r.kind, "choice");
-  if (r.kind !== "choice") return;
-  assert.equal(r.targets.length, 2);
+test("the two presets still resolve exactly as they did", () => {
+  for (const [width, expected] of [["58mm", "58mm"], ["80mm", "80mm"]] as const) {
+    const r = resolveReceiptTarget({
+      route: route({ paper_width: width, custom_paper_width: null }),
+      installed: [installed("Xprinter XP-80")],
+    });
+    assert.equal(r.kind === "single" && r.target.paperWidth, expected);
+  }
 });
 
-test("no configured cashier printer is a blocked state, not a fallback to the Windows default", () => {
-  const r = resolveCashierTarget({ printers: [], installed: [installed("Xprinter XP-80")], branchId: BRANCH });
+test("no route configured is a blocked state, not a fallback to any printer", () => {
+  const r = resolveReceiptTarget({ route: unresolved(), installed: [installed("Xprinter XP-80")] });
   assert.equal(r.kind, "blocked");
   if (r.kind !== "blocked") return;
-  assert.equal(r.block.reason, "none_configured");
-  assert.match(blockMessage(r.block), /No cashier printer is configured for this branch/);
+  assert.equal(r.block.reason, "no_route");
+  assert.match(blockMessage(r.block), /No receipt route is configured/);
+  // And it points at the screen that fixes it.
+  assert.match(blockMessage(r.block), /Printing & Routing/);
 });
 
-test("a kitchen printer is never treated as a cashier printer", () => {
-  // The current staging fixture is exactly this: kitchen, system, NULL name.
-  const r = resolveCashierTarget({
-    printers: [printer({ printer_type: "kitchen", system_printer_name: null })],
+test("nothing is ever guessed when the route does not resolve", () => {
+  // The failure mode this protects against is paper in the wrong room.
+  for (const token of ["is_default", "installed[0]", "printers[0]", "?? installed", "find((p) => p.is_default"]) {
+    assert.equal(resolver.includes(token), false, `${token} must not be a fallback`);
+  }
+});
+
+test("a source-specific route is reported as such, not as the default", () => {
+  const r = resolveReceiptTarget({
+    route: route({ matched_order_source: "takeaway", used_default: false }),
     installed: [installed("Xprinter XP-80")],
-    branchId: BRANCH,
   });
-  assert.equal(r.kind, "blocked");
-  if (r.kind !== "blocked") return;
-  assert.equal(r.block.reason, "none_configured");
+  assert.equal(r.kind === "single" && r.target.usedDefault, false);
 });
 
-test("an inactive row is excluded by the reader, not resurrected here", () => {
-  // `loadServerPrinters` filters `is_active`; eligibility assumes that.
-  assert.match(stripComments(readSrc("lib", "pos", "printerRegistry.ts")), /\.eq\("is_active", true\)/);
-});
-
-test("another branch's printer is never eligible", () => {
-  const r = resolveCashierTarget({
-    printers: [printer({ branch_id: "other-branch" })],
-    installed: [installed("Xprinter XP-80")],
-    branchId: BRANCH,
-  });
-  assert.equal(r.kind, "blocked");
-  if (r.kind !== "blocked") return;
-  assert.equal(r.block.reason, "none_configured");
-});
-
-test("a tenant-wide NULL-branch row is not eligible either", () => {
-  // The web app filters `.eq("branch_id", …)` and always writes a branch, so a
-  // NULL-branch printer is not a product concept. Treating it as "every branch"
-  // would be inventing a rule whose failure mode is remote paper.
-  const r = resolveCashierTarget({
-    printers: [printer({ branch_id: null })],
-    installed: [installed("Xprinter XP-80")],
-    branchId: BRANCH,
-  });
-  assert.equal(r.kind, "blocked");
-  // Enforced by strict equality in the filter, not by a comment.
-  assert.match(resolver, /p\.branch_id === branchId/);
-});
-
-test("a configured printer missing from this terminal is reported by name", () => {
-  const r = resolveCashierTarget({
-    printers: [printer()],
-    installed: [installed("Microsoft Print to PDF")],
-    branchId: BRANCH,
-  });
+test("a routed printer missing from this terminal is reported by name", () => {
+  const r = resolveReceiptTarget({ route: route(), installed: [installed("Microsoft Print to PDF")] });
   assert.equal(r.kind, "blocked");
   if (r.kind !== "blocked") return;
   assert.equal(r.block.reason, "not_installed");
-  assert.match(blockMessage(r.block), /Xprinter XP-80 is configured for this branch but is not installed/);
+  assert.match(blockMessage(r.block), /Xprinter XP-80 is not installed on this terminal/);
 });
 
 test("matching is exact - a near miss is a different device", () => {
   for (const near of ["xprinter xp-80", "XPRINTER XP-80", "Xprinter XP-80 ", "Xprinter"]) {
-    const r = resolveCashierTarget({ printers: [printer()], installed: [installed(near)], branchId: BRANCH });
+    const r = resolveReceiptTarget({ route: route(), installed: [installed(near)] });
     assert.equal(r.kind, "blocked", `${near} must not bind`);
   }
 });
 
-test("a configured printer with no Windows name recorded is unbound", () => {
-  const r = resolveCashierTarget({
-    printers: [printer({ system_printer_name: null })],
+test("a routed printer with no Windows name recorded is unbound", () => {
+  const r = resolveReceiptTarget({
+    route: route({ system_printer_name: null }),
     installed: [installed("Xprinter XP-80")],
-    branchId: BRANCH,
   });
   assert.equal(r.kind, "blocked");
   if (r.kind !== "blocked") return;
   assert.equal(r.block.reason, "unbound");
 });
 
-test("usb, network and desktop_connector are not eligible in this phase", () => {
-  for (const connection of ["usb", "network", "desktop_connector"] as const) {
-    const r = resolveCashierTarget({
-      printers: [printer({ connection_type: connection })],
+test("usb, network and desktop_connector are still not drivable", () => {
+  for (const connection of ["usb", "network", "desktop_connector"]) {
+    const r = resolveReceiptTarget({
+      route: route({ connection_type: connection }),
       installed: [installed("Xprinter XP-80")],
-      branchId: BRANCH,
     });
     assert.equal(r.kind, "blocked", connection);
+    assert.equal(r.kind === "blocked" && r.block.reason, "unsupported_connection");
   }
 });
 
-test("a4 and custom paper are refused rather than approximated to 80mm", () => {
-  // The web app silently falls back to 80mm. That is survivable for a browser
-  // preview and is not survivable when it clips a total off a real roll.
-  for (const width of ["a4", "custom", null]) {
-    const r = resolveCashierTarget({
-      printers: [printer({ paper_width: width })],
+test("a width the renderer cannot lay out is refused, never approximated", () => {
+  // Still stricter than the web app, which silently falls back to 80mm. What
+  // changed is only WHICH widths are layable - custom is now one of them.
+  for (const [paper_width, custom_paper_width] of [
+    ["a4", null],
+    ["custom", null],
+    ["custom", 0],
+    ["custom", 500],
+    [null, null],
+  ] as const) {
+    const r = resolveReceiptTarget({
+      route: route({ paper_width, custom_paper_width }),
       installed: [installed("Xprinter XP-80")],
-      branchId: BRANCH,
     });
-    assert.equal(r.kind, "blocked", `${width}`);
+    assert.equal(r.kind, "blocked", `${paper_width}/${custom_paper_width}`);
     if (r.kind !== "blocked") continue;
     assert.equal(r.block.reason, "unsupported_paper");
-    assert.match(blockMessage(r.block), /supports 58mm and 80mm only/);
   }
 });
 
-test("58mm resolves, and copies come from the printer row bounded to 1..5", () => {
-  const r = resolveCashierTarget({
-    printers: [printer({ paper_width: "58mm", default_copy_count: 3 })],
-    installed: [installed("Xprinter XP-80")],
-    branchId: BRANCH,
-  });
-  assert.equal(r.kind, "single");
-  if (r.kind !== "single") return;
-  assert.equal(r.target.paperWidth, "58mm");
-  assert.equal(r.target.copies, 3);
-
-  for (const [configured, expected] of [[0, 1], [99, 5], [-4, 1]] as const) {
-    const bounded = resolveCashierTarget({
-      printers: [printer({ default_copy_count: configured })],
+test("copies come from the ROUTE, bounded to 1..5", () => {
+  // The route is where an operator says "two copies of this receipt"; the
+  // printer row's default is a device setting the route overrides.
+  assert.equal(
+    resolveReceiptTarget({ route: route({ copies: 3 }), installed: [installed("Xprinter XP-80")] }).kind === "single" &&
+      resolveReceiptTarget({ route: route({ copies: 3 }), installed: [installed("Xprinter XP-80")] }).kind,
+    "single",
+  );
+  for (const [configured, expected] of [[3, 3], [0, 1], [99, 5], [null, 1]] as const) {
+    const r = resolveReceiptTarget({
+      route: route({ copies: configured }),
       installed: [installed("Xprinter XP-80")],
-      branchId: BRANCH,
     });
-    assert.equal(bounded.kind === "single" && bounded.target.copies, expected);
+    assert.equal(r.kind === "single" && r.target.copies, expected, `${configured}`);
   }
 });
 
-test("candidates are filtered by type, connection and branch together", () => {
-  const rows = [
-    printer(),
-    printer({ id: "k", printer_type: "kitchen" }),
-    printer({ id: "n", connection_type: "network" }),
-    printer({ id: "b", branch_id: "elsewhere" }),
-  ];
-  assert.deepEqual(cashierCandidates(rows, BRANCH).map((p) => p.id), ["p1"]);
+test("width is read through P2's helper, not a second parser in this file", () => {
+  assert.match(resolver, /effectivePaperWidth\(/);
+  assert.equal(/"58mm" \|\| .*=== "80mm"/.test(resolver), false, "no local width whitelist");
+});
+
+// --- the order source --------------------------------------------------------
+
+test("the routing source comes from the contract field, not the display string", () => {
+  assert.equal(receiptOrderSource({ orderSource: "delivery", orderType: "Takeaway" }), "delivery");
+  assert.equal(receiptOrderSource({ orderSource: "dine_in" }), "dine_in");
+});
+
+test("the display string is a tolerated fallback, and an unknown one is refused", () => {
+  // Every route sets `orderSource`; this covers a receipt built before it
+  // existed. Guessing a source could match a Takeaway override and put a
+  // delivery receipt on the wrong printer, so anything unrecognised is null.
+  assert.equal(receiptOrderSource({ orderType: "Delivery" }), "delivery");
+  assert.equal(receiptOrderSource({ orderType: "Dine-in" }), "dine_in");
+  assert.equal(receiptOrderSource({ orderType: "takeaway" }), "takeaway");
+  for (const unknown of ["", "Catering", "e_menu", "kitchen"]) {
+    assert.equal(receiptOrderSource({ orderType: unknown }), null, unknown);
+  }
+});
+
+test("every live receipt builder states its order source", () => {
+  for (const [file, expected] of [
+    [["lib", "pos", "paymentCompletion.ts"], "takeaway"],
+    [["lib", "pos", "tablePaymentCompletion.ts"], "dine_in"],
+    [["lib", "pos", "deliveryHistory.ts"], "delivery"],
+  ] as const) {
+    assert.match(stripComments(readSrc(...file)), new RegExp(`orderSource: "${expected}"`), file.join("/"));
+  }
+  assert.match(stripJsxComments(readSrc("screens", "pos", "DeliveryWorkspace.tsx")), /orderSource: "delivery"/);
 });
 
 // --- the gate ----------------------------------------------------------------
 
-const single = resolveCashierTarget({
-  printers: [printer()],
-  installed: [installed("Xprinter XP-80")],
-  branchId: BRANCH,
-});
+const single = resolveReceiptTarget({ route: route(), installed: [installed("Xprinter XP-80")] });
 
 test("printing needs the native app, the permission, a receipt and a printer", () => {
   const base = { nativeAvailable: true, canPrintReceipts: allow, resolution: single, hasReceipt: true, busy: false };
@@ -280,7 +290,7 @@ test("printing needs the native app, the permission, a receipt and a printer", (
 });
 
 test("a blocked printer state explains itself through the gate", () => {
-  const blocked = resolveCashierTarget({ printers: [], installed: [], branchId: BRANCH });
+  const blocked = resolveReceiptTarget({ route: unresolved(), installed: [] });
   const gate = receiptPrintGate({
     nativeAvailable: true,
     canPrintReceipts: allow,
@@ -289,7 +299,7 @@ test("a blocked printer state explains itself through the gate", () => {
     busy: false,
   });
   assert.equal(gate.allowed, false);
-  assert.match(gate.reason ?? "", /No cashier printer is configured/);
+  assert.match(gate.reason ?? "", /No receipt route is configured/);
 });
 
 test("a historical receipt is still printable", () => {
@@ -379,7 +389,8 @@ test("printing is manual - nothing prints on open, on payment or on a timer", ()
   const effect = preview.slice(preview.indexOf("useEffect("), preview.indexOf("const target ="));
   assert.equal(effect.includes("printReceipt"), false);
   assert.match(effect, /listPrinters\(\)/);
-  assert.match(effect, /loadServerPrinters\(/);
+  // The destination is ASKED FOR, not decided here.
+  assert.match(effect, /resolvePrintRoute\(\{ branchId, purpose: "receipt", orderSource: source \}\)/);
   for (const timer of ["setTimeout", "setInterval"]) {
     assert.equal(preview.includes(timer), false, `${timer} must not drive printing`);
   }
@@ -398,14 +409,18 @@ test("auto_print_customer is deliberately not honoured yet", () => {
 });
 
 test("the target printer is shown before anything is sent", () => {
-  assert.match(preview, /Print to <strong className="text-ink">\{target\.windowsName\}<\/strong>/);
+  // Both names: the Breadee alias the operator recognises, and the Windows queue
+  // that decides which device it actually is.
+  assert.match(preview, /Print to <strong className="text-ink">\{target\.printerName\}<\/strong> \(\{target\.windowsName\}\)/);
+  assert.match(preview, /Routed by the/);
 });
 
 test("the confirmation names the order, copies, width and printer", () => {
   assert.match(preview, /Order #\{data\.orderNumber\}/);
   assert.match(preview, /\{target\.copies\} cop/);
-  assert.match(preview, /\{target\.paperWidth\}/);
-  assert.match(preview, /<strong>\{target\.windowsName\}<\/strong>/);
+  // The LABEL, so a custom roll reads "72 mm printable" rather than "custom:72".
+  assert.match(preview, /paperWidthLabel\(target\.paperWidth\)/);
+  assert.match(preview, /<strong>\{target\.printerName\}<\/strong>/);
 });
 
 test("a second click cannot send a second job", () => {
@@ -463,13 +478,27 @@ test("the resolver reads the registry and writes nothing", () => {
   assert.equal(resolver.includes("loadPrinters"), false);
 });
 
-test("no kitchen, routing, network or drawer concept leaks into this phase", () => {
+test("no kitchen, advanced-routing, network or drawer concept leaks into this phase", () => {
+  // RETARGETED. Receipt routing is no longer a leak - it is the mechanism this
+  // phase was reconciled onto, and the resolver call is how the target is found.
+  // What must still stay out is everything routing does NOT cover here: kitchen
+  // tickets, the advanced scopes P5 owns, direct network printing and the drawer.
+  // The print path also still writes no routing row - it reads the resolver.
   for (const src of [preview, resolver]) {
     for (const token of [
-      "kitchen_print_routes", "station_id", "kitchen ticket", "escpos", "TcpStream",
-      "cash_drawer", "auto_cut", "9100",
+      "kitchen_print_routes", "station_id", "section_id", "menu_category_id",
+      "preparation_component_id", "kitchen ticket", "kitchen_ticket", "escpos",
+      "TcpStream", "cash_drawer", "auto_cut", "9100",
     ]) {
       assert.equal(src.toLowerCase().includes(token.toLowerCase()), false, token);
+    }
+  }
+});
+
+test("printing reads routing and never writes it", () => {
+  for (const src of [preview, resolver]) {
+    for (const write of ["createBasicRoute", "updateBasicRoute", "removeBasicRoute", "createPrinter", "updatePrinter", "setPrinterActive"]) {
+      assert.equal(src.includes(write), false, write);
     }
   }
 });
@@ -511,10 +540,15 @@ test("the dashboard copy is untouched by this phase", () => {
   assert.ok(modules.includes("Printing is not available yet."));
 });
 
-test("Level 3E-A's test print is untouched", () => {
+test("the diagnostic test print is untouched, and never prints a receipt", () => {
+  // RETARGETED. P2's Quick Setup rewrote this screen and its confirmation now
+  // reads "Send a test page?" rather than "…to this printer?". The wording was
+  // never the property - the properties are that the diagnostic path still
+  // exists, still confirms before paper, and is still a different document from
+  // the cashier receipt.
   const printers = stripJsxComments(readSrc("screens", "settings", "Printers.tsx"));
   assert.match(printers, /printTestPage\(/);
-  assert.match(printers, /Send a test page to this printer\?/);
+  assert.match(printers, /Send a test page\?/);
   assert.equal(printers.includes("printReceipt"), false);
 });
 

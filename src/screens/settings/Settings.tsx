@@ -1,12 +1,12 @@
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
-import { Printers } from "@/screens/settings/Printers";
+import { Printing } from "@/screens/settings/Printing";
 import { ReceiptDesign } from "@/screens/settings/ReceiptDesign";
 import { SyncCenter } from "@/screens/settings/SyncCenter";
 import { DeviceSettings } from "@/screens/settings/DeviceSettings";
 import { Help } from "@/screens/settings/Help";
 
 const TABS = [
-  { to: "printers", label: "Printers" },
+  { to: "printing", label: "Printing & Routing" },
   { to: "receipt", label: "Receipt" },
   { to: "sync", label: "Sync Center" },
   { to: "device", label: "Device" },
@@ -31,8 +31,11 @@ export function Settings() {
         ))}
       </div>
       <Routes>
-        <Route index element={<Navigate to="/settings/printers" replace />} />
-        <Route path="printers" element={<Printers />} />
+        <Route index element={<Navigate to="/settings/printing/setup" replace />} />
+        <Route path="printing/*" element={<Printing />} />
+        {/* The pre-P3 address. Kept so a bookmark, a support note or a deep link
+            from an older build still lands on the screen it named. */}
+        <Route path="printers" element={<Navigate to="/settings/printing/setup" replace />} />
         <Route path="receipt" element={<ReceiptDesign />} />
         <Route path="sync" element={<SyncCenter />} />
         <Route path="device" element={<DeviceSettings />} />

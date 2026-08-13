@@ -15,37 +15,121 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Widths this phase can lay a diagnostic page out for.
+/// Smallest and largest custom roll this layer will lay a page out for.
 ///
-/// An enum rather than a number: `serde` refuses anything else before our code
-/// runs, so an unsupported width is a deserialisation failure at the boundary
-/// rather than a page silently printed at the wrong size. A4 and `custom` exist
-/// in the server registry and are deliberately NOT here - Level 3E-A prints one
-/// diagnostic page onto thermal rolls, and inventing a sheet layout would be
-/// pretending to a capability that has not been designed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// MIRRORED, not invented: `src/lib/receipt.ts` in the web app already declares
+/// `CUSTOM_PAPER_MIN_MM = 40` / `CUSTOM_PAPER_MAX_MM = 120` as the range outside
+/// which "custom thermal rolls are not safely printable". One product, one
+/// range. The web CLAMPS into it; this boundary REJECTS instead - see
+/// `PaperWidth::parse`.
+pub const CUSTOM_PAPER_MIN_MM: u16 = 40;
+pub const CUSTOM_PAPER_MAX_MM: u16 = 120;
+
+/// Widths this layer can lay a page out for.
+///
+/// A closed type rather than a bare number, so an unsupported width is a
+/// deserialisation failure at the boundary rather than a page silently printed
+/// at the wrong size. A4 is still deliberately absent: these are thermal rolls,
+/// and inventing a sheet layout would be pretending to a capability nobody has
+/// designed.
+///
+/// WHY `CustomMm` EXISTS. A printer's marketed roll class and its actual
+/// printable width are different facts. An Xprinter XP-80 is sold as 80mm and
+/// marks about 72mm, and the web print bridge already sizes its raster to 72 for
+/// exactly that reason. Laying out at a nominal 80 and letting the driver clip
+/// is how the right-hand column of a total disappears, so the real printable
+/// width is a first-class value here rather than something rounded to the
+/// nearest preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaperWidth {
-    #[serde(rename = "58mm")]
     Mm58,
-    #[serde(rename = "80mm")]
     Mm80,
+    /// A validated custom printable width, in whole millimetres.
+    ///
+    /// Only constructible through `parse`/`custom`, so a value of this shape has
+    /// already been range-checked - there is no way to hand the renderer a
+    /// 5000mm page by building the enum directly from frontend input.
+    CustomMm(u16),
 }
 
 impl PaperWidth {
-    /// Nominal roll width. The PRINTABLE area is narrower and is read from the
-    /// device itself at print time; this is only the layout target.
+    /// The width to lay text out against, in millimetres.
+    ///
+    /// For the two presets this is the nominal roll; the driver's own printable
+    /// area still caps it at draw time. For a custom width it is the printable
+    /// figure the operator configured, which is the point of configuring one.
     pub fn millimetres(self) -> f32 {
         match self {
             PaperWidth::Mm58 => 58.0,
             PaperWidth::Mm80 => 80.0,
+            PaperWidth::CustomMm(mm) => mm as f32,
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// The wire and display form: `58mm`, `80mm` or `custom:72`.
+    ///
+    /// `custom:<mm>` is not a new spelling - it is the form the web app already
+    /// stores in `pos_receipt_settings.paper_size` and parses in `resolvePaper`.
+    /// Reusing it means one vocabulary across the product instead of a desktop
+    /// dialect that has to be translated at every boundary.
+    pub fn label(self) -> String {
         match self {
-            PaperWidth::Mm58 => "58mm",
-            PaperWidth::Mm80 => "80mm",
+            PaperWidth::Mm58 => "58mm".to_string(),
+            PaperWidth::Mm80 => "80mm".to_string(),
+            PaperWidth::CustomMm(mm) => format!("custom:{mm}"),
         }
+    }
+
+    /// Build a custom width, refusing anything outside the shared range.
+    pub fn custom(mm: u16) -> Result<Self, PrintError> {
+        if !(CUSTOM_PAPER_MIN_MM..=CUSTOM_PAPER_MAX_MM).contains(&mm) {
+            return Err(PrintError::InvalidPaperWidth {
+                detail: format!(
+                    "custom width {mm}mm is outside {CUSTOM_PAPER_MIN_MM}-{CUSTOM_PAPER_MAX_MM}mm"
+                ),
+            });
+        }
+        Ok(PaperWidth::CustomMm(mm))
+    }
+
+    /// Parse the wire form.
+    ///
+    /// REJECTS rather than clamps. The web clamps because it is laying out a
+    /// preview and a slightly wrong column is survivable; this drives a physical
+    /// head, and a request for a 400mm page is a caller bug that should surface
+    /// as an error rather than quietly become a 120mm page. Whole millimetres
+    /// only: the value originates in `pos_printer_settings.custom_paper_width`,
+    /// which is an integer column.
+    pub fn parse(raw: &str) -> Result<Self, PrintError> {
+        let value = raw.trim().to_ascii_lowercase();
+        match value.as_str() {
+            "58mm" => return Ok(PaperWidth::Mm58),
+            "80mm" => return Ok(PaperWidth::Mm80),
+            _ => {}
+        }
+        let digits = value
+            .strip_prefix("custom:")
+            .map(|rest| rest.strip_suffix("mm").unwrap_or(rest))
+            .ok_or_else(|| PrintError::InvalidPaperWidth { detail: raw.to_string() })?;
+        let mm: u16 = digits
+            .parse()
+            .map_err(|_| PrintError::InvalidPaperWidth { detail: raw.to_string() })?;
+        PaperWidth::custom(mm)
+    }
+}
+
+/// Serialised as its label, so the wire form stays a plain string and the
+/// existing `"58mm"` / `"80mm"` contract is unchanged.
+impl Serialize for PaperWidth {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for PaperWidth {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        PaperWidth::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -86,14 +170,89 @@ pub enum PrinterStatus {
     Unknown,
 }
 
+/// What the printer is for, as far as a test page is concerned.
+///
+/// Mirrors `pos_printer_settings.printer_type`. It selects a HEADING and
+/// nothing else - there is no branch here where a role reaches a device
+/// differently, so a wrong role misprints a word, never a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrinterRole {
+    Cashier,
+    Kitchen,
+    Other,
+}
+
+impl PrinterRole {
+    /// The banner that tells whoever picks the paper up what it is.
+    pub fn test_page_title(self) -> &'static str {
+        match self {
+            PrinterRole::Cashier => "TEST RECEIPT",
+            PrinterRole::Kitchen => "TEST KITCHEN TICKET",
+            PrinterRole::Other => "TEST PAGE",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PrinterRole::Cashier => "Cashier",
+            PrinterRole::Kitchen => "Kitchen",
+            PrinterRole::Other => "Other",
+        }
+    }
+}
+
+/// Longest operator-supplied string a test page will draw.
+///
+/// These values are captions, not content. Capping them means a caller cannot
+/// turn a diagnostic into an unbounded print job - the failure mode this guards
+/// is a runaway roll, not a memory bug.
+pub const MAX_CAPTION_CHARS: usize = 60;
+
+/// Which Breadee printer a test page represents.
+///
+/// STILL SYNTHETIC. Every field is configuration an operator typed on the setup
+/// screen - a printer alias, a branch name - and none of it is order, customer,
+/// payment or shift data. A test page remains safe to leave on a printer in a
+/// public area, which is the property `page.rs` tests directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestPageContext {
+    /// The tenant's business name.
+    pub business_name: String,
+    pub branch_name: String,
+    /// The Breadee alias, e.g. "Front Cashier" - not the Windows queue name.
+    pub printer_alias: String,
+    pub role: PrinterRole,
+}
+
+impl TestPageContext {
+    /// Trim every caption to something a roll can hold.
+    ///
+    /// Truncating on a CHARACTER boundary, not a byte one: an Arabic branch
+    /// name cut mid-codepoint would not be a string at all.
+    pub fn clamped(&self) -> TestPageContext {
+        let cut = |s: &str| s.chars().take(MAX_CAPTION_CHARS).collect::<String>();
+        TestPageContext {
+            business_name: cut(&self.business_name),
+            branch_name: cut(&self.branch_name),
+            printer_alias: cut(&self.printer_alias),
+            role: self.role,
+        }
+    }
+}
+
 /// A request to print the built-in diagnostic page.
 ///
-/// Note what is absent, and see the module comment for why.
+/// Note what is absent, and see the module comment for why. `context` is
+/// optional so the Level 3E-A callers that send three fields keep working
+/// unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestPrintRequest {
     pub printer_name: String,
     pub paper_width: PaperWidth,
     pub copies: u8,
+    #[serde(default)]
+    pub context: Option<TestPageContext>,
 }
 
 /// The result of asking Windows to print.
@@ -216,22 +375,86 @@ mod tests {
     }
 
     #[test]
-    fn paper_width_accepts_only_the_two_thermal_rolls() {
+    fn paper_width_accepts_the_two_presets_and_a_validated_custom_roll() {
         assert_eq!(serde_json::from_str::<PaperWidth>("\"58mm\"").unwrap(), PaperWidth::Mm58);
         assert_eq!(serde_json::from_str::<PaperWidth>("\"80mm\"").unwrap(), PaperWidth::Mm80);
-        // A4 and custom exist in the server registry; this phase has no layout
-        // for them and refuses at the boundary rather than guessing one.
+        // The XP-80 case: sold as 80mm, marks 72mm.
+        assert_eq!(
+            serde_json::from_str::<PaperWidth>("\"custom:72\"").unwrap(),
+            PaperWidth::CustomMm(72)
+        );
+        // A4 is a sheet, not a roll: still refused rather than guessed at.
         assert!(serde_json::from_str::<PaperWidth>("\"a4\"").is_err());
+        // Bare `custom` carries no width, so there is nothing to lay out against.
         assert!(serde_json::from_str::<PaperWidth>("\"custom\"").is_err());
+        assert!(serde_json::from_str::<PaperWidth>("\"custom:\"").is_err());
+        // Not a preset spelling, and not the custom form either.
         assert!(serde_json::from_str::<PaperWidth>("\"120mm\"").is_err());
+    }
+
+    #[test]
+    fn a_custom_width_outside_the_shared_range_is_refused_not_clamped() {
+        // The web clamps for a preview; this drives a head, so an impossible
+        // width surfaces as an error instead of quietly becoming the maximum.
+        for bad in [0u16, 1, CUSTOM_PAPER_MIN_MM - 1, CUSTOM_PAPER_MAX_MM + 1, 400, 5000] {
+            let err = PaperWidth::custom(bad).unwrap_err();
+            assert_eq!(err.code(), "invalid_paper_width", "{bad}mm must be refused");
+        }
+        // Both ends of the range are inclusive.
+        assert_eq!(
+            PaperWidth::custom(CUSTOM_PAPER_MIN_MM).unwrap(),
+            PaperWidth::CustomMm(CUSTOM_PAPER_MIN_MM)
+        );
+        assert_eq!(
+            PaperWidth::custom(CUSTOM_PAPER_MAX_MM).unwrap(),
+            PaperWidth::CustomMm(CUSTOM_PAPER_MAX_MM)
+        );
+    }
+
+    #[test]
+    fn the_custom_range_matches_the_web_apps_declared_range() {
+        // src/lib/receipt.ts: CUSTOM_PAPER_MIN_MM = 40, CUSTOM_PAPER_MAX_MM = 120.
+        // One product, one answer to "what is a printable roll".
+        assert_eq!(CUSTOM_PAPER_MIN_MM, 40);
+        assert_eq!(CUSTOM_PAPER_MAX_MM, 120);
+    }
+
+    #[test]
+    fn a_custom_width_never_arrives_as_a_fraction_or_junk() {
+        // `custom_paper_width` is an integer column; anything else is a caller
+        // that has invented a value, not a printer that has one.
+        for bad in ["custom:72.5", "custom:-72", "custom:abc", "custom:72px", "custom: 72"] {
+            assert!(PaperWidth::parse(bad).is_err(), "{bad:?} must not parse");
+        }
     }
 
     #[test]
     fn paper_width_reports_its_own_geometry_and_label() {
         assert_eq!(PaperWidth::Mm58.millimetres(), 58.0);
         assert_eq!(PaperWidth::Mm80.millimetres(), 80.0);
+        assert_eq!(PaperWidth::CustomMm(72).millimetres(), 72.0);
         assert_eq!(PaperWidth::Mm58.label(), "58mm");
         assert_eq!(PaperWidth::Mm80.label(), "80mm");
+        assert_eq!(PaperWidth::CustomMm(72).label(), "custom:72");
+    }
+
+    #[test]
+    fn every_width_survives_a_round_trip_through_the_wire_form() {
+        for width in [PaperWidth::Mm58, PaperWidth::Mm80, PaperWidth::CustomMm(72)] {
+            let json = serde_json::to_string(&width).unwrap();
+            assert_eq!(serde_json::from_str::<PaperWidth>(&json).unwrap(), width);
+            // The wire form is a plain string, so the 3E-A/3E-B contract that
+            // sends "80mm" keeps working untouched.
+            assert!(json.starts_with('"'), "{json} must serialise as a string");
+        }
+    }
+
+    #[test]
+    fn the_parser_tolerates_case_and_surrounding_space_but_nothing_else() {
+        assert_eq!(PaperWidth::parse(" 80MM ").unwrap(), PaperWidth::Mm80);
+        assert_eq!(PaperWidth::parse("CUSTOM:72mm").unwrap(), PaperWidth::CustomMm(72));
+        assert!(PaperWidth::parse("").is_err());
+        assert!(PaperWidth::parse("80 mm").is_err());
     }
 
     #[test]
@@ -328,7 +551,9 @@ mod tests {
                 let mut keys: Vec<&str> =
                     round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
                 keys.sort_unstable();
-                assert_eq!(keys, vec!["copies", "paper_width", "printer_name"]);
+                // `context` carries only captions (see TestPageContext); there
+                // is still nowhere for bytes, a path, an address or a command.
+                assert_eq!(keys, vec!["context", "copies", "paper_width", "printer_name"]);
             }
         }
     }

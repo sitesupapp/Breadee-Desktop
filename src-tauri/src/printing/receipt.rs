@@ -196,11 +196,16 @@ fn direction_for(text: &str) -> Direction {
     if is_rtl(text) { Direction::Rtl } else { Direction::Auto }
 }
 
+/// The divider, sized to the roll.
+///
+/// Delegates to `page::rule_chars` rather than matching the presets again. When
+/// P2 added custom printable widths this function was an exhaustive two-arm
+/// match and would not compile against the widened type - which was the right
+/// failure, because the alternative was a receipt silently drawing an 80mm rule
+/// onto a 72mm roll. There is now ONE width-to-characters rule for both the
+/// diagnostic page and the receipt.
 fn rule(paper: PaperWidth) -> String {
-    "-".repeat(match paper {
-        PaperWidth::Mm58 => 24,
-        PaperWidth::Mm80 => 32,
-    })
+    "-".repeat(super::page::rule_chars(paper))
 }
 
 /// Lay the receipt out.

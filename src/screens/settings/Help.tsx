@@ -45,7 +45,8 @@ export function Help() {
       </Section>
 
       <Section title="Printing">
-        <p>• Configure printers in Settings → Printers (default 80mm thermal; 58mm and A4 supported).</p>
+        <p>• Configure printers in Settings → Printing &amp; Routing → Quick Setup (default 80mm thermal; 58mm and custom printable widths supported).</p>
+        <p>• Choose which printer each document goes to in Settings → Printing &amp; Routing → Routing, and check it in Test Center.</p>
         <p>• Real printing needs device testing on your actual hardware before go-live.</p>
       </Section>
     </div>

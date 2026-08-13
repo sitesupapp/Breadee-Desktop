@@ -334,6 +334,7 @@ export function buildHistoricalReceipt(input: {
     businessName: input.tenantName,
     branchName: input.branchName,
     orderType: "Delivery",
+    orderSource: "delivery",
     staffName: input.staffName,
     orderNumber: o.order_number ?? "",
     at: input.at,

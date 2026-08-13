@@ -1,4 +1,4 @@
-//! Orchestration: validate, then drive a device through one document per copy.
+﻿//! Orchestration: validate, then drive a device through one document per copy.
 //!
 //! The platform lives behind two small traits, so the parts that are easy to get
 //! wrong - refusing an unknown printer, bounding the copy count, aborting a
@@ -10,6 +10,7 @@ use super::page::{build_test_page, PageLine};
 use super::receipt::{build_receipt_page, validate_receipt, ReceiptDoc};
 use super::types::{
     resolve_printer, validate_copies, InstalledPrinter, PaperWidth, PrintError, PrintOutcome,
+    TestPageContext,
 };
 
 /// Enumerating printers.
@@ -81,6 +82,10 @@ pub fn list_printers<C: PrinterCatalogue>(catalogue: &C) -> Result<Vec<Installed
 }
 
 /// Validate a test-print request and run it.
+///
+/// The copies rule now lives on `print_document`, which is the one path both
+/// this and the cashier receipt take.
+#[allow(clippy::too_many_arguments)]
 pub fn print_test_page<C, D, F>(
     catalogue: &C,
     make_device: F,
@@ -88,6 +93,7 @@ pub fn print_test_page<C, D, F>(
     paper: PaperWidth,
     copies_requested: u32,
     now: &str,
+    context: Option<&TestPageContext>,
 ) -> Result<PrintOutcome, PrintError>
 where
     C: PrinterCatalogue,
@@ -97,7 +103,11 @@ where
     // The page is built from the RESOLVED name, so the paper says which printer
     // Windows actually matched rather than what the caller typed.
     print_document(catalogue, make_device, printer_name, paper, copies_requested, |resolved| {
-        Ok(build_test_page(resolved, paper, now))
+        // `context` is P2's addition - the Breadee alias and role the diagnostic
+        // page prints as its caption. It is forwarded rather than dropped: a
+        // test page that no longer says which configured printer it came from
+        // is the one thing that page exists to prove.
+        Ok(build_test_page(resolved, paper, now, context))
     })
 }
 
@@ -333,6 +343,7 @@ mod tests {
             PaperWidth::Mm80,
             copies,
             "2026-08-11 10:00",
+            None,
         );
         let recorded = steps.borrow().clone();
         (result, recorded)
@@ -360,7 +371,7 @@ mod tests {
         let steps = Rc::new(RefCell::new(Vec::new()));
         let s = Rc::clone(&steps);
         let mut device = MockDevice { fail_at: FailAt::Never, steps: s, next_job: 1 };
-        let lines = build_test_page("P", PaperWidth::Mm80, "t");
+        let lines = build_test_page("P", PaperWidth::Mm80, "t", None);
         print_one_copy(&mut device, "P", PaperWidth::Mm80, &lines).unwrap();
         assert!(lines.iter().any(|l| l.text == ARABIC_SAMPLE));
         assert!(lines.iter().any(|l| l.text == MIXED_SAMPLE));
@@ -435,8 +446,8 @@ mod tests {
     }
 
     #[test]
-    fn both_supported_widths_reach_the_device() {
-        for paper in [PaperWidth::Mm58, PaperWidth::Mm80] {
+    fn every_supported_width_reaches_the_device() {
+        for paper in [PaperWidth::Mm58, PaperWidth::Mm80, PaperWidth::CustomMm(72)] {
             let steps = Rc::new(RefCell::new(Vec::new()));
             let s = Rc::clone(&steps);
             let cat = catalogue(&["P"]);
@@ -447,6 +458,7 @@ mod tests {
                 paper,
                 1,
                 "t",
+                None,
             );
             assert!(out.unwrap().accepted, "{} must print", paper.label());
         }

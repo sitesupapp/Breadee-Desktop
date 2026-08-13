@@ -27,17 +27,18 @@ import {
   ACCEPTED_MESSAGE,
   isNativeAvailable,
   listPrinters,
+  paperWidthLabel,
   printReceipt,
   type NativePrintError,
   type PrintOutcome,
 } from "@/lib/nativePrinting";
-import { loadServerPrinters } from "@/lib/pos/printerRegistry";
+import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
 import {
   blockMessage,
+  receiptOrderSource,
   receiptPrintGate,
-  resolveCashierTarget,
+  resolveReceiptTarget,
   type CashierResolution,
-  type CashierTarget,
 } from "@/lib/pos/cashierPrinter";
 
 export function ReceiptPaper({ data }: { data: ReceiptData }) {
@@ -156,40 +157,52 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
   const native = isNativeAvailable();
 
   const [resolution, setResolution] = useState<CashierResolution | null>(null);
-  const [chosen, setChosen] = useState<CashierTarget | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<PrintOutcome | null>(null);
   const [error, setError] = useState<NativePrintError | null>(null);
 
-  // Find a printer. This is a READ - two selects and a Windows enumeration -
-  // and it prints nothing. It runs on open so the operator can see where the
-  // receipt would go before deciding to send it.
+  // Ask the server where this receipt goes. This is a READ - one RPC and a
+  // Windows enumeration - and it prints nothing. It runs on open so the operator
+  // can see the destination before deciding to send.
+  //
+  // The SOURCE is what makes this per-route rather than one-size-fits-all: a
+  // Takeaway receipt follows the Takeaway route when the branch has configured
+  // one, and the `any` default otherwise. That decision belongs to
+  // `resolve_print_route`, not to this modal.
+  const branchId = pos.branch.id;
+  const source = receiptOrderSource(data);
   useEffect(() => {
     if (!native) return;
+    if (!source) {
+      setResolution({ kind: "blocked", block: { reason: "unknown_source" } });
+      return;
+    }
+    if (!branchId) {
+      setResolution({ kind: "blocked", block: { reason: "no_route" } });
+      return;
+    }
     let cancelled = false;
     void (async () => {
-      const [installed, configured] = await Promise.all([
+      const [installed, route] = await Promise.all([
         listPrinters(),
-        loadServerPrinters({ tenantId: pos.tenantId, branchId: pos.branch.id }).catch(() => []),
+        resolvePrintRoute({ branchId, purpose: "receipt", orderSource: source }).catch(() => null),
       ]);
       if (cancelled) return;
-      setResolution(
-        resolveCashierTarget({
-          printers: configured,
-          installed: installed.ok ? installed.value : [],
-          branchId: pos.branch.id,
-        }),
-      );
+      if (!route) {
+        setResolution({ kind: "blocked", block: { reason: "no_route" } });
+        return;
+      }
+      setResolution(resolveReceiptTarget({ route, installed: installed.ok ? installed.value : [] }));
     })();
     return () => {
       cancelled = true;
     };
-  }, [native, pos.tenantId, pos.branch.id]);
+  }, [native, branchId, source]);
 
-  // One eligible printer is preselected; more than one must be chosen, because
-  // nothing in the server model ranks them.
-  const target = chosen ?? (resolution?.kind === "single" ? resolution.target : null);
+  // Exactly one destination or none - the server resolved it, so there is
+  // nothing left for the operator to pick between.
+  const target = resolution?.kind === "single" ? resolution.target : null;
 
   const gate = receiptPrintGate({
     nativeAvailable: native,
@@ -229,28 +242,17 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
       onClose={onClose}
       footer={
         <div className="space-y-2">
-          {/* Where this would go, stated before anything is sent. */}
+          {/* Where this would go, and WHY - stated before anything is sent, and
+              naming the Breadee alias as well as the Windows queue, because two
+              branches call different devices "Kitchen". */}
           {native && target && !confirming && !outcome && (
             <p className="text-[11px] text-sub">
-              Print to <strong className="text-ink">{target.windowsName}</strong> · {target.paperWidth} ·{" "}
-              {target.copies} cop{target.copies === 1 ? "y" : "ies"}
+              Print to <strong className="text-ink">{target.printerName}</strong> ({target.windowsName}) ·{" "}
+              {paperWidthLabel(target.paperWidth)} · {target.copies} cop{target.copies === 1 ? "y" : "ies"}
+              <span className="block">
+                Routed by the {target.usedDefault ? "default" : `${data.orderType.toLowerCase()}`} receipt route.
+              </span>
             </p>
-          )}
-
-          {native && resolution?.kind === "choice" && !target && (
-            <div className="space-y-1">
-              <p className="text-[11px] font-semibold text-ink">Choose a printer</p>
-              {resolution.targets.map((t) => (
-                <button
-                  key={t.printer.id}
-                  type="button"
-                  onClick={() => setChosen(t)}
-                  className="min-h-[44px] w-full rounded-lg border border-line px-3 text-left text-[11px] font-semibold text-ink hover:bg-slate-50"
-                >
-                  {t.printer.name} · {t.windowsName} · {t.paperWidth}
-                </button>
-              ))}
-            </div>
           )}
 
           {native && resolution?.kind === "blocked" && (
@@ -266,7 +268,8 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
               </p>
               <p className="mt-1 text-[11px] text-brand-dark">
                 Order #{data.orderNumber} · {target.copies} cop{target.copies === 1 ? "y" : "ies"} at{" "}
-                {target.paperWidth} to <strong>{target.windowsName}</strong>.
+                {paperWidthLabel(target.paperWidth)} to <strong>{target.printerName}</strong> (
+                {target.windowsName}).
               </p>
               <div className="mt-2 flex justify-end gap-2">
                 <Button variant="ghost" onClick={() => setConfirming(false)}>
