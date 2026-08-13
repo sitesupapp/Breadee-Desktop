@@ -125,7 +125,7 @@ export function Dashboard() {
           {canPos && <Link to="/pos" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🧾 POS</Link>}
           <Link to="/profile" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">👤 Profile</Link>
           <Link to="/settings/sync" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">↻ Sync Center</Link>
-          <Link to="/settings/printers" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🖨 Printers</Link>
+          <Link to="/settings/printing/setup" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🖨 Printers</Link>
           <Link to="/settings/receipt" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🧾 Receipt design</Link>
         </div>
       </Card>

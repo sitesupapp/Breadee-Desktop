@@ -11,6 +11,11 @@ export const FEATURES = {
   POS_DELIVERY: "pos.delivery",
   POS_SHIFTS: "pos.shifts",
   POS_PRINTING: "pos.printing",
+  // Kitchen operations. Kitchen TICKET routing is gated on this, while receipt
+  // routing is gated on `pos` - the two purposes are authorised separately by
+  // the server, and a POS-only tenant legitimately has receipt routing without
+  // ever seeing a kitchen ticket route.
+  KITCHEN_OPS: "kitchen_ops",
   ACCOUNTING: "accounting",
   ACCOUNTING_EXPENSES: "accounting.expenses",
   ACCOUNTING_REPORTS: "accounting.reports",
