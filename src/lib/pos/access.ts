@@ -308,6 +308,37 @@ export function canPrintReceipts(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.PRINT_RECEIPTS), "You do not have permission to print receipts.");
 }
 
+/**
+ * Printing a kitchen ticket (POS v1).
+ *
+ * DELIBERATELY NOT `pos.print_receipts`. The registry documents that key as
+ * "Print or reprint receipts", and a kitchen ticket is not a receipt: it carries
+ * no money, goes to a different reader and exists because an order was sent, not
+ * because one was paid. Gating tickets on the receipt key would mean a cashier
+ * who may take orders but not handle receipts sends food to a kitchen that never
+ * hears about it - a till that looks like it is working and is not.
+ *
+ * So the rule follows the ACTION that produces the ticket: POS access, the
+ * `pos.printing` sub-feature (this is still physical paper the plan has to
+ * include), and `pos.create_orders` - if you may send the order, you may send
+ * its ticket.
+ *
+ * `kitchen.manage_print_routing` is not consulted either. That permission is
+ * about CONFIGURING where tickets go, which is a manager's decision made once;
+ * printing to the configuration that already exists is a cashier's, made every
+ * order. `printRouting.ts` keeps the management gate for the screen that edits
+ * routes.
+ */
+export function canPrintKitchenTickets(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_PRINTING)) {
+    return { allowed: false, reason: "Printing is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.CREATE_ORDERS), "You do not have permission to send orders to the kitchen.");
+}
+
 /** Reading the customer book. */
 export function canViewCustomers(ctx: PosAccessContext): boolean {
   return perm(ctx, POS_PERMISSIONS.CUSTOMERS_VIEW);
