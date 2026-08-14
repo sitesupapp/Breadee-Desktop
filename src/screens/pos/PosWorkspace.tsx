@@ -22,6 +22,7 @@ import { LineNoteDialog } from "@/components/pos/LineNoteDialog";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components/pos/ShiftDialog";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
+import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
@@ -36,6 +37,10 @@ import { getShiftExpected } from "@/lib/pos/shifts";
 import { classifyError } from "@/lib/pos/errors";
 import type { ReceiptData } from "@/lib/receipt";
 import { useReceipt, shouldShowReceipt } from "@/state/receipt";
+import { useKitchenTicket } from "@/state/kitchenTicket";
+import { buildKitchenTicket, type KitchenSourceLine } from "@/lib/pos/kitchenPrinter";
+import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun";
+import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
 import { canViewDelivery, canViewTables } from "@/lib/pos/access";
@@ -46,7 +51,7 @@ import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
-import type { MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, SubmitOrderResult } from "@/types/pos";
+import type { CartLine, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, SubmitOrderResult } from "@/types/pos";
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
 
@@ -57,8 +62,12 @@ export function PosWorkspace() {
         <ErrorBoundary label="POS">
           <PosWorkspaceInner />
         </ErrorBoundary>
-        {/* Outside the boundary and the screen's loading states on purpose. */}
+        {/* Outside the boundary and the screen's loading states on purpose.
+            Both documents are presented at the moment a server call returns,
+            while the workspace is busy refreshing what that call changed - the
+            exact condition that lost Level 2D's receipt. */}
         <ReceiptLayer />
+        <KitchenTicketLayer />
         <ShortcutHelp />
       </ToastProvider>
     </KeyboardProvider>
@@ -187,6 +196,95 @@ function PosWorkspaceInner() {
   const [expected, setExpected] = useState<ShiftExpected | null>(null);
   // Receipt presentation is store-owned and atomic - see `state/receipt.ts`.
   const receiptStore = useReceipt();
+  // Same arrangement for the kitchen ticket, and for the same reason.
+  const kitchenStore = useKitchenTicket();
+
+  /**
+   * THE kitchen-ticket call site. All three routes go through it.
+   *
+   * One implementation rather than three, for the reason every shared POS
+   * decision in this app is shared: three copies would agree today and diverge
+   * the first time one of them learned something - and the thing they would
+   * diverge about is whether a kitchen is told what to cook.
+   *
+   * SEPARATE FROM THE SUBMISSION, ON PURPOSE. It runs only after the server has
+   * accepted, and it cannot fail its caller: `autoPrintKitchenTicket` has no
+   * failure channel at all - every outcome, a native throw included, comes back
+   * as a status to display. The lines are the ones that were SUBMITTED, passed
+   * in by the caller from a snapshot, never re-read from a bill: on a dine-in
+   * table a re-read would put round 1 on round 2's ticket.
+   *
+   * Declared HERE, above the dine-in and delivery hooks, because both take it as
+   * an argument. Order of declaration is load-bearing in a component.
+   */
+  const printKitchenFor = useCallback(
+    async (input: {
+      source: ResolverOrderSource;
+      orderId: string;
+      orderNumber: string;
+      batchNo?: number | null;
+      tableName?: string | null;
+      customerName?: string | null;
+      orderNote?: string | null;
+      lines: KitchenSourceLine[];
+    }) => {
+      const ticket = buildKitchenTicket({
+        businessName: pos.tenantName,
+        branchName: pos.branch.name,
+        staffName: pos.userName,
+        orderNumber: input.orderNumber,
+        source: input.source,
+        at: new Date().toLocaleString(),
+        lines: input.lines,
+        tableName: input.tableName,
+        batchNo: input.batchNo,
+        customerName: input.customerName,
+        orderNote: input.orderNote,
+      });
+      if (ticket.lines.length === 0) return;
+      const status = await autoPrintKitchenTicket({
+        branchId: pos.branch.id,
+        tenantId: tenantId ?? "",
+        access: pos.access,
+        source: input.source,
+        orderId: input.orderId,
+        batchNo: input.batchNo ?? 1,
+        ticket,
+      });
+      kitchenStore.present(ticket, status);
+    },
+    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, tenantId],
+  );
+
+  /**
+   * THE receipt presentation call site, for all three routes.
+   *
+   * Presentation first, automatic paper second and detached. The preview is on
+   * screen with its Print button live whatever the printer does, so a branch
+   * with no receipt route, no printer, or a jammed one still has a working till
+   * and a cashier who can read the total off the screen.
+   */
+  const presentReceipt = useCallback(
+    (receipt: ReceiptData) => {
+      receiptStore.present(receipt);
+      void autoPrintReceipt({
+        branchId: pos.branch.id,
+        tenantId: tenantId ?? "",
+        access: pos.access,
+        receipt,
+        paidAt: receipt.at,
+      }).then((printed) => {
+        if (printed.kind === "failed") {
+          toast.push({
+            tone: "warning",
+            message: "The payment succeeded. Only the receipt failed to print.",
+            detail: printed.message,
+          });
+        }
+      });
+    },
+    [pos.access, pos.branch.id, receiptStore, tenantId, toast],
+  );
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -222,7 +320,11 @@ function PosWorkspaceInner() {
     rate,
     // The receipt goes to the same store-owned layer takeaway uses, which is
     // mounted outside this component's loading states on purpose.
-    onPresentReceipt: (receipt) => receiptStore.present(receipt),
+    onPresentReceipt: presentReceipt,
+    // The kitchen ticket goes through the one shared call site, so a dine-in
+    // round and a delivery order get the same document, the same routing and
+    // the same duplicate protection as a takeaway order.
+    onKitchenBatch: printKitchenFor,
     // Authoritative cash-box re-read after a table payment. Same call takeaway
     // makes; the desktop never adds the cash to the drawer itself.
     refreshCashBox: () => shiftStore.refreshCashBox(),
@@ -252,7 +354,11 @@ function PosWorkspaceInner() {
     takePayments: pos.gates.takePayments,
     applyDiscounts: pos.gates.applyDiscounts,
     rate,
-    onPresentReceipt: (receipt) => receiptStore.present(receipt),
+    onPresentReceipt: presentReceipt,
+    // The kitchen ticket goes through the one shared call site, so a dine-in
+    // round and a delivery order get the same document, the same routing and
+    // the same duplicate protection as a takeaway order.
+    onKitchenBatch: printKitchenFor,
     refreshCashBox: () => shiftStore.refreshCashBox(),
   });
   /** Delivery Add Items borrows the shell's menu, exactly as Dine-in does. */
@@ -367,10 +473,30 @@ function PosWorkspaceInner() {
     return saved;
   }, [pos.branch.id, shiftId, toast]);
 
+  /** Takeaway's shape of the shared kitchen-ticket call. */
+  const ticketForOrder = useCallback(
+    (saved: SubmitOrderResult, lines: CartLine[]) =>
+      printKitchenFor({
+        source: "takeaway",
+        orderId: saved.order_id,
+        orderNumber: saved.order_number,
+        batchNo: saved.batch_no ?? 1,
+        lines: lines.map((l) => ({
+          name: l.name,
+          qty: l.quantity,
+          modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
+          note: l.kitchen_note,
+        })),
+      }),
+    [printKitchenFor],
+  );
+
   const sendToKitchen = useCallback(async () => {
     if (inFlight.current || cart.lines.length === 0) return;
     inFlight.current = true;
     setBusy(true);
+    // Snapshotted BEFORE the await, so a reset cannot empty the ticket.
+    const submitted = useCart.getState().lines;
     try {
       const saved = await ensureOrder();
       if (saved) {
@@ -379,6 +505,7 @@ function PosWorkspaceInner() {
           message: saved.idempotent ? `Order ${saved.order_number} already sent` : `Order ${saved.order_number} sent to kitchen`,
           detail: saved.idempotent ? "The same submission was replayed - no second order was created." : null,
         });
+        await ticketForOrder(saved, submitted);
         newOrder();
       }
     } catch (e) {
@@ -388,7 +515,7 @@ function PosWorkspaceInner() {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [cart.lines.length, ensureOrder, newOrder, toast]);
+  }, [cart.lines.length, ensureOrder, newOrder, ticketForOrder, toast]);
 
   const openPayment = useCallback(() => {
     if (cart.lines.length === 0) {
@@ -443,13 +570,19 @@ function PosWorkspaceInner() {
         });
 
         for (const step of completion.steps) {
-          if (step === "present-receipt") receiptStore.present(completion.receipt);
+          if (step === "present-receipt") presentReceipt(completion.receipt);
           else if (step === "close-payment-dialog") setPayOpen(false);
           else if (step === "reset-cart") newOrder();
         }
 
         void shiftStore.refreshCashBox();
         toast.push({ tone: "success", message: `Paid - order ${result.order_number}` });
+
+        // Paying without having pressed Send is a normal takeaway flow, and the
+        // kitchen still has to be told. The latch makes this safe to call
+        // unconditionally: if Send already produced this order's ticket, the key
+        // is spent and nothing is printed a second time.
+        void ticketForOrder(saved, lines);
       } catch (e) {
         const c = classifyError(e);
         // The saved order is deliberately KEPT so a retry pays this same order.
@@ -459,7 +592,20 @@ function PosWorkspaceInner() {
         setBusy(false);
       }
     },
-    [currency, ensureOrder, newOrder, pos.branch.name, pos.tenantName, pos.userName, rate, receiptStore, shiftId, shiftStore, toast],
+    [
+      currency,
+      ensureOrder,
+      newOrder,
+      pos.branch.name,
+      pos.tenantName,
+      pos.userName,
+      presentReceipt,
+      rate,
+      shiftId,
+      shiftStore,
+      ticketForOrder,
+      toast,
+    ],
   );
 
   const doOpenShift = useCallback(

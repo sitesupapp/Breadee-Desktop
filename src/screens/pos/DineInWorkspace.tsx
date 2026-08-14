@@ -51,6 +51,8 @@ import {
   type RoundMenu,
 } from "@/lib/pos/tableRounds";
 import { submitOrder } from "@/lib/pos/orders";
+import type { KitchenSourceLine } from "@/lib/pos/kitchenPrinter";
+import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import {
   buildTablePaymentPayload,
@@ -125,6 +127,22 @@ export function useDineInWorkspace(input: {
    * loading states on purpose (see `state/receipt.ts`).
    */
   onPresentReceipt: (receipt: ReceiptData) => void;
+  /**
+   * Kitchen ticket for ONE submitted batch, routed through the caller for the
+   * same reason the receipt is: there is one implementation of "print what was
+   * just sent", shared by all three POS routes, and it lives above the
+   * workspace's loading states.
+   */
+  onKitchenBatch: (input: {
+    source: ResolverOrderSource;
+    orderId: string;
+    orderNumber: string;
+    batchNo?: number | null;
+    tableName?: string | null;
+    customerName?: string | null;
+    orderNote?: string | null;
+    lines: KitchenSourceLine[];
+  }) => Promise<void>;
   /** Authoritative cash-box re-read. The desktop never increments it locally. */
   refreshCashBox: () => Promise<void>;
 }): DineInWorkspace {
@@ -462,6 +480,11 @@ export function useDineInWorkspace(input: {
     try {
       const before: TableBill | null = useTables.getState().bill;
       const opId = useCart.getState().ensureOpId();
+      // The round as it is about to be SENT, snapshotted before the buffer is
+      // cleared. This - and not a re-read of the bill - is what the kitchen
+      // ticket is built from, because the bill contains every earlier round and
+      // reprinting those would have the kitchen cook them again.
+      const submitted = useCart.getState().lines;
       // The sequence itself lives in `performRound` so it is testable; this is
       // the same build -> submit -> clear -> refresh order the tests pin.
       const outcome = await performRound({
@@ -486,6 +509,25 @@ export function useDineInWorkspace(input: {
       setBillChange(describeBillChange(before, useTables.getState().bill, outcome.result.idempotent ? 0 : 1));
       const { message, detail } = roundOutcomeMessage(outcome.result);
       toast.push({ tone: outcome.result.idempotent ? "info" : "success", message, detail });
+
+      // ONLY THIS ROUND. `batch_no` is the server's own number for the batch it
+      // just appended, so round 2's ticket is labelled round 2 and contains
+      // round 2. A replayed submission (`idempotent`) carries the batch it
+      // originally created, and the print latch keys on it - so a retry of a
+      // round the server already has produces no second ticket.
+      await input.onKitchenBatch({
+        source: "dine_in",
+        orderId: outcome.result.order_id,
+        orderNumber: outcome.result.order_number,
+        batchNo: outcome.result.batch_no ?? null,
+        tableName: selected.name,
+        lines: submitted.map((l) => ({
+          name: l.name,
+          qty: l.quantity,
+          modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
+          note: l.kitchen_note,
+        })),
+      });
     } catch (e) {
       // The round survives, unchanged, with the same operation id.
       const c = classifyError(e);

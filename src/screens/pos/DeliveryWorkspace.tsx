@@ -123,6 +123,8 @@ import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/p
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
 import type { DiscountType } from "@/lib/pos/discounts";
 import { submitOrder } from "@/lib/pos/orders";
+import type { KitchenSourceLine } from "@/lib/pos/kitchenPrinter";
+import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { cartSubtotal } from "@/lib/pos/orders";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { DeliveryOrderSummary } from "@/components/pos/DeliveryOrderSummary";
@@ -219,6 +221,21 @@ export function useDeliveryWorkspace(input: {
    * component's loading states on purpose.
    */
   onPresentReceipt: (receipt: ReceiptData) => void;
+  /**
+   * Kitchen ticket for the batch that was just submitted, routed through the
+   * caller for the same reason the receipt is - one implementation of "print
+   * what was just sent", shared by all three POS routes.
+   */
+  onKitchenBatch: (input: {
+    source: ResolverOrderSource;
+    orderId: string;
+    orderNumber: string;
+    batchNo?: number | null;
+    tableName?: string | null;
+    customerName?: string | null;
+    orderNote?: string | null;
+    lines: KitchenSourceLine[];
+  }) => Promise<void>;
   /** Authoritative cash-box re-read. The desktop never increments it locally. */
   refreshCashBox: () => Promise<void>;
 }): DeliveryWorkspace {
@@ -707,6 +724,31 @@ export function useDeliveryWorkspace(input: {
       };
       setOpenOrders(rows);
       setSubmitted({ order: authoritative, recovered: outcome.recovered });
+
+      // The kitchen ticket, from the SNAPSHOT taken before the first await -
+      // the same lines that were actually submitted, and the same discipline
+      // that keeps the payload attached to the identity it was sent for. The
+      // customer's NAME goes on the ticket and their address does not; a cook
+      // does not deliver, and a ticket sits on an open pass.
+      //
+      // A recovered send prints too, and that is deliberate: the order exists
+      // and this terminal has never produced a ticket for it. The latch keys on
+      // the order id, so it still cannot produce a second one.
+      await input.onKitchenBatch({
+        source: "delivery",
+        orderId: outcome.result.order_id,
+        orderNumber: authoritative.order_number ?? outcome.result.order_number,
+        batchNo: outcome.result.batch_no ?? 1,
+        customerName: state.selected?.name ?? null,
+        orderNote: snapshot.note,
+        lines: snapshot.lines.map((l) => ({
+          name: l.name,
+          qty: l.quantity,
+          modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
+          note: l.kitchen_note,
+        })),
+      });
+
       // Only this delivery basket. Takeaway and dine-in state is untouched.
       useCart.getState().reset();
       setOrderNote("");
@@ -726,7 +768,7 @@ export function useDeliveryWorkspace(input: {
     } finally {
       setSending(false);
     }
-  }, [sendGate.allowed, input.shiftId, branchId, orderNote, pos.branch.id, pos.tenantId, toast]);
+  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, pos.branch.id, pos.tenantId, toast]);
 
   const requestSend = useCallback(() => void send(), [send]);
 
