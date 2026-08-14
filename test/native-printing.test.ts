@@ -82,11 +82,16 @@ const configured = (over: Partial<ServerPrinter> = {}): ServerPrinter => ({
 
 // --- the native client -------------------------------------------------------
 
-// RETARGETED BY LEVEL 3E-B: two -> three, for `print_receipt`. The number is a
-// guard against a command arriving unnoticed, so it moves by exactly the one
-// that was reviewed - and the whole list is still asserted, not just the count.
-test("the client knows exactly three commands", () => {
-  assert.deepEqual([...NATIVE_COMMANDS], ["list_printers", "print_test_page", "print_receipt"]);
+// RETARGETED BY LEVEL 3E-B (two -> three, `print_receipt`) and by POS v1
+// (three -> four, `print_kitchen_ticket`). The number is a guard against a
+// command arriving unnoticed, so it moves by exactly the one that was reviewed -
+// and the whole list is still asserted, not just the count. The Rust side pins
+// the identical list in `EXPOSED_COMMANDS`, so the two ends cannot drift.
+test("the client knows exactly four commands", () => {
+  assert.deepEqual(
+    [...NATIVE_COMMANDS],
+    ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"],
+  );
 });
 
 test("the request carries a name, a width, a count and captions - nothing else", () => {
@@ -402,21 +407,46 @@ test("no network or USB printing path is exposed by the UI", () => {
   }
 });
 
-test("the screen states what this phase does not yet do", () => {
-  assert.match(screen, /are not connected yet/);
-  assert.match(screen, /Receipts still print manually/);
+test("the screen states what is genuinely still absent, and nothing more", () => {
+  // RETARGETED. This pinned the exact sentence "…and automatic printing are not
+  // connected yet. Receipts still print manually." P3-B connected routing and
+  // POS v1 connected automatic printing, so that sentence named two shipped
+  // capabilities as missing - which is the more harmful direction of the error:
+  // an operator who reads that printing is unavailable never looks for the
+  // setting that would have worked.
+  //
+  // The enduring property is that the screen is HONEST in both directions. It
+  // must still say network printers are absent, and must no longer say routing
+  // or automatic printing are.
+  assert.match(screen, /Network printers[\s\S]*?are not connected yet/);
+  assert.equal(/automatic printing are not connected/i.test(screen), false);
+  assert.equal(/Receipts still print manually/.test(screen), false);
 });
 
-// --- POS surfaces are untouched ---------------------------------------------
+// --- POS surfaces --------------------------------------------------------
 
-test("the dashboard still says printing is unavailable", () => {
+test("the dashboard tile promises exactly what the desktop has", () => {
+  // RETARGETED for the third time - and the repetition is the point. This tile
+  // deferred Dine-in months after it landed, called Delivery customers-only
+  // after 3B and 3C, and denied printing through 3E-A, P2, P3-B and 3E-B. So the
+  // assertion no longer pins a sentence: it pins the rule the sentence keeps
+  // breaking, in BOTH directions.
   const modules = stripComments(readSrc("lib", "modules.ts"));
-  assert.ok(
-    modules.includes(
-      "Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment and on-screen receipts. Printing is not available yet.",
-    ),
-    "3E-A is a foundation, not POS printing - the tile must not claim otherwise",
-  );
+  const desc = modules.slice(modules.indexOf('key: "pos"'), modules.indexOf('key: "inventory"'));
+
+  // It must not deny a capability the desktop ships.
+  assert.equal(/Printing is not available yet/.test(desc), false);
+  assert.equal(/coming soon|not available|arrives in|deferred/i.test(desc), false);
+
+  // It must name what is actually there, printing included.
+  for (const shipped of ["Takeaway", "Dine-in", "Delivery", "shifts", "receipts", "kitchen tickets"]) {
+    assert.ok(desc.includes(shipped), `the tile should name ${shipped}`);
+  }
+
+  // And it must not promise what the desktop does not have.
+  for (const absent of ["reports", "loyalty", "driver", "cash drawer", "network printer"]) {
+    assert.equal(desc.toLowerCase().includes(absent), false, `the tile must not promise ${absent}`);
+  }
 });
 
 // RETARGETED BY LEVEL 3E-B. This asserted the preview's Print control was
@@ -446,12 +476,15 @@ test("no POS workspace reaches native printing", () => {
 
 // --- the native boundary -----------------------------------------------------
 
-// RETARGETED BY LEVEL 3E-B: two -> three. Still an exact list, so a fourth
-// command cannot arrive without this line changing in review.
-test("the invoke handler exposes exactly the three printing commands", () => {
+// RETARGETED BY LEVEL 3E-B (two -> three) and by POS v1 (three -> four). Still
+// an exact list, which is the whole point: a fifth command cannot arrive without
+// this line changing in review. `print_kitchen_ticket` is the POS v1 addition
+// and is the first command reachable from an automatic path rather than only
+// from a button - see printing/mod.rs for why that does not widen the surface.
+test("the invoke handler exposes exactly the four printing commands", () => {
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
-  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt"]);
+  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"]);
 });
 
 test("the capability grants no shell, filesystem, network or process access", () => {

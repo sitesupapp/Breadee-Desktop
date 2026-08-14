@@ -19,7 +19,15 @@
 // whatever cashier row it found first, and nobody can see why. There is one
 // authority now, and it is the server's.
 //
-// WHAT SURVIVED UNCHANGED:
+// REFACTORED FOR POS v1. The route-to-destination step - exact Windows matching,
+// the width the renderer can lay out, the route's copy count, and a named reason
+// for every refusal - now lives in `printTarget.ts`, because the second document
+// this app prints needs the identical answer from the identical inputs. Two
+// copies of that logic would have drifted the first time either learned about a
+// new connection type. What stays here is everything RECEIPT-specific: which
+// source a receipt is routed for, and the permission gate paper is subject to.
+//
+// WHAT SURVIVED UNCHANGED, and is now guaranteed for both documents at once:
 //
 //   * NOTHING IS GUESSED. No Windows default, no first cashier printer, no first
 //     configured printer. An unroutable receipt is refused with a sentence that
@@ -29,62 +37,31 @@
 //   * WIDTH DECIDES LAYOUT. A width the renderer cannot lay out blocks the print
 //     rather than being approximated - clipping a total off the right-hand edge
 //     is not survivable on paper the customer keeps.
+//   * COPIES COME FROM THE ROUTE, not the printer row.
 //   * `desktop_connector` stays unsupported rather than guessed at.
-//
-// WHAT CHANGED, AND WHY:
-//
-//   * WIDTH now comes from P2's `effectivePaperWidth`, which combines
-//     `paper_width` and `custom_paper_width` into one printable figure. The old
-//     code accepted `58mm`/`80mm` only and would have refused the branch's
-//     actual XP-80 (`custom` + 72), which is the printer receipts are routed to.
-//     There is deliberately no second width parser in this file.
-//   * COPIES come from the ROUTE, not the printer row. The route is where an
-//     operator says "two copies of a delivery receipt"; the printer row's
-//     `default_copy_count` is a device default the route overrides.
-//   * THE OPERATOR NO LONGER PICKS. There is nothing left to pick between - the
-//     resolver returns one destination or none.
 
-import { MAX_COPIES, MIN_COPIES, type InstalledPrinter, type PaperWidth } from "@/lib/nativePrinting";
-import { effectivePaperWidth } from "@/lib/pos/printerRegistry";
-import type { ResolvedRoute } from "@/lib/pos/printRouteResolver";
 import type { ReceiptOrderSource } from "@/lib/receipt";
+import type { ResolvedRoute } from "@/lib/pos/printRouteResolver";
+import {
+  describeBlock,
+  resolveRouteTarget,
+  type PrintBlock,
+  type PrintResolution,
+  type PrintTarget,
+} from "@/lib/pos/printTarget";
+import type { InstalledPrinter } from "@/lib/nativePrinting";
 import type { Gate } from "@/components/ui";
 
-/** The routed destination, once this terminal has confirmed it can reach it. */
-export type CashierTarget = {
-  /** The route's printer, by its Breadee name. */
-  printerName: string;
-  /** The exact Windows printer name, matched from a live enumeration. */
-  windowsName: string;
-  paperWidth: PaperWidth;
-  copies: number;
-  /** True when the `any` default matched rather than a source-specific route. */
-  usedDefault: boolean;
-};
-
-/** Why no receipt can be printed, when that is the case. */
-export type CashierBlock =
-  /** `resolve_print_route` matched nothing for this branch and source. */
-  | { reason: "no_route" }
-  /** Routed, but no Windows printer has been recorded for that printer. */
-  | { reason: "unbound"; printer: string }
-  /** Routed to a connection this app cannot drive. */
-  | { reason: "unsupported_connection"; printer: string; connection: string }
-  /** Routed, but the Windows queue is not installed on THIS terminal. */
-  | { reason: "not_installed"; printer: string; windowsName: string }
-  /** Routed, but the stored width is not one the renderer can lay out. */
-  | { reason: "unsupported_paper"; printer: string; width: string }
-  /** The receipt does not say which kind of order it is, so it cannot be routed. */
-  | { reason: "unknown_source" };
-
-export type CashierResolution =
-  | { kind: "single"; target: CashierTarget }
-  | { kind: "blocked"; block: CashierBlock };
-
-function boundedCopies(value: number | null): number {
-  if (value === null || !Number.isFinite(value)) return MIN_COPIES;
-  return Math.min(Math.max(Math.trunc(value), MIN_COPIES), MAX_COPIES);
-}
+/**
+ * The receipt-flavoured names for the shared shapes.
+ *
+ * Aliases rather than separate types: a receipt destination and a ticket
+ * destination are the same fact about the same terminal, and giving them two
+ * structurally different types would invite two ways of reading it.
+ */
+export type CashierTarget = PrintTarget;
+export type CashierBlock = PrintBlock;
+export type CashierResolution = PrintResolution;
 
 /**
  * The order source a receipt should be routed for.
@@ -107,87 +84,17 @@ export function receiptOrderSource(receipt: {
   return null;
 }
 
-/**
- * Turn the server's routing answer into a destination, or into a reason.
- *
- * Every rejection is reported with a reason rather than filtered into silence:
- * "no receipt route is configured" and "the routed printer is not installed on
- * this till" are different problems with different fixes, and an operator told
- * only "cannot print" has to guess which.
- */
+/** Turn the server's routing answer into a receipt destination, or a reason. */
 export function resolveReceiptTarget(input: {
   route: ResolvedRoute;
   installed: InstalledPrinter[];
 }): CashierResolution {
-  const { route } = input;
-  if (!route.resolved) return { kind: "blocked", block: { reason: "no_route" } };
-
-  const printer = route.printer_name ?? "The routed printer";
-
-  if (route.connection_type !== null && route.connection_type !== "system") {
-    return {
-      kind: "blocked",
-      block: { reason: "unsupported_connection", printer, connection: route.connection_type },
-    };
-  }
-  if (!route.system_printer_name) {
-    return { kind: "blocked", block: { reason: "unbound", printer } };
-  }
-
-  // Exact match only, against a live enumeration.
-  const installedNames = new Set(input.installed.map((p) => p.name));
-  if (!installedNames.has(route.system_printer_name)) {
-    return {
-      kind: "blocked",
-      block: { reason: "not_installed", printer, windowsName: route.system_printer_name },
-    };
-  }
-
-  const paperWidth = effectivePaperWidth({
-    paper_width: route.paper_width,
-    custom_paper_width: route.custom_paper_width,
-  });
-  if (!paperWidth) {
-    return {
-      kind: "blocked",
-      block: {
-        reason: "unsupported_paper",
-        printer,
-        width: route.paper_width === "custom"
-          ? `custom (${route.custom_paper_width ?? "no"} mm)`
-          : (route.paper_width ?? "not set"),
-      },
-    };
-  }
-
-  return {
-    kind: "single",
-    target: {
-      printerName: printer,
-      windowsName: route.system_printer_name,
-      paperWidth,
-      copies: boundedCopies(route.copies),
-      usedDefault: route.used_default === true || route.matched_order_source === "any",
-    },
-  };
+  return resolveRouteTarget(input);
 }
 
-/** One sentence per block, phrased so the operator knows what to do next. */
+/** One sentence per block, in receipt wording. */
 export function blockMessage(block: CashierBlock): string {
-  switch (block.reason) {
-    case "no_route":
-      return "No receipt route is configured for this branch. Set one in Settings → Printing & Routing → Routing.";
-    case "unbound":
-      return `${block.printer} is routed for receipts, but no Windows printer has been recorded for it. Finish it in Settings → Printing & Routing → Quick Setup.`;
-    case "unsupported_connection":
-      return `${block.printer} is set to ${block.connection}. Receipt printing drives Windows printers; network printing is not available yet.`;
-    case "not_installed":
-      return `${block.printer} is routed for receipts, but ${block.windowsName} is not installed on this terminal.`;
-    case "unsupported_paper":
-      return `${block.printer} is set to ${block.width}. Receipt printing supports 58 mm, 80 mm and custom printable widths.`;
-    case "unknown_source":
-      return "This receipt does not say which kind of order it is, so it cannot be routed to a printer.";
-  }
+  return describeBlock(block, "receipt");
 }
 
 /**

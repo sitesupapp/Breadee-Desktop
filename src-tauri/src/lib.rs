@@ -29,20 +29,24 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
-        // THE APP'S FIRST IPC SURFACE (Level 3E-A).
+        // THE APP'S ONLY IPC SURFACE (Level 3E-A onwards).
         //
-        // Two commands, both in `printing`. Deliberately listed here in full
+        // Four commands, all in `printing`. Deliberately listed here in full
         // rather than behind a generated macro over a module, so that widening
         // the surface is a visible edit to this file and shows up in review as
-        // one. Neither command reads or writes an order, a payment, a shift or
-        // any server row - see `printing/mod.rs` for why the inputs are shaped
-        // the way they are.
+        // one. No command reads or writes an order, a payment, a shift or any
+        // server row - see `printing/mod.rs` for why the inputs are shaped the
+        // way they are.
         .invoke_handler(tauri::generate_handler![
             printing::list_printers,
             printing::print_test_page,
-            // Level 3E-B. Manual cashier receipts only - never called on
-            // payment, submission or a timer.
-            printing::print_receipt
+            // Level 3E-B. Cashier receipts.
+            printing::print_receipt,
+            // POS v1. Kitchen tickets. Reachable from the automatic path as
+            // well as from a button, which changes the duplicate risk and not
+            // the transaction-safety argument - the frontend bounds it to one
+            // attempt per successful submission with no retry.
+            printing::print_kitchen_ticket
         ])
         .run(tauri::generate_context!())
         .expect("error while running Breadee desktop application");

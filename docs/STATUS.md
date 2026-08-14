@@ -813,6 +813,88 @@ Node **892 / 892** green in batches (the usual per-run spawn crashes naming no a
 
 Physical receipt proof (authorised separately), automatic printing, kitchen tickets and kitchen production printing, advanced routing scopes, network and USB printing, the cash drawer, `print_jobs` persistence and printer diagnostic writes.
 
+## 1l. POS v1 — kitchen tickets and safe automatic printing (this change set)
+
+On `feature/desktop-pos-v1-finalization`, based on `desktop-staging` @ `447fec5` (3E-B, merged via PR #14 after its one authorised hardware receipt). This is the last release-blocking slice of Desktop POS v1: the kitchen finally gets told what to cook, and both documents can reach paper without a cashier pressing anything.
+
+### The parity position this closed
+
+An operational parity audit against the frozen POS contract found the desktop already complete on Shift, Takeaway, Dine-In, Delivery and Cross-POS — every row PASS — with exactly three MISSING rows, all in Printing: **kitchen ticket**, **safe auto-print**, and **ingredient-level item customization**. The first two are this change set. The third is **intentionally deferred**: the desktop already carries per-item kitchen notes, which reach both the receipt and the ticket, and the `customization_json` write contract could not be read without opening the web repository. Writing a shape the kitchen and costing sides might misread is a worse outcome than a cashier typing "no olives" into the note that already works.
+
+### A third document, not a third printing path
+
+`printing/kitchen.rs` is a **document**: it produces `Vec<PageLine>` for the GDI renderer 3E-A already proved, through the same `print_document` that validates, re-enumerates, resolves and drives the device. The Rust surface grows by exactly one command (`print_kitchen_ticket`, 3 → 4), added in its own visible edit to `lib.rs`, and both ends assert the identical list.
+
+**A kitchen ticket is not a receipt with the prices removed.** The two are read by different people under different pressure, so:
+
+- **No money anywhere, as a property of the TYPE.** `KitchenTicketDoc` has no price, line total, subtotal, discount, currency or payment field, at either end of the boundary. A money field added to one side without the other fails to compile, and a caller that sends one has it dropped rather than printed.
+- **Quantity is the loudest thing on the page** — drawn at the same weight the receipt gives the total, because "2x" misread as "1x" is the error that actually happens.
+- **Delivery carries the customer's NAME and never their address or phone.** A cook does not deliver, and a ticket sits on an open pass.
+- **The order note prints ABOVE the items** — a cook who has started the first dish has read it too late.
+
+### The routing was already there; this is its second consumer
+
+`resolve_print_route` was built for two purposes and P3-B wired only `receipt`. Nothing about routing changed here. What did change is that the route-to-destination step - exact Windows matching, a width the renderer can lay out, the ROUTE's copy count, a named reason for every refusal - moved out of `cashierPrinter.ts` into **`printTarget.ts`**, which both documents now share. Two copies would have agreed on the day they were written and diverged the first time either learned about a new connection type, and what they would have diverged about is which printers a terminal can reach.
+
+`cashierPrinter.ts` keeps every export it had and delegates, so the 3E-B contract is unchanged.
+
+### Only the new round
+
+On a dine-in table this is the whole feature. The ticket is built from the lines that were **submitted**, snapshotted before the buffer is cleared, and labelled with the server's own `batch_no` - never from `useTables.getState().bill`, which holds every earlier round. Printing that would have the kitchen cook rounds 1..n-1 again, with real food and a real customer waiting. A test asserts the bill is not reachable from the ticket call site.
+
+Takeaway and delivery snapshot the same way, before the first await, exactly as their payloads already do.
+
+### Safe auto-print, and what it does NOT promise
+
+`auto_print_customer` / `auto_print_kitchen` are read from `pos_receipt_settings` (branch row first, then the tenant-wide one). The desktop **never writes** that table - the setting is a manager's decision made once in the web admin for a whole branch.
+
+**The trigger is an EVENT, never a STATE.** Nothing asks "is this order paid?" - a question about state is true again tomorrow, after a restart, and every time a queue is refreshed. The trigger is "this UI transaction just returned successfully, once", keyed by facts the server returned (`kitchen:<order>:<batch>`, `receipt:<number>:<paidAt>`) and never by a clock or a random value, or the latch could not recognise the repeat it exists to stop.
+
+Not global exactly-once, and it does not claim to be: there is no server record of what has been printed (`print_jobs` is deliberately still unwritten), so a second terminal cannot know what this one produced. What IS promised:
+
+| | |
+|---|---|
+| One attempt per successful local transaction event | not per render, per mount or per re-read |
+| No automatic retry, ever | a failed or ambiguous print asks the operator to look at the printer |
+| Nothing on start-up, session recovery or historical reads | recovery restores what the SERVER knows; it never re-fires a past event |
+| Manual print and reprint always available | automation is laid on top of the manual path, never replacing it |
+
+The latch marks a key spent **before** the attempt, not after: the spooler may already hold the job, so treating a crash as "never printed" would invite the exact duplicate. An unreadable settings row fails to **both documents manual** - deliberately not the server's `true` default, because failing to a printing state produces paper nobody asked for on a terminal whose configuration is already in doubt.
+
+### Printing still cannot reach the transaction
+
+Every auto-print function runs after the RPC has returned. None takes an order to act on, calls an RPC, or touches the cart, shift or cash box - and none has a **failure channel**: every outcome, a native throw included, comes back as a status to display. A caller cannot accidentally propagate a print failure into its own post-transaction sequence, because there is nothing to propagate. The settings read cannot throw either.
+
+When a ticket fails, the operator is told in this order, always: **"The order was sent successfully. Only the kitchen ticket failed."** Anything vaguer invites a cashier to "fix" a good order by sending it again.
+
+The receipt preview stays a **manual** surface - it reads no setting and has one send call site behind a confirmation. Automation lives on the transaction-completion path, which is the only place "did this just succeed exactly once" is answerable; a modal that can be reopened, re-rendered and remounted is the wrong place to reason about duplicate paper.
+
+### One call site per document, for all three routes
+
+`PosWorkspace` owns `printKitchenFor` and `presentReceipt`; Dine-In and Delivery are handed both. Three copies would agree today and diverge later, and what they would diverge about is whether a kitchen is told about food. Asserted structurally: exactly one `autoPrintKitchenTicket(` and one `autoPrintReceipt(` in the tree, and neither name appears in the other two workspaces.
+
+### Two test-infrastructure defects found and fixed
+
+1. **`stripComments` was silently truncating source assertions.** It removed block comments first, so a line comment containing a slash-star - `PosWorkspace.tsx` line 3 says the rules live in `lib/pos/*` - opened a false block that ran to the next real close, deleting several hundred lines including the entire import block. "This file must not import `nativePrinting`" was passing against a string with no imports in it. Whole-line `//` comments are now removed first, anchored to the start of a line so a URL cannot open the match. Level 3A lost a whole render function to the same class of bug.
+2. **A slice bounded by a comment.** A new assertion anchored its range on `"Level 2D: settlement"` - which the stripper had already removed, so `indexOf` returned -1 and the slice silently widened to the rest of the file. Bounded by code now.
+
+### Retargeted assertions
+
+Four, each because this change set deliberately changed what they described:
+
+- the two exact IPC command lists, 3 → **4** (both ends still assert the whole list, not a count);
+- *"auto_print_customer is deliberately not honoured yet"* → **the preview is a manual surface**, which is the property that actually kept that file safe;
+- *"width is read through P2's helper"* → asserted against `printTarget.ts`, where the logic now lives, **plus** a new assertion that the receipt file has not grown its own copy back. Asserting it against the file that no longer holds it would have been asserting nothing;
+- the takeaway receipt call site, `receiptStore.present` → `presentReceipt`, plus the property that all three routes now pass the same function.
+
+### Gates
+
+Focused printing suites **232 / 232** green (receipt 45, routing + native + kitchen/auto-print 160, quick setup 27); typecheck clean. Rust is left to CI - see §2 and the note in §1k: every local `cargo check` died with `Access is denied` or `0xC0000005` inside third-party crates, on a different random crate each attempt, never in this code.
+
+### Still deferred
+
+Advanced routing scopes (station / section / category / item / preparation component), direct network and USB printing, LAN discovery, the cash drawer, `print_jobs` persistence and printer diagnostic writes, ingredient-level item customization, and historical reprint for takeaway and dine-in (delivery has it; the other two can reprint the receipt they just produced).
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -821,7 +903,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
-- **Native printing — foundation (3E-A, §1i), setup (P2), routing configuration (P3-B, §1j) and manual cashier receipts (3E-B, §1k).** The desktop enumerates Windows printers, prints a diagnostic page, creates and edits the branch's printer registry and its basic print routes, simulates routing in the Test Center, and can print or reprint a **cashier receipt** to the routed printer when an operator asks it to. Still absent, deliberately: **kitchen tickets**, **automatic printing** (`auto_print_customer` is not read anywhere), **advanced routing** (station/section/category/item/preparation component), **network and USB printers**, the **cash drawer**, `print_jobs` persistence and printer diagnostic writes.
+- **Native printing — COMPLETE for POS v1.** Foundation (3E-A, §1i), setup (P2), routing configuration (P3-B, §1j), manual cashier receipts (3E-B, §1k) and now **kitchen tickets + safe automatic printing** (POS v1, §1l). The desktop enumerates Windows printers, prints a diagnostic page, maintains the branch's printer registry and basic print routes, simulates routing in the Test Center, prints or reprints a **cashier receipt**, prints a **kitchen ticket** for the batch that was just submitted, and honours `auto_print_customer` / `auto_print_kitchen` with one attempt per successful transaction and no retry. Still absent, deliberately: **advanced routing** (station/section/category/item/preparation component), **network and USB printers**, the **cash drawer**, `print_jobs` persistence and printer diagnostic writes.
 - **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.

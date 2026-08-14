@@ -19,7 +19,12 @@
 // worse than none: it would make a broken build look like a working one.
 
 /** Commands the Rust side exposes. Must match `EXPOSED_COMMANDS` in printing/mod.rs. */
-export const NATIVE_COMMANDS = ["list_printers", "print_test_page", "print_receipt"] as const;
+export const NATIVE_COMMANDS = [
+  "list_printers",
+  "print_test_page",
+  "print_receipt",
+  "print_kitchen_ticket",
+] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
 /** The two preset thermal rolls. Mirrors the Rust `PaperWidth` presets. */
@@ -452,6 +457,130 @@ export async function printReceipt(input: {
         paperWidth: input.paperWidth,
         copies: input.copies,
         receipt: toReceiptDoc(input.receipt),
+      },
+    });
+    return { ok: true, value: outcome };
+  } catch (e) {
+    return { ok: false, error: toNativeError(e) };
+  }
+}
+
+// --- kitchen tickets (POS v1) ------------------------------------------------
+
+/**
+ * The kitchen ticket as Rust receives it. Mirrors `KitchenTicketDoc` in
+ * printing/kitchen.rs.
+ *
+ * NOTE WHAT IS ABSENT: there is no price, no line total, no subtotal, no total,
+ * no currency and no payment status anywhere in this type. A cook has no
+ * decision that depends on any of them, and the strongest way to keep money off
+ * a kitchen ticket is for the document that crosses the boundary to have nowhere
+ * to put it. The Rust side has the same shape, so a money field added to one
+ * end without the other simply fails to compile.
+ */
+export type KitchenTicketDoc = {
+  businessName: string;
+  branchName: string;
+  staffName: string | null;
+  orderNumber: string;
+  orderType: string;
+  at: string;
+  tableName: string | null;
+  batchLabel: string | null;
+  customerName: string | null;
+  orderNote: string | null;
+  lines: {
+    name: string;
+    qty: number;
+    modifiers: { name: string; quantity: number }[];
+    note: string | null;
+  }[];
+  test: boolean;
+};
+
+/**
+ * Map a built ticket onto the document Rust prints.
+ *
+ * Every field is named, for the same reason `toReceiptDoc` names its own: a
+ * spread is all it would take for a cart line's `lineTotal` - or any future
+ * UI-only field hung off the same object - to cross the native boundary and
+ * appear on a ticket.
+ */
+export function toKitchenTicketDoc(ticket: {
+  businessName: string;
+  branchName: string;
+  staffName?: string | null;
+  orderNumber: string;
+  orderType: string;
+  at: string;
+  tableName?: string | null;
+  batchLabel?: string | null;
+  customerName?: string | null;
+  orderNote?: string | null;
+  lines: {
+    name: string;
+    qty: number;
+    modifiers?: { name: string; quantity: number }[];
+    note?: string | null;
+  }[];
+  test?: boolean;
+}): KitchenTicketDoc {
+  return {
+    businessName: ticket.businessName,
+    branchName: ticket.branchName,
+    staffName: ticket.staffName ?? null,
+    orderNumber: ticket.orderNumber,
+    orderType: ticket.orderType,
+    at: ticket.at,
+    tableName: ticket.tableName ?? null,
+    batchLabel: ticket.batchLabel ?? null,
+    customerName: ticket.customerName ?? null,
+    orderNote: ticket.orderNote ?? null,
+    lines: ticket.lines.map((l) => ({
+      name: l.name,
+      qty: l.qty,
+      modifiers: (l.modifiers ?? []).map((m) => ({ name: m.name, quantity: m.quantity })),
+      note: l.note ?? null,
+    })),
+    test: ticket.test ?? false,
+  };
+}
+
+/**
+ * Print a kitchen ticket.
+ *
+ * UNLIKE `printReceipt`, THIS CAN BE REACHED AUTOMATICALLY. The POS may print a
+ * ticket as part of completing a successful order submission, which is what a
+ * kitchen printer is for - a cook cannot press the button.
+ *
+ * That changes the duplicate risk and NOT the transaction-safety argument. This
+ * function still performs no RPC, reads no order and returns nothing the
+ * caller's transaction depends on; a caller that ignores its result has lost
+ * paper and nothing else. The duplicate bound lives in `lib/pos/autoPrint.ts`:
+ * one attempt per successful submission, one in-flight latch, and no automatic
+ * retry anywhere.
+ */
+export async function printKitchenTicket(input: {
+  printerName: string;
+  paperWidth: PaperWidth;
+  copies: number;
+  ticket: Parameters<typeof toKitchenTicketDoc>[0];
+}): Promise<NativeResult<PrintOutcome>> {
+  if (!isNativeAvailable()) {
+    return { ok: false, error: { code: "native_unavailable", message: MESSAGES.native_unavailable } };
+  }
+  const invalid = validateCopies(input.copies);
+  if (invalid) return { ok: false, error: invalid };
+  if (!isPaperWidth(input.paperWidth)) {
+    return { ok: false, error: { code: "invalid_paper_width", message: MESSAGES.invalid_paper_width } };
+  }
+  try {
+    const outcome = await invokeNative<PrintOutcome>("print_kitchen_ticket", {
+      request: {
+        printerName: input.printerName,
+        paperWidth: input.paperWidth,
+        copies: input.copies,
+        ticket: toKitchenTicketDoc(input.ticket),
       },
     });
     return { ok: true, value: outcome };

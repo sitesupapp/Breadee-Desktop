@@ -14,6 +14,7 @@
 //! content this module owns rather than content the caller supplies. There is
 //! no argument shape that turns this into "write these bytes to that device".
 
+pub mod kitchen;
 pub mod page;
 pub mod receipt;
 pub mod service;
@@ -22,6 +23,7 @@ pub mod types;
 #[cfg(target_os = "windows")]
 pub mod windows_spooler;
 
+use kitchen::KitchenTicketDoc;
 use receipt::ReceiptDoc;
 use serde::{Deserialize, Serialize};
 use types::{InstalledPrinter, PaperWidth, PrintError, PrintOutcome, TestPrintRequest};
@@ -41,6 +43,20 @@ pub struct ReceiptPrintRequest {
     pub paper_width: PaperWidth,
     pub copies: u8,
     pub receipt: ReceiptDoc,
+}
+
+/// A kitchen ticket to print.
+///
+/// Same envelope as the receipt request - a printer NAME re-checked against a
+/// live enumeration, an enumerated width, a bounded copy count, and content to
+/// typeset. The document differs; the surface does not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitchenPrintRequest {
+    pub printer_name: String,
+    pub paper_width: PaperWidth,
+    pub copies: u8,
+    pub ticket: KitchenTicketDoc,
 }
 
 /// Local wall-clock stamp for the diagnostic page.
@@ -136,12 +152,42 @@ pub fn print_receipt(request: ReceiptPrintRequest) -> Result<PrintOutcome, Print
     }
 }
 
+/// Print a kitchen ticket.
+///
+/// Unlike `print_receipt` this one CAN be reached automatically - the POS may
+/// print a ticket as part of completing a successful order submission. The
+/// safety argument does not change, because it never rested on "a human pressed
+/// the button": this function reads no order, takes no lock and returns no
+/// value the caller's transaction depends on. What the automatic path adds is a
+/// duplicate risk, and that is bounded on the frontend by one attempt per
+/// successful submission with no retry - see `lib/pos/autoPrint.ts`.
+#[tauri::command]
+pub fn print_kitchen_ticket(request: KitchenPrintRequest) -> Result<PrintOutcome, PrintError> {
+    #[cfg(target_os = "windows")]
+    {
+        service::print_kitchen_ticket(
+            &windows_spooler::WindowsPrinterCatalogue,
+            windows_spooler::WindowsPrintDevice::new,
+            &request.printer_name,
+            request.paper_width,
+            request.copies as u32,
+            &request.ticket,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &request;
+        Err(PrintError::UnsupportedPlatform)
+    }
+}
+
 /// Every command this module exposes.
 ///
 /// Kept as data so a test can assert the IPC surface has not quietly grown -
-/// the whole safety argument for this work is that it is three commands wide,
+/// the whole safety argument for this work is that it is four commands wide,
 /// and each one was added deliberately in its own phase.
-pub const EXPOSED_COMMANDS: &[&str] = &["list_printers", "print_test_page", "print_receipt"];
+pub const EXPOSED_COMMANDS: &[&str] =
+    &["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"];
 
 /// The preset rolls, kept as data so a test can pin them.
 ///
@@ -159,8 +205,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ipc_surface_is_exactly_three_commands() {
-        assert_eq!(EXPOSED_COMMANDS, &["list_printers", "print_test_page", "print_receipt"]);
+    fn the_ipc_surface_is_exactly_four_commands() {
+        assert_eq!(
+            EXPOSED_COMMANDS,
+            &["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"]
+        );
+    }
+
+    #[test]
+    fn a_kitchen_request_carries_no_device_control() {
+        let json = r#"{
+            "printerName":"Xprinter XP-80","paperWidth":"custom:72","copies":1,
+            "ticket":{"businessName":"B","branchName":"Br","orderNumber":"1","orderType":"Dine-In",
+                      "at":"now","lines":[{"name":"Item","qty":1}]}
+        }"#;
+        let req: KitchenPrintRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.printer_name, "Xprinter XP-80");
+        assert_eq!(req.paper_width, PaperWidth::CustomMm(72));
+        assert_eq!(req.copies, 1);
+        let round_trip = serde_json::to_value(&req).unwrap();
+        let mut keys: Vec<&str> = round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["copies", "paperWidth", "printerName", "ticket"]);
+    }
+
+    #[test]
+    fn a_kitchen_request_still_refuses_an_unsupported_width() {
+        let json = r#"{"printerName":"P","paperWidth":"a4","copies":1,
+            "ticket":{"businessName":"B","branchName":"Br","orderNumber":"1","orderType":"T",
+                      "at":"now","lines":[{"name":"I","qty":1}]}}"#;
+        assert!(serde_json::from_str::<KitchenPrintRequest>(json).is_err());
+    }
+
+    #[test]
+    fn a_kitchen_ticket_has_nowhere_to_put_a_price() {
+        // Deserialisation is the boundary: a caller that sends money fields gets
+        // them dropped rather than printed, because the type has no home for
+        // them. Asserting it here means the guarantee survives a future edit to
+        // the frontend mapper.
+        let json = r#"{"printerName":"P","paperWidth":"80mm","copies":1,
+            "ticket":{"businessName":"B","branchName":"Br","orderNumber":"1","orderType":"T",
+                      "at":"now","total":99.0,"subtotal":99.0,
+                      "lines":[{"name":"I","qty":1,"lineTotal":99.0,
+                                "modifiers":[{"name":"M","quantity":1,"price_delta":5.0}]}]}}"#;
+        let req: KitchenPrintRequest = serde_json::from_str(json).expect("unknown fields are ignored");
+        let round_trip = serde_json::to_string(&req.ticket).unwrap();
+        for money in ["total", "lineTotal", "price_delta", "subtotal", "99"] {
+            assert!(!round_trip.contains(money), "a kitchen ticket must not carry {money:?}");
+        }
     }
 
     #[test]

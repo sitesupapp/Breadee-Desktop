@@ -383,8 +383,17 @@ test("the cash box is re-read from the server, never incremented locally", () =>
 });
 
 test("the receipt goes through the store-owned presentation layer", () => {
+  // RETARGETED BY POS v1. Dine-in used to be handed an inline
+  // `(receipt) => receiptStore.present(receipt)`. It is now handed
+  // `presentReceipt`, the single call site takeaway and delivery also use,
+  // which does the same store presentation and then attempts the automatic
+  // print. The property being defended is unchanged - dine-in does not present
+  // for itself, it goes through the store-owned layer - and is now stronger,
+  // because all three routes are provably passed the SAME function.
   const workspace = read("screens", "pos", "PosWorkspace.tsx");
-  assert.match(workspace, /onPresentReceipt: \(receipt\) => receiptStore\.present\(receipt\)/);
+  assert.match(workspace, /onPresentReceipt: presentReceipt/);
+  assert.match(workspace, /const presentReceipt = useCallback\(/);
+  assert.match(workspace, /receiptStore\.present\(receipt\)/);
   // `present` sets data AND visibility in one update - that is why it is used.
   assert.match(read("state", "receipt.ts"), /present: \(receipt\) => set\(\{ receipt, visible: true \}\)/);
 });
