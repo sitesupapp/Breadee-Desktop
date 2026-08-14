@@ -1004,6 +1004,7 @@ export function useDeliveryWorkspace(input: {
             // Without this the receipt inherits the default and calls a delivery
             // "Takeaway" - wrong on the one document the customer keeps.
             orderType: "Delivery",
+            orderSource: "delivery",
             staffName: pos.userName,
             orderNumber: settled!.order_number ?? "",
             at: new Date().toLocaleString(),

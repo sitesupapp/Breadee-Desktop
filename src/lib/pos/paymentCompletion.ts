@@ -88,6 +88,9 @@ export function buildPaymentReceipt(input: PaymentCompletionInput): ReceiptData 
     businessName: input.tenantName,
     branchName: input.branchName,
     staffName: input.operatorName,
+    // `orderType` is left to default to "Takeaway" for display; the SOURCE is
+    // stated explicitly, because print routing must not read a display string.
+    orderSource: "takeaway",
     orderNumber: result.order_number || input.fallbackOrderNumber,
     at: input.at,
     paid: true,

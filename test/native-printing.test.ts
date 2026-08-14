@@ -82,8 +82,11 @@ const configured = (over: Partial<ServerPrinter> = {}): ServerPrinter => ({
 
 // --- the native client -------------------------------------------------------
 
-test("the client knows exactly two commands", () => {
-  assert.deepEqual([...NATIVE_COMMANDS], ["list_printers", "print_test_page"]);
+// RETARGETED BY LEVEL 3E-B: two -> three, for `print_receipt`. The number is a
+// guard against a command arriving unnoticed, so it moves by exactly the one
+// that was reviewed - and the whole list is still asserted, not just the count.
+test("the client knows exactly three commands", () => {
+  assert.deepEqual([...NATIVE_COMMANDS], ["list_printers", "print_test_page", "print_receipt"]);
 });
 
 test("the request carries a name, a width, a count and captions - nothing else", () => {
@@ -211,9 +214,16 @@ test("success is worded as acceptance, never as paper", () => {
 test("the client never falls back to the browser print dialog", () => {
   // Substituting window.print() would report success for a completely
   // different mechanism than the one that was asked for.
+  //
+  // RETARGETED BY LEVEL 3E-B. This also asserted that `printReceipt(` was
+  // absent, aimed at the WEB app's browser-print helper of that name. Level
+  // 3E-B introduces a native `printReceipt` command, so the old spelling now
+  // matches a legitimate function and proves nothing. `window.print` is the
+  // thing that actually distinguishes the two mechanisms, and it is what the
+  // assertion keeps.
   for (const src of [client, screen]) {
     assert.equal(src.includes("window.print"), false);
-    assert.equal(src.includes("printReceipt("), false);
+    assert.equal(src.includes("document.execCommand"), false);
   }
 });
 
@@ -409,11 +419,17 @@ test("the dashboard still says printing is unavailable", () => {
   );
 });
 
-test("the receipt preview's Print control is still disabled", () => {
+// RETARGETED BY LEVEL 3E-B. This asserted the preview's Print control was
+// disabled and that the preview knew nothing of native printing - true while
+// 3E-A was a foundation with no consumer, and the exact thing 3E-B exists to
+// change. What must still hold is that the preview prints RECEIPTS and does not
+// borrow the diagnostic test page, and that printing is gated rather than free.
+test("the receipt preview prints receipts, not the diagnostic page, and is gated", () => {
   const preview = stripJsxComments(readSrc("screens", "pos", "ReceiptPreview.tsx"));
-  assert.match(preview, /disabled/);
-  assert.equal(preview.includes("printTestPage"), false);
-  assert.equal(preview.includes("nativePrinting"), false);
+  assert.equal(preview.includes("printTestPage"), false, "the test page is not a receipt");
+  assert.match(preview, /printReceipt\(/);
+  assert.match(preview, /receiptPrintGate\(/);
+  assert.match(preview, /<GatedButton/);
 });
 
 test("no POS workspace reaches native printing", () => {
@@ -430,10 +446,12 @@ test("no POS workspace reaches native printing", () => {
 
 // --- the native boundary -----------------------------------------------------
 
-test("the invoke handler exposes exactly the two printing commands", () => {
+// RETARGETED BY LEVEL 3E-B: two -> three. Still an exact list, so a fourth
+// command cannot arrive without this line changing in review.
+test("the invoke handler exposes exactly the three printing commands", () => {
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
-  assert.deepEqual(commands, ["list_printers", "print_test_page"]);
+  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt"]);
 });
 
 test("the capability grants no shell, filesystem, network or process access", () => {

@@ -152,6 +152,7 @@ export function buildTablePaymentReceipt(input: TableReceiptInput): ReceiptData 
     branchName: input.branchName,
     staffName: input.operatorName,
     orderType: "Dine-in",
+    orderSource: "dine_in",
     tableName: input.table.name,
     seats: input.table.seats,
     // Normally one order per table (m218); if a bill genuinely spans more, every

@@ -7,6 +7,7 @@
 //! `windows_spooler.rs` is then only the Win32 calls themselves.
 
 use super::page::{build_test_page, PageLine};
+use super::receipt::{build_receipt_page, validate_receipt, ReceiptDoc};
 use super::types::{
     resolve_printer, validate_copies, InstalledPrinter, PaperWidth, PrintError, PrintOutcome,
     TestPageContext,
@@ -82,11 +83,8 @@ pub fn list_printers<C: PrinterCatalogue>(catalogue: &C) -> Result<Vec<Installed
 
 /// Validate a test-print request and run it.
 ///
-/// COPIES ARE SEPARATE DOCUMENTS. Driver-level copy counts are honoured
-/// inconsistently across thermal drivers - some ignore the field, some apply it
-/// per page rather than per document - so N copies is N spool jobs. It is
-/// slower and it is predictable, and for a diagnostic that a human is standing
-/// over, predictable wins.
+/// The copies rule now lives on `print_document`, which is the one path both
+/// this and the cashier receipt take.
 #[allow(clippy::too_many_arguments)]
 pub fn print_test_page<C, D, F>(
     catalogue: &C,
@@ -102,6 +100,44 @@ where
     D: PrintDevice,
     F: Fn() -> D,
 {
+    // The page is built from the RESOLVED name, so the paper says which printer
+    // Windows actually matched rather than what the caller typed.
+    print_document(catalogue, make_device, printer_name, paper, copies_requested, |resolved| {
+        // `context` is P2's addition - the Breadee alias and role the diagnostic
+        // page prints as its caption. It is forwarded rather than dropped: a
+        // test page that no longer says which configured printer it came from
+        // is the one thing that page exists to prove.
+        Ok(build_test_page(resolved, paper, now, context))
+    })
+}
+
+/// Print a document, once per copy.
+///
+/// The single audited path to paper: validate the copy count, re-enumerate and
+/// resolve the printer, build the lines, then drive the device. Both the
+/// diagnostic page and the cashier receipt go through here, so there is one
+/// place where "may this be printed, and to what?" is decided - and adding a
+/// third document later cannot quietly acquire different rules.
+///
+/// COPIES ARE SEPARATE DOCUMENTS. Driver-level copy counts are honoured
+/// inconsistently across thermal drivers - some ignore the field, some apply it
+/// per page rather than per document - so N copies is N spool jobs. It is
+/// slower and it is predictable, and for something a human is standing over,
+/// predictable wins.
+pub fn print_document<C, D, F, B>(
+    catalogue: &C,
+    make_device: F,
+    printer_name: &str,
+    paper: PaperWidth,
+    copies_requested: u32,
+    build: B,
+) -> Result<PrintOutcome, PrintError>
+where
+    C: PrinterCatalogue,
+    D: PrintDevice,
+    F: Fn() -> D,
+    B: Fn(&str) -> Result<Vec<PageLine>, PrintError>,
+{
     let copies = validate_copies(copies_requested)?;
 
     // Re-enumerate rather than trusting the name the frontend sent. The list the
@@ -110,7 +146,8 @@ where
     let target = resolve_printer(printer_name, &installed)?;
     let name = target.name.clone();
 
-    let lines = build_test_page(&name, paper, now, context);
+    // Built AFTER validation, so a rejected document never opens a device.
+    let lines = build(&name)?;
 
     let mut job_ids = Vec::new();
     let mut first_error = None;
@@ -154,10 +191,38 @@ where
     })
 }
 
+/// Print a cashier receipt (Level 3E-B).
+///
+/// Manual only. Nothing in this crate calls it on payment, on order submission
+/// or on a timer - it runs because an operator pressed Print and then confirmed
+/// a named printer. That is deliberate: paper is a physical event, and coupling
+/// it to a financial transaction is how a spooler problem turns into a refund
+/// argument. A failure here cannot reach the order, because the order is not in
+/// scope of this function at all.
+pub fn print_receipt<C, D, F>(
+    catalogue: &C,
+    make_device: F,
+    printer_name: &str,
+    paper: PaperWidth,
+    copies_requested: u32,
+    doc: &ReceiptDoc,
+) -> Result<PrintOutcome, PrintError>
+where
+    C: PrinterCatalogue,
+    D: PrintDevice,
+    F: Fn() -> D,
+{
+    validate_receipt(doc)?;
+    print_document(catalogue, make_device, printer_name, paper, copies_requested, |_| {
+        Ok(build_receipt_page(doc, paper))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::super::page::{ARABIC_SAMPLE, MIXED_SAMPLE};
+    use super::super::receipt::{ReceiptLine, ReceiptModifier};
     use super::super::types::PrinterStatus;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -405,6 +470,132 @@ mod tests {
         let (result, steps) = run(&cat, FailAt::Never, "P", 1);
         assert!(matches!(result, Err(PrintError::PrinterEnumerationFailed { .. })));
         assert!(steps.is_empty());
+    }
+
+    // --- receipts (Level 3E-B) ----------------------------------------------
+
+    fn receipt() -> ReceiptDoc {
+        ReceiptDoc {
+            business_name: "Dominos Pizza".into(),
+            branch_name: "Main Branch".into(),
+            staff_name: Some("Cashier".into()),
+            order_number: "260809-0001".into(),
+            order_type: "Delivery".into(),
+            at: "8/9/2026, 8:12:54 PM".into(),
+            paid: true,
+            method: Some("cash".into()),
+            currency: "USD".into(),
+            lines: vec![ReceiptLine {
+                name: "Margherita".into(),
+                qty: 1.0,
+                line_total: 7.0,
+                modifiers: vec![ReceiptModifier { name: "Small".into(), price_delta: 0.0, quantity: 1.0 }],
+                note: Some("No olives".into()),
+            }],
+            subtotal: 7.0,
+            discount: 0.0,
+            total: 7.0,
+            tender_currency: None,
+            tender_total: None,
+            tendered: None,
+            change: None,
+            shift_ref: None,
+            table_name: None,
+            seats: None,
+            customer_name: Some("Desktop Level 3A QA".into()),
+            customer_phone: Some("03 111 999".into()),
+            delivery_address: Some("QA, Hamra, QA Street 2".into()),
+        }
+    }
+
+    fn run_receipt(
+        cat: &MockCatalogue,
+        fail_at: FailAt,
+        printer: &str,
+        copies: u32,
+        doc: &ReceiptDoc,
+        paper: PaperWidth,
+    ) -> (Result<PrintOutcome, PrintError>, Vec<Step>) {
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let s = Rc::clone(&steps);
+        let result = print_receipt(
+            cat,
+            || MockDevice { fail_at, steps: Rc::clone(&s), next_job: 21 },
+            printer,
+            paper,
+            copies,
+            doc,
+        );
+        let recorded = steps.borrow().clone();
+        (result, recorded)
+    }
+
+    #[test]
+    fn a_receipt_prints_through_the_same_spooler_sequence() {
+        let (result, steps) = run_receipt(&catalogue(&["Xprinter XP-80"]), FailAt::Never, "Xprinter XP-80", 1, &receipt(), PaperWidth::Mm80);
+        let outcome = result.unwrap();
+        assert!(outcome.accepted);
+        assert_eq!(outcome.copies_accepted, 1);
+        assert_eq!(outcome.job_ids, vec![21]);
+        assert!(matches!(steps[0], Step::Open(_)));
+        assert!(matches!(steps[1], Step::StartDoc(_)));
+        assert!(matches!(steps[2], Step::Draw(_)));
+        assert_eq!(steps[3], Step::FinishDoc);
+        assert_eq!(steps[4], Step::Close);
+    }
+
+    #[test]
+    fn both_widths_print_a_receipt() {
+        for paper in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            let (result, _) = run_receipt(&catalogue(&["P"]), FailAt::Never, "P", 1, &receipt(), paper);
+            assert!(result.unwrap().accepted, "{} must print", paper.label());
+        }
+    }
+
+    #[test]
+    fn an_invalid_receipt_never_opens_a_device() {
+        let mut empty = receipt();
+        empty.lines.clear();
+        let (result, steps) = run_receipt(&catalogue(&["P"]), FailAt::Never, "P", 1, &empty, PaperWidth::Mm80);
+        assert!(matches!(result, Err(PrintError::InvalidReceipt { .. })));
+        assert!(steps.is_empty(), "a refused receipt must not reach the printer");
+    }
+
+    #[test]
+    fn an_unknown_printer_refuses_a_receipt_before_any_device_is_touched() {
+        let (result, steps) = run_receipt(&catalogue(&["Xprinter XP-80"]), FailAt::Never, "Ghost", 1, &receipt(), PaperWidth::Mm80);
+        assert!(matches!(result, Err(PrintError::PrinterNotFound { .. })));
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn receipt_copies_are_bounded_and_each_is_its_own_document() {
+        for bad in [0, 6] {
+            let (result, steps) = run_receipt(&catalogue(&["P"]), FailAt::Never, "P", bad, &receipt(), PaperWidth::Mm80);
+            assert!(matches!(result, Err(PrintError::InvalidCopyCount { .. })));
+            assert!(steps.is_empty());
+        }
+        let (result, steps) = run_receipt(&catalogue(&["P"]), FailAt::Never, "P", 2, &receipt(), PaperWidth::Mm80);
+        assert_eq!(result.unwrap().copies_accepted, 2);
+        assert_eq!(steps.iter().filter(|s| matches!(s, Step::StartDoc(_))).count(), 2);
+    }
+
+    #[test]
+    fn a_receipt_failure_still_aborts_and_closes() {
+        for fail_at in [FailAt::StartDoc, FailAt::Draw, FailAt::FinishDoc] {
+            let (result, steps) = run_receipt(&catalogue(&["P"]), fail_at, "P", 1, &receipt(), PaperWidth::Mm80);
+            assert!(result.is_err());
+            assert_eq!(*steps.last().unwrap(), Step::Close);
+        }
+    }
+
+    #[test]
+    fn a_receipt_is_never_retried_automatically() {
+        // One attempt per copy, and a failure stops the run. Duplicate paper is
+        // the failure mode this protects against.
+        let (result, steps) = run_receipt(&catalogue(&["P"]), FailAt::Draw, "P", 3, &receipt(), PaperWidth::Mm80);
+        assert!(result.is_err());
+        assert_eq!(steps.iter().filter(|s| matches!(s, Step::StartDoc(_))).count(), 1);
     }
 
     #[test]

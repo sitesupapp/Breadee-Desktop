@@ -32,6 +32,8 @@ pub enum LineStyle {
     Rule,
     /// Deliberate vertical space.
     Blank,
+    /// The one figure a customer looks for. Larger and bold (Level 3E-B).
+    Total,
 }
 
 /// Paragraph direction. `Rtl` asks the text engine for right-to-left reading
@@ -47,13 +49,31 @@ pub enum Direction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageLine {
     pub text: String,
+    /// Right-aligned text on the SAME line - a money column (Level 3E-B).
+    ///
+    /// A receipt is two columns: a description that wraps, and an amount that
+    /// must stay flush right. Padding with spaces cannot do this in a
+    /// proportional font, and a receipt whose figures do not line up reads as
+    /// broken however correct the arithmetic is. The renderer draws this with a
+    /// second right-aligned pass on the same row.
+    pub right: Option<String>,
     pub style: LineStyle,
     pub direction: Direction,
 }
 
 impl PageLine {
-    fn new(text: impl Into<String>, style: LineStyle, direction: Direction) -> Self {
-        Self { text: text.into(), style, direction }
+    pub fn new(text: impl Into<String>, style: LineStyle, direction: Direction) -> Self {
+        Self { text: text.into(), right: None, style, direction }
+    }
+
+    /// A description on the left and an amount on the right.
+    pub fn pair(
+        text: impl Into<String>,
+        right: impl Into<String>,
+        style: LineStyle,
+        direction: Direction,
+    ) -> Self {
+        Self { text: text.into(), right: Some(right.into()), style, direction }
     }
 }
 
@@ -89,7 +109,10 @@ pub const NOT_A_REAL_ORDER: &str = "TEST PRINT - NOT A REAL ORDER";
 /// 80mm's. The two presets keep exactly the widths they had (24 and 32), because
 /// changing the look of the existing page was not the point of adding custom
 /// widths. The floor stops a very narrow roll producing a rule of two dashes.
-fn rule_chars(paper: PaperWidth) -> usize {
+/// Shared with the receipt renderer: one rule width for both documents, so a
+/// custom roll cannot end up with a diagnostic page and a receipt that disagree
+/// about how wide the paper is.
+pub(super) fn rule_chars(paper: PaperWidth) -> usize {
     const CHARS_PER_MM: f32 = 32.0 / 80.0;
     match paper {
         PaperWidth::Mm58 => 24,

@@ -19,7 +19,7 @@
 // worse than none: it would make a broken build look like a working one.
 
 /** Commands the Rust side exposes. Must match `EXPOSED_COMMANDS` in printing/mod.rs. */
-export const NATIVE_COMMANDS = ["list_printers", "print_test_page"] as const;
+export const NATIVE_COMMANDS = ["list_printers", "print_test_page", "print_receipt"] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
 /** The two preset thermal rolls. Mirrors the Rust `PaperWidth` presets. */
@@ -132,6 +132,7 @@ export type NativePrintErrorCode =
   | "invalid_paper_width"
   | "invalid_copy_count"
   | "render_failed"
+  | "invalid_receipt"
   | "open_printer_failed"
   | "start_document_failed"
   | "write_failed"
@@ -172,7 +173,8 @@ const MESSAGES: Record<NativePrintErrorCode, string> = {
   printer_not_found: "That printer is no longer installed on this terminal.",
   invalid_paper_width: "That paper width is not supported.",
   invalid_copy_count: `Choose between ${MIN_COPIES} and ${MAX_COPIES} copies.`,
-  render_failed: "The test page could not be drawn.",
+  render_failed: "The page could not be drawn.",
+  invalid_receipt: "This receipt cannot be printed.",
   open_printer_failed: "Windows could not open that printer.",
   start_document_failed: "Windows would not start a print job on that printer.",
   write_failed: "The test page could not be sent to that printer.",
@@ -299,6 +301,158 @@ export async function printTestPage(input: {
   try {
     const outcome = await invokeNative<PrintOutcome>("print_test_page", {
       request: buildTestPrintRequest(input),
+    });
+    return { ok: true, value: outcome };
+  } catch (e) {
+    return { ok: false, error: toNativeError(e) };
+  }
+}
+
+// --- cashier receipts (Level 3E-B) -------------------------------------------
+
+/** The receipt as Rust receives it. Mirrors `ReceiptDoc` in printing/receipt.rs. */
+export type ReceiptDoc = {
+  businessName: string;
+  branchName: string;
+  staffName: string | null;
+  orderNumber: string;
+  orderType: string;
+  at: string;
+  paid: boolean;
+  method: string | null;
+  currency: string;
+  lines: {
+    name: string;
+    qty: number;
+    lineTotal: number;
+    modifiers: { name: string; price_delta: number; quantity: number }[];
+    note: string | null;
+  }[];
+  subtotal: number;
+  discount: number;
+  total: number;
+  tenderCurrency: string | null;
+  tenderTotal: number | null;
+  tendered: number | null;
+  change: number | null;
+  shiftRef: string | null;
+  tableName: string | null;
+  seats: number | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  deliveryAddress: string | null;
+};
+
+/**
+ * Map the on-screen receipt onto the document Rust prints.
+ *
+ * Every field is named. A spread would be shorter and would also be the way an
+ * unrelated field - a future UI-only flag, a cached object, anything someone
+ * later hangs off `ReceiptData` - silently crosses the native boundary.
+ *
+ * `tendered` and `change` pass through as whatever the caller holds, which is
+ * exactly right: the live payment flow has them, and Level 3D's historical
+ * reconstruction deliberately sets them null. Neither is invented here.
+ */
+export function toReceiptDoc(receipt: {
+  businessName: string;
+  branchName: string;
+  staffName?: string | null;
+  orderNumber: string;
+  orderType: string;
+  at: string;
+  paid: boolean;
+  method?: string | null;
+  currency: string;
+  lines: {
+    name: string;
+    qty: number;
+    lineTotal: number;
+    modifiers?: { name: string; price_delta: number; quantity: number }[];
+    note?: string | null;
+  }[];
+  subtotal: number;
+  discount: number;
+  total: number;
+  tenderCurrency?: string | null;
+  tenderTotal?: number | null;
+  tendered?: number | null;
+  change?: number | null;
+  shiftRef?: string | null;
+  tableName?: string | null;
+  seats?: number | null;
+  customerName?: string | null;
+  customerPhone?: string | null;
+  deliveryAddress?: string | null;
+}): ReceiptDoc {
+  return {
+    businessName: receipt.businessName,
+    branchName: receipt.branchName,
+    staffName: receipt.staffName ?? null,
+    orderNumber: receipt.orderNumber,
+    orderType: receipt.orderType,
+    at: receipt.at,
+    paid: receipt.paid,
+    method: receipt.method ?? null,
+    currency: receipt.currency,
+    lines: receipt.lines.map((l) => ({
+      name: l.name,
+      qty: l.qty,
+      lineTotal: l.lineTotal,
+      modifiers: (l.modifiers ?? []).map((m) => ({
+        name: m.name,
+        price_delta: m.price_delta,
+        quantity: m.quantity,
+      })),
+      note: l.note ?? null,
+    })),
+    subtotal: receipt.subtotal,
+    discount: receipt.discount,
+    total: receipt.total,
+    tenderCurrency: receipt.tenderCurrency ?? null,
+    tenderTotal: receipt.tenderTotal ?? null,
+    tendered: receipt.tendered ?? null,
+    change: receipt.change ?? null,
+    shiftRef: receipt.shiftRef ?? null,
+    tableName: receipt.tableName ?? null,
+    seats: receipt.seats ?? null,
+    customerName: receipt.customerName ?? null,
+    customerPhone: receipt.customerPhone ?? null,
+    deliveryAddress: receipt.deliveryAddress ?? null,
+  };
+}
+
+/**
+ * Print a cashier receipt.
+ *
+ * MANUAL ONLY. Called from one place - the operator pressing Print in the
+ * receipt preview and confirming a named printer. It is never wired to payment,
+ * to order submission or to the preview opening, because a print failure must
+ * not be able to reach a settled transaction, and the simplest way to guarantee
+ * that is for the two never to share a code path.
+ */
+export async function printReceipt(input: {
+  printerName: string;
+  paperWidth: PaperWidth;
+  copies: number;
+  receipt: Parameters<typeof toReceiptDoc>[0];
+}): Promise<NativeResult<PrintOutcome>> {
+  if (!isNativeAvailable()) {
+    return { ok: false, error: { code: "native_unavailable", message: MESSAGES.native_unavailable } };
+  }
+  const invalid = validateCopies(input.copies);
+  if (invalid) return { ok: false, error: invalid };
+  if (!isPaperWidth(input.paperWidth)) {
+    return { ok: false, error: { code: "invalid_paper_width", message: MESSAGES.invalid_paper_width } };
+  }
+  try {
+    const outcome = await invokeNative<PrintOutcome>("print_receipt", {
+      request: {
+        printerName: input.printerName,
+        paperWidth: input.paperWidth,
+        copies: input.copies,
+        receipt: toReceiptDoc(input.receipt),
+      },
     });
     return { ok: true, value: outcome };
   } catch (e) {

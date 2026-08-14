@@ -15,13 +15,33 @@
 //! no argument shape that turns this into "write these bytes to that device".
 
 pub mod page;
+pub mod receipt;
 pub mod service;
 pub mod types;
 
 #[cfg(target_os = "windows")]
 pub mod windows_spooler;
 
+use receipt::ReceiptDoc;
+use serde::{Deserialize, Serialize};
 use types::{InstalledPrinter, PaperWidth, PrintError, PrintOutcome, TestPrintRequest};
+
+/// A cashier receipt to print (Level 3E-B).
+///
+/// Same shape as the test-print request plus the document itself: a printer
+/// NAME re-checked against a live enumeration, an enumerated width, a bounded
+/// copy count, and business content. Still no bytes, no path, no address and no
+/// command string - the receipt fields are values to typeset, not instructions
+/// to execute, and the renderer is the only thing that decides what reaches the
+/// device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptPrintRequest {
+    pub printer_name: String,
+    pub paper_width: PaperWidth,
+    pub copies: u8,
+    pub receipt: ReceiptDoc,
+}
 
 /// Local wall-clock stamp for the diagnostic page.
 ///
@@ -89,11 +109,39 @@ pub fn print_test_page(request: TestPrintRequest) -> Result<PrintOutcome, PrintE
     }
 }
 
+/// Print a cashier receipt.
+///
+/// MANUAL ONLY in this phase. Nothing calls this on payment, on submission or
+/// on a timer; it runs because an operator pressed Print and confirmed a named
+/// printer. Automatic printing is a later, explicit slice - mixing it in here
+/// would put a duplicate-paper risk underneath a renderer that has not printed
+/// a single real receipt yet.
+#[tauri::command]
+pub fn print_receipt(request: ReceiptPrintRequest) -> Result<PrintOutcome, PrintError> {
+    #[cfg(target_os = "windows")]
+    {
+        service::print_receipt(
+            &windows_spooler::WindowsPrinterCatalogue,
+            windows_spooler::WindowsPrintDevice::new,
+            &request.printer_name,
+            request.paper_width,
+            request.copies as u32,
+            &request.receipt,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &request;
+        Err(PrintError::UnsupportedPlatform)
+    }
+}
+
 /// Every command this module exposes.
 ///
 /// Kept as data so a test can assert the IPC surface has not quietly grown -
-/// the whole safety argument for this phase is that it is two commands wide.
-pub const EXPOSED_COMMANDS: &[&str] = &["list_printers", "print_test_page"];
+/// the whole safety argument for this work is that it is three commands wide,
+/// and each one was added deliberately in its own phase.
+pub const EXPOSED_COMMANDS: &[&str] = &["list_printers", "print_test_page", "print_receipt"];
 
 /// The preset rolls, kept as data so a test can pin them.
 ///
@@ -111,8 +159,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ipc_surface_is_exactly_two_commands() {
-        assert_eq!(EXPOSED_COMMANDS, &["list_printers", "print_test_page"]);
+    fn the_ipc_surface_is_exactly_three_commands() {
+        assert_eq!(EXPOSED_COMMANDS, &["list_printers", "print_test_page", "print_receipt"]);
+    }
+
+    #[test]
+    fn a_receipt_request_carries_no_device_control() {
+        // The envelope is a printer name, a width, a copy count and business
+        // content. Anything else has nowhere to land.
+        let json = r#"{
+            "printerName":"Xprinter XP-80","paperWidth":"80mm","copies":1,
+            "receipt":{"businessName":"B","branchName":"Br","orderNumber":"1","orderType":"Takeaway",
+                       "at":"now","currency":"USD","lines":[{"name":"Item","qty":1,"lineTotal":1}]}
+        }"#;
+        let req: ReceiptPrintRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.printer_name, "Xprinter XP-80");
+        assert_eq!(req.paper_width, PaperWidth::Mm80);
+        assert_eq!(req.copies, 1);
+        // The field SET, not the order. `serde_json`'s default map is sorted, so
+        // asserting declaration order tests the serialiser rather than the
+        // envelope - the same trap 3E-A's test-print request fell into.
+        let round_trip = serde_json::to_value(&req).unwrap();
+        let mut keys: Vec<&str> = round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["copies", "paperWidth", "printerName", "receipt"]);
+    }
+
+    #[test]
+    fn a_receipt_request_still_refuses_an_unsupported_width() {
+        let json = r#"{"printerName":"P","paperWidth":"a4","copies":1,
+            "receipt":{"businessName":"B","branchName":"Br","orderNumber":"1","orderType":"T",
+                       "at":"now","currency":"USD","lines":[{"name":"I","qty":1,"lineTotal":1}]}}"#;
+        assert!(serde_json::from_str::<ReceiptPrintRequest>(json).is_err());
     }
 
     #[test]

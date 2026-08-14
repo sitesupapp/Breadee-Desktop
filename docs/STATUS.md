@@ -761,6 +761,58 @@ Focused suite **68 / 68**; full Node suite green in batches (**847** total, the 
 
 Auto-print on send or pay, kitchen production printing, advanced routing (station / section / category / item / preparation component), network and USB printing, physical Test Center output, and any change to the cashier receipt renderer.
 
+## 1k. Level 3E-B — cashier receipt printing, reconciled onto P2 + P3-B
+
+On `feature/desktop-pos-level-3e-b-cashier-receipt-printing`, merged forward from `desktop-staging` @ `c4fa544`. The receipt feature itself was written against 3E-A @ `10d4954` and is **preserved, not rebuilt** — PR #14 keeps its two original commits and gains a merge commit.
+
+Dependencies are still untouched: same Tauri 2.11.5, same `windows` 0.61.3, **no new dependency**, no Tauri upgrade, no lockfile change.
+
+**One new command.** `print_receipt` joins `list_printers` and `print_test_page` — the IPC surface is three commands wide and each arrived in its own reviewed phase. Capabilities are untouched: still `core:default` + `opener:default`, no shell, no filesystem, no network.
+
+**Manual only, and structurally so.** Nothing prints on payment, on order submission, on preview open or on a timer. `pos_receipt_settings.auto_print_customer` exists and defaults to `true`; it is deliberately **not** read anywhere in the desktop print path.
+
+**Printing cannot reach a sale.** By the time the preview exists the payment has already succeeded and the receipt is built. The print path calls no RPC that writes, touches no order, and reports failure only to the modal.
+
+### What the merge-forward actually had to reconcile
+
+Only two textual conflicts (`docs/STATUS.md`, `printing/service.rs`), but three genuine semantic ones. Each is worth stating, because in every case the *old* 3E-B behaviour would have been wrong against the current product rather than merely stale.
+
+| Collision | Old 3E-B | Reconciled |
+|---|---|---|
+| **Paper width** | Accepted `58mm`/`80mm` and refused everything else. | Reads P2's `effectivePaperWidth`, which combines `paper_width` + `custom_paper_width`. The branch's actual XP-80 is `custom` + **72**, so the old code would have **blocked the only printer receipts are routed to**. |
+| **Rust rule width** | `rule()` matched the two presets exhaustively — a compile error once P2 added `PaperWidth::CustomMm`. | Delegates to `page::rule_chars`, so there is ONE width-to-characters rule for the diagnostic page and the receipt. The compile error was the right failure: the alternative was an 80mm rule drawn onto a 72mm roll. |
+| **Which printer** | Scanned `printer_type = 'cashier'` rows for the branch and **refused to choose** between two, because nothing in the schema ranked them. | Asks `resolve_print_route(branch, 'receipt', <source>)`. P3-B added the ranking that was missing, so the receipt now follows the branch's **Default Receipt route** and any per-source override. |
+
+The third is the one that mattered most. Two mechanisms answering "which printer prints this receipt" is exactly the failure the Routing screen exists to prevent — support configures a Takeaway route, the till keeps printing to whatever cashier row it found first, and nobody can see why. There is one authority now, and it is the server's.
+
+`print_test_page` also had to keep forwarding P2's `context` (the alias and role captioned on the diagnostic page) through 3E-B's generic `print_document` closure. Dropping it would have left the test page unable to say which configured printer it came from — the one thing that page exists to prove.
+
+### What survived unchanged
+
+Nothing is guessed: no Windows default, no first cashier printer, no first configured printer. Windows matching is still exact. A width the renderer cannot lay out still blocks rather than being approximated. `desktop_connector` is still unsupported rather than invented. `pos.print_receipts` + the `pos.printing` feature is still the gate, stricter than the web POS and never looser.
+
+**Order source is now carried explicitly.** `ReceiptData.orderSource` (`takeaway` / `dine_in` / `delivery`) is set by all four builders, because `orderType` is a DISPLAY string that one route spells "Takeaway" and another spells "takeaway" — not something routing may branch on. An unrecognised source refuses rather than guessing; guessing could match a Takeaway override and put a delivery receipt on the wrong printer.
+
+**The operator no longer picks a printer.** There is nothing left to pick between — the resolver returns one destination or none — so the "choose a printer" branch is gone. Copies now come from the ROUTE rather than the printer row: the route is where an operator says "two copies of a delivery receipt".
+
+### One integration point, four routes
+
+Takeaway, Dine-in, Delivery and Level 3D's historical reprint all present through the same store-owned receipt layer, so native printing is wired once in `ReceiptModal`. A reprint is labelled as one, and repeating it is intentional: manual printing is never suppressed, and `print_jobs` is not used.
+
+`ReceiptData` is reused as-is; the Rust `ReceiptDoc` mirrors it, and the frontend maps it field by field rather than spreading. `tendered`/`change` pass through as whatever the caller holds — the live payment has them and 3D's historical path nulls them — so nothing is fabricated on a reprint.
+
+### The staging blocker is gone
+
+The earlier version of this section recorded **zero configured cashier printers** for Dominos / Main Branch, which blocked the hardware test on configuration rather than code. P2 configured `Xprinter XP-80 (Customer receipts)` (cashier, `system`, exact queue, custom 72mm) and P3-B routed receipts to it, so the hardware test is now unblocked.
+
+### Gates
+
+Node **892 / 892** green in batches (the usual per-run spawn crashes naming no assertion; every flagged file verified green on re-run), receipt suite **45 / 45**, P2 + P3-B + native regressions **137 / 137**; typecheck clean; production frontend build clean. Rust could not be compiled locally — every attempt died with `0xC0000005` inside third-party crates, never in this code — so `cargo check`/`cargo test` are left to CI, which is the authoritative Rust gate on this machine.
+
+### Still deferred
+
+Physical receipt proof (authorised separately), automatic printing, kitchen tickets and kitchen production printing, advanced routing scopes, network and USB printing, the cash drawer, `print_jobs` persistence and printer diagnostic writes.
+
 ## 2. Toolchain
 
 The Rust/MSVC toolchain **is installed** on the development machine (an earlier version of this document said it was missing). `tauri info` reports: MSVC (VS Build Tools 2019), rustc 1.96.1, cargo 1.96.1, rustup 1.29.0, WebView2 151, tauri 2.11.5. A native `tauri build` has still not been produced or verified.
@@ -769,7 +821,7 @@ The Rust/MSVC toolchain **is installed** on the development machine (an earlier 
 
 - **Offline order capture — not implemented.** (An earlier version of this document claimed POS orders were captured into the outbox offline. They were not, and still are not.) Offline blocks ordering with a clear message; the menu remains readable from cache.
 - **Sync replay — intentionally disabled.** Every handler still returns `review`; nothing is pushed. It must stay that way until the outbox carries `client_op_id` + `shift_id`, and conflict/idempotency rules are in place.
-- **Native printing — foundation only (Level 3E-A, §1i), plus setup (P2) and routing configuration (P3-B, §1j).** The desktop can enumerate Windows printers, print a synthetic diagnostic page, and create/edit the branch's printer registry and its basic print routes. It still prints **no receipt and no kitchen ticket**: the receipt preview remains on-screen only with its Print control disabled, no POS event triggers printing, routing is used by the Test Center only, and network/USB printers, advanced routing, auto-print and the cash drawer are untouched.
+- **Native printing — foundation (3E-A, §1i), setup (P2), routing configuration (P3-B, §1j) and manual cashier receipts (3E-B, §1k).** The desktop enumerates Windows printers, prints a diagnostic page, creates and edits the branch's printer registry and its basic print routes, simulates routing in the Test Center, and can print or reprint a **cashier receipt** to the routed printer when an operator asks it to. Still absent, deliberately: **kitchen tickets**, **automatic printing** (`auto_print_customer` is not read anywhere), **advanced routing** (station/section/category/item/preparation component), **network and USB printers**, the **cash drawer**, `print_jobs` persistence and printer diagnostic writes.
 - **Dine-in settlement — implemented in Level 2D and verified on staging** (one real cash-USD payment, 2026-08-07). See §8. Packaged-app (Tauri/NSIS) verification is still outstanding — the smoke test ran against the worktree dev build.
 - **Split bills / partial payment — not implemented.** `pos_pay_table` settles every open order on the table in one call. Paying part of a bill, or splitting it between customers, has no contract behind it.
 - **Non-cash payment methods — not implemented.** `PaymentMethod` is `"cash"` only, which is what the current POS contract exercises. It is a field rather than a literal, so adding a method is a contract change and not a refactor.

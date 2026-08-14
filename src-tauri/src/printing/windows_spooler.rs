@@ -332,12 +332,13 @@ fn draw_page(hdc: HDC, paper: PaperWidth, lines: &[PageLine]) -> Result<(), Prin
     for line in lines {
         let points = match line.style {
             LineStyle::Title => 16,
+            LineStyle::Total => 13,
             LineStyle::Heading => 10,
             LineStyle::Body | LineStyle::Rule => 10,
             LineStyle::Small => 8,
             LineStyle::Blank => 8,
         };
-        let bold = matches!(line.style, LineStyle::Title | LineStyle::Heading);
+        let bold = matches!(line.style, LineStyle::Title | LineStyle::Heading | LineStyle::Total);
         let height_px = -(points * dpi_y) / 72;
 
         let face = wide(FONT_FACE);
@@ -406,20 +407,45 @@ fn draw_line(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32) -> Result<i
         return Ok(mm_to_px(2.0, unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) }).max(4));
     }
 
+    // A money column on the right narrows the space the description may use,
+    // so the two are measured against different widths. Without this the
+    // description would wrap under the amount and the receipt would look like
+    // the figures belonged to the wrong line.
+    let right_text = line.right.as_deref().filter(|r| !r.is_empty());
+    let reserved = if right_text.is_some() { (column * 2) / 5 } else { 0 };
+    let left_column = (column - reserved).max(1);
+
+    let mut measure_rect = RECT { left: x, top: y, right: x + left_column, bottom: y + 1 };
+
     // Measure first so wrapped text advances by its true height.
-    let measured = unsafe { DrawTextW(hdc, &mut text[..len], &mut rect, format | DT_CALCRECT) };
+    let measured = unsafe { DrawTextW(hdc, &mut text[..len], &mut measure_rect, format | DT_CALCRECT) };
     if measured == 0 {
         return Err(PrintError::RenderFailed { detail: "could not measure a line".into() });
     }
     // DT_CALCRECT with DT_RIGHT collapses the rect to the text width, which
     // would right-align against the wrong edge. Restore the full column.
-    let height = rect.bottom - rect.top;
-    let mut draw_rect = RECT { left: x, top: y, right: x + column, bottom: y + height };
+    let height = measure_rect.bottom - measure_rect.top;
+    let mut draw_rect = RECT { left: x, top: y, right: x + left_column, bottom: y + height };
 
     let painted = unsafe { DrawTextW(hdc, &mut text[..len], &mut draw_rect, format) };
     if painted == 0 {
         return Err(PrintError::RenderFailed { detail: "could not draw a line".into() });
     }
+
+    // The amount, flush right on the SAME row. Always left-to-right: a price is
+    // a number, and reversing it would be wrong in any language.
+    if let Some(right) = right_text {
+        let mut right_wide = wide(right);
+        let right_len = right_wide.len().saturating_sub(1);
+        let mut right_rect = RECT { left: x + left_column, top: y, right: x + column, bottom: y + height };
+        let drawn = unsafe {
+            DrawTextW(hdc, &mut right_wide[..right_len], &mut right_rect, DT_RIGHT | DT_NOPREFIX)
+        };
+        if drawn == 0 {
+            return Err(PrintError::RenderFailed { detail: "could not draw an amount".into() });
+        }
+    }
+
     Ok(height.max(1))
 }
 

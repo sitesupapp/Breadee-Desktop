@@ -10,6 +10,16 @@
 
 import type { CurrencyCode } from "@/lib/currency";
 
+/**
+ * The order sources a receipt can be routed for.
+ *
+ * Deliberately the same three strings `resolve_print_route` accepts for
+ * `p_order_source` (minus `e_menu`, which the desktop does not take orders
+ * for). Declared here rather than imported from the routing module so the
+ * receipt model stays free of the printing stack.
+ */
+export type ReceiptOrderSource = "takeaway" | "dine_in" | "delivery";
+
 export type ReceiptModifier = {
   name: string;
   price_delta: number;
@@ -30,7 +40,24 @@ export type ReceiptData = {
   branchName: string;
   staffName: string | null;
   orderNumber: string;
+  /**
+   * What the receipt SAYS the order is - "Takeaway", "Dine-in", "Delivery".
+   *
+   * Presentation only. It is written in whatever case and wording each route
+   * chose, so nothing may branch on it. See `orderSource` for the value that
+   * decides where the paper goes.
+   */
   orderType: string;
+  /**
+   * What the order actually IS, in the server's vocabulary.
+   *
+   * Separate from `orderType` because printing has to ask the routing resolver
+   * "where does a `takeaway` receipt go", and a display string that one route
+   * spells "Takeaway" and another spells "takeaway" is not an answer to that
+   * question. Optional so a receipt built before this field existed still
+   * renders; the print path refuses rather than guessing when it is absent.
+   */
+  orderSource?: ReceiptOrderSource;
   /** Human-readable time captured when the receipt was built. */
   at: string;
   paid: boolean;
