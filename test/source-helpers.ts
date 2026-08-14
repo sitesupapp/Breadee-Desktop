@@ -19,7 +19,24 @@
  * line-ending agnostic, which is the whole point.
  */
 export function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "");
+  return source
+    // WHOLE-LINE `//` COMMENTS FIRST, and this ordering is load-bearing.
+    //
+    // A line comment may legitimately contain a slash-star - `PosWorkspace.tsx`
+    // line 3 says the rules live in "lib/pos/*" - and the block-comment pass
+    // below cannot tell that from a real block opener. It would match from
+    // there to the next real close, silently deleting every line in between.
+    // Measured on `PosWorkspace.tsx`: several hundred lines vanished, including
+    // the entire import block, which made "this file must not import
+    // nativePrinting" pass against a string that no longer contained any
+    // imports at all. An assertion that cannot fail is worse than no assertion,
+    // because it is counted as coverage.
+    //
+    // Anchored to the start of the line (`^\s*//`) so a `//` inside a string -
+    // a URL, most obviously - is never the thing that opens the match.
+    .replace(/^[^\S\r\n]*\/\/[^\r\n]*(\r?\n)/gm, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\r\n]*/g, "");
 }
 
 /**

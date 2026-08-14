@@ -237,9 +237,21 @@ test("copies come from the ROUTE, bounded to 1..5", () => {
   }
 });
 
-test("width is read through P2's helper, not a second parser in this file", () => {
-  assert.match(resolver, /effectivePaperWidth\(/);
-  assert.equal(/"58mm" \|\| .*=== "80mm"/.test(resolver), false, "no local width whitelist");
+test("width is read through P2's helper, not a second parser anywhere", () => {
+  // RETARGETED BY POS v1. The route-to-destination step moved into
+  // `printTarget.ts` so the kitchen ticket resolves through the identical code
+  // rather than a second copy. The property is unchanged and now covers both
+  // documents at once: ONE width parser, P2's, and no local whitelist in either
+  // file. Asserting it against the file that no longer holds the logic would
+  // have been asserting nothing.
+  const shared = stripComments(readSrc("lib", "pos", "printTarget.ts"));
+  assert.match(shared, /effectivePaperWidth\(/);
+  for (const src of [shared, resolver]) {
+    assert.equal(/"58mm" \|\| .*=== "80mm"/.test(src), false, "no local width whitelist");
+  }
+  // The receipt file must not have grown its own resolution back.
+  assert.equal(resolver.includes("effectivePaperWidth("), false, "one resolver, not two");
+  assert.match(resolver, /return resolveRouteTarget\(input\)/);
 });
 
 // --- the order source --------------------------------------------------------
@@ -398,12 +410,21 @@ test("printing is manual - nothing prints on open, on payment or on a timer", ()
   assert.match(preview, /onClick=\{\(\) => void send\(\)\}/);
 });
 
-test("auto_print_customer is deliberately not honoured yet", () => {
-  // The setting exists on the server and defaults to true. Nothing in the
-  // desktop print path reads it, and no effect sends - so no paper can appear
-  // without an operator pressing Print and confirming.
+test("the preview is a MANUAL surface - automatic printing is not decided here", () => {
+  // RETARGETED for POS v1. `auto_print_customer` IS honoured now, and the
+  // original assertion ("nothing anywhere reads it") had to change with it. The
+  // property that outlives the change is the one that actually kept this file
+  // safe: the preview modal decides nothing automatically. It reads no setting,
+  // has one send call site, and that site is behind an operator confirmation.
+  //
+  // Automatic printing lives on the transaction-completion path instead
+  // (`lib/pos/autoPrint.ts`), which is where the "did this transaction just
+  // succeed exactly once" question is actually answerable. A modal that can be
+  // reopened, re-rendered and remounted is the wrong place to reason about
+  // duplicate paper.
   assert.equal(preview.includes("auto_print"), false);
   assert.equal(preview.includes("pos_receipt_settings"), false);
+  assert.equal(preview.includes("autoPrint"), false);
   const sendSites = preview.match(/void send\(\)/g) ?? [];
   assert.equal(sendSites.length, 1, "sending must have exactly one call site");
 });
@@ -505,11 +526,17 @@ test("printing reads routing and never writes it", () => {
 
 // --- the native boundary -----------------------------------------------------
 
-test("the invoke handler exposes exactly three printing commands", () => {
+test("the invoke handler exposes exactly the printing commands, and no others", () => {
+  // RETARGETED for POS v1. The count was never the property worth defending -
+  // the property is that the IPC surface is an explicit, reviewable LIST that
+  // both sides agree on, and that nothing outside printing is on it. POS v1
+  // added `print_kitchen_ticket` deliberately and in its own edit to lib.rs,
+  // which is exactly the visibility this assertion exists to force.
+  const expected = ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"];
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
-  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt"]);
-  assert.deepEqual([...NATIVE_COMMANDS], ["list_printers", "print_test_page", "print_receipt"]);
+  assert.deepEqual(commands, expected);
+  assert.deepEqual([...NATIVE_COMMANDS], expected);
 });
 
 test("no new capability was granted", () => {
@@ -558,7 +585,15 @@ test("all four receipt routes reach paper through this one modal", () => {
   // covers them and none can drift.
   const workspace = stripJsxComments(readSrc("screens", "pos", "PosWorkspace.tsx"));
   assert.match(workspace, /<ReceiptModal data=\{receipt as ReceiptData\} onClose=\{hide\} \/>/);
-  assert.match(workspace, /receiptStore\.present\(completion\.receipt\)/);
+  // RETARGETED BY POS v1. The takeaway path used to call `receiptStore.present`
+  // directly. It now goes through `presentReceipt`, which is the SAME store
+  // presentation plus the automatic-print attempt - and which dine-in and
+  // delivery are handed too, so all three share one call site instead of three.
+  // The property was never the name of the function; it is that every route
+  // reaches the one store-owned layer rather than presenting for itself.
+  assert.match(workspace, /presentReceipt\(completion\.receipt\)/);
+  assert.match(workspace, /receiptStore\.present\(receipt\)/);
+  assert.equal((workspace.match(/onPresentReceipt: presentReceipt/g) ?? []).length, 2);
   const delivery = stripJsxComments(readSrc("screens", "pos", "DeliveryWorkspace.tsx"));
   assert.match(delivery, /onPresentReceipt/);
   assert.match(delivery, /readHistoricalReceipt\(/);

@@ -82,11 +82,16 @@ const configured = (over: Partial<ServerPrinter> = {}): ServerPrinter => ({
 
 // --- the native client -------------------------------------------------------
 
-// RETARGETED BY LEVEL 3E-B: two -> three, for `print_receipt`. The number is a
-// guard against a command arriving unnoticed, so it moves by exactly the one
-// that was reviewed - and the whole list is still asserted, not just the count.
-test("the client knows exactly three commands", () => {
-  assert.deepEqual([...NATIVE_COMMANDS], ["list_printers", "print_test_page", "print_receipt"]);
+// RETARGETED BY LEVEL 3E-B (two -> three, `print_receipt`) and by POS v1
+// (three -> four, `print_kitchen_ticket`). The number is a guard against a
+// command arriving unnoticed, so it moves by exactly the one that was reviewed -
+// and the whole list is still asserted, not just the count. The Rust side pins
+// the identical list in `EXPOSED_COMMANDS`, so the two ends cannot drift.
+test("the client knows exactly four commands", () => {
+  assert.deepEqual(
+    [...NATIVE_COMMANDS],
+    ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"],
+  );
 });
 
 test("the request carries a name, a width, a count and captions - nothing else", () => {
@@ -446,12 +451,15 @@ test("no POS workspace reaches native printing", () => {
 
 // --- the native boundary -----------------------------------------------------
 
-// RETARGETED BY LEVEL 3E-B: two -> three. Still an exact list, so a fourth
-// command cannot arrive without this line changing in review.
-test("the invoke handler exposes exactly the three printing commands", () => {
+// RETARGETED BY LEVEL 3E-B (two -> three) and by POS v1 (three -> four). Still
+// an exact list, which is the whole point: a fifth command cannot arrive without
+// this line changing in review. `print_kitchen_ticket` is the POS v1 addition
+// and is the first command reachable from an automatic path rather than only
+// from a button - see printing/mod.rs for why that does not widen the surface.
+test("the invoke handler exposes exactly the four printing commands", () => {
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
-  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt"]);
+  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"]);
 });
 
 test("the capability grants no shell, filesystem, network or process access", () => {
