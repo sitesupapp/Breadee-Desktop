@@ -575,6 +575,21 @@ test("the confirmation names the order and does not pretend it was cancelled", (
   assert.match(workspace, /cannot be paid from this terminal/);
 });
 
+test("a batch's ticket is presented once, even when its order is paid later", () => {
+  // Found in RC acceptance: paying an order that had already been sent put the
+  // kitchen ticket modal back on screen ON TOP of the receipt - at the one
+  // moment the cashier needs to read the receipt. The PRINT latch did its job
+  // (no second job was spooled); presentation is a separate question, because
+  // with automatic printing off the latch is never claimed at all.
+  const fn = workspace.slice(workspace.indexOf("const printKitchenFor"), workspace.indexOf("const presentReceipt"));
+  assert.match(fn, /presentedTickets\.current\.has\(eventKey\)/);
+  assert.match(fn, /presentedTickets\.current\.add\(eventKey\)/);
+  // Keyed on the batch, so round 2 still gets its own ticket.
+  assert.match(fn, /\$\{input\.orderId\}:\$\{input\.batchNo \?\? 1\}/);
+  // A ref, so two calls in one tick cannot both read "not presented yet".
+  assert.match(workspace, /const presentedTickets = useRef<Set<string>>\(new Set\(\)\)/);
+});
+
 test("the takeaway pay path still tells the kitchen", () => {
   // Paying without pressing Send is a normal takeaway flow. The latch makes the
   // unconditional call safe: a ticket already produced by Send is not repeated.

@@ -243,6 +243,21 @@ function PosWorkspaceInner() {
         orderNote: input.orderNote,
       });
       if (ticket.lines.length === 0) return;
+
+      // ONE PRESENTATION PER BATCH, which is a different question from one
+      // PRINT per batch. The print latch lives in `autoPrint.ts` and is keyed on
+      // the same event, but it is only claimed when a print is actually
+      // attempted - so with automatic printing switched off it never fires, and
+      // a second call would put the ticket modal back on screen.
+      //
+      // That is not hypothetical: paying an order that was already sent calls
+      // this path again (deliberately - see `confirmPayment`), and in RC
+      // acceptance the ticket modal reappeared ON TOP of the receipt at exactly
+      // the moment the cashier needed to read the receipt.
+      const eventKey = `${input.orderId}:${input.batchNo ?? 1}`;
+      if (presentedTickets.current.has(eventKey)) return;
+      presentedTickets.current.add(eventKey);
+
       const status = await autoPrintKitchenTicket({
         branchId: pos.branch.id,
         tenantId: tenantId ?? "",
@@ -290,6 +305,15 @@ function PosWorkspaceInner() {
   const [busy, setBusy] = useState(false);
   /** Open while confirming that a SENT, unpaid order may be walked away from. */
   const [clearConfirm, setClearConfirm] = useState(false);
+  /**
+   * Batches whose ticket has already been put on screen this session.
+   *
+   * A ref rather than state: nothing renders from it, and it must be readable
+   * and writable synchronously inside the callback that decides whether to
+   * present - a `setState` would be read stale by a second call in the same
+   * tick, which is the case it exists to stop.
+   */
+  const presentedTickets = useRef<Set<string>>(new Set());
 
   // Which order type the workspace is showing. Takeaway and Dine-in share one
   // shell instance, so this is a mode rather than a router route.
