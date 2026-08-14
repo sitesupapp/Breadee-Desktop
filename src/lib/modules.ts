@@ -44,11 +44,16 @@ export const MODULES: ModuleEntry[] = [
     label: "Point of Sale",
     icon: "🧾",
     // Kept current with what the desktop actually ships. This copy has now been
-    // wrong twice - it deferred Dine-in months after it landed, and it still
-    // said Delivery was customers-only after 3B added ordering and 3C added
-    // settlement. Delivery is now a full order type, so it is named as one, and
-    // printing is the only thing still deferred.
-    desc: "Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment and on-screen receipts. Printing is not available yet.",
+    // wrong THREE times - it deferred Dine-in months after it landed, it said
+    // Delivery was customers-only after 3B added ordering and 3C added
+    // settlement, and it said printing was unavailable through 3E-A, P2, P3-B
+    // and 3E-B. POS v1 closes the last of those, so the sentence goes.
+    //
+    // The rule this tile keeps breaking is worth stating: it must never promise
+    // a capability the desktop lacks, and must never deny one it has. The second
+    // half matters as much as the first - an operator who reads "printing is not
+    // available" does not go looking for the setting that would have worked.
+    desc: "Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment, receipts and kitchen tickets on a Windows printer.",
     availability: "desktop",
     to: "/pos",
     // Feature + `pos.access` + the owner exclusion, exactly as the server decides.

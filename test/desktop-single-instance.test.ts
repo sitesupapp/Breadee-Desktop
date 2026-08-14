@@ -129,20 +129,28 @@ test("the POS module no longer defers Dine-in", () => {
   assert.match(pos!.desc, /dine-?in/i, "the dashboard no longer mentions Dine-in at all");
 });
 
-// RETARGETED BY LEVEL 3D. This required Delivery to be named only as something
-// NOT here - correct while the route was customers-only, and false since 3B
-// added ordering and 3C added settlement. Leaving it would have kept the test
-// defending a claim the app had already outgrown, which is how this copy came to
-// be wrong twice. The enduring property is narrower: the tile must not promise a
-// capability the desktop does not have, and the only one left is PRINTING.
-test("the dashboard names Delivery, and still does not claim printing exists", () => {
+// RETARGETED BY LEVEL 3D, then again by POS v1 - and the fact that it needed
+// retargeting twice is the finding. 3D removed "Delivery is not here"; POS v1
+// removes "printing is not available". Both were true when written and both went
+// stale silently, because each pinned the SENTENCE rather than the rule.
+//
+// The rule, stated once: the tile must not promise a capability the desktop
+// lacks, AND must not deny one it has. The second half is the half that keeps
+// being forgotten, and it is the more harmful one - a cashier who reads that
+// printing is unavailable never looks for the setting that would have worked.
+test("the dashboard tile neither over-promises nor under-states", () => {
   const pos = MODULES.find((m) => m.key === "pos")!;
-  assert.match(pos.desc, /delivery/i, "Delivery is a shipped order type and should be named");
-  // The retired deferral is gone rather than merely unasserted.
-  assert.doesNotMatch(pos.desc, /delivery[^.]*(not available|not yet)/i);
-  // Printing is the one thing still deferred, and it must say so.
-  assert.match(pos.desc, /printing is not available/i);
-  assert.doesNotMatch(pos.desc, /printing[^.]*(available now|supported|enabled)/i);
+
+  // Shipped order types are named.
+  for (const shipped of [/takeaway/i, /dine-?in/i, /delivery/i]) {
+    assert.match(pos.desc, shipped, "a shipped order type is missing from the tile");
+  }
+  // No retired deferral survives, for any capability.
+  assert.doesNotMatch(pos.desc, /(not available|not yet|coming next|coming soon|arrives in)/i);
+  // Printing shipped in POS v1, so it is named rather than denied.
+  assert.match(pos.desc, /receipts and kitchen tickets/i);
+  // And nothing the desktop still lacks is promised.
+  assert.doesNotMatch(pos.desc, /(reports|loyalty|driver|cash drawer|network printer)/i);
 });
 
 test("the POS module still points at the real route and keeps its own gate", () => {

@@ -560,11 +560,16 @@ test("the permission gate uses the documented key and feature", () => {
 
 // --- regression --------------------------------------------------------------
 
-test("the dashboard copy is untouched by this phase", () => {
-  // POS receipts can now print, but the tile's claim is about the product as a
-  // whole and kitchen printing is still absent - changing it is 3E-C's call.
+test("the dashboard copy no longer denies printing", () => {
+  // RETARGETED BY POS v1. 3E-B deliberately left the tile alone because kitchen
+  // printing was still absent, so "Printing is not available yet" was only half
+  // wrong. POS v1 ships the other half, and the sentence is now wrong outright -
+  // which is the harmful direction: a cashier who reads it never goes looking
+  // for the setting that would have worked. The full both-directions assertion
+  // lives in `native-printing.test.ts`; this file keeps the half it cares about.
   const modules = stripComments(readSrc("lib", "modules.ts"));
-  assert.ok(modules.includes("Printing is not available yet."));
+  assert.equal(modules.includes("Printing is not available yet."), false);
+  assert.ok(modules.includes("receipts and kitchen tickets"));
 });
 
 test("the diagnostic test print is untouched, and never prints a receipt", () => {

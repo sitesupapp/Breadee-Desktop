@@ -407,21 +407,46 @@ test("no network or USB printing path is exposed by the UI", () => {
   }
 });
 
-test("the screen states what this phase does not yet do", () => {
-  assert.match(screen, /are not connected yet/);
-  assert.match(screen, /Receipts still print manually/);
+test("the screen states what is genuinely still absent, and nothing more", () => {
+  // RETARGETED. This pinned the exact sentence "…and automatic printing are not
+  // connected yet. Receipts still print manually." P3-B connected routing and
+  // POS v1 connected automatic printing, so that sentence named two shipped
+  // capabilities as missing - which is the more harmful direction of the error:
+  // an operator who reads that printing is unavailable never looks for the
+  // setting that would have worked.
+  //
+  // The enduring property is that the screen is HONEST in both directions. It
+  // must still say network printers are absent, and must no longer say routing
+  // or automatic printing are.
+  assert.match(screen, /Network printers[\s\S]*?are not connected yet/);
+  assert.equal(/automatic printing are not connected/i.test(screen), false);
+  assert.equal(/Receipts still print manually/.test(screen), false);
 });
 
-// --- POS surfaces are untouched ---------------------------------------------
+// --- POS surfaces --------------------------------------------------------
 
-test("the dashboard still says printing is unavailable", () => {
+test("the dashboard tile promises exactly what the desktop has", () => {
+  // RETARGETED for the third time - and the repetition is the point. This tile
+  // deferred Dine-in months after it landed, called Delivery customers-only
+  // after 3B and 3C, and denied printing through 3E-A, P2, P3-B and 3E-B. So the
+  // assertion no longer pins a sentence: it pins the rule the sentence keeps
+  // breaking, in BOTH directions.
   const modules = stripComments(readSrc("lib", "modules.ts"));
-  assert.ok(
-    modules.includes(
-      "Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment and on-screen receipts. Printing is not available yet.",
-    ),
-    "3E-A is a foundation, not POS printing - the tile must not claim otherwise",
-  );
+  const desc = modules.slice(modules.indexOf('key: "pos"'), modules.indexOf('key: "inventory"'));
+
+  // It must not deny a capability the desktop ships.
+  assert.equal(/Printing is not available yet/.test(desc), false);
+  assert.equal(/coming soon|not available|arrives in|deferred/i.test(desc), false);
+
+  // It must name what is actually there, printing included.
+  for (const shipped of ["Takeaway", "Dine-in", "Delivery", "shifts", "receipts", "kitchen tickets"]) {
+    assert.ok(desc.includes(shipped), `the tile should name ${shipped}`);
+  }
+
+  // And it must not promise what the desktop does not have.
+  for (const absent of ["reports", "loyalty", "driver", "cash drawer", "network printer"]) {
+    assert.equal(desc.toLowerCase().includes(absent), false, `the tile must not promise ${absent}`);
+  }
 });
 
 // RETARGETED BY LEVEL 3E-B. This asserted the preview's Print control was

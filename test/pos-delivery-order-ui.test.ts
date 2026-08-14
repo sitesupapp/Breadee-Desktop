@@ -696,10 +696,14 @@ test("the shell, the single-instance guard and the other order types are untouch
 });
 
 test("the dashboard copy still promises only what the desktop has", () => {
+  // RETARGETED BY POS v1: the exact sentence changed when printing shipped. What
+  // Level 3D cared about here was that DELIVERY is named as a full order type
+  // rather than the customers-only phase it used to describe, so that is what is
+  // asserted now. The tile's full both-directions rule lives in
+  // `native-printing.test.ts`.
   const modules = stripComments(read("lib", "modules.ts"));
-  assert.ok(
-    modules.includes(
-      "Takeaway, Dine-in and Delivery POS: shifts, tables, customers and addresses, modifiers, discounts, cash payment and on-screen receipts. Printing is not available yet.",
-    ),
-  );
+  const desc = modules.slice(modules.indexOf('key: "pos"'), modules.indexOf('key: "inventory"'));
+  assert.ok(desc.includes("Takeaway, Dine-in and Delivery POS"));
+  assert.ok(desc.includes("customers and addresses"));
+  assert.equal(/delivery customers only|customers only/i.test(desc), false);
 });

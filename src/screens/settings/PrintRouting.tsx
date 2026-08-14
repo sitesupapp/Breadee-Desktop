@@ -280,8 +280,19 @@ export function PrintRouting() {
         <p className="font-bold">Not routed here yet</p>
         <p className="mt-1 text-sm text-sub">
           Sending a document to a specific station, section, menu category or item is configured in Kitchen Ops and
-          arrives on the desktop later. Automatic printing when an order is sent or paid is not connected yet either —
-          routing set here is used by the Test Center only.
+          arrives on the desktop later.
+        </p>
+        {/* POS v1 removed the second half of this paragraph, which said automatic
+            printing was "not connected yet" and that routing here was used by the
+            Test Center only. Both are now false: these routes are what real
+            receipts and kitchen tickets follow, and printing can happen without
+            anyone pressing a button. A settings screen that understates what it
+            controls is how an operator changes a route believing it only affects
+            a test page. */}
+        <p className="mt-2 text-sm text-sub">
+          These routes are what real documents follow. Whether they print by themselves after an order is sent or paid
+          is set per branch in <strong className="text-ink">Receipt design</strong>; printing by hand is always
+          available from the receipt and kitchen ticket previews.
         </p>
       </Card>
     </div>

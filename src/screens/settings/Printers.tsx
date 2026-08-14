@@ -532,9 +532,15 @@ export function Printers() {
 
       <Card className="p-5">
         <p className="font-bold">Not set up here yet</p>
+        {/* Corrected twice over. P3-B connected routing and POS v1 connected
+            automatic printing, so this paragraph was naming two capabilities the
+            app had already shipped - and pointing an operator away from the
+            screens that would have solved their problem. Network printers are
+            the only item that is still genuinely absent. */}
         <p className="mt-1 text-sm text-sub">
-          Network printers that Windows does not already know about, print routing (which order goes to which
-          printer) and automatic printing are not connected yet. Receipts still print manually.
+          Network printers that Windows does not already know about are not connected yet — install the printer in
+          Windows first. Which document goes to which printer is set under <strong className="text-ink">Routing</strong>,
+          and whether it prints by itself under <strong className="text-ink">Receipt design</strong>.
         </p>
       </Card>
     </div>
