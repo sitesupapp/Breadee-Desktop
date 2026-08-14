@@ -23,6 +23,7 @@ import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components/pos/ShiftDialog";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
+import { Modal } from "@/components/overlays";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
@@ -287,6 +288,8 @@ function PosWorkspaceInner() {
   );
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** Open while confirming that a SENT, unpaid order may be walked away from. */
+  const [clearConfirm, setClearConfirm] = useState(false);
 
   // Which order type the workspace is showing. Takeaway and Dine-in share one
   // shell instance, so this is a mode rather than a router route.
@@ -503,10 +506,30 @@ function PosWorkspaceInner() {
         toast.push({
           tone: "success",
           message: saved.idempotent ? `Order ${saved.order_number} already sent` : `Order ${saved.order_number} sent to kitchen`,
-          detail: saved.idempotent ? "The same submission was replayed - no second order was created." : null,
+          detail: saved.idempotent
+            ? "The same submission was replayed - no second order was created."
+            : "Not paid yet - press Pay when the customer settles.",
         });
         await ticketForOrder(saved, submitted);
-        newOrder();
+        // THE ORDER STAYS ON SCREEN, AND THAT IS THE FIX.
+        //
+        // This used to call `newOrder()`, which resets the cart INCLUDING
+        // `savedOrder`. Since `ensureOrder()` finds a payable order only through
+        // `savedOrder`, a takeaway order that had been sent to the kitchen could
+        // never be paid from this app again: the money was uncollectable and the
+        // order then blocked End Shift, because `pos_shift_unresolved_orders`
+        // counts it as still open. Found in packaged RC acceptance - order
+        // 260814-0001 is the real one this happened to, and it is still open.
+        //
+        // Keeping the order current makes the documented flow - order, kitchen,
+        // pay, receipt - actually work, and costs nothing: `ensureOrder()`
+        // already returns the saved order rather than submitting a second one,
+        // and a repeat press replays under the same `client_op_id`.
+        //
+        // The cashier moves on with Clear, which now warns first (see
+        // `clearSentOrder`). A takeaway open-orders list is the complete answer
+        // and is deliberately NOT built here - it is a new surface, and this fix
+        // window is for closing the money-stranding hole.
       }
     } catch (e) {
       const c = classifyError(e);
@@ -515,7 +538,25 @@ function PosWorkspaceInner() {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [cart.lines.length, ensureOrder, newOrder, ticketForOrder, toast]);
+  }, [cart.lines.length, ensureOrder, ticketForOrder, toast]);
+
+  /**
+   * Clearing the cart, with one question when money is at stake.
+   *
+   * An unsent cart is scratch and is dropped without ceremony. A cart whose
+   * order the SERVER has already accepted is different: discarding the reference
+   * is what made order 260814-0001 uncollectable, so the operator is told the
+   * order number and asked. Refusing outright would be worse - a cashier must
+   * always be able to move on to the next customer.
+   */
+  const sentButUnpaid = cart.savedOrder;
+  const clearOrder = useCallback(() => {
+    if (useCart.getState().savedOrder) {
+      setClearConfirm(true);
+      return;
+    }
+    newOrder();
+  }, [newOrder]);
 
   const openPayment = useCallback(() => {
     if (cart.lines.length === 0) {
@@ -937,7 +978,7 @@ function PosWorkspaceInner() {
               onSendToKitchen={() => void sendToKitchen()}
               onPay={openPayment}
               onOpenShift={() => setOpenShiftOpen(true)}
-              onNewOrder={newOrder}
+              onNewOrder={clearOrder}
             />
           )
         }
@@ -945,6 +986,45 @@ function PosWorkspaceInner() {
 
       {dineInActive && dineIn.dialogs}
       {deliveryActive && delivery.dialogs}
+
+      {/* Walking away from an order the kitchen is already cooking.
+          The order NUMBER is named, because that is the only thing the cashier
+          can use to find the money again - and right now finding it means the
+          web app, which this dialog says rather than implying. */}
+      <Modal
+        open={clearConfirm}
+        title="Leave this order unpaid?"
+        size="sm"
+        onClose={() => setClearConfirm(false)}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setClearConfirm(false)}>
+              Keep it
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                setClearConfirm(false);
+                newOrder();
+              }}
+            >
+              Leave it unpaid
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-2 text-sm">
+          <p>
+            Order <strong>{sentButUnpaid?.order_number}</strong> has been sent to the kitchen and has not been paid.
+          </p>
+          <p className="text-sub">
+            Clearing here does not cancel it. It stays open on the server, it cannot be paid from this terminal
+            afterwards, and it will stop this shift from being closed until someone settles or cancels it in the
+            Breadee web app.
+          </p>
+          <p className="text-sub">Press Pay instead if the customer is settling now.</p>
+        </div>
+      </Modal>
 
       <ModifierDialog
         open={Boolean(pickerItem)}

@@ -537,10 +537,17 @@ export function Printers() {
             app had already shipped - and pointing an operator away from the
             screens that would have solved their problem. Network printers are
             the only item that is still genuinely absent. */}
+        {/* "Receipt design" was named here as the place to switch automatic
+            printing on. It is not: that screen is preview-only on the desktop,
+            and `auto_print_customer` / `auto_print_kitchen` are branch settings
+            owned by the web admin - this app deliberately never writes them.
+            Sending an operator to a screen that cannot do the thing is worse
+            than saying nothing, so it now says where the setting actually is.
+            Caught in packaged RC acceptance. */}
         <p className="mt-1 text-sm text-sub">
           Network printers that Windows does not already know about are not connected yet — install the printer in
-          Windows first. Which document goes to which printer is set under <strong className="text-ink">Routing</strong>,
-          and whether it prints by itself under <strong className="text-ink">Receipt design</strong>.
+          Windows first. Which document goes to which printer is set under <strong className="text-ink">Routing</strong>;
+          whether it prints by itself is a branch setting in the Breadee web app.
         </p>
       </Card>
     </div>

@@ -539,6 +539,42 @@ test("all three routes share ONE kitchen call site and ONE receipt call site", (
   }
 });
 
+// --- RC acceptance regression: a sent takeaway order stays payable ----------
+//
+// FOUND ON REAL PAPER, NOT IN A TEST. Packaged RC acceptance sent takeaway order
+// 260814-0001 to the kitchen and then could not pay it: `sendToKitchen` called
+// `newOrder()`, which resets the cart INCLUDING `savedOrder` - and `savedOrder`
+// is the only handle `ensureOrder()` has on an already-created order. The money
+// was uncollectable from this app, and the order then blocked End Shift, because
+// the server counts an unpaid order as still open ("Cannot close this shift:
+// 1 order(s) still open"). The DoD flow is literally "Order -> Kitchen -> Pay ->
+// Receipt", so this broke the headline path.
+
+test("sending a takeaway order to the kitchen leaves it payable", () => {
+  const send = workspace.slice(workspace.indexOf("const sendToKitchen"), workspace.indexOf("const clearOrder"));
+  // The reset is gone from the success path - that is the whole fix.
+  assert.equal(/newOrder\(\)/.test(send), false, "the sent order must not be discarded");
+  // And it is gone from the dependency list too, so it cannot creep back in.
+  assert.match(send, /\[cart\.lines\.length, ensureOrder, ticketForOrder, toast\]/);
+});
+
+test("clearing a SENT order asks first, and clearing a scratch cart does not", () => {
+  const clear = workspace.slice(workspace.indexOf("const clearOrder"), workspace.indexOf("const sendToKitchen") > workspace.indexOf("const clearOrder") ? workspace.indexOf("const sendToKitchen") : workspace.length);
+  assert.match(clear, /if \(useCart\.getState\(\)\.savedOrder\)/);
+  assert.match(clear, /setClearConfirm\(true\)/);
+  assert.match(clear, /newOrder\(\)/, "an unsent cart is still cleared without ceremony");
+  // The Clear control goes through the guard, not straight to the reset.
+  assert.match(workspace, /onNewOrder=\{clearOrder\}/);
+});
+
+test("the confirmation names the order and does not pretend it was cancelled", () => {
+  assert.match(workspace, /Leave this order unpaid\?/);
+  assert.match(workspace, /\{sentButUnpaid\?\.order_number\}/);
+  assert.match(workspace, /does not cancel it/);
+  // It must not claim the desktop can recover it - it cannot.
+  assert.match(workspace, /cannot be paid from this terminal/);
+});
+
 test("the takeaway pay path still tells the kitchen", () => {
   // Paying without pressing Send is a normal takeaway flow. The latch makes the
   // unconditional call safe: a ticket already produced by Send is not repeated.
