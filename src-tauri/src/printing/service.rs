@@ -6,6 +6,7 @@
 //! ordinary Rust that runs in CI on any machine, with no printer and no paper.
 //! `windows_spooler.rs` is then only the Win32 calls themselves.
 
+use super::kitchen::{build_kitchen_page, validate_kitchen_ticket, KitchenTicketDoc};
 use super::page::{build_test_page, PageLine};
 use super::receipt::{build_receipt_page, validate_receipt, ReceiptDoc};
 use super::types::{
@@ -35,7 +36,20 @@ pub trait PrintDevice {
     fn close(&mut self);
 }
 
-pub const DOCUMENT_TITLE: &str = "Breadee printer test";
+/// What each document calls itself IN THE WINDOWS QUEUE.
+///
+/// Not cosmetic. This string is what an operator sees in the printer queue and
+/// in a driver's job history, and it is the only label they have when deciding
+/// which stuck job to cancel. Every document used to be titled "Breadee printer
+/// test", so a real customer receipt appeared in the spooler as a test page -
+/// which is exactly the job someone would cancel without hesitation.
+///
+/// The titles stay deliberately free of order numbers, customer names and
+/// amounts: queue titles are visible to anyone who can see the printer, and are
+/// retained by the spooler after the job is gone.
+pub const TEST_DOCUMENT_TITLE: &str = "Breadee printer test";
+pub const RECEIPT_DOCUMENT_TITLE: &str = "Breadee customer receipt";
+pub const KITCHEN_DOCUMENT_TITLE: &str = "Breadee kitchen ticket";
 
 /// Print exactly one document.
 ///
@@ -48,11 +62,12 @@ pub fn print_one_copy<D: PrintDevice>(
     printer: &str,
     paper: PaperWidth,
     lines: &[PageLine],
+    title: &str,
 ) -> Result<u32, PrintError> {
     // Nothing is open yet, so a failure here needs no cleanup.
     device.open(printer)?;
 
-    let job_id = match device.start_document(DOCUMENT_TITLE) {
+    let job_id = match device.start_document(title) {
         Ok(id) => id,
         Err(e) => {
             device.close();
@@ -102,13 +117,21 @@ where
 {
     // The page is built from the RESOLVED name, so the paper says which printer
     // Windows actually matched rather than what the caller typed.
-    print_document(catalogue, make_device, printer_name, paper, copies_requested, |resolved| {
-        // `context` is P2's addition - the Breadee alias and role the diagnostic
-        // page prints as its caption. It is forwarded rather than dropped: a
-        // test page that no longer says which configured printer it came from
-        // is the one thing that page exists to prove.
-        Ok(build_test_page(resolved, paper, now, context))
-    })
+    print_document(
+        catalogue,
+        make_device,
+        printer_name,
+        paper,
+        copies_requested,
+        TEST_DOCUMENT_TITLE,
+        |resolved| {
+            // `context` is P2's addition - the Breadee alias and role the
+            // diagnostic page prints as its caption. It is forwarded rather than
+            // dropped: a test page that no longer says which configured printer
+            // it came from is the one thing that page exists to prove.
+            Ok(build_test_page(resolved, paper, now, context))
+        },
+    )
 }
 
 /// Print a document, once per copy.
@@ -124,12 +147,14 @@ where
 /// per page rather than per document - so N copies is N spool jobs. It is
 /// slower and it is predictable, and for something a human is standing over,
 /// predictable wins.
+#[allow(clippy::too_many_arguments)]
 pub fn print_document<C, D, F, B>(
     catalogue: &C,
     make_device: F,
     printer_name: &str,
     paper: PaperWidth,
     copies_requested: u32,
+    title: &str,
     build: B,
 ) -> Result<PrintOutcome, PrintError>
 where
@@ -153,7 +178,7 @@ where
     let mut first_error = None;
     for _ in 0..copies {
         let mut device = make_device();
-        match print_one_copy(&mut device, &name, paper, &lines) {
+        match print_one_copy(&mut device, &name, paper, &lines, title) {
             Ok(id) => job_ids.push(id),
             Err(e) => {
                 first_error = Some(e);
@@ -213,9 +238,50 @@ where
     F: Fn() -> D,
 {
     validate_receipt(doc)?;
-    print_document(catalogue, make_device, printer_name, paper, copies_requested, |_| {
-        Ok(build_receipt_page(doc, paper))
-    })
+    print_document(
+        catalogue,
+        make_device,
+        printer_name,
+        paper,
+        copies_requested,
+        RECEIPT_DOCUMENT_TITLE,
+        |_| Ok(build_receipt_page(doc, paper)),
+    )
+}
+
+/// Print a kitchen ticket.
+///
+/// Takes the SAME path as the other two documents - one validation, one printer
+/// resolution, one device driver, one cleanup rule. The only thing that differs
+/// is which lines get built, which is the whole point of `print_document`.
+///
+/// It reads no order, no payment and no shift, exactly like `print_receipt`: the
+/// caller has already committed the transaction and hands over a finished
+/// document. A ticket that fails to print therefore cannot reach the order it
+/// describes, because the order is not in scope of this function at all.
+pub fn print_kitchen_ticket<C, D, F>(
+    catalogue: &C,
+    make_device: F,
+    printer_name: &str,
+    paper: PaperWidth,
+    copies_requested: u32,
+    doc: &KitchenTicketDoc,
+) -> Result<PrintOutcome, PrintError>
+where
+    C: PrinterCatalogue,
+    D: PrintDevice,
+    F: Fn() -> D,
+{
+    validate_kitchen_ticket(doc)?;
+    print_document(
+        catalogue,
+        make_device,
+        printer_name,
+        paper,
+        copies_requested,
+        KITCHEN_DOCUMENT_TITLE,
+        |_| Ok(build_kitchen_page(doc, paper)),
+    )
 }
 
 #[cfg(test)]
@@ -372,7 +438,7 @@ mod tests {
         let s = Rc::clone(&steps);
         let mut device = MockDevice { fail_at: FailAt::Never, steps: s, next_job: 1 };
         let lines = build_test_page("P", PaperWidth::Mm80, "t", None);
-        print_one_copy(&mut device, "P", PaperWidth::Mm80, &lines).unwrap();
+        print_one_copy(&mut device, "P", PaperWidth::Mm80, &lines, TEST_DOCUMENT_TITLE).unwrap();
         assert!(lines.iter().any(|l| l.text == ARABIC_SAMPLE));
         assert!(lines.iter().any(|l| l.text == MIXED_SAMPLE));
         assert!(steps.borrow().contains(&Step::Draw(lines.len())));
@@ -605,5 +671,131 @@ mod tests {
         let (result, steps) = run(&catalogue(&["Star TSP100"]), FailAt::Never, "Star TSP100", 1);
         assert_eq!(result.unwrap().printer_name, "Star TSP100");
         assert_eq!(steps[0], Step::Open("Star TSP100".into()));
+    }
+
+    // --- kitchen tickets ----------------------------------------------------
+
+    fn ticket() -> KitchenTicketDoc {
+        KitchenTicketDoc {
+            business_name: "Dominos Pizza".into(),
+            branch_name: "Main Branch".into(),
+            staff_name: Some("Cashier".into()),
+            order_number: "260814-0001".into(),
+            order_type: "Dine-In".into(),
+            at: "8/14/2026, 11:20:00 AM".into(),
+            table_name: Some("Table 4".into()),
+            batch_label: Some("Round 2".into()),
+            customer_name: None,
+            order_note: None,
+            lines: vec![super::super::kitchen::KitchenLine {
+                name: "Margherita".into(),
+                qty: 1.0,
+                modifiers: vec![super::super::kitchen::KitchenModifier { name: "Small".into(), quantity: 1.0 }],
+                note: Some("No olives".into()),
+            }],
+            test: false,
+        }
+    }
+
+    fn run_ticket(
+        cat: &MockCatalogue,
+        fail_at: FailAt,
+        printer: &str,
+        copies: u32,
+        doc: &KitchenTicketDoc,
+        paper: PaperWidth,
+    ) -> (Result<PrintOutcome, PrintError>, Vec<Step>) {
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let s = Rc::clone(&steps);
+        let result = print_kitchen_ticket(
+            cat,
+            || MockDevice { fail_at, steps: Rc::clone(&s), next_job: 31 },
+            printer,
+            paper,
+            copies,
+            doc,
+        );
+        let recorded = steps.borrow().clone();
+        (result, recorded)
+    }
+
+    #[test]
+    fn a_kitchen_ticket_prints_through_the_same_spooler_sequence() {
+        let (result, steps) =
+            run_ticket(&catalogue(&["Xprinter XP-80"]), FailAt::Never, "Xprinter XP-80", 1, &ticket(), PaperWidth::Mm80);
+        let outcome = result.unwrap();
+        assert!(outcome.accepted);
+        assert_eq!(outcome.copies_accepted, 1);
+        assert_eq!(outcome.job_ids, vec![31]);
+        assert!(matches!(steps[0], Step::Open(_)));
+        assert!(matches!(steps[1], Step::StartDoc(_)));
+        assert!(matches!(steps[2], Step::Draw(_)));
+        assert_eq!(steps[3], Step::FinishDoc);
+        assert_eq!(steps[4], Step::Close);
+    }
+
+    #[test]
+    fn an_invalid_kitchen_ticket_never_opens_a_device() {
+        let mut empty = ticket();
+        empty.lines.clear();
+        let (result, steps) = run_ticket(&catalogue(&["P"]), FailAt::Never, "P", 1, &empty, PaperWidth::Mm80);
+        assert!(matches!(result, Err(PrintError::InvalidReceipt { .. })));
+        assert!(steps.is_empty(), "a refused ticket must not reach the printer");
+    }
+
+    #[test]
+    fn an_unknown_printer_refuses_a_kitchen_ticket_before_any_device_is_touched() {
+        let (result, steps) = run_ticket(&catalogue(&["P"]), FailAt::Never, "Ghost", 1, &ticket(), PaperWidth::Mm80);
+        assert!(matches!(result, Err(PrintError::PrinterNotFound { .. })));
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn a_kitchen_ticket_is_never_retried_automatically() {
+        let (result, steps) = run_ticket(&catalogue(&["P"]), FailAt::Draw, "P", 3, &ticket(), PaperWidth::Mm80);
+        assert!(result.is_err());
+        assert_eq!(steps.iter().filter(|s| matches!(s, Step::StartDoc(_))).count(), 1);
+        assert_eq!(*steps.last().unwrap(), Step::Close);
+    }
+
+    #[test]
+    fn every_document_names_itself_in_the_windows_queue() {
+        // The three titles must be distinct and must not be each other's. A real
+        // receipt titled "Breadee printer test" is a job an operator would
+        // cancel without a second thought.
+        let title_of = |steps: &[Step]| {
+            steps
+                .iter()
+                .find_map(|s| match s {
+                    Step::StartDoc(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .expect("a document was started")
+        };
+
+        let (_, steps) = run(&catalogue(&["P"]), FailAt::Never, "P", 1);
+        assert_eq!(title_of(&steps), TEST_DOCUMENT_TITLE);
+
+        let (_, steps) = run_receipt(&catalogue(&["P"]), FailAt::Never, "P", 1, &receipt(), PaperWidth::Mm80);
+        assert_eq!(title_of(&steps), RECEIPT_DOCUMENT_TITLE);
+
+        let (_, steps) = run_ticket(&catalogue(&["P"]), FailAt::Never, "P", 1, &ticket(), PaperWidth::Mm80);
+        assert_eq!(title_of(&steps), KITCHEN_DOCUMENT_TITLE);
+
+        let titles = [TEST_DOCUMENT_TITLE, RECEIPT_DOCUMENT_TITLE, KITCHEN_DOCUMENT_TITLE];
+        for (i, a) in titles.iter().enumerate() {
+            for b in titles.iter().skip(i + 1) {
+                assert_ne!(a, b, "two documents share a queue title");
+            }
+        }
+    }
+
+    #[test]
+    fn a_queue_title_carries_no_order_or_customer_data() {
+        // Queue titles outlive the job and are visible to anyone at the printer.
+        for title in [TEST_DOCUMENT_TITLE, RECEIPT_DOCUMENT_TITLE, KITCHEN_DOCUMENT_TITLE] {
+            assert!(!title.chars().any(|c| c.is_ascii_digit()), "{title:?} carries a number");
+            assert!(title.starts_with("Breadee "), "{title:?} should identify the app");
+        }
     }
 }
