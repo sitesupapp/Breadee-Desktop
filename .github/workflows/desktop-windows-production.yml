@@ -1,0 +1,190 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — Windows PRODUCTION installer
+#
+# PURPOSE: build the Windows Tauri installer (NSIS setup .exe) against the
+# PRODUCTION Supabase backend, and upload it as a build ARTIFACT.
+#
+# WHY THIS IS A SEPARATE FILE rather than a flag on the staging workflow.
+# The staging installer builds automatically on every push and PR to
+# desktop-staging. A production build must never be something that happens as a
+# side effect of ordinary work: it is triggered by hand, on a named commit, and
+# it reads its credentials from a protected GitHub Environment that can carry
+# reviewers and branch restrictions. Keeping the two files apart means there is
+# no shared step where a `production` input could be defaulted, inherited, or
+# forgotten into a staging run - or the reverse.
+#
+# WHAT MAKES IT PRODUCTION:
+#   * `environment: Production` - the URL and anon key come from that
+#     environment's secrets. They are not repository secrets, so a workflow
+#     without this line cannot read them.
+#   * VITE_APP_ENV: production - stated explicitly in both build steps.
+#     src/env.ts REFUSES to start on a missing or unrecognised value, so a
+#     forgotten label fails the build instead of shipping a mislabelled app.
+#
+# There is deliberately NO fallback to the repository's staging secrets. If the
+# Production environment is missing or empty, VITE_SUPABASE_URL arrives empty,
+# src/env.ts throws, and the build fails - which is the correct outcome. A
+# production installer that quietly pointed at staging would take real orders
+# into a test database.
+#
+# THIS DOES NOT PUBLISH. No GitHub Release, no tag, no upload beyond the
+# Actions artifact. The first production build stays owner-controlled until the
+# owner has proved login and data against it.
+#
+# The installer produced here is UNSIGNED - no code-signing certificate is
+# configured in this repository.
+# ---------------------------------------------------------------------------
+
+name: Desktop Windows Installer (PRODUCTION)
+
+on:
+  # Manual. A production build is always a deliberate act.
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 'Exact commit SHA to build (leave blank to use the selected ref)'
+        required: false
+        type: string
+  # ...and a push to ONE dedicated branch, which exists solely to trigger this.
+  #
+  # This is not a convenience. GitHub only offers workflow_dispatch for files
+  # present on the repository's DEFAULT branch, and this repo's default is
+  # `main`, which the desktop level work deliberately never touches - the
+  # staging installer workflow carries a comment about hitting the same wall.
+  # A push trigger is how this repository already solves it.
+  #
+  # `desktop-production-build` is nobody's working branch. Pushing to it is
+  # itself the deliberate act, so this stays as intentional as a dispatch while
+  # actually being reachable. What matters is preserved: a production installer
+  # can never fall out of ordinary work on desktop-staging or out of a PR.
+  push:
+    branches: [desktop-production-build]
+
+# Read-only token: this workflow has no release, tag, or publish step.
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-windows-production
+  cancel-in-progress: false
+
+jobs:
+  build-production-installer:
+    name: Build Windows production installer
+    runs-on: windows-latest
+    # The protected environment holding the production Supabase credentials.
+    # Removing this line does not fall back to staging - it removes the app's
+    # only source of a backend and the build fails in src/env.ts.
+    environment: Production
+
+    steps:
+      # 1. Get the EXACT source. A production installer is built from a named
+      #    commit, never from wherever a branch happens to point today.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit || github.ref }}
+
+      - name: Record the source commit
+        shell: bash
+        run: |
+          echo "Building production installer from: $(git rev-parse HEAD)"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      # 2. Refuse to build if the production environment is not actually
+      #    configured. Without this the failure still happens - src/env.ts
+      #    throws - but it happens minutes later inside a Rust build, reported
+      #    as a blank window rather than as a missing secret.
+      - name: Verify production environment is configured
+        shell: bash
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::The Production environment has no Supabase URL/key. Refusing to build."
+            exit 1
+          fi
+          # Print the host only - never the key, and never the full URL with it.
+          host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
+          echo "Production backend host: $host"
+          case "$VITE_SUPABASE_URL" in
+            *azjxprewycygsocusxjn*)
+              echo "::error::The Production environment is pointing at the STAGING project. Refusing to build."
+              exit 1 ;;
+          esac
+
+      - name: Build frontend
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: production
+
+      # 3. Prove the BUILT BUNDLE targets production before spending twenty
+      #    minutes packaging it. Vite inlines the URL into the bundle, so this
+      #    reads what was actually compiled rather than what we intended.
+      - name: Verify built bundle targets production
+        shell: bash
+        run: |
+          if grep -rl 'azjxprewycygsocusxjn' dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle references the STAGING project. Refusing to package."
+            exit 1
+          fi
+          if ! grep -rl 'cltlqfqormkhppmbvyrv' dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle does not reference the production project. Refusing to package."
+            exit 1
+          fi
+          echo "Bundle backend target verified: production."
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 4. tauri:build re-runs the frontend build via beforeBuildCommand, so the
+      #    same production env must be present here too.
+      - name: Build Tauri installer
+        run: npm run tauri:build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: production
+
+      # 5. Name the artifact for what it is, and record its hash so the owner can
+      #    prove the file they installed is the file this run produced.
+      - name: Name and hash the installer
+        shell: bash
+        run: |
+          src=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)
+          mkdir -p out
+          cp "$src" "out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe"
+          cd out
+          sha256sum Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe | tee SHA256SUMS.txt
+          ls -l Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe
+          echo "Built from commit: ${SOURCE_COMMIT}"
+
+      - name: Upload production installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: breadee-desktop-windows-installer-production
+          path: |
+            out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

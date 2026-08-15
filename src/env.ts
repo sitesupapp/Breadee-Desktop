@@ -5,7 +5,7 @@
 const raw = {
   SUPABASE_URL: (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim(),
   SUPABASE_ANON_KEY: (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim(),
-  APP_ENV: ((import.meta.env.VITE_APP_ENV as string | undefined) ?? "staging").trim(),
+  APP_ENV: (import.meta.env.VITE_APP_ENV as string | undefined)?.trim(),
   APP_PLATFORM: ((import.meta.env.VITE_APP_PLATFORM as string | undefined) ?? "desktop").trim(),
   APP_NAME: ((import.meta.env.VITE_APP_NAME as string | undefined) ?? "Breadee").trim(),
 };
@@ -15,6 +15,36 @@ if (!raw.SUPABASE_URL || !raw.SUPABASE_ANON_KEY) {
     "Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY. Set them as GitHub Actions secrets (staging values) or in a local .env.",
   );
 }
+
+// The environment label is DECLARED, never assumed.
+//
+// This used to read `VITE_APP_ENV ?? "staging"`. The backend could not silently
+// fall back - URL and key have always failed closed above - but the LABEL could,
+// and that is its own hazard: a production build whose variable was forgotten
+// would call itself staging, in its startup log, in `IS_PRODUCTION`, and to
+// anyone reading a support screenshot. A build that cannot say which backend it
+// was aimed at has no business starting, so an absent or unrecognised value is
+// now refused rather than guessed. Every build path states its environment
+// explicitly; there is no default because there is no safe default.
+const APP_ENVIRONMENTS = ["staging", "production"] as const;
+type AppEnv = (typeof APP_ENVIRONMENTS)[number];
+
+function requireAppEnv(value: string | undefined): AppEnv {
+  if (!value) {
+    throw new Error(
+      "Missing VITE_APP_ENV. Every build must declare its environment explicitly - " +
+        `one of: ${APP_ENVIRONMENTS.join(", ")}. There is no default.`,
+    );
+  }
+  if (!(APP_ENVIRONMENTS as readonly string[]).includes(value)) {
+    throw new Error(
+      `VITE_APP_ENV must be one of: ${APP_ENVIRONMENTS.join(", ")} (got "${value}").`,
+    );
+  }
+  return value as AppEnv;
+}
+
+const APP_ENV = requireAppEnv(raw.APP_ENV);
 
 // Validate + normalize the Supabase project URL.
 //
@@ -58,13 +88,13 @@ if (raw.SUPABASE_ANON_KEY.includes("service_role")) {
 }
 
 // Diagnostics: log ONLY the hostname + env label. Never log the key.
-console.info(`[env] Supabase host: ${new URL(SUPABASE_URL).hostname} · env: ${raw.APP_ENV}`);
+console.info(`[env] Supabase host: ${new URL(SUPABASE_URL).hostname} · env: ${APP_ENV}`);
 
 export const env = {
   SUPABASE_URL,
   SUPABASE_ANON_KEY: raw.SUPABASE_ANON_KEY,
-  APP_ENV: raw.APP_ENV as "staging" | "production",
+  APP_ENV,
   APP_PLATFORM: raw.APP_PLATFORM,
   APP_NAME: raw.APP_NAME,
-  IS_PRODUCTION: raw.APP_ENV === "production",
+  IS_PRODUCTION: APP_ENV === "production",
 };
