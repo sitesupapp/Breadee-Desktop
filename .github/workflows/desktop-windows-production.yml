@@ -38,13 +38,27 @@
 name: Desktop Windows Installer (PRODUCTION)
 
 on:
-  # Manual only. A production build is always a deliberate act.
+  # Manual. A production build is always a deliberate act.
   workflow_dispatch:
     inputs:
       source_commit:
         description: 'Exact commit SHA to build (leave blank to use the selected ref)'
         required: false
         type: string
+  # ...and a push to ONE dedicated branch, which exists solely to trigger this.
+  #
+  # This is not a convenience. GitHub only offers workflow_dispatch for files
+  # present on the repository's DEFAULT branch, and this repo's default is
+  # `main`, which the desktop level work deliberately never touches - the
+  # staging installer workflow carries a comment about hitting the same wall.
+  # A push trigger is how this repository already solves it.
+  #
+  # `desktop-production-build` is nobody's working branch. Pushing to it is
+  # itself the deliberate act, so this stays as intentional as a dispatch while
+  # actually being reachable. What matters is preserved: a production installer
+  # can never fall out of ordinary work on desktop-staging or out of a PR.
+  push:
+    branches: [desktop-production-build]
 
 # Read-only token: this workflow has no release, tag, or publish step.
 permissions:

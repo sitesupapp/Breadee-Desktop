@@ -109,10 +109,23 @@ test("a production build refuses to fall back to staging", () => {
   assert.match(production, new RegExp(`grep -rl '${PRODUCTION_REF}' dist/assets`));
 });
 
-test("a production build is deliberate and never automatic", () => {
-  const triggers = production.slice(production.indexOf("\non:"), production.indexOf("permissions:"));
+test("a production build is deliberate and never a side effect", () => {
+  // GitHub only offers workflow_dispatch for files on the DEFAULT branch, and
+  // this repo's default (`main`) is deliberately untouched by the desktop work -
+  // so dispatch alone would be unreachable. The push trigger is what makes it
+  // usable, and it is confined to ONE branch that is nobody's working branch.
+  // The property being defended is not "no push trigger", it is "a production
+  // installer can never fall out of ordinary work".
+  const triggers = yamlCode(production).slice(
+    yamlCode(production).indexOf("\non:"),
+    yamlCode(production).indexOf("permissions:"),
+  );
   assert.match(triggers, /workflow_dispatch/);
-  assert.equal(/^\s*push:/m.test(triggers), false, "a push must not produce a production installer");
+  const branches = [...triggers.matchAll(/branches:\s*\[([^\]]*)\]/g)].map((m) => m[1].trim());
+  assert.deepEqual(branches, ["desktop-production-build"], "exactly one dedicated trigger branch");
+  for (const ordinary of ["desktop-staging", "main"]) {
+    assert.equal(triggers.includes(ordinary), false, `${ordinary} must never build production`);
+  }
   assert.equal(/^\s*pull_request:/m.test(triggers), false, "a PR must not produce a production installer");
   // Built from a named commit, not from wherever a branch points today.
   assert.match(production, /ref: \$\{\{ inputs\.source_commit \|\| github\.ref \}\}/);
