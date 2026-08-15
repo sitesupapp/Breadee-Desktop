@@ -41,6 +41,10 @@ export type PosStatusBarProps = {
   shiftOrders: ShiftOpenOrder[];
   selectedOrderId: string | null;
   onSelectOrder: (orderId: string) => void;
+  /** Open the full Orders workspace. */
+  onOpenOrders: () => void;
+  /** Open delivery management for this shift. */
+  onOpenDelivery: () => void;
 };
 
 function useClock(): Date {
@@ -126,7 +130,18 @@ export function PosStatusBar(props: PosStatusBarProps) {
             </TopBarPopover>
           )}
 
-          {/* SHIFT ORDERS - the count and the list are one collection. */}
+          {/* DELIVERY - management for this shift's delivery orders. */}
+          <Button variant="ghost" onClick={props.onOpenDelivery} title="Delivery orders on this shift">
+            <span aria-hidden className="mr-1">
+              🛵
+            </span>
+            Delivery
+          </Button>
+
+          {/* SHIFT ORDERS - the count and the list are one collection.
+              The badge counts the ACTIVE shift, which is what the quick list
+              shows; the full workspace behind "See all orders" can widen to the
+              whole day, and says so rather than changing what N means. */}
           <TopBarPopover
             open={ordersOpen}
             onOpenChange={setOrdersOpen}
@@ -138,7 +153,19 @@ export function PosStatusBar(props: PosStatusBarProps) {
               </Button>
             }
           >
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">This shift</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">This shift</p>
+              <Button
+                variant="ghost"
+                className="px-2 py-1 text-[11px]"
+                onClick={() => {
+                  setOrdersOpen(false);
+                  props.onOpenOrders();
+                }}
+              >
+                See all orders
+              </Button>
+            </div>
             {props.shiftOrders.length === 0 ? (
               <p className="mt-2 py-3 text-center text-[12px] text-sub">No orders on this shift yet.</p>
             ) : (

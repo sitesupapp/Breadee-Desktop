@@ -24,6 +24,7 @@ export const NATIVE_COMMANDS = [
   "print_test_page",
   "print_receipt",
   "print_kitchen_ticket",
+  "print_report",
 ] as const;
 export type NativeCommand = (typeof NATIVE_COMMANDS)[number];
 
@@ -581,6 +582,62 @@ export async function printKitchenTicket(input: {
         paperWidth: input.paperWidth,
         copies: input.copies,
         ticket: toKitchenTicketDoc(input.ticket),
+      },
+    });
+    return { ok: true, value: outcome };
+  } catch (e) {
+    return { ok: false, error: toNativeError(e) };
+  }
+}
+
+// --- shift reports (POS operations) ------------------------------------------
+
+/** One line of the report, as Rust receives it. Mirrors `ReportLine`. */
+export type ReportDocLine = {
+  label: string;
+  value?: string | null;
+  kind?: "heading" | "rule" | "total" | "body";
+};
+
+/** The report as Rust receives it. Mirrors `ReportDoc` in printing/report.rs. */
+export type ReportDoc = { title: string; lines: ReportDocLine[] };
+
+/**
+ * Print an end-of-shift report.
+ *
+ * ONE DOCUMENT for the whole shift, never one page per order. The lines are
+ * composed by the caller from figures it has already displayed, so the paper
+ * and the screen cannot disagree - and this function reads no shift, no order
+ * and no payment, so a printer failure cannot reach the close.
+ */
+export async function printReport(input: {
+  printerName: string;
+  paperWidth: PaperWidth;
+  copies: number;
+  report: ReportDoc;
+}): Promise<NativeResult<PrintOutcome>> {
+  if (!isNativeAvailable()) {
+    return { ok: false, error: { code: "native_unavailable", message: MESSAGES.native_unavailable } };
+  }
+  const invalid = validateCopies(input.copies);
+  if (invalid) return { ok: false, error: invalid };
+  if (!isPaperWidth(input.paperWidth)) {
+    return { ok: false, error: { code: "invalid_paper_width", message: MESSAGES.invalid_paper_width } };
+  }
+  try {
+    const outcome = await invokeNative<PrintOutcome>("print_report", {
+      request: {
+        printerName: input.printerName,
+        paperWidth: input.paperWidth,
+        copies: input.copies,
+        report: {
+          title: input.report.title,
+          lines: input.report.lines.map((l) => ({
+            label: l.label,
+            value: l.value ?? null,
+            kind: l.kind ?? "body",
+          })),
+        },
       },
     });
     return { ok: true, value: outcome };

@@ -25,6 +25,7 @@ import {
   orderRouteLabel,
   type ShiftOpenOrder,
 } from "@/lib/pos/shiftOrderSummary";
+import { reversalActionFor, reversalLabel } from "@/lib/pos/orderActions";
 
 export function CurrentOrderPanel(props: {
   order: ShiftOpenOrder | null;
@@ -41,6 +42,14 @@ export function CurrentOrderPanel(props: {
   tableName?: string | null;
   onStep: (direction: 1 | -1) => void;
   onPresentReceipt: (receipt: ReceiptData) => void;
+  /**
+   * Start the reversal. The panel decides WHETHER one is offered and the
+   * action's NAME; the dialog owns the reason and the mutation, so destructive
+   * logic exists once.
+   */
+  onReverse?: (order: ShiftOpenOrder) => void;
+  /** Refused reversal, in the gate's own words. Shown instead of a dead button. */
+  reverseGateReason?: string | null;
 }) {
   const [preparing, setPreparing] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
@@ -59,6 +68,8 @@ export function CurrentOrderPanel(props: {
 
   const currency = (order?.currency ?? props.fallbackCurrency) as CurrencyCode;
   const arrowsDisabled = props.count <= 1;
+  // Null for a terminal order - nothing further can be done to it.
+  const reversal = order ? reversalActionFor(order) : null;
 
   /**
    * Build the selected order's receipt from the SERVER's rows and present it.
@@ -179,7 +190,20 @@ export function CurrentOrderPanel(props: {
       )}
 
       {order && (
-        <div className="shrink-0 border-t border-line p-3">
+        <div className="shrink-0 space-y-2 border-t border-line p-3">
+          {/* The reversal sits ABOVE Print and is visually distinct, because it
+              is the only destructive action on this panel. It appears only when
+              the order's own state permits one - a voided, cancelled or
+              refunded order offers nothing, rather than a button the server
+              would refuse. */}
+          {reversal && props.onReverse && (
+            <Button variant="danger" className="w-full" onClick={() => props.onReverse?.(order)}>
+              {reversalLabel(reversal)}
+            </Button>
+          )}
+          {reversal && props.reverseGateReason && (
+            <p className="rounded-lg bg-slate-100 px-2 py-1 text-[11px] text-sub">{props.reverseGateReason}</p>
+          )}
           <Button variant="ghost" className="w-full" disabled={preparing} onClick={() => void print()}>
             {preparing ? "Preparing..." : "Print"}
           </Button>

@@ -77,6 +77,8 @@ export type ShiftOpenOrder = {
   order_type: "takeaway" | "dine_in" | "delivery" | string;
   status: string;
   payment_status: string;
+  /** Stored only once a payment exists - never inferred for an unpaid order. */
+  payment_method: string | null;
   subtotal: number | null;
   discount_amount: number;
   total_amount: number | null;
@@ -85,6 +87,11 @@ export type ShiftOpenOrder = {
   customer_id: string | null;
   /** Delivery only, resolved separately: the caller's name, nothing else. */
   customer_name: string | null;
+  /** Delivery only, and only where the POS already shows it. */
+  customer_phone: string | null;
+  /** Who rang it up. Resolved to a display name where readable. */
+  cashier_user_id: string | null;
+  staff_name: string | null;
   notes: string | null;
   created_at: string | null;
 };
@@ -129,61 +136,162 @@ export async function loadShiftOrders(input: {
   const { data, error } = await supabase
     .from("pos_orders")
     .select(
-      "id, order_number, order_type, status, payment_status, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, notes, created_at",
+      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at",
     )
     .eq("tenant_id", input.tenantId)
     .eq("shift_id", input.shiftId)
     .order("created_at", { ascending: true })
     .limit(200);
   if (error) throw new Error(error.message);
+  return await hydrate(((data ?? []) as unknown[]).map(parseOrderRow).filter((o): o is ShiftOpenOrder => o !== null));
+}
 
-  const rows = ((data ?? []) as unknown[]).map((raw) => {
-    const r = asRecord(raw);
-    const id = strOrNull(r.id);
-    if (!id) return null;
-    const currency = strOrNull(r.primary_currency_snapshot);
-    return {
-      id,
-      order_number: strOrNull(r.order_number),
-      order_type: str(r.order_type, "takeaway"),
-      status: str(r.status),
-      payment_status: str(r.payment_status, "unpaid"),
-      subtotal: numOrNull(r.subtotal),
-      discount_amount: num(r.discount_amount),
-      total_amount: numOrNull(r.total_amount),
-      currency: currency === "LBP" ? "LBP" : currency === "USD" ? "USD" : null,
-      table_id: strOrNull(r.table_id),
-      customer_id: strOrNull(r.customer_id),
-      customer_name: null,
-      notes: strOrNull(r.notes),
-      created_at: strOrNull(r.created_at),
-    } as ShiftOpenOrder;
-  });
-  const orders = rows.filter((o): o is ShiftOpenOrder => o !== null);
+/** One row of `pos_orders`, defensively. A malformed row is dropped, not guessed. */
+function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
+  const r = asRecord(raw);
+  const id = strOrNull(r.id);
+  if (!id) return null;
+  const currency = strOrNull(r.primary_currency_snapshot);
+  return {
+    id,
+    order_number: strOrNull(r.order_number),
+    order_type: str(r.order_type, "takeaway"),
+    status: str(r.status),
+    payment_status: str(r.payment_status, "unpaid"),
+    payment_method: strOrNull(r.payment_method),
+    subtotal: numOrNull(r.subtotal),
+    discount_amount: num(r.discount_amount),
+    total_amount: numOrNull(r.total_amount),
+    currency: currency === "LBP" ? "LBP" : currency === "USD" ? "USD" : null,
+    table_id: strOrNull(r.table_id),
+    customer_id: strOrNull(r.customer_id),
+    customer_name: null,
+    customer_phone: null,
+    cashier_user_id: strOrNull(r.cashier_user_id),
+    staff_name: null,
+    notes: strOrNull(r.notes),
+    created_at: strOrNull(r.created_at),
+  };
+}
 
-  // Delivery rows may name their caller - it is already on the POS surface for
-  // those orders. One read for all of them; a failure here degrades to numbers
-  // only, because a summary that cannot resolve a name is still a summary.
+/**
+ * Fill in the names behind the ids - the customer for delivery rows, and the
+ * cashier for every row. Two reads for the whole page rather than per order.
+ *
+ * Both are best-effort by design: a lookup that fails leaves the field null, so
+ * the column is blank rather than wrong. A summary that cannot resolve a name is
+ * still a correct summary; a summary showing the WRONG name is not.
+ */
+async function hydrate(orders: ShiftOpenOrder[]): Promise<ShiftOpenOrder[]> {
+  if (orders.length === 0) return orders;
+  const { supabase } = await import("@/lib/supabase");
+
   const customerIds = [...new Set(orders.map((o) => o.customer_id).filter((c): c is string => !!c))];
   if (customerIds.length > 0) {
     try {
-      const res = await supabase.from("pos_customers").select("id, name").in("id", customerIds);
+      const res = await supabase.from("pos_customers").select("id, name, phone").in("id", customerIds);
+      if (!res.error) {
+        const byId = new Map(
+          ((res.data ?? []) as unknown[]).map((raw) => {
+            const r = asRecord(raw);
+            return [str(r.id), { name: strOrNull(r.name), phone: strOrNull(r.phone) }] as const;
+          }),
+        );
+        for (const o of orders) {
+          if (!o.customer_id) continue;
+          const found = byId.get(o.customer_id);
+          o.customer_name = found?.name ?? null;
+          o.customer_phone = found?.phone ?? null;
+        }
+      }
+    } catch {
+      /* names are a nicety; the list works without them */
+    }
+  }
+
+  const staffIds = [...new Set(orders.map((o) => o.cashier_user_id).filter((c): c is string => !!c))];
+  if (staffIds.length > 0) {
+    try {
+      const res = await supabase.from("profiles").select("id, full_name").in("id", staffIds);
       if (!res.error) {
         const names = new Map(
           ((res.data ?? []) as unknown[]).map((raw) => {
             const r = asRecord(raw);
-            return [str(r.id), strOrNull(r.name)] as const;
+            return [str(r.id), strOrNull(r.full_name)] as const;
           }),
         );
         for (const o of orders) {
-          if (o.customer_id) o.customer_name = names.get(o.customer_id) ?? null;
+          if (o.cashier_user_id) o.staff_name = names.get(o.cashier_user_id) ?? null;
         }
       }
     } catch {
-      /* names are a nicety; the panel works without them */
+      /* a missing staff name is a blank column, never a wrong one */
     }
   }
   return orders;
+}
+
+/**
+ * A local calendar day as `YYYY-MM-DD`, which is what a date input speaks.
+ *
+ * Deliberately built from the LOCAL date parts rather than `toISOString()`: a
+ * shift that runs past midnight belongs to the day the cashier says it does,
+ * and slicing a UTC string would move orders across that line for anyone east
+ * or west of UTC.
+ */
+export function toDayKey(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Walk the calendar by whole days, letting `Date` handle month/year rollover. */
+export function shiftDay(dayKey: string, deltaDays: number): string {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const next = new Date(y, (m ?? 1) - 1, d ?? 1);
+  next.setDate(next.getDate() + deltaDays);
+  return toDayKey(next);
+}
+
+/**
+ * Every order this terminal can read for one calendar DAY.
+ *
+ * The Orders workspace's widest scope. Deliberately branch-scoped as well as
+ * tenant-scoped: RLS already limits what comes back, and asking narrowly means
+ * a cashier reviewing "the day" sees their own branch rather than a list they
+ * have to mentally filter.
+ *
+ * Day boundaries are LOCAL, computed from the calendar date the operator picked
+ * rather than from UTC - a shift that ends after midnight belongs to the day the
+ * cashier says it does, and guessing a timezone here would put orders on the
+ * wrong side of that line.
+ */
+export async function loadOrdersForDay(input: {
+  tenantId: string | null;
+  branchId: string | null;
+  /** `YYYY-MM-DD`, as the date input speaks it. */
+  day: string;
+}): Promise<ShiftOpenOrder[]> {
+  if (!input.tenantId || !input.day) return [];
+  const [y, m, d] = input.day.split("-").map(Number);
+  if (!y || !m || !d) return [];
+  const from = new Date(y, m - 1, d, 0, 0, 0, 0);
+  const to = new Date(y, m - 1, d + 1, 0, 0, 0, 0);
+
+  const { supabase } = await import("@/lib/supabase");
+  let query = supabase
+    .from("pos_orders")
+    .select(
+      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at",
+    )
+    .eq("tenant_id", input.tenantId)
+    .gte("created_at", from.toISOString())
+    .lt("created_at", to.toISOString())
+    .order("created_at", { ascending: true })
+    .limit(500);
+  if (input.branchId) query = query.eq("branch_id", input.branchId);
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return await hydrate(((data ?? []) as unknown[]).map(parseOrderRow).filter((o): o is ShiftOpenOrder => o !== null));
 }
 
 // ----------------------------------------------------------- navigation ------

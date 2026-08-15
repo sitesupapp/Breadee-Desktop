@@ -46,7 +46,10 @@ pub fn run() {
             // well as from a button, which changes the duplicate risk and not
             // the transaction-safety argument - the frontend bounds it to one
             // attempt per successful submission with no retry.
-            printing::print_kitchen_ticket
+            printing::print_kitchen_ticket,
+            // POS operations. The end-of-shift report - one document for the
+            // whole shift, composed from figures already shown on screen.
+            printing::print_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running Breadee desktop application");

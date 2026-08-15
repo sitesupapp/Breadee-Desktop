@@ -11,6 +11,8 @@ import { Badge, Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { differenceLabel } from "@/lib/pos/shifts";
+import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { ShiftExpected, ShiftReport } from "@/types/pos";
 
 export function OpenShiftDialog({
@@ -207,26 +209,52 @@ export function EndShiftDialog({
   );
 }
 
+/**
+ * The end-of-shift report.
+ *
+ * EVERY MONEY FIGURE IS THE SERVER'S. `pos_end_shift` computed gross,
+ * discounts, net, expected, counted, the difference and `by_item`, and nothing
+ * here recomputes any of them - least of all by re-converting LBP at today's
+ * rate, which would make a reprint of last week's shift disagree with the
+ * receipts that shift produced.
+ *
+ * What the desktop ADDS is the operational detail the RPC does not return: the
+ * routes the orders came from, and what was reversed. Those are derived from
+ * the shift's own orders and never netted off sales - a voided order is shown
+ * because it happened, not counted because it did not.
+ */
 export function ShiftReportDialog({
   report,
   currency,
+  shiftOrders = [],
+  onPrint,
   onClose,
 }: {
   report: ShiftReport | null;
   currency: CurrencyCode;
+  /** The shift's orders, for the route and reversal detail. */
+  shiftOrders?: ShiftOpenOrder[];
+  /** Print the whole report as ONE document. Absent outside the packaged app. */
+  onPrint?: (detail: ShiftReportDetail) => void;
   onClose: () => void;
 }) {
   if (!report) return null;
   const diff = differenceLabel(report.difference);
+  const detail = buildShiftReportDetail(shiftOrders, report.by_item);
   return (
     <Modal
       open
-      title="Shift closed"
+      title="End of shift report"
       subtitle="Sent for manager review - it is not approved yet."
       size="md"
       onClose={onClose}
       footer={
-        <div className="flex justify-end">
+        <div className="flex items-center justify-end gap-2">
+          {onPrint && (
+            <Button variant="ghost" size="lg" onClick={() => onPrint(detail)}>
+              Print
+            </Button>
+          )}
           <Button size="lg" onClick={onClose}>
             Done
           </Button>
@@ -258,6 +286,52 @@ export function ShiftReportDialog({
           <SummaryRow label="Refunded" value={String(report.refunded_count)} />
         </div>
       </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {/* Payments, by what was actually taken. LBP appears only when some
+            was, and in its own units - never converted for display. */}
+        <div className="rounded-xl border border-line p-3">
+          <p className="mb-2 text-sm font-bold text-ink">Payments</p>
+          <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, currency)} />
+          <SummaryRow label="Cash USD" value={formatMoney(report.cash_usd, "USD")} />
+          {report.cash_lbp_original > 0 && (
+            <SummaryRow label="Cash LBP" value={formatMoney(report.cash_lbp_original, "LBP")} />
+          )}
+        </div>
+
+        {/* Routes and reversals: derived from the shift's orders, which is
+            detail `pos_end_shift` does not return. Reversed money is shown for
+            visibility and is NOT part of net sales. */}
+        <div className="rounded-xl border border-line p-3">
+          <p className="mb-2 text-sm font-bold text-ink">By route</p>
+          {detail.routes.length === 0 && <p className="text-xs text-sub">No orders on this shift.</p>}
+          {detail.routes.map((r) => (
+            <SummaryRow
+              key={r.route}
+              label={`${r.route === "dine_in" ? "Dine-In" : r.route === "takeaway" ? "Takeaway" : r.route === "delivery" ? "Delivery" : r.route} x${r.orders}`}
+              value={formatMoney(r.total, currency)}
+            />
+          ))}
+          {(detail.reversals.voided > 0 || detail.reversals.cancelled > 0 || detail.reversals.refunded > 0) && (
+            <div className="mt-2 border-t border-line pt-2">
+              <SummaryRow
+                label="Reversed orders"
+                value={String(detail.reversals.voided + detail.reversals.cancelled + detail.reversals.refunded)}
+                tone="amber"
+              />
+              <p className="text-[11px] text-sub">
+                {formatMoney(detail.reversals.amount, currency)} not counted as sales
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 text-xs sm:grid-cols-2">
+        <SummaryRow label="Opened" value={report.opened_at ? new Date(report.opened_at).toLocaleString() : "-"} />
+        <SummaryRow label="Closed" value={report.closed_at ? new Date(report.closed_at).toLocaleString() : "-"} />
+      </div>
+      {report.notes && <p className="mt-2 text-xs italic text-sub">Note: {report.notes}</p>}
 
       {report.by_item.length > 0 && (
         <div className="mt-3 rounded-xl border border-line p-3">

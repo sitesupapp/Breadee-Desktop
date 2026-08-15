@@ -531,8 +531,15 @@ test("the invoke handler exposes exactly the printing commands, and no others", 
   // the property is that the IPC surface is an explicit, reviewable LIST that
   // both sides agree on, and that nothing outside printing is on it. POS v1
   // added `print_kitchen_ticket` deliberately and in its own edit to lib.rs,
-  // which is exactly the visibility this assertion exists to force.
-  const expected = ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"];
+  // and the operations revision added `print_report` the same way, which is
+  // exactly the visibility this assertion exists to force.
+  const expected = [
+    "list_printers",
+    "print_test_page",
+    "print_receipt",
+    "print_kitchen_ticket",
+    "print_report",
+  ];
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
   assert.deepEqual(commands, expected);

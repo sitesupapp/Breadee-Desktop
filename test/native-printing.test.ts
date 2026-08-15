@@ -82,15 +82,16 @@ const configured = (over: Partial<ServerPrinter> = {}): ServerPrinter => ({
 
 // --- the native client -------------------------------------------------------
 
-// RETARGETED BY LEVEL 3E-B (two -> three, `print_receipt`) and by POS v1
-// (three -> four, `print_kitchen_ticket`). The number is a guard against a
-// command arriving unnoticed, so it moves by exactly the one that was reviewed -
-// and the whole list is still asserted, not just the count. The Rust side pins
-// the identical list in `EXPOSED_COMMANDS`, so the two ends cannot drift.
-test("the client knows exactly four commands", () => {
+// RETARGETED BY LEVEL 3E-B (two -> three, `print_receipt`), by POS v1
+// (three -> four, `print_kitchen_ticket`) and by the operations revision
+// (four -> five, `print_report`). The number is a guard against a command
+// arriving unnoticed, so it moves by exactly the one that was reviewed - and the
+// whole list is still asserted, not just the count. The Rust side pins the
+// identical list in `EXPOSED_COMMANDS`, so the two ends cannot drift.
+test("the client knows exactly five commands", () => {
   assert.deepEqual(
     [...NATIVE_COMMANDS],
-    ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"],
+    ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket", "print_report"],
   );
 });
 
@@ -462,29 +463,55 @@ test("the receipt preview prints receipts, not the diagnostic page, and is gated
   assert.match(preview, /<GatedButton/);
 });
 
-test("no POS workspace reaches native printing", () => {
+// RETARGETED by the operations revision. The rule this enforces has always been
+// "a workspace never prints a RECEIPT behind the cashier's back" - every receipt
+// and every kitchen ticket goes through the preview modal, which is what makes a
+// misprint visible before it reaches paper.
+//
+// The end-of-shift report is the one reviewed exception, and it does not weaken
+// the rule: the report dialog the cashier is reading IS the preview, there is no
+// order to re-check, and it is reachable only from a button on that dialog. So
+// PosWorkspace may reach `printReport` and nothing else; the receipt, ticket and
+// test-page entry points stay off-limits to all three workspaces.
+test("no POS workspace prints a receipt or ticket without a preview", () => {
   for (const file of [
     ["screens", "pos", "PosWorkspace.tsx"],
     ["screens", "pos", "DeliveryWorkspace.tsx"],
     ["screens", "pos", "DineInWorkspace.tsx"],
   ]) {
+    const name = file.join("/");
     const src = stripJsxComments(readSrc(...file));
-    assert.equal(src.includes("nativePrinting"), false, `${file.join("/")} must not print natively yet`);
-    assert.equal(src.includes("print_test_page"), false);
+    for (const forbidden of ["printReceipt", "printKitchenTicket", "print_test_page", "printTestPage"]) {
+      assert.equal(src.includes(forbidden), false, `${name} must not reach ${forbidden} directly`);
+    }
+    if (name.endsWith("PosWorkspace.tsx")) {
+      // The exception, pinned to its exact import so a second one cannot be
+      // added on the same line without this assertion changing in review.
+      assert.match(src, /import \{ isNativeAvailable, listPrinters, printReport \} from "@\/lib\/nativePrinting"/);
+    } else {
+      assert.equal(src.includes("nativePrinting"), false, `${name} must not print natively`);
+    }
   }
 });
 
 // --- the native boundary -----------------------------------------------------
 
-// RETARGETED BY LEVEL 3E-B (two -> three) and by POS v1 (three -> four). Still
-// an exact list, which is the whole point: a fifth command cannot arrive without
-// this line changing in review. `print_kitchen_ticket` is the POS v1 addition
-// and is the first command reachable from an automatic path rather than only
-// from a button - see printing/mod.rs for why that does not widen the surface.
-test("the invoke handler exposes exactly the four printing commands", () => {
+// RETARGETED BY LEVEL 3E-B (two -> three), by POS v1 (three -> four) and by the
+// operations revision (four -> five). Still an exact list, which is the whole
+// point: a sixth command cannot arrive without this line changing in review.
+// `print_report` is the operations addition; like the others it takes a document
+// and no device control - see printing/mod.rs for why that does not widen the
+// surface.
+test("the invoke handler exposes exactly the five printing commands", () => {
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
-  assert.deepEqual(commands, ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"]);
+  assert.deepEqual(commands, [
+    "list_printers",
+    "print_test_page",
+    "print_receipt",
+    "print_kitchen_ticket",
+    "print_report",
+  ]);
 });
 
 test("the capability grants no shell, filesystem, network or process access", () => {

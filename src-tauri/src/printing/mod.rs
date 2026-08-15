@@ -17,6 +17,7 @@
 pub mod kitchen;
 pub mod page;
 pub mod receipt;
+pub mod report;
 pub mod service;
 pub mod types;
 
@@ -25,6 +26,7 @@ pub mod windows_spooler;
 
 use kitchen::KitchenTicketDoc;
 use receipt::ReceiptDoc;
+use report::ReportDoc;
 use serde::{Deserialize, Serialize};
 use types::{InstalledPrinter, PaperWidth, PrintError, PrintOutcome, TestPrintRequest};
 
@@ -181,13 +183,53 @@ pub fn print_kitchen_ticket(request: KitchenPrintRequest) -> Result<PrintOutcome
     }
 }
 
+/// An end-of-shift report to print.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportPrintRequest {
+    pub printer_name: String,
+    pub paper_width: PaperWidth,
+    pub copies: u8,
+    pub report: ReportDoc,
+}
+
+/// Print an end-of-shift report.
+///
+/// Reads no shift and no order - the caller hands over lines it has already
+/// shown on screen, so the paper cannot disagree with the report the operator
+/// just read and approved. A print failure cannot affect the shift close.
+#[tauri::command]
+pub fn print_report(request: ReportPrintRequest) -> Result<PrintOutcome, PrintError> {
+    #[cfg(target_os = "windows")]
+    {
+        service::print_report(
+            &windows_spooler::WindowsPrinterCatalogue,
+            windows_spooler::WindowsPrintDevice::new,
+            &request.printer_name,
+            request.paper_width,
+            request.copies as u32,
+            &request.report,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &request;
+        Err(PrintError::UnsupportedPlatform)
+    }
+}
+
 /// Every command this module exposes.
 ///
 /// Kept as data so a test can assert the IPC surface has not quietly grown -
 /// the whole safety argument for this work is that it is four commands wide,
 /// and each one was added deliberately in its own phase.
-pub const EXPOSED_COMMANDS: &[&str] =
-    &["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"];
+pub const EXPOSED_COMMANDS: &[&str] = &[
+    "list_printers",
+    "print_test_page",
+    "print_receipt",
+    "print_kitchen_ticket",
+    "print_report",
+];
 
 /// The preset rolls, kept as data so a test can pin them.
 ///
@@ -205,11 +247,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ipc_surface_is_exactly_four_commands() {
+    fn the_ipc_surface_is_exactly_five_commands() {
         assert_eq!(
             EXPOSED_COMMANDS,
-            &["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"]
+            &["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket", "print_report"]
         );
+    }
+
+    #[test]
+    fn a_report_request_carries_no_device_control() {
+        let json = r#"{
+            "printerName":"Xprinter XP-80","paperWidth":"custom:72","copies":1,
+            "report":{"title":"END OF SHIFT REPORT",
+                      "lines":[{"label":"Orders","value":"7"},{"label":"","kind":"rule"}]}
+        }"#;
+        let req: ReportPrintRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.printer_name, "Xprinter XP-80");
+        assert_eq!(req.paper_width, PaperWidth::CustomMm(72));
+        let round_trip = serde_json::to_value(&req).unwrap();
+        let mut keys: Vec<&str> = round_trip.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["copies", "paperWidth", "printerName", "report"]);
     }
 
     #[test]
