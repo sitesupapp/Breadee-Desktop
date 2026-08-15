@@ -24,6 +24,7 @@ import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
+import { OrderSummaryPanel } from "@/components/pos/OrderSummaryPanel";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
@@ -50,7 +51,7 @@ import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
-import { restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
+import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
 import type { CartLine, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, SubmitOrderResult } from "@/types/pos";
 
@@ -145,6 +146,25 @@ function PosWorkspaceInner() {
       dispose = d;
     });
     return () => dispose?.();
+  }, []);
+
+  // Fullscreen label state. Initialised from the PLATFORM and refreshed from
+  // the platform after every toggle - toggleFullscreen() returns the re-read
+  // native state, so a denied or failed toggle leaves the label truthful
+  // rather than flipping a fiction. Toggling is a pure window operation: no
+  // cart, shift, order or printer state is anywhere near this path.
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void getFullscreen().then((f) => {
+      if (live) setFullscreen(f);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const doToggleFullscreen = useCallback(() => {
+    void toggleFullscreen().then(setFullscreen);
   }, []);
 
   // --- pending sync badge ----------------------------------------------------
@@ -732,7 +752,7 @@ function PosWorkspaceInner() {
     routeDelivery: () => deliveryGate.allowed && setMode("delivery"),
     openShift: () => !shiftId && setOpenShiftOpen(true),
     endShift: () => shiftId && void startEndShift(),
-    fullscreen: () => void toggleFullscreen(),
+    fullscreen: doToggleFullscreen,
   });
 
   // Menu + buffer bindings. Live whenever the MENU is on screen - Takeaway, or
@@ -845,7 +865,8 @@ function PosWorkspaceInner() {
       <PosShell
         routes={routes}
         onExit={() => navigate("/dashboard")}
-        onToggleFullscreen={() => void toggleFullscreen()}
+        onToggleFullscreen={doToggleFullscreen}
+        isFullscreen={fullscreen}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
         cartTitle={deliveryActive ? "Customer" : dineInActive ? "Table bill" : "Current order"}
@@ -896,13 +917,32 @@ function PosWorkspaceInner() {
         /* One menu implementation, used by Takeaway, Dine-in Add Items AND
            Delivery Add Items. A second menu would be a second place for prices
            to drift. */
-        work={(layout) =>
-          deliveryActive && !addingToDelivery ? (
-            /* Customer half of Delivery: no menu grid is reachable from here. */
-            delivery.work(layout)
-          ) : dineInActive && dineIn.view === "map" ? (
-            dineIn.work(layout)
-          ) : (
+        work={(layout) => (
+          <div className="relative flex h-full min-h-0 flex-col">
+            {/* Order Summary: one pill over the top-right of the work area, in
+                every mode. It reads the ACTIVE shift's open orders and nothing
+                else, and its Print hands the store-owned receipt preview a
+                server-built snapshot - deliberately receiptStore.present, NOT
+                presentReceipt, so browsing the summary can never auto-print. */}
+            <div className="pointer-events-none absolute right-0 top-0 z-20">
+              <div className="pointer-events-auto">
+                <OrderSummaryPanel
+                  tenantId={tenantId}
+                  shiftId={shiftId}
+                  tenantName={pos.tenantName}
+                  branchName={pos.branch.name}
+                  staffName={pos.userName}
+                  fallbackCurrency={currency}
+                  onPresentReceipt={(receipt) => receiptStore.present(receipt)}
+                />
+              </div>
+            </div>
+            {deliveryActive && !addingToDelivery ? (
+              /* Customer half of Delivery: no menu grid is reachable from here. */
+              delivery.work(layout)
+            ) : dineInActive && dineIn.view === "map" ? (
+              dineIn.work(layout)
+            ) : (
             <>
               <div className="mb-3 flex shrink-0 items-center gap-2">
                 {addingToTable && (
@@ -970,8 +1010,9 @@ function PosWorkspaceInner() {
                   />
                 ))}
             </>
-          )
-        }
+            )}
+          </div>
+        )}
         cart={(layout) =>
           deliveryActive ? (
             /* The side panel is Delivery's own: the customer, then the cart,

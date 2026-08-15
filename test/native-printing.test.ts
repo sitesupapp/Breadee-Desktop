@@ -488,8 +488,24 @@ test("the invoke handler exposes exactly the four printing commands", () => {
 });
 
 test("the capability grants no shell, filesystem, network or process access", () => {
+  // RETARGETED for the fullscreen fix. This pinned the list at exactly
+  // ["core:default","opener:default"] - and that pin was doing its job: the
+  // packaged Full Screen button silently did nothing on a customer PC precisely
+  // BECAUSE `core:default` excludes window setters, so `setFullscreen` was
+  // denied and the catch swallowed it. Two narrow window permissions are now
+  // granted deliberately. The enduring property is unchanged and still asserted
+  // below: nothing dangerous is reachable, and the list stays exact so a third
+  // permission cannot arrive unnoticed.
   const parsed = JSON.parse(capabilities) as { permissions: string[] };
-  assert.deepEqual(parsed.permissions, ["core:default", "opener:default"]);
+  assert.deepEqual(parsed.permissions, [
+    "core:default",
+    "opener:default",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen",
+  ]);
+  // Window access is fullscreen ONLY - no move, resize, close or create.
+  const windowPerms = parsed.permissions.filter((p) => p.startsWith("core:window:"));
+  assert.deepEqual(windowPerms.sort(), ["core:window:allow-is-fullscreen", "core:window:allow-set-fullscreen"]);
   for (const forbidden of ["shell", "fs:", "http", "process", "dialog", "path:"]) {
     assert.equal(
       parsed.permissions.some((p) => p.includes(forbidden)),

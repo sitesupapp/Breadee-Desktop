@@ -1052,13 +1052,23 @@ export function useDeliveryWorkspace(input: {
             at: new Date().toLocaleString(),
             paid: true,
             method: money?.method ?? confirm.method,
-            currency: (money?.currency_code ?? input.currency) as CurrencyCode,
+            // THE TRANSACTION SNAPSHOT, never the payment response. This line
+            // used to read `money?.currency_code`, which is the currency the
+            // customer was CHARGED in - so a USD order tendered in LBP rendered
+            // its USD figures labelled "LBP" on the first open (real repro:
+            // order 260814-0009, $43.00 shown as "43 LBP"). Reopening went
+            // through the historical path, which reads the order's own
+            // `primary_currency_snapshot` and was correct - the first open and
+            // the reopen must be financially identical, so both now read the
+            // same stored snapshot. The tender currency has its own field two
+            // lines down, where "Charged in LBP" belongs.
+            currency: (settled!.currency ?? input.currency) as CurrencyCode,
             lines,
             // Server figures win over anything computed here.
             subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
             discount: money?.discount ?? 0,
             total: money?.amount ?? settled!.total_amount ?? 0,
-            tenderCurrency: confirm.currency,
+            tenderCurrency: (money?.currency_code ?? confirm.currency) as CurrencyCode,
             tenderTotal: money?.original_amount ?? null,
             tendered: confirm.tendered,
             change:

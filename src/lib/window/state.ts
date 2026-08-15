@@ -118,16 +118,51 @@ export async function trackWindowState(): Promise<() => void> {
   }
 }
 
-/** Toggle fullscreen (kiosk). Falls back to the browser Fullscreen API outside Tauri. */
+/**
+ * The window's ACTUAL fullscreen state, asked of the platform.
+ *
+ * Native state is the source of truth - a React boolean drifts the moment the
+ * user presses Esc, F11, or the platform changes state underneath the app.
+ * Callers refresh their label from this rather than remembering what they last
+ * requested.
+ */
+export async function getFullscreen(): Promise<boolean> {
+  if (isTauri()) {
+    try {
+      return await getCurrentWindow().isFullscreen();
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return document.fullscreenElement !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Toggle fullscreen (kiosk). Falls back to the browser Fullscreen API outside
+ * Tauri. Returns the state the window is ACTUALLY in afterwards - re-read from
+ * the platform, not assumed from the request.
+ *
+ * WHY THE RE-READ EXISTS: the packaged customer-PC build shipped with a
+ * capability file that did not grant `window:allow-set-fullscreen`, so
+ * `setFullscreen` was denied, the catch swallowed the denial, and the button
+ * "did nothing" while the code looked correct. The permission is now granted in
+ * `capabilities/default.json`, and returning the re-read state (rather than
+ * `next`) means any future silent denial at least leaves the button LABEL
+ * telling the truth instead of toggling a fiction.
+ */
 export async function toggleFullscreen(): Promise<boolean> {
   if (isTauri()) {
     try {
       const win = getCurrentWindow();
       const next = !(await win.isFullscreen());
       await win.setFullscreen(next);
-      return next;
+      return await win.isFullscreen();
     } catch {
-      return false;
+      return getFullscreen();
     }
   }
   try {
@@ -138,6 +173,6 @@ export async function toggleFullscreen(): Promise<boolean> {
     await document.documentElement.requestFullscreen();
     return true;
   } catch {
-    return false;
+    return getFullscreen();
   }
 }

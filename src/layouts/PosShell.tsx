@@ -67,6 +67,13 @@ export type PosShellProps = {
   onCartDrawerChange: (open: boolean) => void;
   onExit: () => void;
   onToggleFullscreen: () => void;
+  /**
+   * The window's ACTUAL fullscreen state, owned by the workspace and refreshed
+   * from the platform after every toggle. The shell renders it and never
+   * guesses - a label that says "Full Screen" while the window is already
+   * fullscreen is the button "doing nothing" all over again, one layer up.
+   */
+  isFullscreen?: boolean;
 };
 
 export function PosShell(props: PosShellProps) {
@@ -165,9 +172,9 @@ export function PosShell(props: PosShellProps) {
             variant="ghost"
             className={cn("w-full", !layout.railExpanded && "px-0")}
             onClick={props.onToggleFullscreen}
-            title="Fullscreen (F11)"
+            title={props.isFullscreen ? "Exit full screen (F11)" : "Full screen (F11)"}
           >
-            {layout.railExpanded ? "Fullscreen" : "[ ]"}
+            {layout.railExpanded ? (props.isFullscreen ? "Exit Full Screen" : "Full Screen") : props.isFullscreen ? "[x]" : "[ ]"}
           </Button>
           <Button
             variant="ghost"

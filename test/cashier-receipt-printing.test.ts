@@ -539,9 +539,24 @@ test("the invoke handler exposes exactly the printing commands, and no others", 
   assert.deepEqual([...NATIVE_COMMANDS], expected);
 });
 
-test("no new capability was granted", () => {
+test("printing still needs no capability of its own", () => {
+  // RETARGETED. This asserted the whole capability list was unchanged, which
+  // was the right guard while receipts were the only thing being added -
+  // printing commands go through `invoke_handler` and need no permission entry,
+  // and that is still true. The list has since grown by two WINDOW permissions
+  // for the fullscreen fix, which have nothing to do with printing. What this
+  // file cares about is that no print/shell/fs surface was opened; the exact
+  // list is pinned in `native-printing.test.ts`.
   const parsed = JSON.parse(capabilities) as { permissions: string[] };
-  assert.deepEqual(parsed.permissions, ["core:default", "opener:default"]);
+  for (const p of parsed.permissions) {
+    assert.ok(
+      p === "core:default" || p === "opener:default" || p.startsWith("core:window:"),
+      `unexpected capability: ${p}`,
+    );
+  }
+  for (const forbidden of ["print", "shell", "fs:", "http", "process"]) {
+    assert.equal(parsed.permissions.some((p) => p.includes(forbidden)), false, `${forbidden} must not be granted`);
+  }
 });
 
 test("invoke is still reached only through the one adapter", () => {
