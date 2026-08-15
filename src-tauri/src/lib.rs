@@ -27,6 +27,20 @@ pub fn run() {
         focus_existing_window(app);
     }));
 
+    // Update delivery. Desktop only, and deliberately INERT until the frontend
+    // asks: registering the plugin gives the app the ABILITY to check, download
+    // and install a signed update - it does not schedule one, and nothing here
+    // runs on startup. The decision to check, and the decision to restart, both
+    // live in the frontend where the cashier can see them.
+    //
+    // `process` is registered alongside it for exactly one reason: relaunching
+    // after an update has installed. Tauri's updater installs the new version
+    // but cannot restart the app for you.
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+
     builder
         .plugin(tauri_plugin_opener::init())
         // THE APP'S ONLY IPC SURFACE (Level 3E-A onwards).

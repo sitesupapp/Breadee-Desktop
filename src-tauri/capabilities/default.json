@@ -1,12 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window. Core, the opener plugin, the printing commands registered through invoke_handler, and exactly two window permissions - nothing else. `core:default` deliberately excludes window SETTERS, which is why the Full Screen button silently did nothing in the packaged build: `setFullscreen` was denied and the catch swallowed it. The two grants below are the narrow fix - fullscreen state read and write for the kiosk toggle. Still no shell, no filesystem, no HTTP, no process, and no other window mutation.",
+  "description": "Default capability for the main window. Core, the opener plugin, the printing commands registered through invoke_handler, two window permissions, and the three updater/relaunch permissions - nothing else. `core:default` deliberately excludes window SETTERS, which is why the Full Screen button silently did nothing in the packaged build: `setFullscreen` was denied and the catch swallowed it. The two window grants are the narrow fix - fullscreen state read and write for the kiosk toggle. The updater grants are `check` and `download-and-install` plus `process:allow-restart`; note what is NOT granted - `process:allow-exit`, which would let the frontend kill the app outright rather than restart it into the new version. Still no shell, no filesystem, no HTTP, and no other window or process control.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "opener:default",
     "core:window:allow-is-fullscreen",
-    "core:window:allow-set-fullscreen"
+    "core:window:allow-set-fullscreen",
+    "updater:allow-check",
+    "updater:allow-download-and-install",
+    "process:allow-restart"
   ]
 }

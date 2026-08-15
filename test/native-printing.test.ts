@@ -514,26 +514,40 @@ test("the invoke handler exposes exactly the five printing commands", () => {
   ]);
 });
 
-test("the capability grants no shell, filesystem, network or process access", () => {
-  // RETARGETED for the fullscreen fix. This pinned the list at exactly
-  // ["core:default","opener:default"] - and that pin was doing its job: the
-  // packaged Full Screen button silently did nothing on a customer PC precisely
-  // BECAUSE `core:default` excludes window setters, so `setFullscreen` was
-  // denied and the catch swallowed it. Two narrow window permissions are now
-  // granted deliberately. The enduring property is unchanged and still asserted
-  // below: nothing dangerous is reachable, and the list stays exact so a third
-  // permission cannot arrive unnoticed.
+test("the capability grants no shell, filesystem, network or arbitrary process access", () => {
+  // RETARGETED TWICE, and the pin has earned its keep both times.
+  //
+  // First for the fullscreen fix: this pinned exactly
+  // ["core:default","opener:default"], and the packaged Full Screen button
+  // silently did nothing on a customer PC precisely BECAUSE `core:default`
+  // excludes window setters - `setFullscreen` was denied and the catch swallowed
+  // it. Two narrow window permissions were granted deliberately.
+  //
+  // Now for the auto-updater: three more, each load-bearing. The list stays
+  // EXACT so a fourth cannot arrive unnoticed.
   const parsed = JSON.parse(capabilities) as { permissions: string[] };
   assert.deepEqual(parsed.permissions, [
     "core:default",
     "opener:default",
     "core:window:allow-is-fullscreen",
     "core:window:allow-set-fullscreen",
+    "updater:allow-check",
+    "updater:allow-download-and-install",
+    "process:allow-restart",
   ]);
   // Window access is fullscreen ONLY - no move, resize, close or create.
   const windowPerms = parsed.permissions.filter((p) => p.startsWith("core:window:"));
   assert.deepEqual(windowPerms.sort(), ["core:window:allow-is-fullscreen", "core:window:allow-set-fullscreen"]);
-  for (const forbidden of ["shell", "fs:", "http", "process", "dialog", "path:"]) {
+  // Process access is RESTART only. `process:allow-exit` would let the frontend
+  // kill the till outright rather than relaunch it into the new version, which
+  // is a different and much worse capability.
+  const processPerms = parsed.permissions.filter((p) => p.startsWith("process:"));
+  assert.deepEqual(processPerms, ["process:allow-restart"]);
+  // Updater access is check + install. Nothing lets it choose its own endpoint;
+  // that is compiled in from tauri.conf.json.
+  const updaterPerms = parsed.permissions.filter((p) => p.startsWith("updater:"));
+  assert.deepEqual(updaterPerms.sort(), ["updater:allow-check", "updater:allow-download-and-install"]);
+  for (const forbidden of ["shell", "fs:", "http", "dialog", "path:"]) {
     assert.equal(
       parsed.permissions.some((p) => p.includes(forbidden)),
       false,

@@ -1,6 +1,6 @@
 [package]
 name = "breadee-desktop"
-version = "0.1.0"
+version = "1.0.0"
 description = "Breadee Desktop"
 authors = ["Breadee"]
 edition = "2021"
@@ -22,8 +22,15 @@ serde_json = "1"
 # single-instance guard in `src/lib.rs`. Scoped by target rather than added to
 # the shared list because the crate is itself compiled out on android/ios, so a
 # mobile build would fail to resolve it.
+#
+# The updater and `process` are scoped the same way and for the same reason. The
+# updater replaces the installed application, which is a desktop concept only;
+# `process` is here solely so the app can relaunch itself once an update has been
+# installed - Tauri's updater installs but does not restart.
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # Native printing (Level 3E-A), Windows only.
 #

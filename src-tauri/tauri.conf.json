@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Breadee",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "app.breadee.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,6 +40,17 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3Nzk5OUQ4MjFGODJGRDcKUldUWEwvZ2gySmw1dHhzVmRVUENEdmVUTFFJNGpJSkFTQSs5RSsxdERRZUR4SFlEQVBOcmFNcGkK",
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

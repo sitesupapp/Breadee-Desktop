@@ -554,15 +554,29 @@ test("printing still needs no capability of its own", () => {
   // for the fullscreen fix, which have nothing to do with printing. What this
   // file cares about is that no print/shell/fs surface was opened; the exact
   // list is pinned in `native-printing.test.ts`.
+  //
+  // RETARGETED AGAIN for the auto-updater, which added updater + process:restart.
+  // Those have nothing to do with printing either - and the point stands: after
+  // three separate features touched this list, PRINTING still holds no
+  // capability, because it never needed one.
   const parsed = JSON.parse(capabilities) as { permissions: string[] };
   for (const p of parsed.permissions) {
     assert.ok(
-      p === "core:default" || p === "opener:default" || p.startsWith("core:window:"),
+      p === "core:default" ||
+        p === "opener:default" ||
+        p.startsWith("core:window:") ||
+        p.startsWith("updater:") ||
+        p === "process:allow-restart",
       `unexpected capability: ${p}`,
     );
   }
-  for (const forbidden of ["print", "shell", "fs:", "http", "process"]) {
+  // `print` is the one that matters here, and it is still absent.
+  for (const forbidden of ["print", "shell", "fs:", "http"]) {
     assert.equal(parsed.permissions.some((p) => p.includes(forbidden)), false, `${forbidden} must not be granted`);
+  }
+  // Process access, if any, is restart and never exit.
+  for (const p of parsed.permissions.filter((x) => x.startsWith("process:"))) {
+    assert.equal(p, "process:allow-restart", "only restart may be granted");
   }
 });
 

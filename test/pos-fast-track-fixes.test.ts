@@ -308,9 +308,16 @@ test("the capability now grants exactly the two fullscreen permissions", () => {
   assert.ok(parsed.permissions.includes("opener:default"));
   const windowPerms = parsed.permissions.filter((p) => p.includes("window"));
   assert.deepEqual(windowPerms.sort(), ["core:window:allow-is-fullscreen", "core:window:allow-set-fullscreen"]);
-  for (const forbidden of ["shell", "fs:", "http", "process", "dialog", "path:"]) {
+  // RETARGETED for the auto-updater, which grants `process:allow-restart` so the
+  // app can relaunch into an installed update. `process` therefore moves out of
+  // the blanket-forbidden list and gets a precise assertion instead: restart is
+  // permitted, exit is not. Everything else stays forbidden.
+  for (const forbidden of ["shell", "fs:", "http", "dialog", "path:"]) {
     assert.equal(parsed.permissions.some((p) => p.includes(forbidden)), false, `${forbidden} must not be granted`);
   }
+  const processPerms = parsed.permissions.filter((p) => p.startsWith("process:"));
+  assert.ok(processPerms.every((p) => p === "process:allow-restart"), "only restart may be granted");
+  assert.equal(parsed.permissions.includes("process:allow-exit"), false, "exit must never be granted");
 });
 
 test("the toggle reports the state the window is ACTUALLY in", () => {
