@@ -152,11 +152,20 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # 3. Build + sign. `createUpdaterArtifacts` is on in tauri.conf.json, so
-      #    this produces the NSIS installer, the updater artifact and its `.sig`.
+      # 3. Build + sign.
+      #
+      #    `--config src-tauri/tauri.release.conf.json` is what turns updater
+      #    artifacts ON, and it is deliberately NOT on in the base config: Tauri
+      #    demands a private signing key from any build that produces updater
+      #    artifacts, so leaving it enabled globally made the ordinary STAGING
+      #    installer fail with "a public key has been found, but no private key".
+      #    Signing belongs to the one workflow that holds the key, so only this
+      #    build asks for it - and staging never needs the production key at all,
+      #    which is a better boundary than the one that broke.
+      #
       #    The password variable must be PRESENT even though the key has none.
       - name: Build and sign the production app
-        run: npm run tauri:build
+        run: npm run tauri:build -- --config tauri.release.conf.json
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}

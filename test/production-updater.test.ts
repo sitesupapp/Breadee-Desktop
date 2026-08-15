@@ -156,9 +156,33 @@ test("the signing key is never committed anywhere", () => {
   }
 });
 
-test("updater artifacts are actually produced", () => {
-  assert.equal(conf.bundle.createUpdaterArtifacts, true);
+test("only the signing workflow produces updater artifacts", () => {
+  // Tauri demands a private signing key from ANY build that creates updater
+  // artifacts. Enabling this in the base config therefore broke the ordinary
+  // staging installer - "a public key has been found, but no private key" -
+  // because staging has no key and must never be given the production one.
+  //
+  // So artifacts are off by default and switched on by the release build alone,
+  // which is the workflow that actually holds the key. Staging keeps building,
+  // and the production key stays in one place.
+  assert.equal(conf.bundle.createUpdaterArtifacts, false, "must be off in the base config");
+  const override = JSON.parse(read("src-tauri", "tauri.release.conf.json"));
+  assert.equal(override.bundle.createUpdaterArtifacts, true, "and on in the release override");
+  assert.match(releaseCode, /npm run tauri:build -- --config tauri\.release\.conf\.json/);
+  // The override does one thing. It must not become a second place where the
+  // endpoint or the key can be redefined.
+  assert.deepEqual(Object.keys(override.bundle), ["createUpdaterArtifacts"]);
+  assert.equal("plugins" in override, false, "the override must not redefine the updater");
   assert.equal(conf.plugins.updater.windows.installMode, "passive");
+});
+
+test("the staging installer never asks for the production signing key", () => {
+  const installer = read(".github", "workflows", "desktop-windows-installer.yml");
+  const productionInstaller = read(".github", "workflows", "desktop-windows-production.yml");
+  for (const [name, src] of [["staging installer", installer], ["production installer", productionInstaller]] as const) {
+    assert.equal(src.includes("TAURI_SIGNING_PRIVATE_KEY"), false, `${name} must not need the key`);
+    assert.equal(src.includes("tauri.release.conf.json"), false, `${name} must not create updater artifacts`);
+  }
 });
 
 // --- the release workflow -----------------------------------------------------

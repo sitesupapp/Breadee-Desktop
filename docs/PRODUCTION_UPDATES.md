@@ -63,6 +63,13 @@ Updates are signed with the Breadee production updater key. The public half is
 compiled into the app; an artifact the workflow did not sign will not install,
 because the client refuses it.
 
+Updater artifacts are produced **only** by the release workflow, via
+`--config tauri.release.conf.json`. They are off in the base config on purpose:
+Tauri demands a private signing key from any build that creates them, so leaving
+it on globally made the ordinary staging installer fail with *"a public key has
+been found, but no private key"*. Signing belongs to the one workflow that holds
+the key — staging never needs it.
+
 - **Public key** — in `src-tauri/tauri.conf.json`. Not a secret.
 - **Private key** — GitHub → Production environment → `TAURI_SIGNING_PRIVATE_KEY`.
   Never in the repository, never in a build log, never in an artifact.
