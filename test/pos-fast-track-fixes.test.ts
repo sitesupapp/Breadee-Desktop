@@ -261,7 +261,11 @@ test("the closed top bar never renders the drawer amount", () => {
 
 test("the amount lives only inside the opened popover", () => {
   const body = statusBar.slice(statusBar.indexOf("Current drawer"));
-  assert.match(body, /formatMoney\(props\.cashBox\.expected_cash, props\.currency\)/);
+  // RETARGETED by the LBP drawer hotfix: the amount is now formatted with
+  // CASH_CONTRACT_CURRENCY rather than the tenant's primary currency, because
+  // `expected_cash` is USD. The property THIS test defends is privacy - that the
+  // figure exists only inside the opened popover - and that is unchanged.
+  assert.match(body, /formatMoney\(props\.cashBox\.expected_cash, CASH_CONTRACT_CURRENCY\)/);
   // Rendered under `props.open`, so closing removes it from the DOM entirely
   // rather than hiding it behind a style.
   const popover = stripJsxComments(readSrc("components", "pos", "TopBarPopover.tsx"));

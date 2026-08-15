@@ -19,7 +19,7 @@
 // Reversed orders are excluded from sold quantities and reported separately,
 // because a voided item was never sold.
 
-import type { CurrencyCode } from "@/lib/currency";
+import { CASH_CONTRACT_CURRENCY, type CurrencyCode } from "@/lib/currency";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 /** Statuses whose money never counted as a sale. */
@@ -200,15 +200,18 @@ export function buildShiftReportLines(input: {
   lines.push({ label: "Not counted as sales", value: fmt(detail.reversals.amount, currency) });
 
   lines.push({ label: "", kind: "rule" }, { label: "PAYMENTS", kind: "heading" });
-  lines.push({ label: "Cash sales", value: fmt(money.cashSales, currency) });
+  lines.push({ label: "Cash sales", value: fmt(money.cashSales, CASH_CONTRACT_CURRENCY) });
   lines.push({ label: "Cash USD", value: fmt(money.cashUsd, "USD") });
   if (money.cashLbpOriginal > 0) lines.push({ label: "Cash LBP", value: fmt(money.cashLbpOriginal, "LBP") });
 
-  lines.push({ label: "", kind: "rule" }, { label: "DRAWER", kind: "heading" });
-  lines.push({ label: "Opening cash", value: fmt(money.openingCash, currency) });
-  lines.push({ label: "Expected", value: fmt(money.expectedCash, currency) });
-  lines.push({ label: "Counted", value: fmt(money.actualCash, currency) });
-  lines.push({ label: "Difference", value: fmt(money.difference, currency), kind: "total" });
+  // The drawer is USD even for an LBP tenant - see CASH_CONTRACT_CURRENCY. The
+  // heading says so, because a printed report has no tooltip to explain why the
+  // drawer figure is three orders of magnitude below the sales figure above it.
+  lines.push({ label: "", kind: "rule" }, { label: `DRAWER (${CASH_CONTRACT_CURRENCY})`, kind: "heading" });
+  lines.push({ label: "Opening cash", value: fmt(money.openingCash, CASH_CONTRACT_CURRENCY) });
+  lines.push({ label: "Expected", value: fmt(money.expectedCash, CASH_CONTRACT_CURRENCY) });
+  lines.push({ label: "Counted", value: fmt(money.actualCash, CASH_CONTRACT_CURRENCY) });
+  lines.push({ label: "Difference", value: fmt(money.difference, CASH_CONTRACT_CURRENCY), kind: "total" });
 
   if (detail.items.length > 0) {
     lines.push({ label: "", kind: "rule" }, { label: "SALES BY ITEM", kind: "heading" });

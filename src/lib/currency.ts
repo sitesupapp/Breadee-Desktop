@@ -7,6 +7,39 @@
 
 export type CurrencyCode = "USD" | "LBP";
 
+/**
+ * The currency the POS **cash / drawer** contract is denominated in: USD, always,
+ * whatever the tenant's primary currency is.
+ *
+ * THIS IS THE SERVER'S CONTRACT, NOT A DISPLAY CHOICE. Every cash figure the POS
+ * RPCs exchange is a USD-normalised aggregate:
+ *
+ *   `_pos_shift_cash.net_cash`   sum(pos_payments.amount) - refunds, and
+ *                                `pos_payments.amount` is USD
+ *   `pos_shift_expected`         `expected` = opening_cash_amount + net_cash
+ *   `pos_cash_box_shift`         `expected_cash`, `total_usd` - same figure
+ *   `pos_end_shift`              compares `actual_cash_counted` against that
+ *                                expected and stores the difference
+ *
+ * `pos_end_shift` subtracts the counted cash from the expected cash directly, so
+ * the number the cashier types IS compared against USD. Sending anything else -
+ * or labelling the field with the tenant's primary currency and letting them
+ * type LBP - records a difference that is wrong by the exchange rate.
+ *
+ * WHY THIS CONSTANT RATHER THAN A CONVERSION. Production showed a drawer reading
+ * "114 LBP" for a shift that had taken 10,220,000 LBP: 113.56 USD rendered with
+ * the LBP formatter, which rounds to whole units. The fix is to say what the
+ * number IS, not to convert it - converting a historical aggregate at today's
+ * rate would re-value settled money, which is the one thing a POS must never do.
+ *
+ * The SALES figures are different and are deliberately NOT covered by this:
+ * gross, discounts and net are sums of `pos_orders.total_amount`, which is in the
+ * order's own currency. An LBP tenant's end-of-shift report therefore reads sales
+ * in LBP and cash in USD. That mix is the existing product contract; rendering it
+ * accurately is this constant's whole purpose.
+ */
+export const CASH_CONTRACT_CURRENCY: CurrencyCode = "USD";
+
 /** Transaction-boundary precision for a normalized USD amount. */
 export const USD_STORE_DP = 4;
 

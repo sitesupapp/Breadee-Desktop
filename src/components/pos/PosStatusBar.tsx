@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import { Badge, Button, StatusDot, cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { CASH_CONTRACT_CURRENCY, formatMoney, type CurrencyCode } from "@/lib/currency";
 import { elapsedSince } from "@/lib/pos/shifts";
 import { TopBarPopover } from "@/components/pos/TopBarPopover";
 import { orderLifecycleLabel, orderLifecycleTone, orderRouteLabel, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -121,11 +121,15 @@ export function PosStatusBar(props: PosStatusBarProps) {
               }
             >
               <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">Current drawer</p>
+              {/* USD, not the tenant's primary currency. `expected_cash` is a
+                  USD-normalised aggregate; rendering it with the LBP formatter
+                  turned 113.56 into "114 LBP" on a shift that had taken
+                  10,220,000 LBP. See CASH_CONTRACT_CURRENCY. */}
               <p className="mt-1 text-xl font-extrabold text-ink">
-                {formatMoney(props.cashBox.expected_cash, props.currency)}
+                {formatMoney(props.cashBox.expected_cash, CASH_CONTRACT_CURRENCY)}
               </p>
               <p className="mt-1 text-[11px] text-sub">
-                Expected cash: opening float plus cash taken this shift. Read from the server.
+                Expected cash: opening float plus cash taken this shift. Read from the server, in USD.
               </p>
             </TopBarPopover>
           )}
