@@ -175,11 +175,14 @@ export function CurrentOrderPanel(props: {
                 <span>-{formatMoney(order.discount_amount, currency)}</span>
               </div>
             )}
+            {/* `formatMoney` already names the currency - "200,000 LBP" for LBP,
+                and the "$" sigil for USD - so the code span that used to sit here
+                printed it twice: "200,000 LBP LBP". Every other total in the app
+                (cart, orders table, shift report) renders bare formatMoney; this
+                was the only place that appended a second label. */}
             <div className="flex justify-between text-sm font-extrabold text-ink">
               <span>Total</span>
-              <span>
-                {formatMoney(order.total_amount ?? 0, currency)} <span className="text-[11px] text-sub">{currency}</span>
-              </span>
+              <span>{formatMoney(order.total_amount ?? 0, currency)}</span>
             </div>
           </div>
 

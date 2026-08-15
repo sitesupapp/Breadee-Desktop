@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { Modal } from "@/components/overlays";
 import { Badge, Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
-import { formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
+import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { differenceLabel } from "@/lib/pos/shifts";
 import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -70,8 +70,12 @@ export function OpenShiftDialog({
         Count the cash already in the drawer and enter it as the opening float. Leave it empty for an empty drawer. The
         float is added to the expected cash at end of shift.
       </p>
+      {/* USD, whatever the tenant's primary currency is. The server adds this
+          straight onto a USD cash aggregate, so a float typed as LBP would be
+          recorded as that many DOLLARS. Decimals must stay available for the
+          same reason - they are cents here, not an LBP artefact. */}
       <label className="mb-1 block text-sm font-bold text-ink" htmlFor="opening-float">
-        Opening float ({currency})
+        Opening float ({CASH_CONTRACT_CURRENCY})
       </label>
       <Input
         id="opening-float"
@@ -82,7 +86,7 @@ export function OpenShiftDialog({
         placeholder="0.00"
         className="text-right text-lg font-bold"
       />
-      <NumericKeypad className="mt-3" value={float} onChange={setFloat} allowDecimal={currency === "USD"} />
+      <NumericKeypad className="mt-3" value={float} onChange={setFloat} allowDecimal />
     </Modal>
   );
 }
@@ -152,12 +156,15 @@ export function EndShiftDialog({
             <p className="mb-2 text-sm font-bold text-ink">Expected in the drawer</p>
             {expected ? (
               <>
-                <SummaryRow label="Opening float" value={formatMoney(expected.opening_cash, currency)} />
-                <SummaryRow label="Cash taken" value={formatMoney(expected.cash_sales, currency)} />
+                {/* All USD - see CASH_CONTRACT_CURRENCY. `expected` is what
+                    pos_end_shift will subtract the counted cash from, so these
+                    three and the input below must share one unit. */}
+                <SummaryRow label="Opening float" value={formatMoney(expected.opening_cash, CASH_CONTRACT_CURRENCY)} />
+                <SummaryRow label="Cash taken" value={formatMoney(expected.cash_sales, CASH_CONTRACT_CURRENCY)} />
                 <div className="mt-1 flex items-baseline justify-between border-t border-line pt-2">
                   <span className="text-sm font-bold text-ink">Expected</span>
                   <span className="text-xl font-extrabold tabular-nums text-ink">
-                    {formatMoney(expected.expected, currency)}
+                    {formatMoney(expected.expected, CASH_CONTRACT_CURRENCY)}
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-sub">
@@ -181,7 +188,7 @@ export function EndShiftDialog({
               <div className="flex items-center justify-between">
                 <span className="text-sm text-sub">Difference (preview)</span>
                 <Badge tone={previewLabel.tone}>
-                  {previewLabel.label} {formatMoney(Math.abs(preview ?? 0), currency)}
+                  {previewLabel.label} {formatMoney(Math.abs(preview ?? 0), CASH_CONTRACT_CURRENCY)}
                 </Badge>
               </div>
               <p className="mt-1 text-xs text-sub">The server recalculates this when the shift closes.</p>
@@ -190,8 +197,11 @@ export function EndShiftDialog({
         </div>
 
         <div>
+          {/* USD. pos_end_shift does `expected - actual_cash_counted` with no
+              conversion, so a figure typed in LBP would produce a difference
+              wrong by the exchange rate. Decimals stay enabled: they are cents. */}
           <label className="mb-1 block text-sm font-bold text-ink" htmlFor="actual-cash">
-            Counted cash ({currency})
+            Counted cash ({CASH_CONTRACT_CURRENCY})
           </label>
           <Input
             id="actual-cash"
@@ -202,7 +212,7 @@ export function EndShiftDialog({
             placeholder="0.00"
             className="text-right text-lg font-bold"
           />
-          <NumericKeypad className="mt-3" value={actual} onChange={setActual} allowDecimal={currency === "USD"} />
+          <NumericKeypad className="mt-3" value={actual} onChange={setActual} allowDecimal />
         </div>
       </div>
     </Modal>
@@ -264,20 +274,25 @@ export function ShiftReportDialog({
       <div className="mb-3 flex items-center gap-2">
         <Badge tone="amber">Pending manager review</Badge>
         <Badge tone={diff.tone}>
-          {diff.label} {formatMoney(Math.abs(report.difference), currency)}
+          {diff.label} {formatMoney(Math.abs(report.difference), CASH_CONTRACT_CURRENCY)}
         </Badge>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
+        {/* CASH is USD and SALES are in the order currency. That is not an
+            inconsistency to tidy away - `cash_sales` sums USD payment amounts
+            while `net_sales` sums pos_orders.total_amount in the order's own
+            currency. Labelling both with one currency is what produced
+            "114 LBP" against 10,220,000 LBP of orders. */}
         <div className="rounded-xl border border-line p-3">
-          <p className="mb-2 text-sm font-bold text-ink">Cash</p>
-          <SummaryRow label="Opening float" value={formatMoney(report.opening_cash, currency)} />
-          <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, currency)} />
-          <SummaryRow label="Expected" value={formatMoney(report.expected_cash, currency)} />
-          <SummaryRow label="Counted" value={formatMoney(report.actual_cash, currency)} />
+          <p className="mb-2 text-sm font-bold text-ink">Cash ({CASH_CONTRACT_CURRENCY})</p>
+          <SummaryRow label="Opening float" value={formatMoney(report.opening_cash, CASH_CONTRACT_CURRENCY)} />
+          <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, CASH_CONTRACT_CURRENCY)} />
+          <SummaryRow label="Expected" value={formatMoney(report.expected_cash, CASH_CONTRACT_CURRENCY)} />
+          <SummaryRow label="Counted" value={formatMoney(report.actual_cash, CASH_CONTRACT_CURRENCY)} />
         </div>
         <div className="rounded-xl border border-line p-3">
-          <p className="mb-2 text-sm font-bold text-ink">Sales</p>
+          <p className="mb-2 text-sm font-bold text-ink">Sales ({currency})</p>
           <SummaryRow label="Orders" value={String(report.orders)} />
           <SummaryRow label="Gross" value={formatMoney(report.gross_sales, currency)} />
           <SummaryRow label="Discounts" value={formatMoney(report.discounts, currency)} />
@@ -292,7 +307,7 @@ export function ShiftReportDialog({
             was, and in its own units - never converted for display. */}
         <div className="rounded-xl border border-line p-3">
           <p className="mb-2 text-sm font-bold text-ink">Payments</p>
-          <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, currency)} />
+          <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, CASH_CONTRACT_CURRENCY)} />
           <SummaryRow label="Cash USD" value={formatMoney(report.cash_usd, "USD")} />
           {report.cash_lbp_original > 0 && (
             <SummaryRow label="Cash LBP" value={formatMoney(report.cash_lbp_original, "LBP")} />
