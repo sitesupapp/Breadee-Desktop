@@ -17,8 +17,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import {
-  loadShiftOpenOrders,
+  isOpenOrder,
+  loadShiftOrders,
   nextOrderIndex,
+  orderLifecycleLabel,
+  orderLifecycleTone,
   orderRouteLabel,
   previousOrderIndex,
   stableSelectionIndex,
@@ -33,7 +36,9 @@ const root = dirname(fileURLToPath(import.meta.url));
 const readSrc = (...p: string[]) => readFileSync(join(root, "..", "src", ...p), "utf8");
 
 const summaryLib = stripComments(readSrc("lib", "pos", "shiftOrderSummary.ts"));
-const panel = stripJsxComments(readSrc("components", "pos", "OrderSummaryPanel.tsx"));
+const panel = stripJsxComments(readSrc("components", "pos", "CurrentOrderPanel.tsx"));
+const statusBar = stripJsxComments(readSrc("components", "pos", "PosStatusBar.tsx"));
+const ordersStore = stripComments(readSrc("state", "shiftOrders.ts"));
 const workspace = stripJsxComments(readSrc("screens", "pos", "PosWorkspace.tsx"));
 const windowState = stripComments(readSrc("lib", "window", "state.ts"));
 const shell = stripJsxComments(readSrc("layouts", "PosShell.tsx"));
@@ -62,19 +67,43 @@ const order = (over: Partial<ShiftOpenOrder> = {}): ShiftOpenOrder => ({
 
 test("no active shift means an empty list and no network at all", async () => {
   // The guard returns before the supabase import - which is why this resolves
-  // in Node, where no client exists to import.
-  assert.deepEqual(await loadShiftOpenOrders({ tenantId: "t1", shiftId: null }), []);
-  assert.deepEqual(await loadShiftOpenOrders({ tenantId: null, shiftId: "s1" }), []);
+  // in Node, where no client exists to import. Nothing historical is borrowed.
+  assert.deepEqual(await loadShiftOrders({ tenantId: "t1", shiftId: null }), []);
+  assert.deepEqual(await loadShiftOrders({ tenantId: null, shiftId: "s1" }), []);
 });
 
-test("the query is scoped to the shift, and to open unsettled orders only", () => {
-  // The shift id is the PRIMARY scope - branch-wide or historical rows have no
-  // way in, because the filter is an equality on the active shift.
+test("the query is scoped to the shift, and to NOTHING else", () => {
+  // The shift id is the PRIMARY scope - a previous shift, another cashier's
+  // shift and branch-wide rows have no way in, because the filter is an
+  // equality on the active shift.
   assert.match(summaryLib, /\.eq\("shift_id", input\.shiftId\)/);
   assert.match(summaryLib, /\.eq\("tenant_id", input\.tenantId\)/);
-  assert.match(summaryLib, /\.eq\("status", OPEN_ORDER_STATUS\)/);
-  assert.match(summaryLib, /\.neq\("payment_status", "paid"\)/);
-  assert.match(summaryLib, /OPEN_ORDER_STATUS = "sent_to_kitchen"/);
+});
+
+test("the whole shift is returned, settled and voided orders included", () => {
+  // REVISED: an earlier cut filtered to outstanding orders only, which made the
+  // panel useless for reviewing a till at close. The lifecycle filters are gone
+  // from the query on purpose.
+  assert.equal(/\.eq\("status", OPEN_ORDER_STATUS\)/.test(summaryLib), false);
+  assert.equal(/\.neq\("payment_status", "paid"\)/.test(summaryLib), false);
+});
+
+test("lifecycle labels come from the two stored fields, never invented", () => {
+  assert.equal(orderLifecycleLabel({ status: "sent_to_kitchen", payment_status: "unpaid" }), "Open");
+  assert.equal(orderLifecycleLabel({ status: "sent_to_kitchen", payment_status: "paid" }), "Paid");
+  assert.equal(orderLifecycleLabel({ status: "completed", payment_status: "paid" }), "Paid");
+  assert.equal(orderLifecycleLabel({ status: "voided", payment_status: "unpaid" }), "Voided");
+  assert.equal(orderLifecycleLabel({ status: "cancelled", payment_status: "unpaid" }), "Cancelled");
+  assert.equal(orderLifecycleLabel({ status: "refunded", payment_status: "refunded" }), "Refunded");
+  // An unrecognised status falls through to itself rather than being guessed.
+  assert.equal(orderLifecycleLabel({ status: "some_new_state", payment_status: "unpaid" }), "some new state");
+  // Reversals read as reversals; money reads as money.
+  assert.equal(orderLifecycleTone({ status: "voided", payment_status: "unpaid" }), "red");
+  assert.equal(orderLifecycleTone({ status: "completed", payment_status: "paid" }), "green");
+  assert.equal(orderLifecycleTone({ status: "sent_to_kitchen", payment_status: "unpaid" }), "amber");
+  // "Open" is now a label, not a filter.
+  assert.equal(isOpenOrder({ status: "sent_to_kitchen", payment_status: "unpaid" }), true);
+  assert.equal(isOpenOrder({ status: "completed", payment_status: "paid" }), false);
 });
 
 test("the summary module can only read", () => {
@@ -105,28 +134,84 @@ test("the selection survives a refresh when its order still exists", () => {
   assert.equal(stableSelectionIndex("b", 0, list), 1);
 });
 
-test("a selection that was settled elsewhere falls to the nearest order, never a crash", () => {
+test("the newest order is the default selection", () => {
+  // The list is oldest-first, so "most recent" is the last index. This is both
+  // the first-load default and where a vanished selection lands.
+  const list = [order({ id: "a" }), order({ id: "b" }), order({ id: "c" })];
+  assert.equal(stableSelectionIndex(null, -1, list), 2);
+});
+
+test("a newly created order becomes the selection", () => {
+  // `preferId` is the "an order was just created" signal - no reload, no route
+  // switch, no manual refresh.
+  const list = [order({ id: "a" }), order({ id: "b" }), order({ id: "c" })];
+  assert.equal(stableSelectionIndex("a", 0, list, "c"), 2);
+  // An unknown preferId falls back to the normal rules rather than losing the
+  // selection - a refresh that raced the insert must not blank the panel.
+  assert.equal(stableSelectionIndex("a", 0, list, "missing"), 0);
+});
+
+test("a selection that left the shift falls back safely, never a crash", () => {
   const list = [order({ id: "a" }), order({ id: "c" })];
   assert.equal(stableSelectionIndex("b", 1, list), 1, "clamped to a live index");
   assert.equal(stableSelectionIndex("b", 5, list), 1, "an out-of-range fallback clamps");
   assert.equal(stableSelectionIndex("b", 0, []), -1, "an empty list selects nothing");
-  assert.equal(stableSelectionIndex(null, -1, list), 0, "no prior selection starts at the first");
 });
 
 test("the count and the carousel are the same collection", () => {
-  // One `orders` array: the pill renders its length and the arrows index into
-  // it. There is no second query for the count to disagree with.
-  assert.match(panel, /Open orders \{count\}/);
-  assert.match(panel, /const count = orders\.length/);
-  assert.equal((panel.match(/loadShiftOpenOrders\(/g) ?? []).length, 1);
+  // One store, one array: the top bar renders its length, the dropdown maps it,
+  // and the panel indexes into it. There is no second query to disagree with.
+  assert.match(statusBar, /Orders \{props\.shiftOrders\.length\}/);
+  assert.match(workspace, /shiftOrders=\{shiftOrders\.orders\}/);
+  assert.match(workspace, /count=\{shiftOrders\.orders\.length\}/);
+  assert.equal((ordersStore.match(/loadShiftOrders\(/g) ?? []).length, 1);
+  assert.equal(panel.includes("loadShiftOrders"), false, "the panel renders, it does not query");
+});
+
+test("a shift change drops the previous shift's orders before anything loads", () => {
+  // NEW SHIFT ISOLATION: the store invalidates on a shift change *before* the
+  // request, and discards a response that arrived after the shift moved on -
+  // so the next cashier never reviews the previous cashier's till.
+  assert.match(ordersStore, /if \(get\(\)\.shiftId !== shiftId\) \{\s*set\(\{ orders: \[\], index: -1, shiftId, error: null \}\)/);
+  assert.match(ordersStore, /if \(get\(\)\.shiftId !== shiftId\) return;/);
+});
+
+test("clicking a shift order selects exactly that order", () => {
+  assert.match(ordersStore, /select: \(orderId\) => \{/);
+  assert.match(ordersStore, /const found = get\(\)\.orders\.findIndex\(\(o\) => o\.id === orderId\)/);
+  assert.match(ordersStore, /if \(found >= 0\) set\(\{ index: found \}\)/);
+  // The dropdown selects and closes; it does not navigate.
+  assert.match(statusBar, /props\.onSelectOrder\(o\.id\);\s*setOrdersOpen\(false\);/);
+  assert.equal(statusBar.includes("navigate"), false, "selecting must not leave POS");
+});
+
+test("the refresh is event-driven, not polled", () => {
+  // Wired to the call sites that already exist for submission and settlement.
+  assert.match(workspace, /refreshShiftOrders\(input\.orderId\)/, "a submitted batch refreshes and selects");
+  const present = workspace.slice(workspace.indexOf("const presentReceipt"), workspace.indexOf("const [cartDrawerOpen"));
+  assert.match(present, /refreshShiftOrders\(\)/, "a settlement refreshes");
+  for (const poll of ["setInterval", "setTimeout"]) {
+    assert.equal(ordersStore.includes(poll), false, `${poll} must not drive the shift order list`);
+  }
+});
+
+test("the order shows in the right-hand panel, not behind a dropdown", () => {
+  // REVISED UX: the "Open orders N" pill over the work area is gone; the order
+  // renders directly in the panel the cashier already looks at. The live cart
+  // still wins whenever there are lines, so taking an order is unchanged.
+  assert.equal(workspace.includes("OrderSummaryPanel"), false, "the old pill must be gone");
+  assert.match(workspace, /cart\.lines\.length > 0 \? \(\s*<CartPanel/);
+  assert.match(workspace, /<CurrentOrderPanel/);
+  assert.match(panel, /onStep\(-1\)/);
+  assert.match(panel, /onStep\(1\)/);
 });
 
 test("Print presents the manual preview and can never auto-print", () => {
   // The workspace hands the panel receiptStore.present - the store-owned MANUAL
   // layer - and not presentReceipt, whose whole job is the automatic attempt.
   assert.match(workspace, /onPresentReceipt=\{\(receipt\) => receiptStore\.present\(receipt\)\}/);
-  const panelBlock = workspace.slice(workspace.indexOf("<OrderSummaryPanel"), workspace.indexOf("</div>", workspace.indexOf("<OrderSummaryPanel")));
-  assert.equal(panelBlock.includes("presentReceipt"), false, "the auto-print wrapper must not be reachable from the summary");
+  const panelBlock = workspace.slice(workspace.indexOf("<CurrentOrderPanel"), workspace.indexOf("/>", workspace.indexOf("<CurrentOrderPanel")));
+  assert.equal(panelBlock.includes("presentReceipt"), false, "the auto-print wrapper must not be reachable from the panel");
   for (const token of ["autoPrintReceipt", "autoPrintKitchenTicket", "printReceipt(", "printKitchenTicket("]) {
     assert.equal(panel.includes(token), false, `${token} must not appear in the panel`);
   }
@@ -140,13 +225,67 @@ test("printing an open order fabricates nothing", () => {
   for (const invented of ["tendered:", "change:", "tenderCurrency:", "tenderTotal:"]) {
     assert.equal(panel.includes(invented), false, `${invented} must not be invented for an open order`);
   }
-  // And the denomination is the order's own snapshot.
-  assert.match(panel, /currency: \(order\.currency \?\? props\.fallbackCurrency\)/);
+  // And the denomination is the order's own snapshot - the same source-of-truth
+  // rule the delivery receipt fix establishes, never a display currency.
+  assert.match(panel, /const currency = \(order\?\.currency \?\? props\.fallbackCurrency\)/);
+  assert.match(panel, /buildReceipt\(\{[\s\S]*?\n\s*currency,\n/);
 });
 
 test("the panel mutates nothing anywhere", () => {
   for (const token of ["callPosRpc", ".rpc(", ".insert(", ".update(", ".upsert(", ".delete(", "pos_pay_order", "pos_submit_order", "useCart", "refreshCashBox"]) {
     assert.equal(panel.includes(token), false, `${token} must not appear on a read-only surface`);
+  }
+  // The store is read-only too: it loads and selects, and that is all.
+  for (const token of ["callPosRpc", ".rpc(", ".insert(", ".update(", ".upsert(", ".delete("]) {
+    assert.equal(ordersStore.includes(token), false, `${token} must not appear in the store`);
+  }
+});
+
+// --- Item 3: drawer privacy --------------------------------------------------
+
+test("the closed top bar never renders the drawer amount", () => {
+  // THE WHOLE POINT. The bar used to carry "Drawer {formatMoney(...)}" all day,
+  // which put the till's cash in front of anyone standing behind the cashier.
+  // The trigger is now the bare word, and the figure exists only inside the
+  // popover body - not in the label, not in a badge, not in a title tooltip.
+  assert.equal(/Drawer \{formatMoney/.test(statusBar), false, "no amount in the label");
+  assert.equal(/title=\{?"?[^"]*formatMoney/.test(statusBar), false, "no amount in a tooltip");
+  const trigger = statusBar.slice(statusBar.indexOf('label="Drawer"'), statusBar.indexOf("Current drawer"));
+  assert.equal(trigger.includes("formatMoney"), false, "the trigger must not compute an amount");
+  assert.match(trigger, />\s*Drawer\s*<\/Button>/, "the trigger is the bare word");
+});
+
+test("the amount lives only inside the opened popover", () => {
+  const body = statusBar.slice(statusBar.indexOf("Current drawer"));
+  assert.match(body, /formatMoney\(props\.cashBox\.expected_cash, props\.currency\)/);
+  // Rendered under `props.open`, so closing removes it from the DOM entirely
+  // rather than hiding it behind a style.
+  const popover = stripJsxComments(readSrc("components", "pos", "TopBarPopover.tsx"));
+  assert.match(popover, /\{props\.open && \(/);
+  assert.equal(/hidden|opacity-0|invisible/.test(popover), false, "closed must mean absent, not merely unseen");
+});
+
+test("the drawer control toggles, closes on outside click and on Escape", () => {
+  assert.match(statusBar, /onClick=\{\(\) => setDrawerOpen\(\(o\) => !o\)\}/);
+  const popover = stripComments(readSrc("components", "pos", "TopBarPopover.tsx"));
+  assert.match(popover, /if \(wrapRef\.current && !wrapRef\.current\.contains\(e\.target as Node\)\) props\.onOpenChange\(false\)/);
+  assert.match(popover, /if \(e\.key === "Escape"\) props\.onOpenChange\(false\)/);
+  // Not a full-screen modal, and it never navigates away.
+  assert.equal(popover.includes("Modal"), false);
+  assert.equal(popover.includes("navigate"), false);
+});
+
+test("the drawer figure is the existing authoritative value, unchanged", () => {
+  // Same `cashBox.expected_cash` the old permanent label used - this revision
+  // moved it, it did not recompute it. No new financial logic anywhere.
+  assert.match(statusBar, /props\.cashBox\.expected_cash/);
+  assert.equal(/expected_cash\s*[+\-*/]/.test(statusBar), false, "the amount must not be recomputed");
+  assert.equal(statusBar.includes("convertCurrency"), false);
+});
+
+test("viewing the drawer mutates nothing", () => {
+  for (const token of ["callPosRpc", ".rpc(", ".insert(", ".update(", ".upsert(", ".delete(", "pos_end_shift", "pos_open_shift", "refreshCashBox", "cashIn", "cashOut"]) {
+    assert.equal(statusBar.includes(token), false, `${token} must not be reachable from the status bar`);
   }
 });
 

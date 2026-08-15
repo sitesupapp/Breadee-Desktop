@@ -21,16 +21,55 @@ import { asRecord, num, numOrNull, str, strOrNull } from "@/lib/pos/rpc";
 import type { CurrencyCode } from "@/lib/currency";
 
 /**
- * An order that is still OPEN in the existing POS lifecycle.
+ * The status that means "still working on it" in the existing POS lifecycle.
  *
- * The vocabulary in use across `pos_orders` is `sent_to_kitchen`, `completed`,
- * `voided`, `refunded` (Level 3C established there is no other state), and
- * settlement is what moves an order to `completed`+`paid` in one statement. So
- * "open/unsettled" is exactly: still `sent_to_kitchen`, not yet `paid`.
- * Cancelled, voided, refunded and settled orders all fail one of the two
- * conditions and drop out without being named individually.
+ * The vocabulary across `pos_orders` is `sent_to_kitchen`, `completed`,
+ * `voided`, `refunded` - Level 3C established there is no other state, and
+ * settlement moves an order to `completed`+`paid` in one statement.
+ *
+ * This constant is now only used to LABEL an order as open. It is deliberately
+ * NOT a filter any more: the Current Order carousel reviews everything this
+ * shift produced, settled and voided included, because a cashier closing a
+ * till needs to see what happened, not only what is outstanding.
  */
 export const OPEN_ORDER_STATUS = "sent_to_kitchen";
+
+/** Is this order still outstanding? Used for labels and counts, never to hide. */
+export function isOpenOrder(order: Pick<ShiftOpenOrder, "status" | "payment_status">): boolean {
+  return order.status === OPEN_ORDER_STATUS && order.payment_status !== "paid";
+}
+
+/**
+ * The lifecycle in the operator's words.
+ *
+ * Derived from the two stored fields and nothing else - no state is invented,
+ * and an unrecognised status falls through to itself rather than being coerced
+ * into a label that would be a guess.
+ */
+export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "payment_status">): string {
+  switch (order.status) {
+    case "voided":
+      return "Voided";
+    case "refunded":
+      return "Refunded";
+    case "cancelled":
+      return "Cancelled";
+    case "completed":
+      return order.payment_status === "paid" ? "Paid" : "Completed";
+    case OPEN_ORDER_STATUS:
+      return order.payment_status === "paid" ? "Paid" : "Open";
+    default:
+      return order.status.replaceAll("_", " ");
+  }
+}
+
+/** Badge tone per lifecycle: money in green, reversal in red, work in amber. */
+export function orderLifecycleTone(order: Pick<ShiftOpenOrder, "status" | "payment_status">): "green" | "amber" | "red" | "slate" {
+  if (order.status === "voided" || order.status === "cancelled" || order.status === "refunded") return "red";
+  if (order.payment_status === "paid") return "green";
+  if (order.status === OPEN_ORDER_STATUS) return "amber";
+  return "slate";
+}
 
 export type ShiftOpenOrder = {
   id: string;
@@ -65,17 +104,23 @@ export function orderRouteLabel(orderType: string): string {
 }
 
 /**
- * The active shift's open orders, oldest first.
+ * EVERY order belonging to the active shift, oldest first.
  *
- * Oldest first on purpose: the order that has been waiting longest is the one
- * the operator most needs to see, and a stable sort keeps the arrows meaning
- * the same thing between refreshes.
+ * Deliberately unfiltered by lifecycle. An earlier revision returned only
+ * outstanding orders, which made the panel useless for the thing a cashier
+ * actually does at the end of a shift: look back over what this till produced.
+ * Paid, completed, voided, cancelled and refunded orders are all part of that
+ * history, and the count beside "End shift" is only trustworthy if it counts
+ * the same collection the list shows.
+ *
+ * Oldest first, so the arrows mean the same thing between refreshes; the panel
+ * selects the NEWEST by default, which is the one just created.
  *
  * A null/absent shift returns an EMPTY list without touching the network -
  * "no active shift" is a normal state, not a reason to go looking for orders
  * that would necessarily belong to somebody else's till.
  */
-export async function loadShiftOpenOrders(input: {
+export async function loadShiftOrders(input: {
   tenantId: string | null;
   shiftId: string | null;
 }): Promise<ShiftOpenOrder[]> {
@@ -88,10 +133,8 @@ export async function loadShiftOpenOrders(input: {
     )
     .eq("tenant_id", input.tenantId)
     .eq("shift_id", input.shiftId)
-    .eq("status", OPEN_ORDER_STATUS)
-    .neq("payment_status", "paid")
     .order("created_at", { ascending: true })
-    .limit(100);
+    .limit(200);
   if (error) throw new Error(error.message);
 
   const rows = ((data ?? []) as unknown[]).map((raw) => {
@@ -160,22 +203,37 @@ export function previousOrderIndex(current: number, count: number): number {
 /**
  * Where the selection lands after the list refreshes.
  *
- * The selected order survives if it still exists - an operator reading an order
- * must not have it swapped underneath them because someone else's order closed.
- * A selection that vanished (paid, voided, cleared elsewhere) falls to the
- * nearest remaining index, clamped; an empty list selects nothing. Never throws,
- * whatever the refresh brought back.
+ * Three rules, in order:
+ *
+ *   1. A `preferId` wins outright. That is the "an order was just created"
+ *      signal - the new order becomes the Current Order without a reload, a
+ *      route switch or a manual refresh.
+ *   2. Otherwise the selected order survives if it is still in this shift. An
+ *      operator reading an order must not have it swapped underneath them
+ *      because a different order was paid.
+ *   3. Otherwise select the MOST RECENT order - the list is oldest-first, so
+ *      that is the last index. This is also the first-load default, which is
+ *      what a cashier wants on screen when they walk up to the till.
+ *
+ * Never throws, whatever the refresh brought back; an empty list selects
+ * nothing.
  */
 export function stableSelectionIndex(
   previousId: string | null,
   previousIndex: number,
   orders: ShiftOpenOrder[],
+  preferId?: string | null,
 ): number {
   if (orders.length === 0) return -1;
+  if (preferId) {
+    const preferred = orders.findIndex((o) => o.id === preferId);
+    if (preferred >= 0) return preferred;
+  }
   if (previousId) {
     const kept = orders.findIndex((o) => o.id === previousId);
     if (kept >= 0) return kept;
   }
-  if (previousIndex < 0) return 0;
+  // No prior selection, or it left the shift: the newest order.
+  if (previousIndex < 0) return orders.length - 1;
   return Math.min(Math.max(previousIndex, 0), orders.length - 1);
 }

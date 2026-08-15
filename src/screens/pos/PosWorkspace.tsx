@@ -24,7 +24,8 @@ import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
-import { OrderSummaryPanel } from "@/components/pos/OrderSummaryPanel";
+import { CurrentOrderPanel } from "@/components/pos/CurrentOrderPanel";
+import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
@@ -220,6 +221,32 @@ function PosWorkspaceInner() {
   // Same arrangement for the kitchen ticket, and for the same reason.
   const kitchenStore = useKitchenTicket();
 
+  // The active shift's orders, held once and read by three surfaces: the top
+  // bar's "Orders N", its dropdown, and the right-hand Current Order panel.
+  const shiftOrders = useShiftOrders();
+  const currentOrder = selectedShiftOrder(shiftOrders);
+
+  // Reload whenever the shift changes - including closing one, where the store
+  // invalidates before the request so the previous shift is never on screen.
+  useEffect(() => {
+    void useShiftOrders.getState().refresh({ tenantId, shiftId });
+  }, [tenantId, shiftId]);
+
+  /**
+   * Re-read the shift's orders after something changed one.
+   *
+   * `preferId` is the "an order was just created" signal: the new order becomes
+   * the Current Order with no reload, route switch or manual refresh. Wired to
+   * the existing post-transaction call sites rather than a poller - the events
+   * that change an order are already the places this app refreshes on.
+   */
+  const refreshShiftOrders = useCallback(
+    (preferId?: string | null) => {
+      void useShiftOrders.getState().refresh({ tenantId, shiftId, preferId });
+    },
+    [tenantId, shiftId],
+  );
+
   /**
    * THE kitchen-ticket call site. All three routes go through it.
    *
@@ -278,6 +305,10 @@ function PosWorkspaceInner() {
       if (presentedTickets.current.has(eventKey)) return;
       presentedTickets.current.add(eventKey);
 
+      // A submitted batch is new shift activity, whichever route sent it - and
+      // for dine-in and delivery this is the call site the order arrives on.
+      refreshShiftOrders(input.orderId);
+
       const status = await autoPrintKitchenTicket({
         branchId: pos.branch.id,
         tenantId: tenantId ?? "",
@@ -289,7 +320,7 @@ function PosWorkspaceInner() {
       });
       kitchenStore.present(ticket, status);
     },
-    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, tenantId],
+    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId],
   );
 
   /**
@@ -303,6 +334,10 @@ function PosWorkspaceInner() {
   const presentReceipt = useCallback(
     (receipt: ReceiptData) => {
       receiptStore.present(receipt);
+      // A settlement changes an order's lifecycle, so the shift list and its
+      // count follow it. Every route presents its receipt through here, which
+      // makes this the one place a payment has to be reflected.
+      refreshShiftOrders();
       void autoPrintReceipt({
         branchId: pos.branch.id,
         tenantId: tenantId ?? "",
@@ -319,7 +354,7 @@ function PosWorkspaceInner() {
         }
       });
     },
-    [pos.access, pos.branch.id, receiptStore, tenantId, toast],
+    [pos.access, pos.branch.id, receiptStore, refreshShiftOrders, tenantId, toast],
   );
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -520,7 +555,14 @@ function PosWorkspaceInner() {
     return saved;
   }, [pos.branch.id, shiftId, toast]);
 
-  /** Takeaway's shape of the shared kitchen-ticket call. */
+  /**
+   * Takeaway's shape of the shared kitchen-ticket call.
+   *
+   * The shift-order refresh lives inside `printKitchenFor`, which every route
+   * goes through - so a takeaway order is picked up there exactly like a
+   * dine-in round or a delivery order, and there is one place that says "a
+   * batch was submitted".
+   */
   const ticketForOrder = useCallback(
     (saved: SubmitOrderResult, lines: CartLine[]) =>
       printKitchenFor({
@@ -912,31 +954,18 @@ function PosWorkspaceInner() {
             onEndShift={() => void startEndShift()}
             canOpenShift={pos.gates.openShift.allowed}
             openShiftReason={pos.gates.openShift.reason}
+            /* The SAME collection the right panel renders - one array, so the
+               count beside End shift cannot disagree with the list. */
+            shiftOrders={shiftOrders.orders}
+            selectedOrderId={currentOrder?.id ?? null}
+            onSelectOrder={shiftOrders.select}
           />
         )}
         /* One menu implementation, used by Takeaway, Dine-in Add Items AND
            Delivery Add Items. A second menu would be a second place for prices
            to drift. */
         work={(layout) => (
-          <div className="relative flex h-full min-h-0 flex-col">
-            {/* Order Summary: one pill over the top-right of the work area, in
-                every mode. It reads the ACTIVE shift's open orders and nothing
-                else, and its Print hands the store-owned receipt preview a
-                server-built snapshot - deliberately receiptStore.present, NOT
-                presentReceipt, so browsing the summary can never auto-print. */}
-            <div className="pointer-events-none absolute right-0 top-0 z-20">
-              <div className="pointer-events-auto">
-                <OrderSummaryPanel
-                  tenantId={tenantId}
-                  shiftId={shiftId}
-                  tenantName={pos.tenantName}
-                  branchName={pos.branch.name}
-                  staffName={pos.userName}
-                  fallbackCurrency={currency}
-                  onPresentReceipt={(receipt) => receiptStore.present(receipt)}
-                />
-              </div>
-            </div>
+          <div className="flex h-full min-h-0 flex-col">
             {deliveryActive && !addingToDelivery ? (
               /* Customer half of Delivery: no menu grid is reachable from here. */
               delivery.work(layout)
@@ -1025,7 +1054,7 @@ function PosWorkspaceInner() {
             ) : (
               dineIn.bill(layout)
             )
-          ) : (
+          ) : cart.lines.length > 0 ? (
             <CartPanel
               lines={cart.lines}
               selectedKey={cart.selectedKey}
@@ -1044,6 +1073,31 @@ function PosWorkspaceInner() {
               onPay={openPayment}
               onOpenShift={() => setOpenShiftOpen(true)}
               onNewOrder={clearOrder}
+            />
+          ) : (
+            /* THE ORDER SUMMARY, in the panel rather than behind a pill.
+               An empty cart means the cashier is between orders, which is
+               exactly when they want to review what this shift has done - so
+               the panel shows the selected shift order in full. Picking any
+               menu item puts lines in the cart and the live cart returns, so
+               nothing about taking an order changed. */
+            <CurrentOrderPanel
+              order={currentOrder}
+              count={shiftOrders.orders.length}
+              position={shiftOrders.index + 1}
+              hasShift={Boolean(shiftId)}
+              loading={shiftOrders.loading}
+              error={shiftOrders.error}
+              tenantName={pos.tenantName}
+              branchName={pos.branch.name}
+              staffName={pos.userName}
+              shiftId={shiftId}
+              fallbackCurrency={currency}
+              tableName={currentOrder?.table_id ? (tableStore.map.tables.find((t) => t.id === currentOrder.table_id)?.name ?? null) : null}
+              onStep={shiftOrders.step}
+              /* The MANUAL layer - deliberately receiptStore.present and not
+                 presentReceipt, so reviewing an order can never auto-print. */
+              onPresentReceipt={(receipt) => receiptStore.present(receipt)}
             />
           )
         }
