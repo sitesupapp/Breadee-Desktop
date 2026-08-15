@@ -228,7 +228,11 @@ test("printing an open order fabricates nothing", () => {
   // And the denomination is the order's own snapshot - the same source-of-truth
   // rule the delivery receipt fix establishes, never a display currency.
   assert.match(panel, /const currency = \(order\?\.currency \?\? props\.fallbackCurrency\)/);
-  assert.match(panel, /buildReceipt\(\{[\s\S]*?\n\s*currency,\n/);
+  // NB the line-ending class. `\n` alone does not match this repo's CRLF files
+  // once CI has checked them out with autocrlf - the same trap documented in
+  // `source-helpers.ts`. Anchored on `[\r\n]` so the assertion means the same
+  // thing on both sides.
+  assert.match(panel, /buildReceipt\(\{[\s\S]*?[\r\n]\s*currency,[\r\n]/);
 });
 
 test("the panel mutates nothing anywhere", () => {
