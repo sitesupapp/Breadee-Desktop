@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -168,7 +168,12 @@ test("only the signing workflow produces updater artifacts", () => {
   assert.equal(conf.bundle.createUpdaterArtifacts, false, "must be off in the base config");
   const override = JSON.parse(read("src-tauri", "tauri.release.conf.json"));
   assert.equal(override.bundle.createUpdaterArtifacts, true, "and on in the release override");
-  assert.match(releaseCode, /npm run tauri:build -- --config tauri\.release\.conf\.json/);
+  // The path is relative to the REPO ROOT, where the tauri CLI is invoked - not
+  // to src-tauri. `--config tauri.release.conf.json` failed the first release
+  // with "the system cannot find the file specified", so the prefix is asserted
+  // rather than assumed.
+  assert.match(releaseCode, /npm run tauri:build -- --config src-tauri\/tauri\.release\.conf\.json/);
+  assert.ok(existsSync(join(root, "..", "src-tauri", "tauri.release.conf.json")), "the override must exist at that path");
   // The override does one thing. It must not become a second place where the
   // endpoint or the key can be redefined.
   assert.deepEqual(Object.keys(override.bundle), ["createUpdaterArtifacts"]);
