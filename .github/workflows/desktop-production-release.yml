@@ -165,7 +165,7 @@ jobs:
       #
       #    The password variable must be PRESENT even though the key has none.
       - name: Build and sign the production app
-        run: npm run tauri:build -- --config tauri.release.conf.json
+        run: npm run tauri:build -- --config src-tauri/tauri.release.conf.json
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
