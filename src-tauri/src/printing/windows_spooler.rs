@@ -27,9 +27,9 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::{
     CreateDCW, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDeviceCaps, SelectObject,
-    SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DT_CALCRECT,
-    DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING, DT_WORDBREAK, FF_DONTCARE, HDC, HFONT, HGDIOBJ,
-    HORZRES, LOGPIXELSX, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES,
+    SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DRAW_TEXT_FORMAT,
+    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING, DT_WORDBREAK, FF_DONTCARE, HDC,
+    HFONT, HGDIOBJ, HORZRES, LOGPIXELSX, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES,
 };
 use windows::Win32::Graphics::Printing::{
     EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
@@ -39,7 +39,7 @@ use windows::Win32::Graphics::Printing::{
 };
 use windows::Win32::Storage::Xps::{AbortDoc, EndDoc, EndPage, StartDocW, StartPage, DOCINFOW};
 
-use super::page::{Direction, LineStyle, PageLine};
+use super::page::{Direction, LineStyle, PageLine, CUT_CLEARANCE_MM};
 use super::service::{PrintDevice, PrinterCatalogue};
 use super::types::{InstalledPrinter, PaperWidth, PrintError, PrinterStatus};
 
@@ -304,11 +304,24 @@ fn mm_to_px(mm: f32, dpi: i32) -> i32 {
     ((mm / 25.4) * dpi as f32).round() as i32
 }
 
-/// Lay the diagnostic page out and draw it.
+/// Lay a document out and draw it.
 ///
 /// Text is measured with `DT_CALCRECT` before it is drawn, so a long line wraps
 /// and advances the cursor by its real height instead of overprinting the next
 /// line - which is what makes the Arabic samples legible rather than a smear.
+///
+/// MEASURING ALSO DECIDES WHETHER A LINE MAY BE DRAWN AT ALL, and that is the
+/// fix for a receipt that came off a real till with its TOTAL sliced in half.
+/// This loop used to draw every line and only afterwards ask whether the cursor
+/// had passed the bottom of what the driver says it can mark. By then the line
+/// was already on the page, so GDI clipped it mid-glyph, and everything below it
+/// was dropped. A financial document that ends in half a total is worse than one
+/// that ends a line early, so the height is now known BEFORE anything is
+/// committed: a line that does not fit moves to the next page instead of being
+/// cut through, and nothing is silently discarded.
+///
+/// The bottom of the usable area also reserves `CUT_CLEARANCE_MM`, because the
+/// blade passes below the print head - see the constant.
 fn draw_page(hdc: HDC, paper: PaperWidth, lines: &[PageLine]) -> Result<(), PrintError> {
     let dpi_x = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSX) };
     let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
@@ -324,120 +337,219 @@ fn draw_page(hdc: HDC, paper: PaperWidth, lines: &[PageLine]) -> Result<(), Prin
     let margin = mm_to_px(2.0, dpi_x).max(1);
     let column = (width - margin * 2).max(mm_to_px(20.0, dpi_x));
 
+    // Where TEXT has to stop. The clearance band below it is not free space
+    // going spare - it is the paper the cutter needs, and the trailing feed line
+    // is what occupies it. A driver that reports no page length gets no limit,
+    // which is the same as before: there is nothing to compare against.
+    let content_bottom = if printable_height > 0 {
+        Some(printable_height - margin - mm_to_px(CUT_CLEARANCE_MM, dpi_y).max(1))
+    } else {
+        None
+    };
+
     unsafe {
         SetBkMode(hdc, TRANSPARENT);
     }
 
     let mut y = margin;
     for line in lines {
-        let points = match line.style {
-            LineStyle::Title => 16,
-            LineStyle::Total => 13,
-            LineStyle::Heading => 10,
-            LineStyle::Body | LineStyle::Rule => 10,
-            LineStyle::Small => 8,
-            LineStyle::Blank => 8,
-        };
-        let bold = matches!(line.style, LineStyle::Title | LineStyle::Heading | LineStyle::Total);
-        let height_px = -(points * dpi_y) / 72;
+        // Measured and painted under separate font selections so that no GDI
+        // object is still selected into the DC if the page has to be broken
+        // between the two.
+        let height = with_font(hdc, line.style, dpi_y, |hdc| measure_line(hdc, line, margin, y, column))?;
 
-        let face = wide(FONT_FACE);
-        let font: HFONT = unsafe {
-            CreateFontW(
-                height_px,
-                0,
-                0,
-                0,
-                if bold { 700 } else { 400 },
-                0,
-                0,
-                0,
-                // DEFAULT_CHARSET keeps GDI font linking available so a
-                // codepoint outside the face still renders.
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                PCWSTR(face.as_ptr()),
-            )
-        };
-        if font.is_invalid() {
-            return Err(PrintError::RenderFailed { detail: "could not create the page font".into() });
-        }
-        let previous: HGDIOBJ = unsafe { SelectObject(hdc, font.into()) };
-
-        let drawn = draw_line(hdc, line, margin, y, column);
-
-        unsafe {
-            SelectObject(hdc, previous);
-            let _ = DeleteObject(font.into());
+        // The trailing feed is exempt: it is the tail itself, and breaking the
+        // page for it would eject a blank slip rather than clear the blade.
+        if line.style != LineStyle::Feed {
+            if let Some(bottom) = content_bottom {
+                // `y > margin` keeps a line taller than a whole page from
+                // bouncing between pages forever; it is drawn where it is.
+                if y + height > bottom && y > margin {
+                    continue_on_a_new_page(hdc)?;
+                    y = margin;
+                }
+            }
         }
 
-        let advance = drawn?;
-        y += advance;
-
-        // A diagnostic page must never run away onto a second metre of paper.
-        if printable_height > 0 && y > printable_height - margin {
-            break;
-        }
+        with_font(hdc, line.style, dpi_y, |hdc| paint_line(hdc, line, margin, y, column, height))?;
+        y += height;
     }
 
     Ok(())
 }
 
-/// Draw one line and report how far down the page to move next.
-fn draw_line(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32) -> Result<i32, PrintError> {
-    let mut text = wide(&line.text);
-    // `wide` appends a NUL for the C APIs; DrawTextW takes a counted slice, so
-    // the terminator must not be part of it.
-    let len = text.len().saturating_sub(1);
-    let mut rect = RECT { left: x, top: y, right: x + column, bottom: y + 1 };
+/// End this page and begin another, so a line that will not fit is continued
+/// rather than clipped.
+///
+/// Only reachable when the driver reports a page shorter than the document.
+/// `draw` opened the first page and closes the last one, so the pair here keeps
+/// the document balanced.
+fn continue_on_a_new_page(hdc: HDC) -> Result<(), PrintError> {
+    if unsafe { EndPage(hdc) } <= 0 {
+        return Err(PrintError::WriteFailed {
+            printer: String::new(),
+            detail: format!("EndPage: {}", last_error()),
+        });
+    }
+    if unsafe { StartPage(hdc) } <= 0 {
+        return Err(PrintError::WriteFailed {
+            printer: String::new(),
+            detail: format!("StartPage: {}", last_error()),
+        });
+    }
+    // Page attributes are not guaranteed to survive a page boundary.
+    unsafe {
+        SetBkMode(hdc, TRANSPARENT);
+    }
+    Ok(())
+}
 
+/// Run `f` with the font this line's style asks for selected into the DC.
+///
+/// Selecting and restoring in ONE place is what guarantees the font is always
+/// restored and deleted - including on the error paths, and before any page
+/// break - rather than leaking a GDI object into a long-running till process.
+fn with_font<T>(
+    hdc: HDC,
+    style: LineStyle,
+    dpi_y: i32,
+    f: impl FnOnce(HDC) -> Result<T, PrintError>,
+) -> Result<T, PrintError> {
+    let points = match style {
+        LineStyle::Title => 16,
+        LineStyle::Total => 13,
+        LineStyle::Heading => 10,
+        LineStyle::Body | LineStyle::Rule => 10,
+        LineStyle::Small => 8,
+        // Neither draws a glyph; the size only has to be legal.
+        LineStyle::Blank | LineStyle::Feed => 8,
+    };
+    let bold = matches!(style, LineStyle::Title | LineStyle::Heading | LineStyle::Total);
+    let height_px = -(points * dpi_y) / 72;
+
+    let face = wide(FONT_FACE);
+    let font: HFONT = unsafe {
+        CreateFontW(
+            height_px,
+            0,
+            0,
+            0,
+            if bold { 700 } else { 400 },
+            0,
+            0,
+            0,
+            // DEFAULT_CHARSET keeps GDI font linking available so a codepoint
+            // outside the face still renders.
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR(face.as_ptr()),
+        )
+    };
+    if font.is_invalid() {
+        return Err(PrintError::RenderFailed { detail: "could not create the page font".into() });
+    }
+    let previous: HGDIOBJ = unsafe { SelectObject(hdc, font.into()) };
+
+    let result = f(hdc);
+
+    unsafe {
+        SelectObject(hdc, previous);
+        let _ = DeleteObject(font.into());
+    }
+    result
+}
+
+/// The width the description may use once the amount column is reserved.
+///
+/// A money column on the right narrows the space the description has, so the
+/// two are laid out against different widths. Without this the description
+/// would wrap under the amount and the receipt would look like the figures
+/// belonged to the wrong line.
+fn left_column_width(line: &PageLine, column: i32) -> i32 {
+    let reserved = if line.right.as_deref().is_some_and(|r| !r.is_empty()) {
+        (column * 2) / 5
+    } else {
+        0
+    };
+    (column - reserved).max(1)
+}
+
+fn line_format(line: &PageLine) -> DRAW_TEXT_FORMAT {
     let alignment = match line.direction {
         Direction::Rtl => DT_RIGHT | DT_RTLREADING,
         Direction::Auto => DT_LEFT,
     };
     // DT_NOPREFIX: a printer name may legitimately contain "&", which would
     // otherwise be swallowed as an accelerator marker.
-    let format = alignment | DT_WORDBREAK | DT_NOPREFIX;
+    alignment | DT_WORDBREAK | DT_NOPREFIX
+}
 
+/// How tall this line will be, measured before anything is committed.
+fn measure_line(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32) -> Result<i32, PrintError> {
     if line.text.is_empty() {
-        // Blank spacer: advance by roughly one line without drawing.
-        return Ok(mm_to_px(2.0, unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) }).max(4));
+        let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
+        let mm = match line.style {
+            // The tail the cutter needs. This is the whole of Fix 1's spacing.
+            LineStyle::Feed => CUT_CLEARANCE_MM,
+            // Blank spacer: roughly one line, drawing nothing.
+            _ => 2.0,
+        };
+        return Ok(mm_to_px(mm, dpi_y).max(4));
     }
 
-    // A money column on the right narrows the space the description may use,
-    // so the two are measured against different widths. Without this the
-    // description would wrap under the amount and the receipt would look like
-    // the figures belonged to the wrong line.
-    let right_text = line.right.as_deref().filter(|r| !r.is_empty());
-    let reserved = if right_text.is_some() { (column * 2) / 5 } else { 0 };
-    let left_column = (column - reserved).max(1);
+    let mut text = wide(&line.text);
+    // `wide` appends a NUL for the C APIs; DrawTextW takes a counted slice, so
+    // the terminator must not be part of it.
+    let len = text.len().saturating_sub(1);
+    let mut rect =
+        RECT { left: x, top: y, right: x + left_column_width(line, column), bottom: y + 1 };
 
-    let mut measure_rect = RECT { left: x, top: y, right: x + left_column, bottom: y + 1 };
-
-    // Measure first so wrapped text advances by its true height.
-    let measured = unsafe { DrawTextW(hdc, &mut text[..len], &mut measure_rect, format | DT_CALCRECT) };
+    let measured =
+        unsafe { DrawTextW(hdc, &mut text[..len], &mut rect, line_format(line) | DT_CALCRECT) };
     if measured == 0 {
         return Err(PrintError::RenderFailed { detail: "could not measure a line".into() });
     }
-    // DT_CALCRECT with DT_RIGHT collapses the rect to the text width, which
-    // would right-align against the wrong edge. Restore the full column.
-    let height = measure_rect.bottom - measure_rect.top;
+    Ok((rect.bottom - rect.top).max(1))
+}
+
+/// Draw one line that has already been measured and found to fit.
+///
+/// The rectangles are built fresh from `height` rather than reused from the
+/// measuring pass: `DT_CALCRECT` with `DT_RIGHT` collapses the rect to the text
+/// width, which would then right-align against the wrong edge.
+fn paint_line(
+    hdc: HDC,
+    line: &PageLine,
+    x: i32,
+    y: i32,
+    column: i32,
+    height: i32,
+) -> Result<(), PrintError> {
+    // Spacers and the trailing feed are paper, not marks.
+    if line.text.is_empty() {
+        return Ok(());
+    }
+
+    let left_column = left_column_width(line, column);
+    let mut text = wide(&line.text);
+    let len = text.len().saturating_sub(1);
     let mut draw_rect = RECT { left: x, top: y, right: x + left_column, bottom: y + height };
 
-    let painted = unsafe { DrawTextW(hdc, &mut text[..len], &mut draw_rect, format) };
+    let painted = unsafe { DrawTextW(hdc, &mut text[..len], &mut draw_rect, line_format(line)) };
     if painted == 0 {
         return Err(PrintError::RenderFailed { detail: "could not draw a line".into() });
     }
 
     // The amount, flush right on the SAME row. Always left-to-right: a price is
     // a number, and reversing it would be wrong in any language.
-    if let Some(right) = right_text {
+    if let Some(right) = line.right.as_deref().filter(|r| !r.is_empty()) {
         let mut right_wide = wide(right);
         let right_len = right_wide.len().saturating_sub(1);
-        let mut right_rect = RECT { left: x + left_column, top: y, right: x + column, bottom: y + height };
+        let mut right_rect =
+            RECT { left: x + left_column, top: y, right: x + column, bottom: y + height };
         let drawn = unsafe {
             DrawTextW(hdc, &mut right_wide[..right_len], &mut right_rect, DT_RIGHT | DT_NOPREFIX)
         };
@@ -446,7 +558,7 @@ fn draw_line(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32) -> Result<i
         }
     }
 
-    Ok(height.max(1))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -483,6 +595,30 @@ mod tests {
         let arabic = wide("بريدي");
         assert_eq!(*arabic.last().unwrap(), 0);
         assert!(arabic.len() > 1);
+    }
+
+    #[test]
+    fn the_cut_clearance_is_real_paper_at_every_thermal_resolution() {
+        // The tail is declared in millimetres, so it has to survive the
+        // conversion the renderer actually performs. 15mm at 203dpi is 120
+        // device rows - about four body lines of paper below the last glyph.
+        assert_eq!(mm_to_px(CUT_CLEARANCE_MM, 203), 120);
+        assert_eq!(mm_to_px(CUT_CLEARANCE_MM, 300), 177);
+        // And it is never rounded away on a low-resolution device.
+        assert!(mm_to_px(CUT_CLEARANCE_MM, 96) > 0);
+    }
+
+    #[test]
+    fn a_line_may_not_be_drawn_into_the_cutters_band() {
+        // The usable height is the page less the top margin, less the tail. A
+        // renderer that forgets the second term draws the last line where the
+        // blade lands, which is the receipt this hotfix was raised for.
+        let dpi = 203;
+        let page_height = mm_to_px(100.0, dpi);
+        let margin = mm_to_px(2.0, dpi).max(1);
+        let content_bottom = page_height - margin - mm_to_px(CUT_CLEARANCE_MM, dpi).max(1);
+        assert!(content_bottom < page_height - margin, "no clearance was reserved");
+        assert!(content_bottom > page_height / 2, "the reserve must not eat the page");
     }
 
     #[test]

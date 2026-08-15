@@ -145,7 +145,11 @@ export function ReceiptPaper({ data }: { data: ReceiptData }) {
         <span>{data.paid ? `Paid - ${data.method ?? "cash"}` : "Unpaid"}</span>
         <span>{data.currency}</span>
       </div>
-      {data.shiftRef && <div className="text-[10px] text-sub">Shift {data.shiftRef}</div>}
+      {/* The shift reference is deliberately NOT shown. It is an internal code
+          that means nothing to the customer, it does not print on the paper any
+          more, and a preview that shows a line the printer will not produce is
+          a preview of a different document. `ReceiptData.shiftRef` still
+          carries it for the routes that use it elsewhere. */}
       <div className="my-2 border-t border-dashed border-line" />
       <p className="text-center text-[11px] text-sub">Thank you!</p>
     </div>
