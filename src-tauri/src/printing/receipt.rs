@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::page::{Direction, LineStyle, PageLine};
+use super::page::{cut_clearance, Direction, LineStyle, PageLine};
 use super::types::{PaperWidth, PrintError};
 
 /// Bounds on what may cross the native boundary.
@@ -92,6 +92,12 @@ pub struct ReceiptDoc {
     #[serde(default)]
     pub change: Option<f64>,
     // --- route identity -----------------------------------------------------
+    /// The shift this sale belongs to. **Accepted, never printed.**
+    ///
+    /// It is an internal operational reference - the leading bytes of the shift
+    /// UUID - and it means nothing to the person holding the paper. It used to
+    /// print under the payment line; it does not any more, and the field is kept
+    /// only so an older frontend's payload still deserialises. Do not render it.
     #[serde(default)]
     pub shift_ref: Option<String>,
     #[serde(default)]
@@ -346,12 +352,15 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
         "Unpaid".to_string()
     };
     out.push(PageLine::pair(status, doc.currency.clone(), LineStyle::Body, Direction::Auto));
-    if let Some(shift) = doc.shift_ref.as_deref().filter(|s| !s.is_empty()) {
-        out.push(PageLine::new(format!("Shift {shift}"), LineStyle::Small, Direction::Auto));
-    }
+    // The shift reference is NOT printed. It is an internal code, the customer
+    // has no use for it, and a receipt is the one document in this system that
+    // leaves the building - see `ReceiptDoc::shift_ref`.
 
     out.push(PageLine::new(divider, LineStyle::Rule, Direction::Auto));
     out.push(PageLine::new("Thank you!", LineStyle::Small, Direction::Auto));
+    // Paper, not content: the cutter sits below the print head, so without this
+    // tail the blade comes down across the lines above it.
+    out.push(cut_clearance());
     out
 }
 
@@ -641,6 +650,120 @@ mod tests {
     #[test]
     fn a_realistic_receipt_validates() {
         assert!(validate_receipt(&doc()).is_ok());
+    }
+
+    // --- the shift reference never reaches paper ----------------------------
+
+    /// The three POS routes, exactly as each one labels its own receipt.
+    ///
+    /// They share one renderer, so this is not three code paths - it is the
+    /// same document asked the question three times, which is what makes it a
+    /// regression test rather than a coincidence.
+    fn routed(order_type: &str) -> ReceiptDoc {
+        let mut d = doc();
+        d.order_type = order_type.into();
+        // The value the till actually sends: the leading bytes of the shift
+        // UUID. Present here precisely so its absence from the page is proved.
+        d.shift_ref = Some("74192728".into());
+        d
+    }
+
+    fn every_string(lines: &[PageLine]) -> String {
+        lines
+            .iter()
+            .map(|l| format!("{} {}", l.text, l.right.clone().unwrap_or_default()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn a_takeaway_receipt_carries_no_shift_code() {
+        let printed = every_string(&build_receipt_page(&routed("Takeaway"), PaperWidth::Mm80));
+        assert!(!printed.contains("Shift"), "the shift label reached the paper");
+        assert!(!printed.contains("74192728"), "the shift code reached the paper");
+    }
+
+    #[test]
+    fn a_dine_in_receipt_carries_no_shift_code() {
+        let mut d = routed("Dine-in");
+        d.table_name = Some("Table 4".into());
+        d.seats = Some(2.0);
+        let printed = every_string(&build_receipt_page(&d, PaperWidth::Mm80));
+        assert!(!printed.contains("Shift"));
+        assert!(!printed.contains("74192728"));
+    }
+
+    #[test]
+    fn a_delivery_receipt_carries_no_shift_code() {
+        let mut d = routed("Delivery");
+        d.customer_name = Some("Desktop Level 3A QA".into());
+        d.delivery_address = Some("QA, Hamra, QA Street 2".into());
+        // Level 3D's historical path sends the WHOLE shift id, not the short
+        // form, so the absence has to hold for that shape too.
+        d.shift_ref = Some("74192728-1f3c-4c21-9a55-0b1d2e3f4a5b".into());
+        let printed = every_string(&build_receipt_page(&d, PaperWidth::Mm80));
+        assert!(!printed.contains("Shift"));
+        assert!(!printed.contains("74192728"));
+    }
+
+    #[test]
+    fn no_paper_width_reintroduces_the_shift_code() {
+        for paper in [PaperWidth::Mm58, PaperWidth::Mm80, PaperWidth::CustomMm(72)] {
+            for route in ["Takeaway", "Dine-in", "Delivery"] {
+                let printed = every_string(&build_receipt_page(&routed(route), paper));
+                assert!(!printed.contains("74192728"), "{route} at {}", paper.label());
+            }
+        }
+    }
+
+    // --- the paper the cutter needs -----------------------------------------
+
+    #[test]
+    fn the_receipt_ends_with_blank_paper_for_the_cutter() {
+        // The blade sits below the print head, so a document that ends at its
+        // last glyph is cut through its own last lines. This tail is the fix.
+        for route in ["Takeaway", "Dine-in", "Delivery"] {
+            let page = build_receipt_page(&routed(route), PaperWidth::Mm80);
+            let last = page.last().expect("a receipt has lines");
+            assert_eq!(last.style, LineStyle::Feed, "{route} must end with a feed");
+            assert!(last.text.is_empty(), "the tail is paper, not content");
+            assert_eq!(page.iter().filter(|l| l.style == LineStyle::Feed).count(), 1);
+        }
+    }
+
+    #[test]
+    fn the_total_is_never_the_last_thing_on_the_paper() {
+        // The defect this replaces: TOTAL was the line the cut landed on. It
+        // must now be followed by the payment line, the rule, the thank-you and
+        // the tail - enough paper that the blade cannot reach it.
+        let page = build_receipt_page(&routed("Takeaway"), PaperWidth::Mm80);
+        let total = page.iter().position(|l| l.text == "TOTAL").expect("a total");
+        assert!(page.len() - total >= 4, "only {} lines follow TOTAL", page.len() - 1 - total);
+        assert_eq!(page.last().unwrap().style, LineStyle::Feed);
+    }
+
+    #[test]
+    fn removing_the_shift_line_changed_nothing_about_the_money() {
+        // Fix 2 must be invisible to every figure on the receipt.
+        let mut d = routed("Takeaway");
+        d.subtotal = 10.0;
+        d.discount = 2.0;
+        d.total = 8.0;
+        d.tender_currency = Some("USD".into());
+        d.tendered = Some(10.0);
+        d.change = Some(2.0);
+        let page = build_receipt_page(&d, PaperWidth::Mm80);
+
+        let amount = |label: &str| {
+            page.iter().find(|l| l.text == label).unwrap_or_else(|| panic!("{label} is missing")).right.clone()
+        };
+        assert_eq!(amount("Subtotal").as_deref(), Some("10.00 USD"));
+        assert_eq!(amount("Discount").as_deref(), Some("-2.00 USD"));
+        assert_eq!(amount("TOTAL").as_deref(), Some("8.00 USD"));
+        assert_eq!(amount("Tendered").as_deref(), Some("10.00 USD"));
+        assert_eq!(amount("Change").as_deref(), Some("2.00 USD"));
+        assert!(texts(&page).iter().any(|t| t == "Paid - cash"));
+        assert_eq!(page.iter().find(|l| l.text == "TOTAL").unwrap().style, LineStyle::Total);
     }
 
     #[test]

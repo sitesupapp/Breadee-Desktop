@@ -34,6 +34,34 @@ pub enum LineStyle {
     Blank,
     /// The one figure a customer looks for. Larger and bold (Level 3E-B).
     Total,
+    /// Blank paper fed AFTER the last printed line, so the cutter clears it.
+    ///
+    /// Deliberately not a taller `Blank`. A blank line is spacing INSIDE the
+    /// document and may be moved, merged or trimmed like any other layout; this
+    /// is the physical tail the mechanism needs before its blade passes. Giving
+    /// it its own style is what stops it being tidied away as "an empty line at
+    /// the end", which is how the last lines came to be cut through.
+    Feed,
+}
+
+/// Millimetres of blank paper that must follow the last printed line.
+///
+/// A thermal mechanism's cutter sits DOWNSTREAM of the print head - roughly
+/// 10-15mm on every 58/80mm unit in common use - so the blade comes down on
+/// paper that passed the head a centimetre or so earlier. A document that ends
+/// at its final glyph is therefore cut THROUGH its own last lines: on the tills
+/// this was found on, the cut landed across the TOTAL row.
+///
+/// 15mm clears the widest gap in that range. It is deliberately not larger:
+/// this tail is printed on every single receipt, and paper is a consumable.
+pub const CUT_CLEARANCE_MM: f32 = 15.0;
+
+/// The trailing feed a printed document ends with.
+///
+/// Carries no text on purpose - it is paper, not content - so it can never
+/// disclose anything and can never be confused for a line of the receipt.
+pub fn cut_clearance() -> PageLine {
+    PageLine::new("", LineStyle::Feed, Direction::Auto)
 }
 
 /// Paragraph direction. `Rtl` asks the text engine for right-to-left reading
@@ -381,6 +409,23 @@ mod tests {
         let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         // The operator reading the paper can see which width produced it.
         assert!(text.contains(&"custom:72"));
+    }
+
+    #[test]
+    fn the_cut_clearance_clears_a_thermal_cutter_without_wasting_a_roll() {
+        // Both halves matter. Below ~10mm the blade reaches printed text on
+        // common 58/80mm mechanisms, which is the defect. Above ~20mm every
+        // receipt in the estate grows a tail nobody asked for.
+        assert!(CUT_CLEARANCE_MM >= 10.0, "too short to clear the blade");
+        assert!(CUT_CLEARANCE_MM <= 20.0, "a tail this long is wasted paper");
+    }
+
+    #[test]
+    fn the_clearance_line_is_paper_and_not_content() {
+        let feed = cut_clearance();
+        assert_eq!(feed.style, LineStyle::Feed);
+        assert!(feed.text.is_empty(), "the tail must never carry text");
+        assert_eq!(feed.right, None);
     }
 
     #[test]

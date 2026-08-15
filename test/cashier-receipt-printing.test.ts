@@ -620,6 +620,86 @@ test("the diagnostic test print is untouched, and never prints a receipt", () =>
   assert.equal(printers.includes("printReceipt"), false);
 });
 
+// --- the print hotfix --------------------------------------------------------
+//
+// Two defects found on physical paper from all three POS routes: the shift code
+// was printing on a customer's receipt, and the cut landed across the TOTAL.
+//
+// The layout itself lives in Rust and is asserted there, line by line, in
+// `src-tauri/src/printing/receipt.rs`. What these add is the boundary view: the
+// renderer is SHARED, so proving the property once proves it for Takeaway,
+// Dine-in and Delivery at the same time - and proving the sharing is the part
+// only this side can see.
+
+const receiptRs = readTauri("src", "printing", "receipt.rs");
+const pageRs = readTauri("src", "printing", "page.rs");
+
+test("Takeaway, Dine-in and Delivery print through ONE renderer", () => {
+  // The premise the three assertions below stand on. If a route ever grew its
+  // own page builder, a fix applied here would silently miss it.
+  const serviceRs = readTauri("src", "printing", "service.rs");
+  assert.match(serviceRs, /Ok\(build_receipt_page\(doc, paper\)\)/);
+  assert.equal((serviceRs.match(/build_receipt_page/g) ?? []).length, 2, "one call site, one import");
+  assert.equal(receiptRs.includes("fn build_takeaway"), false);
+  assert.equal(receiptRs.includes("fn build_delivery"), false);
+});
+
+test("no receipt route prints the shift code", () => {
+  // Removed at the renderer, so every route loses it at once. The field is
+  // still ACCEPTED - an older frontend's payload must still deserialise - which
+  // is why the assertion is about rendering, not about the struct.
+  assert.equal(/PageLine::new\(format!\("Shift/.test(receiptRs), false, "the shift line is back");
+  assert.equal(/"Shift /.test(receiptRs.replace(/\/\/.*$/gm, "")), false, "a shift label is being built");
+  assert.match(receiptRs, /pub shift_ref: Option<String>/);
+});
+
+test("the on-screen preview shows the same receipt the printer will produce", () => {
+  // A preview carrying a line the paper does not is a preview of a different
+  // document, and the operator is the one who has to spot the difference.
+  assert.equal(preview.includes("Shift {data.shiftRef}"), false);
+  assert.equal(/>\s*Shift\b/.test(preview), false);
+});
+
+test("the shift code still reaches the surfaces it belongs on", () => {
+  // Scope check, not a feature. `shiftRef` is operational data: the end-of-shift
+  // REPORT is an internal document and legitimately prints it, and the routes
+  // still carry it. Only the customer's receipt stopped showing it.
+  const report = stripComments(readSrc("lib", "pos", "shiftReport.ts"));
+  assert.match(report, /\{ label: "Shift", value: input\.shiftRef \?\? "-" \}/);
+  assert.match(stripComments(readSrc("lib", "nativePrinting.ts")), /shiftRef: receipt\.shiftRef \?\? null/);
+});
+
+test("every receipt ends with blank paper the cutter can land on", () => {
+  // The blade sits below the print head, so a document that stops at its last
+  // glyph is cut through its own last lines - which is how a TOTAL came off a
+  // real till in halves.
+  assert.match(pageRs, /pub const CUT_CLEARANCE_MM: f32 = 15\.0;/);
+  assert.match(receiptRs, /out\.push\(cut_clearance\(\)\);/);
+  // Appended last, after the thank-you, so nothing prints below it.
+  assert.ok(
+    receiptRs.indexOf("cut_clearance()") > receiptRs.indexOf('"Thank you!"'),
+    "the tail must be the last thing on the page",
+  );
+});
+
+test("a line is measured before it is drawn, never after", () => {
+  // The clipping defect in one property. The renderer used to draw a line and
+  // only then ask whether the page had room; by then GDI had already sliced it
+  // and everything below was dropped.
+  const spooler = readTauri("src", "printing", "windows_spooler.rs");
+  assert.match(spooler, /fn measure_line\(/);
+  assert.match(spooler, /fn paint_line\(/);
+  assert.ok(
+    spooler.indexOf("measure_line(hdc, line, margin, y, column)") <
+      spooler.indexOf("paint_line(hdc, line, margin, y, column, height)"),
+    "the measurement must come first",
+  );
+  // The usable area reserves the tail, and an overflowing line continues rather
+  // than being clipped away.
+  assert.match(spooler, /printable_height - margin - mm_to_px\(CUT_CLEARANCE_MM, dpi_y\)/);
+  assert.match(spooler, /continue_on_a_new_page\(hdc\)\?;/);
+});
+
 test("all four receipt routes reach paper through this one modal", () => {
   // Takeaway, Dine-in and Delivery present through the store-owned layer, and
   // Level 3D's historical path goes to the same place - so one integration
