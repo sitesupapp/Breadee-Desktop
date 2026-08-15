@@ -24,6 +24,21 @@ import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
+import { CurrentOrderPanel } from "@/components/pos/CurrentOrderPanel";
+import { OrdersModal } from "@/components/pos/OrdersModal";
+import { DeliveryModal } from "@/components/pos/DeliveryModal";
+import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
+import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
+import { reversalActionFor } from "@/lib/pos/orderActions";
+import { buildShiftReportLines, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { buildReceipt } from "@/lib/receipt";
+import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
+import { isNativeAvailable, listPrinters, printReport } from "@/lib/nativePrinting";
+import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolveRouteTarget } from "@/lib/pos/printTarget";
+import { formatMoney } from "@/lib/currency";
+import type { VoidAction } from "@/lib/pos/deliveryOrderManagement";
+import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
@@ -50,9 +65,9 @@ import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
-import { restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
+import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
-import type { CartLine, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, SubmitOrderResult } from "@/types/pos";
+import type { CartLine, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
 
@@ -147,6 +162,25 @@ function PosWorkspaceInner() {
     return () => dispose?.();
   }, []);
 
+  // Fullscreen label state. Initialised from the PLATFORM and refreshed from
+  // the platform after every toggle - toggleFullscreen() returns the re-read
+  // native state, so a denied or failed toggle leaves the label truthful
+  // rather than flipping a fiction. Toggling is a pure window operation: no
+  // cart, shift, order or printer state is anywhere near this path.
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void getFullscreen().then((f) => {
+      if (live) setFullscreen(f);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const doToggleFullscreen = useCallback(() => {
+    void toggleFullscreen().then(setFullscreen);
+  }, []);
+
   // --- pending sync badge ----------------------------------------------------
   const [pending, setPending] = useState(0);
   useEffect(() => {
@@ -199,6 +233,165 @@ function PosWorkspaceInner() {
   const receiptStore = useReceipt();
   // Same arrangement for the kitchen ticket, and for the same reason.
   const kitchenStore = useKitchenTicket();
+
+  // The active shift's orders, held once and read by three surfaces: the top
+  // bar's "Orders N", its dropdown, and the right-hand Current Order panel.
+  const shiftOrders = useShiftOrders();
+  const currentOrder = selectedShiftOrder(shiftOrders);
+
+  // Reload whenever the shift changes - including closing one, where the store
+  // invalidates before the request so the previous shift is never on screen.
+  useEffect(() => {
+    void useShiftOrders.getState().refresh({ tenantId, shiftId });
+  }, [tenantId, shiftId]);
+
+  /**
+   * Re-read the shift's orders after something changed one.
+   *
+   * `preferId` is the "an order was just created" signal: the new order becomes
+   * the Current Order with no reload, route switch or manual refresh. Wired to
+   * the existing post-transaction call sites rather than a poller - the events
+   * that change an order are already the places this app refreshes on.
+   */
+  const refreshShiftOrders = useCallback(
+    (preferId?: string | null) => {
+      void useShiftOrders.getState().refresh({ tenantId, shiftId, preferId });
+    },
+    [tenantId, shiftId],
+  );
+
+  // --- operations surfaces ---------------------------------------------------
+  const [ordersOpen, setOrdersOpen] = useState(false);
+  const [deliveryOpen, setDeliveryOpen] = useState(false);
+  /** The order a reversal was started for, and which reversal it is. */
+  const [reversing, setReversing] = useState<{ order: ShiftOpenOrder; action: VoidAction } | null>(null);
+  /** The just-closed shift's orders, kept so its report can describe it. */
+  const [closedShiftOrders, setClosedShiftOrders] = useState<ShiftOpenOrder[]>([]);
+
+  /** Start a reversal. The dialog owns the reason and the mutation. */
+  const startReverse = useCallback((order: ShiftOpenOrder) => {
+    const action = reversalActionFor(order);
+    if (!action) return;
+    setReversing({ order, action });
+  }, []);
+
+  /**
+   * Print any shift order through the MANUAL receipt preview.
+   *
+   * Shared by the Current Order panel, the Orders modal and the Delivery modal,
+   * so one lifecycle produces one document. Built from the SERVER's rows and
+   * the order's own currency snapshot; an unpaid order prints as Unpaid with
+   * no method, tendered or change invented.
+   */
+  const printShiftOrder = useCallback(
+    async (order: ShiftOpenOrder) => {
+      try {
+        const lines = await readOrderReceiptLines(order.id);
+        const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
+          ? order.order_type
+          : "takeaway") as "takeaway" | "dine_in" | "delivery";
+        receiptStore.present(
+          buildReceipt({
+            businessName: pos.tenantName,
+            branchName: pos.branch.name,
+            orderType: source === "dine_in" ? "Dine-In" : source === "delivery" ? "Delivery" : "Takeaway",
+            orderSource: source,
+            staffName: order.staff_name ?? pos.userName,
+            orderNumber: order.order_number ?? order.id.slice(0, 8),
+            at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
+            paid: order.payment_status === "paid",
+            method: null,
+            currency: (order.currency ?? currency) as CurrencyCode,
+            lines,
+            subtotal: order.subtotal ?? order.total_amount ?? 0,
+            discount: order.discount_amount,
+            total: order.total_amount ?? 0,
+            shiftRef: shiftId ? shiftId.slice(0, 8) : null,
+            // Read at call time rather than closed over: the table store is
+            // declared below this callback, and a name looked up now is the
+            // name the map actually holds when the operator pressed Print.
+            tableName: order.table_id ? (useTables.getState().map.tables.find((t) => t.id === order.table_id)?.name ?? null) : null,
+            customerName: order.order_type === "delivery" ? order.customer_name : null,
+          }),
+        );
+      } catch (e) {
+        toast.push({ tone: "error", message: "The order could not be read for printing.", detail: e instanceof Error ? e.message : null });
+      }
+    },
+    [currency, pos.branch.name, pos.tenantName, pos.userName, receiptStore, shiftId, toast],
+  );
+
+  /**
+   * Print the end-of-shift report as ONE document.
+   *
+   * Goes through the same native path as the receipt and the kitchen ticket -
+   * one more DOCUMENT, not one more printing system - and is routed by the
+   * branch's receipt route. Every figure was already on screen; nothing is
+   * recomputed for the paper. A failure is reported and cannot touch the shift,
+   * which the server has already closed by this point.
+   */
+  const printShiftReport = useCallback(
+    async (report: ShiftReport, detail: ShiftReportDetail) => {
+      if (!isNativeAvailable()) {
+        toast.push({ tone: "warning", message: "Printing is available only in the installed Desktop app." });
+        return;
+      }
+      if (!pos.branch.id) {
+        toast.push({ tone: "warning", message: "No branch is resolved, so the report cannot be routed." });
+        return;
+      }
+      const [installed, route] = await Promise.all([
+        listPrinters(),
+        resolvePrintRoute({ branchId: pos.branch.id, purpose: "receipt", orderSource: "takeaway" }).catch(() => null),
+      ]);
+      const resolution = route
+        ? resolveRouteTarget({ route, installed: installed.ok ? installed.value : [] })
+        : ({ kind: "blocked", block: { reason: "no_route" } } as const);
+      if (resolution.kind !== "single") {
+        toast.push({ tone: "warning", message: "No receipt printer route is configured." });
+        return;
+      }
+      const result = await printReport({
+        printerName: resolution.target.windowsName,
+        paperWidth: resolution.target.paperWidth,
+        copies: 1,
+        report: {
+          title: "END OF SHIFT REPORT",
+          lines: buildShiftReportLines({
+            businessName: pos.tenantName,
+            branchName: pos.branch.name,
+            staffName: pos.userName,
+            shiftRef: report.shift_id ? report.shift_id.slice(0, 8) : null,
+            openedAt: report.opened_at ? new Date(report.opened_at).toLocaleString() : null,
+            closedAt: report.closed_at ? new Date(report.closed_at).toLocaleString() : null,
+            currency,
+            money: {
+              orders: report.orders,
+              grossSales: report.gross_sales,
+              discounts: report.discounts,
+              netSales: report.net_sales,
+              cashSales: report.cash_sales,
+              cashUsd: report.cash_usd,
+              cashLbpOriginal: report.cash_lbp_original,
+              openingCash: report.opening_cash,
+              expectedCash: report.expected_cash,
+              actualCash: report.actual_cash,
+              difference: report.difference,
+            },
+            detail,
+            note: report.notes,
+            fmt: formatMoney,
+          }),
+        },
+      });
+      if (result.ok) {
+        toast.push({ tone: "success", message: "Print job accepted by Windows.", detail: "Check the printer." });
+      } else {
+        toast.push({ tone: "warning", message: "The shift is closed. Only the report failed to print.", detail: result.error.message });
+      }
+    },
+    [currency, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, toast],
+  );
 
   /**
    * THE kitchen-ticket call site. All three routes go through it.
@@ -258,6 +451,10 @@ function PosWorkspaceInner() {
       if (presentedTickets.current.has(eventKey)) return;
       presentedTickets.current.add(eventKey);
 
+      // A submitted batch is new shift activity, whichever route sent it - and
+      // for dine-in and delivery this is the call site the order arrives on.
+      refreshShiftOrders(input.orderId);
+
       const status = await autoPrintKitchenTicket({
         branchId: pos.branch.id,
         tenantId: tenantId ?? "",
@@ -269,7 +466,7 @@ function PosWorkspaceInner() {
       });
       kitchenStore.present(ticket, status);
     },
-    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, tenantId],
+    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId],
   );
 
   /**
@@ -283,6 +480,10 @@ function PosWorkspaceInner() {
   const presentReceipt = useCallback(
     (receipt: ReceiptData) => {
       receiptStore.present(receipt);
+      // A settlement changes an order's lifecycle, so the shift list and its
+      // count follow it. Every route presents its receipt through here, which
+      // makes this the one place a payment has to be reflected.
+      refreshShiftOrders();
       void autoPrintReceipt({
         branchId: pos.branch.id,
         tenantId: tenantId ?? "",
@@ -299,7 +500,7 @@ function PosWorkspaceInner() {
         }
       });
     },
-    [pos.access, pos.branch.id, receiptStore, tenantId, toast],
+    [pos.access, pos.branch.id, receiptStore, refreshShiftOrders, tenantId, toast],
   );
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -500,7 +701,14 @@ function PosWorkspaceInner() {
     return saved;
   }, [pos.branch.id, shiftId, toast]);
 
-  /** Takeaway's shape of the shared kitchen-ticket call. */
+  /**
+   * Takeaway's shape of the shared kitchen-ticket call.
+   *
+   * The shift-order refresh lives inside `printKitchenFor`, which every route
+   * goes through - so a takeaway order is picked up there exactly like a
+   * dine-in round or a delivery order, and there is one place that says "a
+   * batch was submitted".
+   */
   const ticketForOrder = useCallback(
     (saved: SubmitOrderResult, lines: CartLine[]) =>
       printKitchenFor({
@@ -708,8 +916,13 @@ function PosWorkspaceInner() {
     async (input: { actual: number; notes: string | null }) => {
       setBusy(true);
       setShiftError(null);
+      // Snapshotted BEFORE the close. Closing clears the active shift and the
+      // order store follows it, so the report would otherwise describe an empty
+      // shift - the one thing an end-of-shift report must not do.
+      const closing = useShiftOrders.getState().orders;
       try {
         await shiftStore.close({ actualCashCounted: input.actual, notes: input.notes });
+        setClosedShiftOrders(closing);
         setEndShiftOpen(false);
         newOrder();
       } catch (e) {
@@ -732,7 +945,7 @@ function PosWorkspaceInner() {
     routeDelivery: () => deliveryGate.allowed && setMode("delivery"),
     openShift: () => !shiftId && setOpenShiftOpen(true),
     endShift: () => shiftId && void startEndShift(),
-    fullscreen: () => void toggleFullscreen(),
+    fullscreen: doToggleFullscreen,
   });
 
   // Menu + buffer bindings. Live whenever the MENU is on screen - Takeaway, or
@@ -845,7 +1058,8 @@ function PosWorkspaceInner() {
       <PosShell
         routes={routes}
         onExit={() => navigate("/dashboard")}
-        onToggleFullscreen={() => void toggleFullscreen()}
+        onToggleFullscreen={doToggleFullscreen}
+        isFullscreen={fullscreen}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
         cartTitle={deliveryActive ? "Customer" : dineInActive ? "Table bill" : "Current order"}
@@ -891,18 +1105,26 @@ function PosWorkspaceInner() {
             onEndShift={() => void startEndShift()}
             canOpenShift={pos.gates.openShift.allowed}
             openShiftReason={pos.gates.openShift.reason}
+            /* The SAME collection the right panel renders - one array, so the
+               count beside End shift cannot disagree with the list. */
+            shiftOrders={shiftOrders.orders}
+            selectedOrderId={currentOrder?.id ?? null}
+            onSelectOrder={shiftOrders.select}
+            onOpenOrders={() => setOrdersOpen(true)}
+            onOpenDelivery={() => setDeliveryOpen(true)}
           />
         )}
         /* One menu implementation, used by Takeaway, Dine-in Add Items AND
            Delivery Add Items. A second menu would be a second place for prices
            to drift. */
-        work={(layout) =>
-          deliveryActive && !addingToDelivery ? (
-            /* Customer half of Delivery: no menu grid is reachable from here. */
-            delivery.work(layout)
-          ) : dineInActive && dineIn.view === "map" ? (
-            dineIn.work(layout)
-          ) : (
+        work={(layout) => (
+          <div className="flex h-full min-h-0 flex-col">
+            {deliveryActive && !addingToDelivery ? (
+              /* Customer half of Delivery: no menu grid is reachable from here. */
+              delivery.work(layout)
+            ) : dineInActive && dineIn.view === "map" ? (
+              dineIn.work(layout)
+            ) : (
             <>
               <div className="mb-3 flex shrink-0 items-center gap-2">
                 {addingToTable && (
@@ -970,8 +1192,9 @@ function PosWorkspaceInner() {
                   />
                 ))}
             </>
-          )
-        }
+            )}
+          </div>
+        )}
         cart={(layout) =>
           deliveryActive ? (
             /* The side panel is Delivery's own: the customer, then the cart,
@@ -984,7 +1207,7 @@ function PosWorkspaceInner() {
             ) : (
               dineIn.bill(layout)
             )
-          ) : (
+          ) : cart.lines.length > 0 ? (
             <CartPanel
               lines={cart.lines}
               selectedKey={cart.selectedKey}
@@ -1004,12 +1227,80 @@ function PosWorkspaceInner() {
               onOpenShift={() => setOpenShiftOpen(true)}
               onNewOrder={clearOrder}
             />
+          ) : (
+            /* THE ORDER SUMMARY, in the panel rather than behind a pill.
+               An empty cart means the cashier is between orders, which is
+               exactly when they want to review what this shift has done - so
+               the panel shows the selected shift order in full. Picking any
+               menu item puts lines in the cart and the live cart returns, so
+               nothing about taking an order changed. */
+            <CurrentOrderPanel
+              order={currentOrder}
+              count={shiftOrders.orders.length}
+              position={shiftOrders.index + 1}
+              hasShift={Boolean(shiftId)}
+              loading={shiftOrders.loading}
+              error={shiftOrders.error}
+              tenantName={pos.tenantName}
+              branchName={pos.branch.name}
+              staffName={pos.userName}
+              shiftId={shiftId}
+              fallbackCurrency={currency}
+              tableName={currentOrder?.table_id ? (tableStore.map.tables.find((t) => t.id === currentOrder.table_id)?.name ?? null) : null}
+              onStep={shiftOrders.step}
+              /* The MANUAL layer - deliberately receiptStore.present and not
+                 presentReceipt, so reviewing an order can never auto-print. */
+              onPresentReceipt={(receipt) => receiptStore.present(receipt)}
+              onReverse={startReverse}
+            />
           )
         }
       />
 
       {dineInActive && dineIn.dialogs}
       {deliveryActive && delivery.dialogs}
+
+      {/* Operations surfaces. All three read the ONE shift-order store and all
+          three reverse through the ONE dialog, so no screen can hold its own
+          opinion about what an order's state permits. */}
+      <OrdersModal
+        open={ordersOpen}
+        onClose={() => setOrdersOpen(false)}
+        tenantId={tenantId}
+        branchId={pos.branch.id}
+        shiftId={shiftId}
+        currency={currency}
+        tableNameFor={(id) => (id ? (tableStore.map.tables.find((t) => t.id === id)?.name ?? null) : null)}
+        shiftOrders={shiftOrders.orders}
+        selectedOrderId={currentOrder?.id ?? null}
+        onSelectOrder={shiftOrders.select}
+        onPrintOrder={(o) => void printShiftOrder(o)}
+        onReverseOrder={startReverse}
+      />
+
+      <DeliveryModal
+        open={deliveryOpen}
+        onClose={() => setDeliveryOpen(false)}
+        shiftId={shiftId}
+        currency={currency}
+        shiftOrders={shiftOrders.orders}
+        onSelectOrder={shiftOrders.select}
+        onPrintOrder={(o) => void printShiftOrder(o)}
+        onReverseOrder={startReverse}
+      />
+
+      <ReverseOrderDialog
+        order={reversing?.order ?? null}
+        action={reversing?.action ?? null}
+        onClose={() => setReversing(null)}
+        /* Authoritative re-read: the reversed order's new state, its removal
+           from the open counts, and the drawer are all read back rather than
+           patched locally. */
+        onDone={() => {
+          refreshShiftOrders();
+          void shiftStore.refreshCashBox();
+        }}
+      />
 
       {/* Walking away from an order the kitchen is already cooking.
           The order NUMBER is named, because that is the only thing the cashier
@@ -1109,7 +1400,20 @@ function PosWorkspaceInner() {
         onConfirm={(input) => void doEndShift(input)}
       />
 
-      <ShiftReportDialog report={shiftStore.lastReport} currency={currency} onClose={() => shiftStore.clearReport()} />
+      {/* The orders are captured BEFORE the close cleared the active shift, so
+          the report's route and reversal detail describes the shift it is
+          reporting on rather than the empty one that replaced it. */}
+      <ShiftReportDialog
+        report={shiftStore.lastReport}
+        currency={currency}
+        shiftOrders={closedShiftOrders}
+        onPrint={
+          shiftStore.lastReport
+            ? (detail) => void printShiftReport(shiftStore.lastReport as ShiftReport, detail)
+            : undefined
+        }
+        onClose={() => shiftStore.clearReport()}
+      />
 
     </>
   );

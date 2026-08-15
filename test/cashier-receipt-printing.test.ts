@@ -531,17 +531,39 @@ test("the invoke handler exposes exactly the printing commands, and no others", 
   // the property is that the IPC surface is an explicit, reviewable LIST that
   // both sides agree on, and that nothing outside printing is on it. POS v1
   // added `print_kitchen_ticket` deliberately and in its own edit to lib.rs,
-  // which is exactly the visibility this assertion exists to force.
-  const expected = ["list_printers", "print_test_page", "print_receipt", "print_kitchen_ticket"];
+  // and the operations revision added `print_report` the same way, which is
+  // exactly the visibility this assertion exists to force.
+  const expected = [
+    "list_printers",
+    "print_test_page",
+    "print_receipt",
+    "print_kitchen_ticket",
+    "print_report",
+  ];
   const handler = libRs.slice(libRs.indexOf("invoke_handler"), libRs.indexOf("]));"));
   const commands = [...handler.matchAll(/printing::(\w+)/g)].map((m) => m[1]);
   assert.deepEqual(commands, expected);
   assert.deepEqual([...NATIVE_COMMANDS], expected);
 });
 
-test("no new capability was granted", () => {
+test("printing still needs no capability of its own", () => {
+  // RETARGETED. This asserted the whole capability list was unchanged, which
+  // was the right guard while receipts were the only thing being added -
+  // printing commands go through `invoke_handler` and need no permission entry,
+  // and that is still true. The list has since grown by two WINDOW permissions
+  // for the fullscreen fix, which have nothing to do with printing. What this
+  // file cares about is that no print/shell/fs surface was opened; the exact
+  // list is pinned in `native-printing.test.ts`.
   const parsed = JSON.parse(capabilities) as { permissions: string[] };
-  assert.deepEqual(parsed.permissions, ["core:default", "opener:default"]);
+  for (const p of parsed.permissions) {
+    assert.ok(
+      p === "core:default" || p === "opener:default" || p.startsWith("core:window:"),
+      `unexpected capability: ${p}`,
+    );
+  }
+  for (const forbidden of ["print", "shell", "fs:", "http", "process"]) {
+    assert.equal(parsed.permissions.some((p) => p.includes(forbidden)), false, `${forbidden} must not be granted`);
+  }
 });
 
 test("invoke is still reached only through the one adapter", () => {

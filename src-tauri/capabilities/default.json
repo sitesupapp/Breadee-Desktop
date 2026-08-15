@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window. Core, the opener plugin, and the two native printing commands (Level 3E-A) - nothing else. Application commands registered through invoke_handler are reachable from the app's own window without a plugin permission, so this list stays the record of what the window is allowed to touch: no shell, no filesystem, no HTTP, no process.",
+  "description": "Default capability for the main window. Core, the opener plugin, the printing commands registered through invoke_handler, and exactly two window permissions - nothing else. `core:default` deliberately excludes window SETTERS, which is why the Full Screen button silently did nothing in the packaged build: `setFullscreen` was denied and the catch swallowed it. The two grants below are the narrow fix - fullscreen state read and write for the kiosk toggle. Still no shell, no filesystem, no HTTP, no process, and no other window mutation.",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-fullscreen"
+  ]
 }

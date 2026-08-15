@@ -113,7 +113,15 @@ test("the takeaway payment shortcuts stay disabled in Delivery", () => {
 test("Delivery reuses the shared menu and cart, and still exposes no Pay", () => {
   const code = stripJsxComments(stripComments(workspaceSrc));
   // The customer half still bypasses the menu entirely.
-  assert.match(code, /work=\{\(layout\) =>\s*deliveryActive && !addingToDelivery \? \(/);
+  //
+  // RETARGETED: the work area now opens with a positioned wrapper carrying the
+  // Order Summary overlay, so the delivery branch is no longer the FIRST thing
+  // after `work={(layout) =>`. Adjacency was never the property - "the customer
+  // half renders delivery.work and never the menu grid" is - so the assertion
+  // now pins that branch wherever it sits inside the work builder.
+  assert.match(code, /work=\{\(layout\) => \(/);
+  const work = code.slice(code.indexOf("work={(layout) =>"), code.indexOf("cart={(layout) =>"));
+  assert.match(work, /deliveryActive && !addingToDelivery \? \(\s*delivery\.work\(layout\)/);
   // The side panel is Delivery's own, which mounts CartPanel without a pay gate.
   assert.match(code, /cart=\{\(layout\) =>\s*deliveryActive \? \(/);
   // And no bottom-bar Pay, exactly as before.

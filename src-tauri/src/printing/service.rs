@@ -9,6 +9,7 @@
 use super::kitchen::{build_kitchen_page, validate_kitchen_ticket, KitchenTicketDoc};
 use super::page::{build_test_page, PageLine};
 use super::receipt::{build_receipt_page, validate_receipt, ReceiptDoc};
+use super::report::{build_report_page, validate_report, ReportDoc};
 use super::types::{
     resolve_printer, validate_copies, InstalledPrinter, PaperWidth, PrintError, PrintOutcome,
     TestPageContext,
@@ -50,6 +51,7 @@ pub trait PrintDevice {
 pub const TEST_DOCUMENT_TITLE: &str = "Breadee printer test";
 pub const RECEIPT_DOCUMENT_TITLE: &str = "Breadee customer receipt";
 pub const KITCHEN_DOCUMENT_TITLE: &str = "Breadee kitchen ticket";
+pub const REPORT_DOCUMENT_TITLE: &str = "Breadee shift report";
 
 /// Print exactly one document.
 ///
@@ -281,6 +283,38 @@ where
         copies_requested,
         KITCHEN_DOCUMENT_TITLE,
         |_| Ok(build_kitchen_page(doc, paper)),
+    )
+}
+
+/// Print an end-of-shift report.
+///
+/// Same path as the other three documents. It reads no shift and no order: the
+/// caller composes the lines from snapshots it has already displayed, so the
+/// paper and the screen cannot disagree. A failure here cannot reach the shift,
+/// because the shift is not in scope of this function at all - a report that
+/// fails to print is a report, not a broken close.
+pub fn print_report<C, D, F>(
+    catalogue: &C,
+    make_device: F,
+    printer_name: &str,
+    paper: PaperWidth,
+    copies_requested: u32,
+    doc: &ReportDoc,
+) -> Result<PrintOutcome, PrintError>
+where
+    C: PrinterCatalogue,
+    D: PrintDevice,
+    F: Fn() -> D,
+{
+    validate_report(doc)?;
+    print_document(
+        catalogue,
+        make_device,
+        printer_name,
+        paper,
+        copies_requested,
+        REPORT_DOCUMENT_TITLE,
+        |_| Ok(build_report_page(doc, paper)),
     )
 }
 
@@ -782,7 +816,12 @@ mod tests {
         let (_, steps) = run_ticket(&catalogue(&["P"]), FailAt::Never, "P", 1, &ticket(), PaperWidth::Mm80);
         assert_eq!(title_of(&steps), KITCHEN_DOCUMENT_TITLE);
 
-        let titles = [TEST_DOCUMENT_TITLE, RECEIPT_DOCUMENT_TITLE, KITCHEN_DOCUMENT_TITLE];
+        let titles = [
+            TEST_DOCUMENT_TITLE,
+            RECEIPT_DOCUMENT_TITLE,
+            KITCHEN_DOCUMENT_TITLE,
+            REPORT_DOCUMENT_TITLE,
+        ];
         for (i, a) in titles.iter().enumerate() {
             for b in titles.iter().skip(i + 1) {
                 assert_ne!(a, b, "two documents share a queue title");
@@ -791,9 +830,56 @@ mod tests {
     }
 
     #[test]
+    fn a_shift_report_prints_as_one_document() {
+        // ONE job for the whole shift, not one per order - the property that
+        // makes this a report rather than a stack of receipts.
+        let doc = super::super::report::ReportDoc {
+            title: "END OF SHIFT REPORT".into(),
+            lines: (0..80)
+                .map(|i| super::super::report::ReportLine {
+                    label: format!("Item {i}"),
+                    value: Some("1.00 USD".into()),
+                    kind: super::super::report::ReportLineKind::Body,
+                })
+                .collect(),
+        };
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let s = Rc::clone(&steps);
+        let result = print_report(
+            &catalogue(&["P"]),
+            || MockDevice { fail_at: FailAt::Never, steps: Rc::clone(&s), next_job: 41 },
+            "P",
+            PaperWidth::Mm80,
+            1,
+            &doc,
+        );
+        assert!(result.unwrap().accepted);
+        let recorded = steps.borrow().clone();
+        assert_eq!(recorded.iter().filter(|s| matches!(s, Step::StartDoc(_))).count(), 1);
+        assert_eq!(recorded.iter().filter(|s| matches!(s, Step::Draw(_))).count(), 1);
+    }
+
+    #[test]
+    fn an_invalid_report_never_opens_a_device() {
+        let doc = super::super::report::ReportDoc { title: "R".into(), lines: vec![] };
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let s = Rc::clone(&steps);
+        let result = print_report(
+            &catalogue(&["P"]),
+            || MockDevice { fail_at: FailAt::Never, steps: Rc::clone(&s), next_job: 42 },
+            "P",
+            PaperWidth::Mm80,
+            1,
+            &doc,
+        );
+        assert!(matches!(result, Err(PrintError::InvalidReceipt { .. })));
+        assert!(steps.borrow().is_empty());
+    }
+
+    #[test]
     fn a_queue_title_carries_no_order_or_customer_data() {
         // Queue titles outlive the job and are visible to anyone at the printer.
-        for title in [TEST_DOCUMENT_TITLE, RECEIPT_DOCUMENT_TITLE, KITCHEN_DOCUMENT_TITLE] {
+        for title in [TEST_DOCUMENT_TITLE, RECEIPT_DOCUMENT_TITLE, KITCHEN_DOCUMENT_TITLE, REPORT_DOCUMENT_TITLE] {
             assert!(!title.chars().any(|c| c.is_ascii_digit()), "{title:?} carries a number");
             assert!(title.starts_with("Breadee "), "{title:?} should identify the app");
         }
