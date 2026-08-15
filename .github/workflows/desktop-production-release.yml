@@ -1,0 +1,251 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — PRODUCTION RELEASE + UPDATE PUBLISH
+#
+# The only workflow that can change what an installed production terminal is
+# offered. Everything about it is deliberately hard to trigger by accident.
+#
+# TRIGGER: a `desktop-prod-v*` tag, and nothing else. Merging to desktop-staging
+# does NOT update customer machines - a release is a separate, intentional act
+# with its own version number. That separation is the whole safety model: code
+# can land continuously while the fleet moves only when someone decides it does.
+#
+# WHY A DEDICATED CHANNEL BRANCH RATHER THAN /releases/latest.
+# This repository has already published `desktop-v1.0.0-rc1-staging`. A generic
+# "latest release" endpoint would happily hand that RC to a production till,
+# which would point a real restaurant at the staging database. The updater
+# therefore reads ONE file on ONE branch, and only this job writes it. A staging
+# build cannot appear there because nothing else ever writes there.
+#
+# SIGNING is mandatory and unconditional. The private key lives in the protected
+# Production environment; the matching public key is compiled into the app, so an
+# artifact this workflow did not sign cannot install - the client refuses it.
+#
+# FAIL CLOSED. Every check below exits non-zero rather than publishing something
+# unverified. A release that does not happen is a nuisance; a release that points
+# a production till at staging, or ships an unsigned binary, is an incident.
+# ---------------------------------------------------------------------------
+
+name: Desktop Production Release
+
+on:
+  push:
+    tags:
+      - 'desktop-prod-v*'
+
+permissions:
+  contents: write # required to create the release and push the channel manifest
+
+concurrency:
+  group: desktop-production-release
+  cancel-in-progress: false
+
+env:
+  # The branch carrying the production update manifest. Orphan by design: it
+  # holds `latest.json` and nothing else, so it can never accidentally serve
+  # source or a staging artifact.
+  CHANNEL_BRANCH: desktop-production-channel
+  STAGING_REF: azjxprewycygsocusxjn
+  PRODUCTION_REF: cltlqfqormkhppmbvyrv
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: windows-latest
+    environment: Production
+
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 1. The tag IS the version. Validate its shape, then prove the
+      #    application actually claims that version - a tag that disagrees with
+      #    tauri.conf.json would publish a manifest advertising a version no
+      #    client can ever reach, and every terminal would re-download forever.
+      - name: Validate tag and version agreement
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "Tag: $tag"
+          version="${tag#desktop-prod-v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$version' is not a plain SemVer MAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "tauri.conf.json=$conf package.json=$pkg Cargo.toml=$cargo"
+          for got in "$conf" "$pkg" "$cargo"; do
+            if [ "$got" != "$version" ]; then
+              echo "::error::Version mismatch: tag says $version but a manifest says $got."
+              exit 1
+            fi
+          done
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      # 2. Same production-environment guards as the installer workflow. Kept
+      #    here rather than shared, because a release must not depend on another
+      #    workflow having been correct.
+      - name: Verify production environment is configured
+        shell: bash
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::The Production environment has no Supabase URL/key. Refusing to release."
+            exit 1
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::No updater signing key in the Production environment. Refusing to publish an unsigned update."
+            exit 1
+          fi
+          case "$VITE_SUPABASE_URL" in
+            *"$STAGING_REF"*)
+              echo "::error::The Production environment points at the STAGING project. Refusing to release."
+              exit 1 ;;
+          esac
+          host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
+          echo "Production backend host: $host"
+
+      - name: Build frontend
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: production
+
+      - name: Verify built bundle targets production
+        shell: bash
+        run: |
+          if grep -rl "$STAGING_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle references the STAGING project. Refusing to release."
+            exit 1
+          fi
+          if ! grep -rl "$PRODUCTION_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle does not reference the production project. Refusing to release."
+            exit 1
+          fi
+          echo "Bundle backend target verified: production."
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 3. Build + sign. `createUpdaterArtifacts` is on in tauri.conf.json, so
+      #    this produces the NSIS installer, the updater artifact and its `.sig`.
+      #    The password variable must be PRESENT even though the key has none.
+      - name: Build and sign the production app
+        run: npm run tauri:build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: production
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+
+      # 4. Collect the assets and prove the signature exists. An unsigned
+      #    release is worse than no release: it cannot install, and it would
+      #    look like a broken app rather than a broken pipeline.
+      - name: Collect and verify release assets
+        shell: bash
+        run: |
+          nsis_dir=src-tauri/target/release/bundle/nsis
+          mkdir -p out
+          installer=$(ls "$nsis_dir"/*-setup.exe | head -n 1)
+          sig=$(ls "$nsis_dir"/*-setup.exe.sig 2>/dev/null | head -n 1 || true)
+          if [ -z "$sig" ] || [ ! -s "$sig" ]; then
+            echo "::error::No updater signature was produced. Refusing to publish an unsigned update."
+            exit 1
+          fi
+          cp "$installer" "out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe"
+          cp "$installer" "out/Breadee_${VERSION}_x64-setup.exe"
+          cp "$sig"       "out/Breadee_${VERSION}_x64-setup.exe.sig"
+          cd out
+          sha256sum Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe > SHA256SUMS.txt
+          sha256sum "Breadee_${VERSION}_x64-setup.exe" >> SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "SIGNATURE=$(cat "Breadee_${VERSION}_x64-setup.exe.sig")" >> "$GITHUB_ENV"
+
+      # 5. Immutable release assets. Fresh installs keep working: the normal
+      #    installer is published alongside the updater artifact, so a brand-new
+      #    customer can still install Breadee the ordinary way.
+      - name: Publish the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Breadee Desktop ${{ env.VERSION }}
+          body: |
+            Breadee Desktop production release ${{ env.VERSION }}.
+
+            - `Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe` — fresh installation
+            - `Breadee_${{ env.VERSION }}_x64-setup.exe` + `.sig` — signed automatic update
+            - `SHA256SUMS.txt` — checksums
+
+            Installed production terminals will be offered this version in-app.
+          files: |
+            out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe
+            out/Breadee_${{ env.VERSION }}_x64-setup.exe
+            out/Breadee_${{ env.VERSION }}_x64-setup.exe.sig
+            out/SHA256SUMS.txt
+          draft: false
+          prerelease: false
+
+      # 6. Advance the channel. This is the step that actually reaches the
+      #    fleet, and it happens LAST - only after the assets exist and are
+      #    signed, so the manifest can never point at something unpublished.
+      - name: Publish the production update manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Breadee_${VERSION}_x64-setup.exe"
+          pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          mkdir -p channel
+          cat > channel/latest.json <<JSON
+          {
+            "version": "${VERSION}",
+            "notes": "Breadee Desktop ${VERSION}",
+            "pub_date": "${pub_date}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${SIGNATURE}",
+                "url": "${asset}"
+              }
+            }
+          }
+          JSON
+          node -e "JSON.parse(require('fs').readFileSync('channel/latest.json','utf8'))"
+          cat channel/latest.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Orphan branch: it carries the manifest and nothing else, so no source
+          # and no staging artifact can ever be served from this endpoint.
+          git checkout --orphan "$CHANNEL_BRANCH"
+          git rm -rf . >/dev/null 2>&1 || true
+          cp channel/latest.json ./latest.json
+          git add latest.json
+          git commit -m "Production channel -> ${VERSION}"
+          git push --force origin "$CHANNEL_BRANCH"
+          echo "Production channel now advertises ${VERSION}."

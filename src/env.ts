@@ -8,6 +8,11 @@ const raw = {
   APP_ENV: (import.meta.env.VITE_APP_ENV as string | undefined)?.trim(),
   APP_PLATFORM: ((import.meta.env.VITE_APP_PLATFORM as string | undefined) ?? "desktop").trim(),
   APP_NAME: ((import.meta.env.VITE_APP_NAME as string | undefined) ?? "Breadee").trim(),
+  // Injected by vite.config.ts from package.json - see the note there. Falls
+  // back to "0.0.0" rather than throwing: a missing version must not stop the
+  // app from starting, and 0.0.0 is older than any real release, so the updater
+  // treats it as "everything is newer" instead of "nothing is".
+  APP_VERSION: ((import.meta.env.VITE_APP_VERSION as string | undefined) ?? "0.0.0").trim(),
 };
 
 if (!raw.SUPABASE_URL || !raw.SUPABASE_ANON_KEY) {
@@ -96,5 +101,6 @@ export const env = {
   APP_ENV,
   APP_PLATFORM: raw.APP_PLATFORM,
   APP_NAME: raw.APP_NAME,
+  APP_VERSION: raw.APP_VERSION,
   IS_PRODUCTION: APP_ENV === "production",
 };

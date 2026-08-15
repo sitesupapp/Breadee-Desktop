@@ -91,9 +91,25 @@ test("the callback focuses the EXISTING main window", () => {
 });
 
 test("the callback never creates a second window", () => {
+  // RETARGETED for the auto-updater. The bare `::new(` guard was a proxy for
+  // "constructs a window", and it caught `tauri_plugin_updater::Builder::new()`
+  // - a plugin builder, not a window. Widening the proxy would have been the
+  // wrong fix; naming the window constructors is the right one, because the
+  // property being defended is that a second launch focuses the existing till
+  // rather than opening a second one.
   const code = rustCode();
-  for (const forbidden of ["WebviewWindowBuilder", "WindowBuilder", "::new(", "add_window"]) {
+  for (const forbidden of [
+    "WebviewWindowBuilder",
+    "WindowBuilder",
+    "add_window",
+    "WebviewWindow::new",
+    "Window::new",
+  ]) {
     assert.equal(code.includes(forbidden), false, `the shell can construct a window (${forbidden})`);
+  }
+  // Whatever else the shell builds, only plugins may be constructed this way.
+  for (const ctor of code.match(/\w+::Builder::new\(\)/g) ?? []) {
+    assert.match(ctor, /^tauri_plugin_\w+::Builder::new\(\)$/, `unexpected builder: ${ctor}`);
   }
 });
 

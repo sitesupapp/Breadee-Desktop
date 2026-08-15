@@ -4,6 +4,7 @@ import { ReceiptDesign } from "@/screens/settings/ReceiptDesign";
 import { SyncCenter } from "@/screens/settings/SyncCenter";
 import { DeviceSettings } from "@/screens/settings/DeviceSettings";
 import { Help } from "@/screens/settings/Help";
+import { About } from "@/screens/settings/About";
 
 const TABS = [
   { to: "printing", label: "Printing & Routing" },
@@ -11,6 +12,7 @@ const TABS = [
   { to: "sync", label: "Sync Center" },
   { to: "device", label: "Device" },
   { to: "help", label: "Help" },
+  { to: "about", label: "About" },
 ];
 
 export function Settings() {
@@ -40,6 +42,7 @@ export function Settings() {
         <Route path="sync" element={<SyncCenter />} />
         <Route path="device" element={<DeviceSettings />} />
         <Route path="help" element={<Help />} />
+        <Route path="about" element={<About />} />
       </Routes>
     </div>
   );

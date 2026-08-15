@@ -6,6 +6,8 @@ import { pendingCount } from "@/lib/offline/db";
 import { roleLabel } from "@/lib/permissions";
 import { visibleNav } from "@/lib/nav";
 import { Badge } from "@/components/ui";
+import { UpdateBanner } from "@/components/UpdateBanner";
+import { useUpdates } from "@/state/updates";
 
 export function Shell() {
   const s = useSession();
@@ -25,6 +27,15 @@ export function Shell() {
     tick();
     const id = window.setInterval(tick, 4000);
     return () => window.clearInterval(id);
+  }, []);
+
+  // ONE update check, once, after the shell is up. Fire-and-forget on purpose:
+  // it is not awaited, nothing renders behind it, and it cannot reject - so a
+  // terminal with no internet, or one whose update endpoint is down, opens
+  // exactly as fast as one on a good connection. The store itself guarantees
+  // this runs once per process however many times the shell mounts.
+  useEffect(() => {
+    void useUpdates.getState().checkOnStartup();
   }, []);
 
   const branchLabel = s.membership?.all_branches
@@ -66,6 +77,10 @@ export function Shell() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* Above the header, below nothing - a strip that pushes the app down
+            rather than covering any control. Renders nothing at all unless an
+            update is actually waiting. */}
+        <UpdateBanner />
         <header className="flex items-center justify-between border-b border-line bg-white px-5 py-3">
           <div className="flex items-center gap-2 text-sm">
             <span className="font-bold text-ink">{s.tenant?.business_name ?? "—"}</span>
