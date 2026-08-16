@@ -105,7 +105,7 @@ export function PosShell(props: PosShellProps) {
         aria-label="POS navigation"
       >
         <div className={cn("flex items-center gap-2 px-3 py-3", !layout.railExpanded && "justify-center px-0")}>
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-lg font-black text-white">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-lg font-black text-onbrand">
             B
           </div>
           {layout.railExpanded && (

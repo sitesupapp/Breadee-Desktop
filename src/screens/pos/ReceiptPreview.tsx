@@ -32,6 +32,10 @@ import {
   type NativePrintError,
   type PrintOutcome,
 } from "@/lib/nativePrinting";
+import { QrSymbol } from "@/components/pos/QrSymbol";
+import { customerRenderOptions, type ReceiptRenderOptions } from "@/lib/pos/receiptRender";
+import { readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
+import { readShowPaymentQr } from "@/lib/pos/qrCode";
 import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
 import {
   blockMessage,
@@ -41,26 +45,48 @@ import {
   type CashierResolution,
 } from "@/lib/pos/cashierPrinter";
 
-export function ReceiptPaper({ data }: { data: ReceiptData }) {
+/**
+ * The 80mm thermal preview.
+ *
+ * DELIBERATELY NOT THEMED. `paper`/`paper-ink` are literal black and white in
+ * `tailwind.config.ts` with no variable behind them, so this panel looks the
+ * same under all ten themes. Themed paper would show a cashier a burgundy
+ * receipt and print a black one - a preview of a different document.
+ *
+ * `render` is the tenant's template, from `pos_receipt_settings`. Absent means
+ * "no template configured", and everything is drawn - the same direction the
+ * native renderer takes, for the same reason: a preview that silently lost the
+ * TOTAL because a settings read failed would be worse than one showing a line
+ * somebody had switched off.
+ */
+export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: ReceiptRenderOptions }) {
+  const show = (key: string) => !render?.sections || render.sections.includes(key);
   return (
-    <div className="mx-auto w-[320px] rounded-lg border border-line bg-white p-4 font-mono text-[12px] leading-tight text-ink">
+    <div className="mx-auto w-[320px] rounded-lg border border-paper-line bg-paper p-4 font-mono text-[12px] leading-tight text-paper-ink">
       <div className="text-center">
-        <p className="text-sm font-bold uppercase tracking-wide">{data.businessName}</p>
-        <p className="text-[11px] text-sub">{data.branchName}</p>
+        {show("business_name") && (
+          <p className="text-sm font-bold uppercase tracking-wide">{data.businessName}</p>
+        )}
+        {show("branch_name") && <p className="text-[11px] text-paper-sub">{data.branchName}</p>}
+        {show("address") && render?.address && <p className="text-[11px] text-paper-sub">{render.address}</p>}
+        {show("phone") && render?.phone && <p className="text-[11px] text-paper-sub">Tel: {render.phone}</p>}
+        {show("welcome") && render?.welcome && <p className="text-[11px] text-paper-sub">{render.welcome}</p>}
       </div>
-      <div className="my-2 border-t border-dashed border-line" />
-      <div className="flex justify-between text-[11px] text-sub">
-        <span>{data.orderType}</span>
-        <span>#{data.orderNumber}</span>
-      </div>
+      <div className="my-2 border-t border-dashed border-paper-line" />
+      {(show("order_type") || show("order_number")) && (
+        <div className="flex justify-between text-[11px] text-paper-sub">
+          <span>{show("order_type") ? data.orderType : ""}</span>
+          <span>{show("order_number") ? `#${data.orderNumber}` : ""}</span>
+        </div>
+      )}
       {/* The tenant's STORED table name, printed verbatim (m256).
           It is never prefixed: a tenant may legitimately call a table "5",
           "Table 5", "Terrace" or "VIP 2", and prepending "Table " produced
           "Table Table 4" on the first staging receipt - the same doubled-label
           defect the web POS already carries. The order type line above supplies
           the "Dine-in" context, so the name needs no decoration. */}
-      {data.tableName && (
-        <div className="flex justify-between text-[11px] text-sub">
+      {show("table_info") && data.tableName && (
+        <div className="flex justify-between text-[11px] text-paper-sub">
           <span>{data.tableName}</span>
           {data.seats != null && <span>{data.seats} seats</span>}
         </div>
@@ -68,90 +94,109 @@ export function ReceiptPaper({ data }: { data: ReceiptData }) {
       {/* Delivery identity. Without it the receipt says who took the money but
           not who the food is for or where it goes - the two things a delivery
           receipt exists to carry. */}
-      {(data.customerName || data.deliveryAddress) && (
-        <div className="text-[11px] text-sub">
-          {data.customerName && (
+      {((show("customer_name") && data.customerName) || (show("customer_address") && data.deliveryAddress)) && (
+        <div className="text-[11px] text-paper-sub">
+          {show("customer_name") && data.customerName && (
             <div className="flex justify-between">
               <span className="truncate">{data.customerName}</span>
-              {data.customerPhone && <span className="pl-2">{data.customerPhone}</span>}
+              {show("customer_phone") && data.customerPhone && <span className="pl-2">{data.customerPhone}</span>}
             </div>
           )}
-          {data.deliveryAddress && <p className="mt-0.5">{data.deliveryAddress}</p>}
+          {show("customer_address") && data.deliveryAddress && <p className="mt-0.5">{data.deliveryAddress}</p>}
         </div>
       )}
-      <div className="flex justify-between text-[11px] text-sub">
-        <span>{data.at}</span>
-        {data.staffName && <span className="truncate pl-2">{data.staffName}</span>}
-      </div>
-      <div className="my-2 border-t border-dashed border-line" />
+      {(show("datetime") || show("staff")) && (
+        <div className="flex justify-between text-[11px] text-paper-sub">
+          <span>{show("datetime") ? data.at : ""}</span>
+          {show("staff") && data.staffName && <span className="truncate pl-2">{data.staffName}</span>}
+        </div>
+      )}
+      <div className="my-2 border-t border-dashed border-paper-line" />
 
-      <table className="w-full">
-        <tbody>
-          {data.lines.map((l, i) => (
-            <tr key={`${l.name}-${i}`}>
-              <td className="py-0.5 pr-1 align-top">{l.qty}x</td>
-              <td className="py-0.5 pr-1 align-top">
-                <span>{l.name}</span>
-                {l.modifiers?.map((m) => (
-                  <span key={m.name} className="block pl-2 text-[11px] text-sub">
-                    + {m.name}
-                    {m.price_delta !== 0 ? ` (${formatMoney(m.price_delta, data.currency)})` : ""}
-                  </span>
-                ))}
-                {l.note && <span className="block pl-2 text-[11px] italic text-sub">{l.note}</span>}
-              </td>
-              <td className="py-0.5 text-right align-top">{formatMoney(l.lineTotal, data.currency)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {show("items") && (
+        <table className="w-full">
+          <tbody>
+            {data.lines.map((l, i) => (
+              <tr key={`${l.name}-${i}`}>
+                <td className="py-0.5 pr-1 align-top">{l.qty}x</td>
+                <td className="py-0.5 pr-1 align-top">
+                  <span>{l.name}</span>
+                  {l.modifiers?.map((m) => (
+                    <span key={m.name} className="block pl-2 text-[11px] text-paper-sub">
+                      + {m.name}
+                      {m.price_delta !== 0 ? ` (${formatMoney(m.price_delta, data.currency)})` : ""}
+                    </span>
+                  ))}
+                  {l.note && <span className="block pl-2 text-[11px] italic text-paper-sub">{l.note}</span>}
+                </td>
+                <td className="py-0.5 text-right align-top">{formatMoney(l.lineTotal, data.currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
-      <div className="my-2 border-t border-dashed border-line" />
-      <div className="flex justify-between">
-        <span>Subtotal</span>
-        <span>{formatMoney(data.subtotal, data.currency)}</span>
-      </div>
-      {data.discount > 0 && (
+      <div className="my-2 border-t border-dashed border-paper-line" />
+      {show("subtotal") && (
+        <div className="flex justify-between">
+          <span>Subtotal</span>
+          <span>{formatMoney(data.subtotal, data.currency)}</span>
+        </div>
+      )}
+      {show("discount") && data.discount > 0 && (
         <div className="flex justify-between">
           <span>Discount</span>
           <span>-{formatMoney(data.discount, data.currency)}</span>
         </div>
       )}
-      <div className="mt-1 flex justify-between text-sm font-bold">
-        <span>Total</span>
-        <span>{formatMoney(data.total, data.currency)}</span>
-      </div>
+      {show("total") && (
+        <div className="mt-1 flex justify-between text-sm font-bold">
+          <span>Total</span>
+          <span>{formatMoney(data.total, data.currency)}</span>
+        </div>
+      )}
 
       {data.tenderCurrency && data.tenderCurrency !== data.currency && data.tenderTotal != null && (
-        <div className="mt-1 flex justify-between text-[11px] text-sub">
+        <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
           <span>Charged in {data.tenderCurrency}</span>
           <span>{formatMoney(data.tenderTotal, data.tenderCurrency)}</span>
         </div>
       )}
       {data.tendered != null && data.tenderCurrency && (
         <>
-          <div className="mt-1 flex justify-between text-[11px] text-sub">
+          <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
             <span>Tendered</span>
             <span>{formatMoney(data.tendered, data.tenderCurrency)}</span>
           </div>
-          <div className="flex justify-between text-[11px] text-sub">
+          <div className="flex justify-between text-[11px] text-paper-sub">
             <span>Change</span>
             <span>{formatMoney(data.change ?? 0, data.tenderCurrency)}</span>
           </div>
         </>
       )}
 
-      <div className="mt-1 flex justify-between text-[11px] text-sub">
-        <span>{data.paid ? `Paid - ${data.method ?? "cash"}` : "Unpaid"}</span>
-        <span>{data.currency}</span>
-      </div>
+      {show("payment_method") && (
+        <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
+          <span>{data.paid ? `Paid - ${data.method ?? "cash"}` : "Unpaid"}</span>
+          <span>{data.currency}</span>
+        </div>
+      )}
       {/* The shift reference is deliberately NOT shown. It is an internal code
           that means nothing to the customer, it does not print on the paper any
           more, and a preview that shows a line the printer will not produce is
           a preview of a different document. `ReceiptData.shiftRef` still
           carries it for the routes that use it elsewhere. */}
-      <div className="my-2 border-t border-dashed border-line" />
-      <p className="text-center text-[11px] text-sub">Thank you!</p>
+      <div className="my-2 border-t border-dashed border-paper-line" />
+      {/* After the total, before the footer - where a customer looks once they
+          have seen what they owe, and the same position the printer uses. */}
+      {render?.qr && (
+        <div className="my-2 flex justify-center">
+          <QrSymbol matrix={render.qr} size={112} />
+        </div>
+      )}
+      {show("footer") && (
+        <p className="text-center text-[11px] text-paper-sub">{render?.footer?.trim() || "Thank you!"}</p>
+      )}
     </div>
   );
 }
@@ -176,6 +221,41 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
   // `resolve_print_route`, not to this modal.
   const branchId = pos.branch.id;
   const source = receiptOrderSource(data);
+  const tenantId = pos.tenantId;
+
+  /**
+   * The tenant's template, so THIS PREVIEW SHOWS WHAT WILL PRINT.
+   *
+   * Loaded here rather than threaded through `ReceiptData` because every route
+   * already funnels its receipt into this one modal, and the print path reads
+   * the same settings from the same helper - so the two cannot describe
+   * different documents. Undefined until it arrives, which renders the full
+   * receipt: a customer waiting at a till should not watch lines appear.
+   */
+  const [render, setRender] = useState<ReceiptRenderOptions | undefined>(undefined);
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    void (async () => {
+      const design = await readReceiptDesignSafe({ tenantId, branchId });
+      // The QR is only fetched and encoded when this terminal asked for one.
+      let qr = null;
+      if (readShowPaymentQr()) {
+        try {
+          const { readPublicQrSource, qrForSlug } = await import("@/lib/pos/paymentQr");
+          const src = await readPublicQrSource({ tenantId, branchId });
+          qr = qrForSlug(src?.slug ?? null);
+        } catch {
+          qr = null;
+        }
+      }
+      if (!cancelled) setRender(customerRenderOptions({ design, qr }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, branchId]);
+
   useEffect(() => {
     if (!native) return;
     if (!source) {
@@ -226,12 +306,14 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
       printerName: target.windowsName,
       paperWidth: target.paperWidth,
       copies: target.copies,
-      receipt: data,
+      // The SAME options the panel above is rendering. What the operator
+      // approved on screen is what leaves the spooler.
+      receipt: { ...data, ...(render ?? {}) },
     });
     if (result.ok) setOutcome(result.value);
     else setError(result.error);
     setBusy(false);
-  }, [target, gate.allowed, data]);
+  }, [target, gate.allowed, data, render]);
 
   // A reprint of an order settled earlier is labelled as one. Repeating it is
   // intentional and is never suppressed - see the manual-print contract.
@@ -326,7 +408,7 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
         </div>
       }
     >
-      <ReceiptPaper data={data} />
+      <ReceiptPaper data={data} render={render} />
     </Modal>
   );
 }

@@ -52,7 +52,7 @@ export function CategoryNavigation({
             className={cn(
               "flex min-h-[44px] shrink-0 items-center gap-2 rounded-xl border px-4 text-sm font-semibold transition",
               active
-                ? "border-brand bg-brand text-white shadow-sm"
+                ? "border-brand bg-brand text-onbrand shadow-sm"
                 : "border-line bg-white text-ink hover:border-brand/40 hover:bg-brand-soft/40",
             )}
           >

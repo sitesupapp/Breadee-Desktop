@@ -485,12 +485,36 @@ test("the auto-print functions have no failure channel out of them", () => {
 });
 
 test("reading the settings can never interrupt a completed sale", () => {
-  assert.match(settingsLib, /catch \{/);
-  assert.match(settingsLib, /return AUTO_PRINT_UNKNOWN/);
-  // Read-only: the desktop never writes the branch's printing preference.
-  for (const write of ["insert", "update(", "upsert", "delete", "save_pos_receipt_settings"]) {
-    assert.equal(settingsLib.includes(write), false, write);
+  // THIS USED TO ASSERT THE WHOLE MODULE WAS READ-ONLY, and that is no longer
+  // true: Settings -> POS Settings and Settings -> Receipt now write the branch
+  // row through the web app's own `save_pos_receipt_settings`. What has NOT
+  // changed - and is the property this test was always really protecting - is
+  // that the PRINT PATH only ever reads, and that its read cannot throw. So the
+  // assertion is narrowed to the read function rather than deleted.
+  const readFn = settingsLib.slice(
+    settingsLib.indexOf("export async function readAutoPrintSettings"),
+    settingsLib.indexOf("function pickRow"),
+  );
+  assert.ok(readFn.length > 0, "the read function must be locatable");
+  assert.match(readFn, /catch \{/);
+  assert.match(readFn, /return AUTO_PRINT_UNKNOWN/);
+  for (const write of ["insert", "update(", "upsert", "delete", "save_pos_receipt_settings", "rpc("]) {
+    assert.equal(readFn.includes(write), false, write);
   }
+});
+
+test("the automatic print path can read the settings but never write them", () => {
+  // The write path exists for two settings screens and must stay out of the
+  // post-transaction sequence entirely: a save attempted after a payment would
+  // be a server round trip that could fail, on the one path in the app where a
+  // failure must be impossible.
+  for (const write of ["saveReceiptSettings", "save_pos_receipt_settings", "buildReceiptSettingsPayload"]) {
+    assert.equal(autoPrintRunSrc.includes(write), false, write);
+  }
+  // It reads through the never-throwing helpers, not the throwing ones.
+  assert.match(autoPrintRunSrc, /readAutoPrintSettings/);
+  assert.match(autoPrintRunSrc, /readReceiptDesignSafe/);
+  assert.equal(/\breadReceiptDesign\b(?!Safe)/.test(autoPrintRunSrc), false, "the throwing read must not be used here");
 });
 
 // --- wiring ------------------------------------------------------------------

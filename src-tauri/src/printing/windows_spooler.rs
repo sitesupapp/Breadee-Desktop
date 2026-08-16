@@ -24,12 +24,13 @@
 //! solved by rasterising - which is exactly why it is not in this one.
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateDCW, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDeviceCaps, SelectObject,
-    SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DRAW_TEXT_FORMAT,
-    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING, DT_WORDBREAK, FF_DONTCARE, HDC,
-    HFONT, HGDIOBJ, HORZRES, LOGPIXELSX, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES,
+    CreateDCW, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect,
+    GetDeviceCaps, SelectObject, SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DEFAULT_QUALITY, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING,
+    DT_WORDBREAK, FF_DONTCARE, HBRUSH, HDC, HFONT, HGDIOBJ, HORZRES, LOGPIXELSX, LOGPIXELSY,
+    OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES,
 };
 use windows::Win32::Graphics::Printing::{
     EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
@@ -39,7 +40,7 @@ use windows::Win32::Graphics::Printing::{
 };
 use windows::Win32::Storage::Xps::{AbortDoc, EndDoc, EndPage, StartDocW, StartPage, DOCINFOW};
 
-use super::page::{Direction, LineStyle, PageLine, CUT_CLEARANCE_MM};
+use super::page::{Direction, LineStyle, PageLine, CUT_CLEARANCE_MM, QR_QUIET_MM, QR_SIZE_MM};
 use super::service::{PrintDevice, PrinterCatalogue};
 use super::types::{InstalledPrinter, PaperWidth, PrintError, PrinterStatus};
 
@@ -421,8 +422,10 @@ fn with_font<T>(
         LineStyle::Heading => 10,
         LineStyle::Body | LineStyle::Rule => 10,
         LineStyle::Small => 8,
-        // Neither draws a glyph; the size only has to be legal.
-        LineStyle::Blank | LineStyle::Feed => 8,
+        // None of these draws a glyph; the size only has to be legal. A QR is
+        // measured and painted as geometry and never consults the font, but the
+        // shared `with_font` wrapper still selects one, so it needs a value.
+        LineStyle::Blank | LineStyle::Feed | LineStyle::Qr => 8,
     };
     let bold = matches!(style, LineStyle::Title | LineStyle::Heading | LineStyle::Total);
     let height_px = -(points * dpi_y) / 72;
@@ -489,6 +492,15 @@ fn line_format(line: &PageLine) -> DRAW_TEXT_FORMAT {
 
 /// How tall this line will be, measured before anything is committed.
 fn measure_line(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32) -> Result<i32, PrintError> {
+    // A QR is geometry, not glyphs, so its height comes from millimetres rather
+    // than from a font. Checked BEFORE the empty-text branch below: a QR line
+    // carries no text on purpose, and would otherwise be measured as a spacer
+    // and painted over by whatever came next.
+    if line.style == LineStyle::Qr {
+        let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
+        return Ok(mm_to_px(QR_SIZE_MM + QR_QUIET_MM * 2.0, dpi_y).max(8));
+    }
+
     if line.text.is_empty() {
         let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
         let mm = match line.style {
@@ -528,6 +540,10 @@ fn paint_line(
     column: i32,
     height: i32,
 ) -> Result<(), PrintError> {
+    if line.style == LineStyle::Qr {
+        return paint_qr(hdc, line, x, y, column, height);
+    }
+
     // Spacers and the trailing feed are paper, not marks.
     if line.text.is_empty() {
         return Ok(());
@@ -558,6 +574,75 @@ fn paint_line(
         }
     }
 
+    Ok(())
+}
+
+/// Draw a QR symbol as filled rectangles.
+///
+/// WHY RECTANGLES AND NOT A BITMAP. A bitmap would have to be built at the
+/// device's own resolution, blitted with `StretchDIBits`, and then dithered by
+/// whatever the driver felt like doing to it - which on a 1-bit thermal head is
+/// how a QR turns into a grey smear that will not scan. Filling each module as
+/// its own black rectangle asks the driver for exactly the marks the symbol is
+/// made of, at device resolution, with no resampling anywhere.
+///
+/// MODULE SIZE IS ROUNDED DOWN TO A WHOLE DEVICE PIXEL, and the symbol's true
+/// width is then recomputed from it. A fractional module size would put some
+/// modules one pixel wider than their neighbours, and an unevenly-spaced grid
+/// is the classic reason a printed code scans on one phone and not another.
+fn paint_qr(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32, height: i32) -> Result<(), PrintError> {
+    let Some(matrix) = line.qr.as_ref() else { return Ok(()) };
+    if !matrix.is_well_formed() {
+        // Validation refuses this at the boundary; reaching here means a caller
+        // inside this process built one by hand. Draw nothing rather than a
+        // partial symbol - half a QR scans as nothing at all.
+        return Ok(());
+    }
+
+    let dpi_x = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSX) };
+    let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
+    if dpi_x <= 0 || dpi_y <= 0 {
+        return Err(PrintError::RenderFailed { detail: "device reported no resolution".into() });
+    }
+
+    let wanted = mm_to_px(QR_SIZE_MM, dpi_x).min(column);
+    let module = (wanted / matrix.size as i32).max(1);
+    let side = module * matrix.size as i32;
+    // Centred on the paper, and vertically inside its own quiet zone.
+    let left = x + ((column - side) / 2).max(0);
+    let quiet = mm_to_px(QR_QUIET_MM, dpi_y).max(1);
+    let top = y + quiet.min((height - side).max(0) / 2);
+
+    // One brush for the whole symbol. Creating one per module would be a few
+    // thousand GDI objects for a single receipt.
+    // Pure black, as a COLORREF (0x00BBGGRR). A thermal head is one bit deep,
+    // so anything else would be dithered into a grey mesh that will not scan.
+    let brush: HBRUSH = unsafe { CreateSolidBrush(COLORREF(0x0000_0000)) };
+    if brush.is_invalid() {
+        return Err(PrintError::RenderFailed { detail: "could not create the QR brush".into() });
+    }
+
+    for row in 0..matrix.size {
+        for col in 0..matrix.size {
+            if !matrix.is_dark(row, col) {
+                continue;
+            }
+            let cell = RECT {
+                left: left + col as i32 * module,
+                top: top + row as i32 * module,
+                right: left + (col as i32 + 1) * module,
+                bottom: top + (row as i32 + 1) * module,
+            };
+            unsafe { FillRect(hdc, &cell, brush) };
+        }
+    }
+
+    // Always deleted, including when nothing was drawn: a till runs for a whole
+    // shift and a leaked brush per receipt is a leak per sale. `.into()` rather
+    // than a hand-built HGDIOBJ, matching how `with_font` disposes of its font.
+    unsafe {
+        let _ = DeleteObject(brush.into());
+    }
     Ok(())
 }
 

@@ -93,6 +93,17 @@ pub struct KitchenTicketDoc {
     #[serde(default)]
     pub order_note: Option<String>,
     pub lines: Vec<KitchenLine>,
+    /// The tenant's footer message, when they configured one.
+    ///
+    /// The web ships the kitchen footer switched OFF by default, and this
+    /// renderer draws nothing when either the block is hidden or the message is
+    /// empty - so a ticket does not grow a blank line for a feature nobody used.
+    #[serde(default)]
+    pub footer: Option<String>,
+    /// Which blocks to draw. `None` means no template was supplied and
+    /// everything is drawn - see `ReceiptDoc::sections` for why that direction.
+    #[serde(default)]
+    pub sections: Option<Vec<String>>,
     /// True for a rehearsal ticket, which prints the NOT-A-REAL-ORDER banner.
     #[serde(default)]
     pub test: bool,
@@ -107,6 +118,16 @@ fn too_long(value: &str, limit: usize) -> bool {
 /// The same bounds as the receipt, deliberately: both are handed to the same
 /// Win32 text engine and drawn in the same loop, so a limit that differed
 /// between them would be an accident rather than a decision.
+impl KitchenTicketDoc {
+    /// Should this block be drawn? No template supplied means draw everything.
+    pub fn shows(&self, key: &str) -> bool {
+        match &self.sections {
+            None => true,
+            Some(keys) => keys.iter().any(|k| k == key),
+        }
+    }
+}
+
 pub fn validate_kitchen_ticket(doc: &KitchenTicketDoc) -> Result<(), PrintError> {
     let invalid = |detail: &str| PrintError::InvalidReceipt { detail: detail.to_string() };
 
@@ -184,25 +205,33 @@ pub fn build_kitchen_page(doc: &KitchenTicketDoc, paper: PaperWidth) -> Vec<Page
     if doc.test {
         out.push(PageLine::new(NOT_A_REAL_ORDER, LineStyle::Body, Direction::Auto));
     }
-    if !doc.business_name.is_empty() {
+    if doc.shows("business_name") && !doc.business_name.is_empty() {
         out.push(PageLine::new(&doc.business_name, LineStyle::Small, direction_for(&doc.business_name)));
     }
-    if !doc.branch_name.is_empty() {
+    if doc.shows("branch_name") && !doc.branch_name.is_empty() {
         out.push(PageLine::new(&doc.branch_name, LineStyle::Small, direction_for(&doc.branch_name)));
     }
     out.push(PageLine::new(divider.clone(), LineStyle::Rule, Direction::Auto));
 
     // --- order identity -----------------------------------------------------
-    out.push(PageLine::pair(
-        &doc.order_type,
-        format!("#{}", doc.order_number),
-        LineStyle::Heading,
-        Direction::Auto,
-    ));
+    if doc.shows("order_type") || doc.shows("order_number") {
+        out.push(PageLine::pair(
+            if doc.shows("order_type") { doc.order_type.clone() } else { String::new() },
+            if doc.shows("order_number") { format!("#{}", doc.order_number) } else { String::new() },
+            LineStyle::Heading,
+            Direction::Auto,
+        ));
+    }
 
     // Table and round sit together: for a dine-in cook they are one fact -
     // "the second round for table 4".
-    if let Some(table) = doc.table_name.as_deref().filter(|t| !t.is_empty()) {
+    //
+    // THE ROUND LABEL IS NOT SWITCHABLE, deliberately. `table_info` hides the
+    // table; the batch is which round of that table this ticket is, and a
+    // kitchen that cannot tell round 2 from a duplicate of round 1 will cook
+    // the same food twice. It is operational safety, not a display preference.
+    let table = doc.table_name.as_deref().filter(|t| !t.is_empty() && doc.shows("table_info"));
+    if let Some(table) = table {
         out.push(PageLine::pair(
             table,
             doc.batch_label.clone().unwrap_or_default(),
@@ -213,16 +242,20 @@ pub fn build_kitchen_page(doc: &KitchenTicketDoc, paper: PaperWidth) -> Vec<Page
         out.push(PageLine::new(batch, LineStyle::Heading, Direction::Auto));
     }
 
-    if let Some(name) = doc.customer_name.as_deref().filter(|n| !n.is_empty()) {
-        out.push(PageLine::new(name, LineStyle::Body, direction_for(name)));
+    if doc.shows("customer_info") {
+        if let Some(name) = doc.customer_name.as_deref().filter(|n| !n.is_empty()) {
+            out.push(PageLine::new(name, LineStyle::Body, direction_for(name)));
+        }
     }
 
-    out.push(PageLine::pair(
-        &doc.at,
-        doc.staff_name.clone().unwrap_or_default(),
-        LineStyle::Small,
-        Direction::Auto,
-    ));
+    if doc.shows("datetime") || doc.shows("staff") {
+        out.push(PageLine::pair(
+            if doc.shows("datetime") { doc.at.clone() } else { String::new() },
+            if doc.shows("staff") { doc.staff_name.clone().unwrap_or_default() } else { String::new() },
+            LineStyle::Small,
+            Direction::Auto,
+        ));
+    }
 
     // The order note is prep instruction for the whole ticket, so it goes ABOVE
     // the items rather than after them - a cook who has already started the
@@ -237,7 +270,7 @@ pub fn build_kitchen_page(doc: &KitchenTicketDoc, paper: PaperWidth) -> Vec<Page
     // --- items --------------------------------------------------------------
     // No right-hand column anywhere below: there is no money, and an empty money
     // column would just invite someone to fill it.
-    for line in &doc.lines {
+    for line in doc.lines.iter().filter(|_| doc.shows("items")) {
         out.push(PageLine::new(
             format!("{}x {}", format_qty(line.qty), line.name),
             LineStyle::Total,
@@ -259,6 +292,15 @@ pub fn build_kitchen_page(doc: &KitchenTicketDoc, paper: PaperWidth) -> Vec<Page
     }
 
     out.push(PageLine::new(divider, LineStyle::Rule, Direction::Auto));
+
+    // The tenant's footer, when the block is on AND there is something to say.
+    // Unlike the receipt there is no default text: a cook has no use for
+    // "Thank you!", and printing one would just be paper.
+    if doc.shows("footer") {
+        if let Some(footer) = doc.footer.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            out.push(PageLine::new(footer, LineStyle::Small, direction_for(footer)));
+        }
+    }
     out
 }
 
@@ -284,6 +326,8 @@ mod tests {
             order_note: None,
             lines: vec![line("Margherita", 1.0)],
             test: false,
+            footer: None,
+            sections: None,
         }
     }
 

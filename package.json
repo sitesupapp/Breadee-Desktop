@@ -1,7 +1,7 @@
 {
   "name": "breadee-desktop",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Breadee Desktop â€” offline-capable POS desktop app (Tauri + Vite + React) reusing the Breadee web app's Supabase logic.",
   "scripts": {
@@ -19,6 +19,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "dexie": "^4.0.10",
+    "qrcode-generator": "1.4.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.1.1",

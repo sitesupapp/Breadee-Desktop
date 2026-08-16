@@ -106,7 +106,7 @@ export function CustomerCard(props: CustomerCardProps) {
                 className={cn(
                   "min-h-[44px] rounded-xl border px-3 text-xs font-bold transition",
                   a.id === props.selectedAddressId
-                    ? "border-brand bg-brand text-white"
+                    ? "border-brand bg-brand text-onbrand"
                     : "border-line bg-white text-ink hover:border-brand/40",
                 )}
               >

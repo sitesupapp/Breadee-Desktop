@@ -48,7 +48,7 @@ export function Shell() {
     <div className="flex h-full">
       <aside className="flex w-56 flex-col border-r border-line bg-white">
         <div className="flex items-center gap-2 px-4 py-4">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand text-lg font-black text-white">B</div>
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand text-lg font-black text-onbrand">B</div>
           <div>
             <p className="text-sm font-extrabold leading-none text-brand-dark">Breadee</p>
             <p className="text-[10px] font-semibold text-sub">Desktop</p>
