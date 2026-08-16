@@ -459,7 +459,12 @@ export function toReceiptDoc(receipt: {
     // binary, or not the size it claims is dropped, because the native side
     // would refuse the whole document for it and a customer would rather have
     // a receipt with no code than no receipt.
-    qr: receipt.qr && isQrMatrix(receipt.qr) ? { size: receipt.qr.size, rows: [...receipt.qr.rows] } : null,
+    // `.slice()` rather than a spread, and that is not a style preference:
+    // `test/cashier-receipt-printing.test.ts` asserts this function contains no
+    // `...receipt`, because a spread is exactly how a future UI-only field
+    // would silently cross the native boundary. A copy that reads like one is
+    // worth more here than three saved characters.
+    qr: receipt.qr && isQrMatrix(receipt.qr) ? { size: receipt.qr.size, rows: receipt.qr.rows.slice() } : null,
   };
 }
 

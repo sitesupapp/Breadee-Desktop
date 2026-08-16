@@ -24,7 +24,7 @@
 //! solved by rasterising - which is exactly why it is not in this one.
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreateDCW, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect,
     GetDeviceCaps, SelectObject, SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
@@ -615,7 +615,9 @@ fn paint_qr(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32, height: i32)
 
     // One brush for the whole symbol. Creating one per module would be a few
     // thousand GDI objects for a single receipt.
-    let brush: HBRUSH = unsafe { CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x0000_0000)) };
+    // Pure black, as a COLORREF (0x00BBGGRR). A thermal head is one bit deep,
+    // so anything else would be dithered into a grey mesh that will not scan.
+    let brush: HBRUSH = unsafe { CreateSolidBrush(COLORREF(0x0000_0000)) };
     if brush.is_invalid() {
         return Err(PrintError::RenderFailed { detail: "could not create the QR brush".into() });
     }
@@ -636,9 +638,10 @@ fn paint_qr(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32, height: i32)
     }
 
     // Always deleted, including when nothing was drawn: a till runs for a whole
-    // shift and a leaked brush per receipt is a leak per sale.
+    // shift and a leaked brush per receipt is a leak per sale. `.into()` rather
+    // than a hand-built HGDIOBJ, matching how `with_font` disposes of its font.
     unsafe {
-        let _ = DeleteObject(HGDIOBJ(brush.0));
+        let _ = DeleteObject(brush.into());
     }
     Ok(())
 }

@@ -330,12 +330,23 @@ test("a historical receipt is still printable", () => {
 
 test("the receipt document carries exactly the fields the renderer needs", () => {
   const doc = toReceiptDoc(receipt());
+  // The set grew by six when the receipt designer landed, and each addition is
+  // deliberate: `address`/`phone`/`welcome`/`footer` are the branding the
+  // native renderer can now draw, `sections` is the tenant's block list, and
+  // `qr` is a pre-encoded matrix. Nothing else may appear - the point of
+  // listing them exhaustively is that a seventh has to be argued for here.
   assert.deepEqual(Object.keys(doc).sort(), [
-    "at", "branchName", "businessName", "change", "currency", "customerName", "customerPhone",
-    "deliveryAddress", "discount", "lines", "method", "orderNumber", "orderType", "paid",
-    "seats", "shiftRef", "staffName", "subtotal", "tableName", "tenderCurrency", "tenderTotal",
-    "tendered", "total",
+    "address", "at", "branchName", "businessName", "change", "currency", "customerName",
+    "customerPhone", "deliveryAddress", "discount", "footer", "lines", "method", "orderNumber",
+    "orderType", "paid", "phone", "qr", "seats", "sections", "shiftRef", "staffName", "subtotal",
+    "tableName", "tenderCurrency", "tenderTotal", "tendered", "total", "welcome",
   ]);
+  // The six default to null/absent, so a caller written before the designer
+  // existed produces exactly the document it always did.
+  assert.equal(doc.sections, null);
+  assert.equal(doc.qr, null);
+  assert.equal(doc.address, null);
+  assert.equal(doc.footer, null);
   assert.equal(doc.lines[0].modifiers[0].name, "Small");
   assert.equal(doc.lines[0].note, "No olives");
 });
