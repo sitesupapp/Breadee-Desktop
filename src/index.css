@@ -2,8 +2,65 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * The default theme, written as plain CSS.
+ *
+ * These are the Classic Green values from `src/lib/theme/themes.ts`, repeated
+ * here so the very first frame is correct even before any JavaScript runs -
+ * during the Vite module graph load, on a storage failure, or in a build where
+ * `bootTheme()` somehow did not run. `src/lib/theme/apply.ts` overwrites every
+ * one of them on `<html>` as soon as it does.
+ *
+ * `test/desktop-themes.test.ts` pins these against the THEMES definition, so
+ * the two copies cannot drift.
+ */
 :root {
   color-scheme: light;
+
+  --c-canvas: 248 250 252;
+  --c-surface: 255 255 255;
+  --c-surface-muted: 248 250 252;
+  --c-surface-subtle: 241 245 249;
+  --c-surface-strong: 226 232 240;
+  --c-neutral-300: 203 213 225;
+  --c-neutral-400: 148 163 184;
+  --c-neutral-600: 71 85 105;
+  --c-neutral-700: 51 65 85;
+  --c-line: 226 232 240;
+  --c-ink: 15 23 42;
+  --c-sub: 100 116 139;
+  --c-brand: 22 163 74;
+  --c-brand-dark: 21 128 61;
+  --c-brand-soft: 220 252 231;
+  --c-on-brand: 255 255 255;
+  --c-black: 0 0 0;
+
+  --c-danger-50: 254 242 242;
+  --c-danger-100: 254 226 226;
+  --c-danger-200: 254 202 202;
+  --c-danger-300: 252 165 165;
+  --c-danger-500: 239 68 68;
+  --c-danger-600: 220 38 38;
+  --c-danger-700: 185 28 28;
+  --c-danger-800: 153 27 27;
+  --c-danger-900: 127 29 29;
+
+  --c-warning-50: 255 251 235;
+  --c-warning-100: 254 243 199;
+  --c-warning-200: 253 230 138;
+  --c-warning-300: 252 211 77;
+  --c-warning-400: 251 191 36;
+  --c-warning-500: 245 158 11;
+  --c-warning-600: 217 119 6;
+  --c-warning-700: 180 83 9;
+  --c-warning-800: 146 64 14;
+  --c-warning-900: 120 53 15;
+
+  --c-info-50: 240 249 255;
+  --c-info-100: 224 242 254;
+  --c-info-200: 186 230 253;
+  --c-info-500: 14 165 233;
+  --c-info-800: 7 89 133;
 }
 
 html,
@@ -15,8 +72,8 @@ body,
 body {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  color: #0f172a;
-  background: #f8fafc;
+  color: rgb(var(--c-ink));
+  background: rgb(var(--c-canvas));
   /* Desktop feel: disable text selection on chrome, allow in inputs. */
   -webkit-user-select: none;
   user-select: none;

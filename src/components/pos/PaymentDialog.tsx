@@ -340,7 +340,7 @@ function Choice({
       onClick={onClick}
       className={cn(
         "min-h-[44px] rounded-xl border px-4 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-40",
-        active ? "border-brand bg-brand text-white" : "border-line bg-white text-ink hover:border-brand/40",
+        active ? "border-brand bg-brand text-onbrand" : "border-line bg-white text-ink hover:border-brand/40",
       )}
     >
       {children}

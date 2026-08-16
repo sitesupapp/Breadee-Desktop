@@ -18,6 +18,8 @@
 // `native_unavailable` and the UI says so plainly. A fake printer list would be
 // worse than none: it would make a broken build look like a working one.
 
+import { isQrMatrix, type QrMatrix } from "@/lib/pos/qrCode";
+
 /** Commands the Rust side exposes. Must match `EXPOSED_COMMANDS` in printing/mod.rs. */
 export const NATIVE_COMMANDS = [
   "list_printers",
@@ -347,6 +349,23 @@ export type ReceiptDoc = {
   customerName: string | null;
   customerPhone: string | null;
   deliveryAddress: string | null;
+  /** Branding from `pos_receipt_settings`. Null draws nothing, never a placeholder. */
+  address: string | null;
+  phone: string | null;
+  welcome: string | null;
+  footer: string | null;
+  /**
+   * Which template blocks to draw, in the tenant's stored order.
+   *
+   * `null` means NO TEMPLATE WAS SUPPLIED and the renderer draws everything -
+   * the behaviour of every build before the receipt designer existed. A receipt
+   * that silently lost its TOTAL because a settings row could not be read would
+   * be far worse than one that printed a line somebody had switched off, so
+   * this default is deliberately the opposite of `AUTO_PRINT_UNKNOWN`'s.
+   */
+  sections: string[] | null;
+  /** The tenant's public QR, already encoded. See `lib/pos/qrCode.ts`. */
+  qr: QrMatrix | null;
 };
 
 /**
@@ -390,6 +409,12 @@ export function toReceiptDoc(receipt: {
   customerName?: string | null;
   customerPhone?: string | null;
   deliveryAddress?: string | null;
+  address?: string | null;
+  phone?: string | null;
+  welcome?: string | null;
+  footer?: string | null;
+  sections?: string[] | null;
+  qr?: QrMatrix | null;
 }): ReceiptDoc {
   return {
     businessName: receipt.businessName,
@@ -425,6 +450,16 @@ export function toReceiptDoc(receipt: {
     customerName: receipt.customerName ?? null,
     customerPhone: receipt.customerPhone ?? null,
     deliveryAddress: receipt.deliveryAddress ?? null,
+    address: receipt.address ?? null,
+    phone: receipt.phone ?? null,
+    welcome: receipt.welcome ?? null,
+    footer: receipt.footer ?? null,
+    sections: receipt.sections ?? null,
+    // Re-checked here rather than trusted: a matrix that is not square, not
+    // binary, or not the size it claims is dropped, because the native side
+    // would refuse the whole document for it and a customer would rather have
+    // a receipt with no code than no receipt.
+    qr: receipt.qr && isQrMatrix(receipt.qr) ? { size: receipt.qr.size, rows: [...receipt.qr.rows] } : null,
   };
 }
 
@@ -497,6 +532,10 @@ export type KitchenTicketDoc = {
     note: string | null;
   }[];
   test: boolean;
+  /** The tenant's footer message, when the template asks for one. */
+  footer: string | null;
+  /** Which template blocks to draw. Null draws everything - see `ReceiptDoc`. */
+  sections: string[] | null;
 };
 
 /**
@@ -525,6 +564,8 @@ export function toKitchenTicketDoc(ticket: {
     note?: string | null;
   }[];
   test?: boolean;
+  footer?: string | null;
+  sections?: string[] | null;
 }): KitchenTicketDoc {
   return {
     businessName: ticket.businessName,
@@ -544,6 +585,8 @@ export function toKitchenTicketDoc(ticket: {
       note: l.note ?? null,
     })),
     test: ticket.test ?? false,
+    footer: ticket.footer ?? null,
+    sections: ticket.sections ?? null,
   };
 }
 

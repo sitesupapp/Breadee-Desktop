@@ -32,6 +32,17 @@ export type PrintTarget = {
   copies: number;
   /** True when the `any` default matched rather than a source-specific route. */
   usedDefault: boolean;
+  /**
+   * `pos_printer_settings.id` of the routed printer, when the caller supplied
+   * it.
+   *
+   * Read by nothing that decides WHERE a document goes - it is the key a
+   * terminal's local automatic-printing switches are stored against, and
+   * `resolveRouteTarget` deliberately does not populate it: the resolution is
+   * about reachability, and adding an identity here would invite a future
+   * caller to route by it.
+   */
+  printerId?: string | null;
 };
 
 /** Why no document of this purpose can be printed, when that is the case. */

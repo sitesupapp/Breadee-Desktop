@@ -27,7 +27,7 @@ export function Login() {
     <div className="flex h-full items-center justify-center p-6">
       <div className="w-full max-w-md">
         <div className="mb-6 text-center">
-          <div className="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand text-2xl font-black text-white">B</div>
+          <div className="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand text-2xl font-black text-onbrand">B</div>
           <h1 className="text-2xl font-extrabold text-brand-dark">Breadee</h1>
           <p className="text-xs font-semibold text-sub">From Ingredients To Profit · Desktop</p>
         </div>

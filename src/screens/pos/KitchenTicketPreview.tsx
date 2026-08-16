@@ -42,6 +42,8 @@ import {
   type KitchenTicket,
 } from "@/lib/pos/kitchenPrinter";
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
+import { kitchenRenderOptions, type KitchenRenderOptions } from "@/lib/pos/receiptRender";
+import { readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
 import { useKitchenTicket, shouldShowKitchenTicket, type KitchenTicketStatus } from "@/state/kitchenTicket";
 
 /** The order source this ticket is routed for, from the wording it carries. */
@@ -58,58 +60,84 @@ function ticketSource(ticket: KitchenTicket): ResolverOrderSource | null {
   }
 }
 
-export function KitchenTicketPaper({ ticket }: { ticket: KitchenTicket }) {
+/**
+ * The ticket preview.
+ *
+ * Non-themed for the same reason `ReceiptPaper` is: it predicts thermal paper,
+ * and the ten themes must not be able to change what a cook is shown. `render`
+ * carries the tenant's kitchen template; absent means no template configured
+ * and everything is drawn.
+ */
+export function KitchenTicketPaper({
+  ticket,
+  render,
+}: {
+  ticket: KitchenTicket;
+  render?: KitchenRenderOptions;
+}) {
+  const show = (key: string) => !render?.sections || render.sections.includes(key);
   return (
-    <div className="mx-auto w-[320px] rounded-lg border border-line bg-white p-4 font-mono text-[12px] leading-tight text-ink">
+    <div className="mx-auto w-[320px] rounded-lg border border-paper-line bg-paper p-4 font-mono text-[12px] leading-tight text-paper-ink">
       <div className="text-center">
         <p className="text-sm font-extrabold uppercase tracking-widest">Kitchen</p>
-        {ticket.test && <p className="text-[11px] font-bold text-amber-700">TEST PRINT - NOT A REAL ORDER</p>}
-        <p className="text-[11px] text-sub">{ticket.businessName}</p>
-        <p className="text-[11px] text-sub">{ticket.branchName}</p>
+        {ticket.test && <p className="text-[11px] font-bold">TEST PRINT - NOT A REAL ORDER</p>}
+        {show("business_name") && <p className="text-[11px] text-paper-sub">{ticket.businessName}</p>}
+        {show("branch_name") && <p className="text-[11px] text-paper-sub">{ticket.branchName}</p>}
       </div>
-      <div className="my-2 border-t border-dashed border-line" />
-      <div className="flex justify-between text-[12px] font-bold">
-        <span>{ticket.orderType}</span>
-        <span>#{ticket.orderNumber}</span>
-      </div>
-      {/* The tenant's stored table name, verbatim - never prefixed (m256). */}
-      {(ticket.tableName || ticket.batchLabel) && (
+      <div className="my-2 border-t border-dashed border-paper-line" />
+      {(show("order_type") || show("order_number")) && (
         <div className="flex justify-between text-[12px] font-bold">
-          <span>{ticket.tableName ?? ""}</span>
+          <span>{show("order_type") ? ticket.orderType : ""}</span>
+          <span>{show("order_number") ? `#${ticket.orderNumber}` : ""}</span>
+        </div>
+      )}
+      {/* The tenant's stored table name, verbatim - never prefixed (m256).
+          The ROUND label is not switchable: a kitchen that cannot tell round 2
+          from a duplicate of round 1 cooks the same food twice. */}
+      {((show("table_info") && ticket.tableName) || ticket.batchLabel) && (
+        <div className="flex justify-between text-[12px] font-bold">
+          <span>{(show("table_info") && ticket.tableName) || ""}</span>
           <span>{ticket.batchLabel ?? ""}</span>
         </div>
       )}
-      {ticket.customerName && <p className="text-[11px]">{ticket.customerName}</p>}
-      <div className="flex justify-between text-[11px] text-sub">
-        <span>{ticket.at}</span>
-        {ticket.staffName && <span className="truncate pl-2">{ticket.staffName}</span>}
-      </div>
+      {show("customer_info") && ticket.customerName && <p className="text-[11px]">{ticket.customerName}</p>}
+      {(show("datetime") || show("staff")) && (
+        <div className="flex justify-between text-[11px] text-paper-sub">
+          <span>{show("datetime") ? ticket.at : ""}</span>
+          {show("staff") && ticket.staffName && <span className="truncate pl-2">{ticket.staffName}</span>}
+        </div>
+      )}
       {ticket.orderNote && (
         <>
-          <div className="my-2 border-t border-dashed border-line" />
+          <div className="my-2 border-t border-dashed border-paper-line" />
           <p className="text-[12px]">{ticket.orderNote}</p>
         </>
       )}
-      <div className="my-2 border-t border-dashed border-line" />
-      <ul className="space-y-1">
-        {ticket.lines.map((l, i) => (
-          <li key={`${l.name}-${i}`}>
-            {/* Quantity carries the emphasis on paper, so it does here too - the
-                preview has to look like what will come out of the printer. */}
-            <p className="text-[13px] font-bold">
-              {l.qty}x {l.name}
-            </p>
-            {l.modifiers.map((m) => (
-              <p key={m.name} className="pl-3 text-[12px]">
-                + {m.quantity > 1 ? `${m.quantity} x ` : ""}
-                {m.name}
+      <div className="my-2 border-t border-dashed border-paper-line" />
+      {show("items") && (
+        <ul className="space-y-1">
+          {ticket.lines.map((l, i) => (
+            <li key={`${l.name}-${i}`}>
+              {/* Quantity carries the emphasis on paper, so it does here too - the
+                  preview has to look like what will come out of the printer. */}
+              <p className="text-[13px] font-bold">
+                {l.qty}x {l.name}
               </p>
-            ))}
-            {l.note && <p className="pl-3 text-[12px]">{l.note}</p>}
-          </li>
-        ))}
-      </ul>
-      <div className="my-2 border-t border-dashed border-line" />
+              {l.modifiers.map((m) => (
+                <p key={m.name} className="pl-3 text-[12px]">
+                  + {m.quantity > 1 ? `${m.quantity} x ` : ""}
+                  {m.name}
+                </p>
+              ))}
+              {l.note && <p className="pl-3 text-[12px]">{l.note}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="my-2 border-t border-dashed border-paper-line" />
+      {show("footer") && render?.footer?.trim() && (
+        <p className="text-center text-[11px] text-paper-sub">{render.footer.trim()}</p>
+      )}
       {/* No total, no price, no payment status. See printing/kitchen.rs. */}
     </div>
   );
@@ -138,6 +166,24 @@ export function KitchenTicketModal({
   // produce paper on its own.
   const branchId = pos.branch.id;
   const source = ticketSource(ticket);
+  const tenantId = pos.tenantId;
+
+  // The tenant's kitchen template, so the panel below shows what would print.
+  // Read through the never-throwing helper: this modal often exists BECAUSE
+  // something already went wrong with printing, and a settings error on top of
+  // that would replace the ticket with a stack trace.
+  const [render, setRender] = useState<KitchenRenderOptions | undefined>(undefined);
+  useEffect(() => {
+    if (!tenantId) return;
+    let cancelled = false;
+    void readReceiptDesignSafe({ tenantId, branchId }).then((design) => {
+      if (!cancelled) setRender(kitchenRenderOptions(design));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, branchId]);
+
   useEffect(() => {
     if (!native) return;
     if (!source) {
@@ -186,12 +232,13 @@ export function KitchenTicketModal({
       printerName: target.windowsName,
       paperWidth: target.paperWidth,
       copies: target.copies,
-      ticket,
+      // The SAME template the panel above is rendering.
+      ticket: { ...ticket, sections: render?.sections ?? null, footer: render?.footer ?? null },
     });
     if (result.ok) setOutcome(result.value);
     else setError(result.error);
     setBusy(false);
-  }, [target, gate.allowed, ticket]);
+  }, [target, gate.allowed, ticket, render]);
 
   return (
     <Modal
@@ -287,7 +334,7 @@ export function KitchenTicketModal({
         </div>
       }
     >
-      <KitchenTicketPaper ticket={ticket} />
+      <KitchenTicketPaper ticket={ticket} render={render} />
     </Modal>
   );
 }

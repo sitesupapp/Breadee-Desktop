@@ -12,6 +12,8 @@ import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { useElementSize } from "@/lib/useElementSize";
 import type { SearchableItem } from "@/lib/pos/menu";
+import { PosIconGlyph } from "@/components/PosIconGlyph";
+import { iconForItem, readIconAssignments } from "@/lib/icons/assignments";
 
 const CARD_HEIGHT = 104;
 const GRID_GAP = 12;
@@ -31,6 +33,17 @@ export function MenuItemGrid({ items, columns, currency, rate, itemsNeedingChoic
   const scrollRef = useRef<HTMLDivElement>(null);
   const { height: viewportHeight } = useElementSize(scrollRef);
   const [scrollTop, setScrollTop] = useState(0);
+
+  /**
+   * Icon assignments, read ONCE per mount.
+   *
+   * From `localStorage`, which is synchronous, so this costs a single small
+   * JSON parse when the workspace opens - not one per card, and never per
+   * scroll frame. An assignment made in Settings appears the next time the POS
+   * is opened, which is the right cadence for a decision nobody makes during
+   * service.
+   */
+  const icons = useMemo(() => readIconAssignments(), []);
 
   const rows = Math.ceil(items.length / columns);
   const totalHeight = Math.max(0, rows * ROW_HEIGHT - GRID_GAP);
@@ -67,6 +80,7 @@ export function MenuItemGrid({ items, columns, currency, rate, itemsNeedingChoic
             const price = resolved.amount;
             const unpriced = price === null;
             const needsChoice = itemsNeedingChoice.has(item.id);
+            const iconKey = iconForItem(icons, item.id);
             return (
               <button
                 key={item.id}
@@ -81,7 +95,14 @@ export function MenuItemGrid({ items, columns, currency, rate, itemsNeedingChoic
                   "disabled:cursor-not-allowed disabled:opacity-50",
                 )}
               >
-                <span className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{item.name}</span>
+                {/* Icon and name on one row, with the name still the widest
+                    thing on the card. The glyph inherits the card's ink through
+                    `currentColor`, so it is legible in every theme with no
+                    per-theme asset. */}
+                <span className="flex min-w-0 items-start gap-1.5">
+                  {iconKey && <PosIconGlyph iconKey={iconKey} size={18} className="mt-0.5 shrink-0 text-sub" />}
+                  <span className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{item.name}</span>
+                </span>
                 <span className="flex items-center justify-between gap-2">
                   <span className="text-sm font-extrabold text-brand-dark">
                     {unpriced ? "No price" : formatMoney(price, currency)}

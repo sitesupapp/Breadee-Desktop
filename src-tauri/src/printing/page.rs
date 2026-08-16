@@ -14,6 +14,7 @@
 //! almost nothing about whether this printer path is usable here, so the three
 //! samples below are the actual point of the diagnostic.
 
+use super::receipt::QrMatrix;
 use super::types::{PaperWidth, TestPageContext};
 
 /// How a line should be laid out. The renderer maps these onto the platform's
@@ -42,6 +43,12 @@ pub enum LineStyle {
     /// it its own style is what stops it being tidied away as "an empty line at
     /// the end", which is how the last lines came to be cut through.
     Feed,
+    /// A QR symbol, drawn as filled squares rather than text.
+    ///
+    /// A separate style because it is the only thing in this document model
+    /// that is not a run of glyphs: its height comes from a module count, not
+    /// from a font, and it is measured and painted by geometry.
+    Qr,
 }
 
 /// Millimetres of blank paper that must follow the last printed line.
@@ -87,11 +94,27 @@ pub struct PageLine {
     pub right: Option<String>,
     pub style: LineStyle,
     pub direction: Direction,
+    /// The symbol, when `style` is `Qr`. Ignored for every other style.
+    pub qr: Option<QrMatrix>,
 }
+
+/// The QR symbol size on paper, in millimetres.
+///
+/// 24mm fits inside a 58mm roll with margin to spare and is comfortably above
+/// the ~20mm floor below which a phone camera starts needing several attempts.
+/// Fixed rather than proportional to the paper: a bigger symbol on a wider roll
+/// would just use more of a consumable to encode the same URL.
+pub const QR_SIZE_MM: f32 = 24.0;
+
+/// Blank paper above and below the symbol.
+///
+/// A QR needs a clear border - the "quiet zone" - or a scanner cannot find its
+/// edges against the lines printed next to it.
+pub const QR_QUIET_MM: f32 = 3.0;
 
 impl PageLine {
     pub fn new(text: impl Into<String>, style: LineStyle, direction: Direction) -> Self {
-        Self { text: text.into(), right: None, style, direction }
+        Self { text: text.into(), right: None, style, direction, qr: None }
     }
 
     /// A description on the left and an amount on the right.
@@ -101,7 +124,12 @@ impl PageLine {
         style: LineStyle,
         direction: Direction,
     ) -> Self {
-        Self { text: text.into(), right: Some(right.into()), style, direction }
+        Self { text: text.into(), right: Some(right.into()), style, direction, qr: None }
+    }
+
+    /// A QR symbol. Carries no text, so it can disclose nothing if misrouted.
+    pub fn qr(matrix: QrMatrix) -> Self {
+        Self { text: String::new(), right: None, style: LineStyle::Qr, direction: Direction::Auto, qr: Some(matrix) }
     }
 }
 

@@ -110,6 +110,93 @@ pub struct ReceiptDoc {
     pub customer_phone: Option<String>,
     #[serde(default)]
     pub delivery_address: Option<String>,
+    // --- branding, from `pos_receipt_settings` -------------------------------
+    //
+    // Optional because they are settings a tenant may never have filled in, and
+    // because every payload built before the receipt designer existed simply
+    // omits them. An absent field draws nothing; it never draws a placeholder.
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub welcome: Option<String>,
+    #[serde(default)]
+    pub footer: Option<String>,
+    // --- the tenant's receipt template ---------------------------------------
+    /// Which blocks to draw, in the order the tenant arranged them.
+    ///
+    /// `None` means NO TEMPLATE WAS SUPPLIED and everything is drawn - which is
+    /// exactly what every build before the designer did. That direction is
+    /// deliberate and is the opposite of the automatic-printing default: a
+    /// receipt that silently lost its TOTAL because a settings row could not be
+    /// read would be a far worse failure than one that printed a line somebody
+    /// had switched off.
+    #[serde(default)]
+    pub sections: Option<Vec<String>>,
+    /// The tenant's public QR, already encoded by the caller.
+    ///
+    /// A MATRIX, NOT A URL. The frontend encodes it once and both draws it in
+    /// the preview and sends it here, so the code an operator approved on
+    /// screen is bit-for-bit the code that reaches paper. Accepting a URL and
+    /// encoding it again here would be a second implementation of the same
+    /// symbol, and the first time the two disagreed would be in a customer's
+    /// hand.
+    #[serde(default)]
+    pub qr: Option<QrMatrix>,
+}
+
+/// A square QR symbol as rows of `0`/`1`.
+///
+/// Validated at the boundary (`validate_receipt`) rather than trusted: this is
+/// drawn as filled rectangles in a loop, so a malformed or enormous matrix is a
+/// rejected document, never a runaway print job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QrMatrix {
+    pub size: usize,
+    pub rows: Vec<String>,
+}
+
+/// Largest symbol this layer will lay out. QR version 40 is 177 modules; a
+/// public menu URL never needs more than a fraction of that, and the bound is
+/// what stops a caller asking for a page-sized grid of rectangles.
+pub const MAX_QR_MODULES: usize = 177;
+
+impl QrMatrix {
+    /// Is this a square grid of `0`/`1` of the size it claims?
+    pub fn is_well_formed(&self) -> bool {
+        self.size > 0
+            && self.size <= MAX_QR_MODULES
+            && self.rows.len() == self.size
+            && self
+                .rows
+                .iter()
+                .all(|r| r.len() == self.size && r.bytes().all(|b| b == b'0' || b == b'1'))
+    }
+
+    pub fn is_dark(&self, row: usize, col: usize) -> bool {
+        self.rows
+            .get(row)
+            .and_then(|r| r.as_bytes().get(col))
+            .is_some_and(|b| *b == b'1')
+    }
+}
+
+impl ReceiptDoc {
+    /// Should this block be drawn?
+    ///
+    /// See `sections`: no template means draw everything.
+    pub fn shows(&self, key: &str) -> bool {
+        match &self.sections {
+            None => true,
+            Some(keys) => keys.iter().any(|k| k == key),
+        }
+    }
+}
+
+/// Text drawn only when it is present and not blank.
+fn present(value: &Option<String>) -> Option<&str> {
+    value.as_deref().map(str::trim).filter(|v| !v.is_empty())
 }
 
 fn too_long(value: &str, limit: usize) -> bool {
@@ -135,6 +222,18 @@ pub fn validate_receipt(doc: &ReceiptDoc) -> Result<(), PrintError> {
     }
     if doc.delivery_address.as_deref().is_some_and(|a| too_long(a, MAX_NOTE)) {
         return Err(invalid("the delivery address is too long"));
+    }
+    for field in [&doc.address, &doc.phone, &doc.welcome, &doc.footer] {
+        if field.as_deref().is_some_and(|v| too_long(v, MAX_NOTE)) {
+            return Err(invalid("a receipt branding line is too long"));
+        }
+    }
+    // A malformed QR is refused rather than drawn partially: half a symbol
+    // scans as nothing, and the customer holding it has no way to tell.
+    if let Some(qr) = &doc.qr {
+        if !qr.is_well_formed() {
+            return Err(invalid("the payment QR is not a well-formed square matrix"));
+        }
     }
     for line in &doc.lines {
         if too_long(&line.name, MAX_TEXT) {
@@ -225,53 +324,103 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     let divider = rule(paper);
 
     // --- header -------------------------------------------------------------
-    out.push(PageLine::new(&doc.business_name, LineStyle::Title, direction_for(&doc.business_name)));
-    if !doc.branch_name.is_empty() {
+    //
+    // ORDER IS FIXED, VISIBILITY IS THE TENANT'S. The template's own ordering is
+    // deliberately NOT followed here. A thermal receipt is not a free canvas:
+    // the head prints top to bottom onto a strip that gets torn off, and a
+    // layout with the total above the items or the branch name after the
+    // payment line is not a preference, it is an unreadable bill. So the
+    // desktop honours WHICH blocks appear - which is what the checkboxes
+    // control - and keeps the reading order a receipt has to have. The web
+    // renderer, which lays out an HTML page, still honours the stored order;
+    // both read the same config and neither invents one.
+    if doc.shows("business_name") {
+        out.push(PageLine::new(&doc.business_name, LineStyle::Title, direction_for(&doc.business_name)));
+    }
+    if doc.shows("branch_name") && !doc.branch_name.is_empty() {
         out.push(PageLine::new(&doc.branch_name, LineStyle::Small, direction_for(&doc.branch_name)));
+    }
+    if doc.shows("address") {
+        if let Some(address) = present(&doc.address) {
+            out.push(PageLine::new(address, LineStyle::Small, direction_for(address)));
+        }
+    }
+    if doc.shows("phone") {
+        if let Some(phone) = present(&doc.phone) {
+            out.push(PageLine::new(format!("Tel: {phone}"), LineStyle::Small, Direction::Auto));
+        }
+    }
+    if doc.shows("welcome") {
+        if let Some(welcome) = present(&doc.welcome) {
+            out.push(PageLine::new(welcome, LineStyle::Small, direction_for(welcome)));
+        }
     }
     out.push(PageLine::new(divider.clone(), LineStyle::Rule, Direction::Auto));
 
     // --- order identity -----------------------------------------------------
-    out.push(PageLine::pair(
-        &doc.order_type,
-        format!("#{}", doc.order_number),
-        LineStyle::Body,
-        Direction::Auto,
-    ));
+    //
+    // The type and the number share one row, so they are drawn when EITHER is
+    // wanted; the half that is switched off is left blank rather than the row
+    // being dropped, which keeps the receipt's first line where a cashier
+    // scanning a pile of paper expects it.
+    if doc.shows("order_type") || doc.shows("order_number") {
+        out.push(PageLine::pair(
+            if doc.shows("order_type") { doc.order_type.clone() } else { String::new() },
+            if doc.shows("order_number") { format!("#{}", doc.order_number) } else { String::new() },
+            LineStyle::Body,
+            Direction::Auto,
+        ));
+    }
 
     // Dine-in: the tenant's STORED table name, verbatim. Never prefixed with
     // "Table" - a tenant may already call it "Table 5", and m256 produced
     // "Table Table 4" on a real receipt by decorating it.
-    if let Some(table) = doc.table_name.as_deref().filter(|t| !t.is_empty()) {
-        let seats = doc.seats.map(|s| format!("{} seats", format_qty(s))).unwrap_or_default();
-        out.push(PageLine::pair(table, seats, LineStyle::Body, direction_for(table)));
+    if doc.shows("table_info") {
+        if let Some(table) = doc.table_name.as_deref().filter(|t| !t.is_empty()) {
+            let seats = doc.seats.map(|s| format!("{} seats", format_qty(s))).unwrap_or_default();
+            out.push(PageLine::pair(table, seats, LineStyle::Body, direction_for(table)));
+        }
     }
 
     // Delivery: who the food is for and where it goes - the two things a
-    // delivery receipt exists to carry.
-    if let Some(name) = doc.customer_name.as_deref().filter(|n| !n.is_empty()) {
-        out.push(PageLine::pair(
-            name,
-            doc.customer_phone.clone().unwrap_or_default(),
-            LineStyle::Body,
-            direction_for(name),
-        ));
+    // delivery receipt exists to carry. Each is independently switchable,
+    // because a branch that hands receipts to drivers and a branch that hands
+    // them to walk-ins want different amounts of a customer's details on paper.
+    let show_name = doc.shows("customer_name");
+    let show_phone = doc.shows("customer_phone");
+    if show_name || show_phone {
+        let name = doc.customer_name.as_deref().filter(|n| !n.is_empty()).unwrap_or_default();
+        let phone = doc.customer_phone.as_deref().filter(|p| !p.is_empty()).unwrap_or_default();
+        let left = if show_name { name } else { "" };
+        let right = if show_phone { phone } else { "" };
+        if !left.is_empty() || !right.is_empty() {
+            out.push(PageLine::pair(left, right, LineStyle::Body, direction_for(left)));
+        }
     }
-    if let Some(address) = doc.delivery_address.as_deref().filter(|a| !a.is_empty()) {
-        out.push(PageLine::new(address, LineStyle::Small, direction_for(address)));
+    if doc.shows("customer_address") {
+        if let Some(address) = doc.delivery_address.as_deref().filter(|a| !a.is_empty()) {
+            out.push(PageLine::new(address, LineStyle::Small, direction_for(address)));
+        }
     }
 
     // --- when and who -------------------------------------------------------
-    out.push(PageLine::pair(
-        &doc.at,
-        doc.staff_name.clone().unwrap_or_default(),
-        LineStyle::Small,
-        Direction::Auto,
-    ));
+    if doc.shows("datetime") || doc.shows("staff") {
+        out.push(PageLine::pair(
+            if doc.shows("datetime") { doc.at.clone() } else { String::new() },
+            if doc.shows("staff") { doc.staff_name.clone().unwrap_or_default() } else { String::new() },
+            LineStyle::Small,
+            Direction::Auto,
+        ));
+    }
     out.push(PageLine::new(divider.clone(), LineStyle::Rule, Direction::Auto));
 
     // --- items --------------------------------------------------------------
-    for line in &doc.lines {
+    //
+    // `items` is switchable like anything else, and switching it off produces a
+    // total with nothing to explain it - which is a tenant's decision to make
+    // for, say, a duplicate card slip. `validate_receipt` still refuses a
+    // document that HAS no items, which is a different thing entirely.
+    for line in doc.lines.iter().filter(|_| doc.shows("items")) {
         out.push(PageLine::pair(
             format!("{}x {}", format_qty(line.qty), line.name),
             format_money(line.line_total, &doc.currency),
@@ -300,13 +449,15 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     out.push(PageLine::new(divider.clone(), LineStyle::Rule, Direction::Auto));
 
     // --- money --------------------------------------------------------------
-    out.push(PageLine::pair(
-        "Subtotal",
-        format_money(doc.subtotal, &doc.currency),
-        LineStyle::Body,
-        Direction::Auto,
-    ));
-    if doc.discount > 0.0 {
+    if doc.shows("subtotal") {
+        out.push(PageLine::pair(
+            "Subtotal",
+            format_money(doc.subtotal, &doc.currency),
+            LineStyle::Body,
+            Direction::Auto,
+        ));
+    }
+    if doc.shows("discount") && doc.discount > 0.0 {
         out.push(PageLine::pair(
             "Discount",
             format!("-{}", format_money(doc.discount, &doc.currency)),
@@ -314,12 +465,14 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
             Direction::Auto,
         ));
     }
-    out.push(PageLine::pair(
-        "TOTAL",
-        format_money(doc.total, &doc.currency),
-        LineStyle::Total,
-        Direction::Auto,
-    ));
+    if doc.shows("total") {
+        out.push(PageLine::pair(
+            "TOTAL",
+            format_money(doc.total, &doc.currency),
+            LineStyle::Total,
+            Direction::Auto,
+        ));
+    }
 
     // A different tender currency is real information: the customer paid LBP
     // against a USD total, and the paper should say what was actually charged.
@@ -346,18 +499,37 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     }
 
     // --- payment ------------------------------------------------------------
-    let status = if doc.paid {
-        format!("Paid - {}", doc.method.as_deref().unwrap_or("cash"))
-    } else {
-        "Unpaid".to_string()
-    };
-    out.push(PageLine::pair(status, doc.currency.clone(), LineStyle::Body, Direction::Auto));
+    if doc.shows("payment_method") {
+        let status = if doc.paid {
+            format!("Paid - {}", doc.method.as_deref().unwrap_or("cash"))
+        } else {
+            "Unpaid".to_string()
+        };
+        out.push(PageLine::pair(status, doc.currency.clone(), LineStyle::Body, Direction::Auto));
+    }
     // The shift reference is NOT printed. It is an internal code, the customer
     // has no use for it, and a receipt is the one document in this system that
     // leaves the building - see `ReceiptDoc::shift_ref`.
 
     out.push(PageLine::new(divider, LineStyle::Rule, Direction::Auto));
-    out.push(PageLine::new("Thank you!", LineStyle::Small, Direction::Auto));
+
+    // --- the public QR ------------------------------------------------------
+    //
+    // AFTER THE TOTAL, BEFORE THE FOOTER, which is where a customer looks once
+    // they have seen what they owe. It is drawn only when the caller supplied a
+    // matrix - this layer never encodes one, and never substitutes a URL as
+    // text when encoding was not possible.
+    if let Some(qr) = doc.qr.as_ref().filter(|q| q.is_well_formed()) {
+        out.push(PageLine::qr(qr.clone()));
+    }
+
+    // The tenant's footer when they have one, and the long-standing default
+    // when they have not - an existing till keeps printing "Thank you!" until
+    // somebody writes something else.
+    if doc.shows("footer") {
+        let footer = present(&doc.footer).unwrap_or("Thank you!");
+        out.push(PageLine::new(footer, LineStyle::Small, direction_for(footer)));
+    }
     // Paper, not content: the cutter sits below the print head, so without this
     // tail the blade comes down across the lines above it.
     out.push(cut_clearance());
@@ -397,6 +569,12 @@ mod tests {
             customer_name: None,
             customer_phone: None,
             delivery_address: None,
+            address: None,
+            phone: None,
+            welcome: None,
+            footer: None,
+            sections: None,
+            qr: None,
         }
     }
 

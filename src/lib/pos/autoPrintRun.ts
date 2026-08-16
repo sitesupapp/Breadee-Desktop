@@ -40,7 +40,10 @@ import {
 import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { resolveRouteTarget, type PrintResolution } from "@/lib/pos/printTarget";
-import { readAutoPrintSettings } from "@/lib/pos/receiptSettings";
+import { readAutoPrintSettings, readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
+import { customerRenderOptions, kitchenRenderOptions } from "@/lib/pos/receiptRender";
+import { printerAutoPrintEnabled, readPrinterAutoPrintMap } from "@/lib/pos/autoPrintPrinters";
+import { readShowPaymentQr } from "@/lib/pos/qrCode";
 import type { KitchenTicketStatus } from "@/state/kitchenTicket";
 
 /**
@@ -64,7 +67,47 @@ async function resolveFor(input: {
     orderSource: input.orderSource,
   }).catch(() => null);
   if (!route) return { kind: "blocked", block: { reason: "no_route" } };
-  return resolveRouteTarget({ route, installed: input.installed.ok ? input.installed.value : [] });
+  const resolution = resolveRouteTarget({ route, installed: input.installed.ok ? input.installed.value : [] });
+  return resolution.kind === "single"
+    ? { kind: "single", target: { ...resolution.target, printerId: route.printer_id } }
+    : resolution;
+}
+
+/**
+ * Has this terminal switched automatic printing off for the routed printer?
+ *
+ * A LOCAL VETO ON AN ALREADY-MADE DECISION. Routing has chosen the printer and
+ * the branch has said the document type prints by itself; this only asks
+ * whether THIS till participates. It can never cause a print, choose a
+ * different destination, or change what any other terminal does - see
+ * `autoPrintPrinters.ts`.
+ *
+ * A vetoed document falls back to `manual`, silently: the operator switched
+ * the printer off themselves, so telling them about it after every order would
+ * be nagging them about their own decision. The Print button in the preview is
+ * unaffected, which is the point of a veto rather than a block.
+ */
+function printerIsSilenced(resolution: PrintResolution): boolean {
+  if (resolution.kind !== "single") return false;
+  return !printerAutoPrintEnabled(readPrinterAutoPrintMap(), resolution.target.printerId);
+}
+
+/**
+ * The tenant's public QR, when this terminal has been asked to print one.
+ *
+ * READS NOTHING UNLESS THE SWITCH IS ON, so a branch that never enabled it
+ * pays neither the round trip nor the encoding. Never throws: a receipt without
+ * a code is a receipt; an exception on the post-payment path is not.
+ */
+async function resolvePaymentQr(input: { tenantId: string; branchId: string | null }) {
+  if (!readShowPaymentQr()) return null;
+  try {
+    const { readPublicQrSource, qrForSlug } = await import("@/lib/pos/paymentQr");
+    const source = await readPublicQrSource(input);
+    return qrForSlug(source?.slug ?? null);
+  } catch {
+    return null;
+  }
 }
 
 // --- kitchen -----------------------------------------------------------------
@@ -96,9 +139,10 @@ export async function autoPrintKitchenTicket(input: {
   if (!native) return { kind: "manual" };
   if (autoPrintLatch.claimed(key)) return { kind: "manual" };
 
-  const [settings, installed] = await Promise.all([
+  const [settings, installed, design] = await Promise.all([
     readAutoPrintSettings({ tenantId: input.tenantId, branchId: input.branchId }),
     listPrinters(),
+    readReceiptDesignSafe({ tenantId: input.tenantId, branchId: input.branchId }),
   ]);
   if (!settings.kitchen) return { kind: "manual" };
 
@@ -108,6 +152,9 @@ export async function autoPrintKitchenTicket(input: {
     orderSource: input.source,
     installed,
   });
+  // Checked before the latch is claimed, so switching a printer back on does
+  // not find the event key already burned by an attempt that never happened.
+  if (printerIsSilenced(resolution)) return { kind: "manual" };
 
   const decision = decideAutoPrint({
     nativeAvailable: native,
@@ -123,11 +170,12 @@ export async function autoPrintKitchenTicket(input: {
   if (!autoPrintLatch.claim(key)) return { kind: "manual" };
 
   try {
+    const render = kitchenRenderOptions(design);
     const result = await printKitchenTicket({
       printerName: resolution.target.windowsName,
       paperWidth: resolution.target.paperWidth,
       copies: resolution.target.copies,
-      ticket: input.ticket,
+      ticket: { ...input.ticket, sections: render.sections, footer: render.footer },
     });
     if (result.ok) {
       return {
@@ -213,9 +261,10 @@ export async function autoPrintReceipt(input: {
   const source = receiptOrderSource(input.receipt);
   if (!source) return { kind: "manual" };
 
-  const [settings, installed] = await Promise.all([
+  const [settings, installed, design] = await Promise.all([
     readAutoPrintSettings({ tenantId: input.tenantId, branchId: input.branchId }),
     listPrinters(),
+    readReceiptDesignSafe({ tenantId: input.tenantId, branchId: input.branchId }),
   ]);
   if (!settings.customer) return { kind: "manual" };
 
@@ -225,6 +274,7 @@ export async function autoPrintReceipt(input: {
     orderSource: source,
     installed,
   });
+  if (printerIsSilenced(resolution)) return { kind: "manual" };
 
   const decision = decideAutoPrint({
     nativeAvailable: native,
@@ -245,11 +295,19 @@ export async function autoPrintReceipt(input: {
   if (!autoPrintLatch.claim(key)) return { kind: "manual" };
 
   try {
+    // The QR is encoded here, on the print path, and only when this terminal
+    // has been asked for one - so a branch that never switched it on pays
+    // nothing for it, and an encoder failure produces a receipt without a code
+    // rather than no receipt.
+    const render = customerRenderOptions({
+      design,
+      qr: await resolvePaymentQr({ tenantId: input.tenantId, branchId: input.branchId }),
+    });
     const result = await printReceipt({
       printerName: resolution.target.windowsName,
       paperWidth: resolution.target.paperWidth,
       copies: resolution.target.copies,
-      receipt: input.receipt,
+      receipt: { ...input.receipt, ...render },
     });
     if (result.ok) {
       return { kind: "sent", copies: result.value.copies_accepted, printer: result.value.printer_name };

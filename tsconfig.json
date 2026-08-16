@@ -7,6 +7,11 @@
     "skipLibCheck": true,
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // `qrcode-generator` is a CommonJS package that uses `export =`. Vite,
+    // esbuild and Node all already apply this interop at runtime; setting it
+    // here only makes the TYPE checker agree with them. `noEmit` is true, so
+    // nothing about the emitted output changes.
+    "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "moduleDetection": "force",

@@ -34,11 +34,11 @@ export function Button({
   const base =
     "inline-flex select-none items-center justify-center gap-2 font-semibold transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40";
   const styles: Record<ButtonVariant, string> = {
-    primary: "bg-brand text-white hover:bg-brand-dark",
+    primary: "bg-brand text-onbrand hover:bg-brand-dark",
     ghost: "border border-line bg-white text-ink hover:bg-slate-50",
     outline: "border-2 border-brand bg-white text-brand-dark hover:bg-brand-soft",
     subtle: "bg-slate-100 text-ink hover:bg-slate-200",
-    danger: "bg-red-600 text-white hover:bg-red-700",
+    danger: "bg-red-600 text-onbrand hover:bg-red-700",
   };
   return <button type="button" className={cn(base, SIZES[size], styles[variant], className)} {...props} />;
 }

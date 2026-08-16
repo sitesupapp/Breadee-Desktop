@@ -26,7 +26,7 @@ export function Printing() {
             to={`/settings/printing/${t.to}`}
             className={({ isActive }) =>
               `rounded-xl px-3 py-1.5 text-xs font-bold ${
-                isActive ? "bg-brand text-white" : "bg-slate-100 text-sub hover:text-ink"
+                isActive ? "bg-brand text-onbrand" : "bg-slate-100 text-sub hover:text-ink"
               }`
             }
           >

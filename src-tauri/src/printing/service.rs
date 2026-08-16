@@ -605,6 +605,12 @@ mod tests {
             customer_name: Some("Desktop Level 3A QA".into()),
             customer_phone: Some("03 111 999".into()),
             delivery_address: Some("QA, Hamra, QA Street 2".into()),
+            address: None,
+            phone: None,
+            welcome: None,
+            footer: None,
+            sections: None,
+            qr: None,
         }
     }
 
@@ -728,6 +734,8 @@ mod tests {
                 note: Some("No olives".into()),
             }],
             test: false,
+            footer: None,
+            sections: None,
         }
     }
 
