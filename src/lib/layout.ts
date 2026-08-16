@@ -52,7 +52,19 @@ export function isTooSmall(width: number, height: number): boolean {
   return width < MIN_SUPPORTED_WIDTH || height < MIN_SUPPORTED_HEIGHT;
 }
 
+/**
+ * Rail widths in px.
+ *
+ * Declared here rather than in the shell because `railWidth` is what the layout
+ * test measures the remaining work area against; two copies of these numbers
+ * would let the shell get narrower while the test kept checking the old figure.
+ * The expanded rail is narrower than it once was: labels now sit beside glyphs
+ * rather than beside a letter, so the same text needs less box.
+ */
+export const RAIL_EXPANDED_PX = 200;
+export const RAIL_COLLAPSED_PX = 76;
+
 /** Rail width in px for a tier - used by the shell grid and the status bar offset. */
 export function railWidth(spec: LayoutSpec): number {
-  return spec.railExpanded ? 232 : 76;
+  return spec.railExpanded ? RAIL_EXPANDED_PX : RAIL_COLLAPSED_PX;
 }

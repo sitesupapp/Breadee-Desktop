@@ -105,6 +105,51 @@ type CartState = {
   invalidateSavedOrder: () => void;
   /** Definitive completion (paid) or an explicit new order. */
   reset: () => void;
+
+  /**
+   * Lift the whole buffer out, verbatim.
+   *
+   * Exists for the takeaway order slots (`state/takeawayOrders.ts`), which park
+   * one order while the cashier serves another. It copies EVERY field the
+   * duplicate-order protection depends on - `clientOpId` and `savedOrder`
+   * included - because a parked order that came back without its op id would be
+   * submitted a second time as a new order, which is the exact failure m224 and
+   * this store exist to prevent.
+   */
+  snapshot: () => CartSnapshot;
+  /**
+   * Put a previously lifted buffer back, replacing whatever is here.
+   *
+   * The caller is responsible for having snapshotted what it is overwriting;
+   * this is deliberately a plain assignment rather than a merge, because a merge
+   * of two orders is precisely the mixing that `claim` exists to make
+   * impossible.
+   */
+  restore: (snapshot: CartSnapshot) => void;
+};
+
+/**
+ * A parked order.
+ *
+ * `lastRemoved` is deliberately NOT part of it: undo is a gesture about what the
+ * cashier just did on screen, and offering "undo" for a line removed from a
+ * different order ten minutes ago would restore it into whichever order happens
+ * to be open now.
+ */
+export type CartSnapshot = {
+  lines: CartLine[];
+  selectedKey: string | null;
+  clientOpId: string | null;
+  savedOrder: SubmitOrderResult | null;
+  owner: CartOwner | null;
+};
+
+export const EMPTY_CART_SNAPSHOT: CartSnapshot = {
+  lines: [],
+  selectedKey: null,
+  clientOpId: null,
+  savedOrder: null,
+  owner: null,
 };
 
 let keySeq = 0;
@@ -227,6 +272,28 @@ export const useCart = create<CartState>((set, get) => ({
 
   reset: () =>
     set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null, owner: null }),
+
+  snapshot: () => {
+    const s = get();
+    return {
+      lines: s.lines,
+      selectedKey: s.selectedKey,
+      clientOpId: s.clientOpId,
+      savedOrder: s.savedOrder,
+      owner: s.owner,
+    };
+  },
+
+  restore: (snapshot) =>
+    set({
+      lines: snapshot.lines,
+      selectedKey: snapshot.selectedKey,
+      clientOpId: snapshot.clientOpId,
+      savedOrder: snapshot.savedOrder,
+      owner: snapshot.owner,
+      // Cleared rather than carried: see `CartSnapshot`.
+      lastRemoved: null,
+    }),
 }));
 
 /** Subtotal as the server computes it. Exported for components and tests. */

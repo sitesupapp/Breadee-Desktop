@@ -44,6 +44,8 @@ import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
+import { OrderTabs } from "@/components/pos/OrderTabs";
+import { canSwitchSlots, slotSummaries, useTakeawayOrders } from "@/state/takeawayOrders";
 import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
@@ -594,6 +596,10 @@ function PosWorkspaceInner() {
 
   // Table state is tenant/branch scoped; drop it when the operator leaves POS.
   useEffect(() => () => tableStore.reset(), []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Parked takeaway orders belong to the session that took them. Dropped on the
+  // way out for the same reason the table map and the customer book are: the
+  // next person to open this till must not inherit the last one's baskets.
+  useEffect(() => () => useTakeawayOrders.getState().reset(), []);
   // Same for the customer book: a delivery customer must not survive the POS.
   useEffect(() => () => useCustomers.getState().reset(), []);
 
@@ -789,6 +795,67 @@ function PosWorkspaceInner() {
     }
     newOrder();
   }, [newOrder]);
+
+  // --- parallel takeaway orders ----------------------------------------------
+  //
+  // The slot store parks and un-parks the ONE cart, so the selected tab IS the
+  // cart every action below already operates on. Nothing here passes an order id
+  // to Pay, Send or Clear, and that is deliberate: an id threaded alongside the
+  // cart is an id that can disagree with it.
+  const takeawaySlots = useTakeawayOrders();
+  const slots = useMemo(
+    () =>
+      slotSummaries({
+        parked: takeawaySlots.parked,
+        index: takeawaySlots.index,
+        live: { lines: cart.lines, savedOrder: cart.savedOrder },
+      }),
+    [takeawaySlots.parked, takeawaySlots.index, cart.lines, cart.savedOrder],
+  );
+  /**
+   * Why the tabs are refused, if they are.
+   *
+   * Only ever true when the shared buffer is holding a table's round or a
+   * caller's basket - which cannot happen while Takeaway is the visible route,
+   * so this is the second of two independent guards rather than the only one.
+   */
+  const slotsBlockedReason = canSwitchSlots(cart.owner)
+    ? null
+    : "Finish or clear the order in progress before switching.";
+
+  /**
+   * Manual print of the SELECTED order.
+   *
+   * Goes to `printShiftOrder` - the EXISTING manual receipt path, shared with
+   * the Orders modal and the delivery modal, which presents through the
+   * store-owned preview and deliberately does NOT auto-print. It takes no
+   * payment and routes nothing to a kitchen.
+   *
+   * The order is looked up in the shift store by the id the SERVER returned for
+   * this slot, so the document is built from the server's rows rather than from
+   * the buffer on screen.
+   */
+  const [printingOrder, setPrintingOrder] = useState(false);
+  const printCurrentOrder = useCallback(async () => {
+    const saved = useCart.getState().savedOrder;
+    if (!saved || printingOrder) return;
+    setPrintingOrder(true);
+    try {
+      const found = useShiftOrders.getState().orders.find((o) => o.id === saved.order_id);
+      if (!found) {
+        toast.push({
+          tone: "warning",
+          message: "This order is still being saved.",
+          detail: "Try Print again in a moment.",
+        });
+        refreshShiftOrders(saved.order_id);
+        return;
+      }
+      await printShiftOrder(found);
+    } finally {
+      setPrintingOrder(false);
+    }
+  }, [printingOrder, printShiftOrder, refreshShiftOrders, toast]);
 
   const openPayment = useCallback(() => {
     if (cart.lines.length === 0) {
@@ -1021,35 +1088,52 @@ function PosWorkspaceInner() {
     );
   }
 
+  // The FOUR POS routes, and only those four. Settings, Reports and Customers
+  // are Desktop surfaces reached by leaving the workspace through Close; putting
+  // them in this rail would make the till a place to administer the business
+  // from, which is a different job done by a different person.
   const routes: PosRoute[] = [
     {
       key: "takeaway",
       label: "Takeaway",
-      icon: "T",
+      icon: "takeaway",
       to: "/pos",
       enabled: true,
-      active: mode === "takeaway",
+      active: mode === "takeaway" && !ordersOpen,
       onSelect: () => setMode("takeaway"),
     },
     {
       key: "dine_in",
       label: "Dine-in",
-      icon: "D",
+      icon: "dine-in",
       to: "/pos",
       enabled: tablesGate.allowed,
       reason: tablesGate.reason,
-      active: mode === "dine_in",
+      active: mode === "dine_in" && !ordersOpen,
       onSelect: () => setMode("dine_in"),
     },
     {
       key: "delivery",
       label: "Delivery",
-      icon: "V",
+      icon: "delivery",
       to: "/pos",
       enabled: deliveryGate.allowed,
       reason: deliveryGate.reason,
-      active: mode === "delivery",
+      active: mode === "delivery" && !ordersOpen,
       onSelect: () => setMode("delivery"),
+    },
+    {
+      // The EXISTING orders workspace, given the rail entry the approved design
+      // puts it in. It opens the same modal the status bar used to, with the
+      // same shift-order collection, the same manual print and the same reversal
+      // dialog behind it - one surface, reached from a more obvious place.
+      key: "orders",
+      label: "Orders",
+      icon: "orders",
+      to: "/pos",
+      enabled: true,
+      active: ordersOpen,
+      onSelect: () => setOrdersOpen(true),
     },
   ];
 
@@ -1057,9 +1141,18 @@ function PosWorkspaceInner() {
     <>
       <PosShell
         routes={routes}
+        /* CLOSE returns to the Desktop main page. It is a route change and
+           nothing else: no sign-out, no shift close, no cart reset, no table or
+           delivery state discarded beyond the unmount cleanups this component
+           already declares. */
         onExit={() => navigate("/dashboard")}
         onToggleFullscreen={doToggleFullscreen}
         isFullscreen={fullscreen}
+        tenantName={pos.tenantName}
+        /* The footer reads the build's own version; nothing is passed for it. */
+        ready={menuState === "ready"}
+        online={online}
+        pendingSync={pending}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
         cartTitle={deliveryActive ? "Customer" : dineInActive ? "Table bill" : "Current order"}
@@ -1207,7 +1300,16 @@ function PosWorkspaceInner() {
             ) : (
               dineIn.bill(layout)
             )
-          ) : cart.lines.length > 0 ? (
+          ) : (
+            /* TAKEAWAY, ALWAYS THIS PANEL - empty or not.
+               It used to swap to a shift-order browser whenever the cart was
+               empty, which meant the order strip and the four actions vanished
+               at exactly the moment a cashier returns to a parked order. The
+               browser has not gone anywhere: it is the Orders rail entry, which
+               opens the same collection with the same print and reversal paths.
+
+               Every control below acts on the SELECTED slot, and the selected
+               slot IS this cart - see `state/takeawayOrders.ts`. */
             <CartPanel
               lines={cart.lines}
               selectedKey={cart.selectedKey}
@@ -1226,32 +1328,18 @@ function PosWorkspaceInner() {
               onPay={openPayment}
               onOpenShift={() => setOpenShiftOpen(true)}
               onNewOrder={clearOrder}
-            />
-          ) : (
-            /* THE ORDER SUMMARY, in the panel rather than behind a pill.
-               An empty cart means the cashier is between orders, which is
-               exactly when they want to review what this shift has done - so
-               the panel shows the selected shift order in full. Picking any
-               menu item puts lines in the cart and the live cart returns, so
-               nothing about taking an order changed. */
-            <CurrentOrderPanel
-              order={currentOrder}
-              count={shiftOrders.orders.length}
-              position={shiftOrders.index + 1}
-              hasShift={Boolean(shiftId)}
-              loading={shiftOrders.loading}
-              error={shiftOrders.error}
-              tenantName={pos.tenantName}
-              branchName={pos.branch.name}
-              staffName={pos.userName}
-              shiftId={shiftId}
-              fallbackCurrency={currency}
-              tableName={currentOrder?.table_id ? (tableStore.map.tables.find((t) => t.id === currentOrder.table_id)?.name ?? null) : null}
-              onStep={shiftOrders.step}
-              /* The MANUAL layer - deliberately receiptStore.present and not
-                 presentReceipt, so reviewing an order can never auto-print. */
-              onPresentReceipt={(receipt) => receiptStore.present(receipt)}
-              onReverse={startReverse}
+              clearLabel={cart.savedOrder ? "Clear cart (leaves the order unpaid)" : "Clear cart"}
+              orderTabs={
+                <OrderTabs
+                  slots={slots}
+                  index={takeawaySlots.index}
+                  disabledReason={slotsBlockedReason}
+                  onSelect={takeawaySlots.select}
+                  onStep={takeawaySlots.step}
+                />
+              }
+              onPrint={() => void printCurrentOrder()}
+              printBusy={printingOrder}
             />
           )
         }
@@ -1276,6 +1364,31 @@ function PosWorkspaceInner() {
         onSelectOrder={shiftOrders.select}
         onPrintOrder={(o) => void printShiftOrder(o)}
         onReverseOrder={startReverse}
+        /* The selected order in full, rendered by the ONE panel that knows how.
+           It moved here from the takeaway side column, which the approved design
+           gives to the live cart and its order strip. Same component, same
+           reads-only guarantee, same manual receipt path. */
+        detail={
+          <CurrentOrderPanel
+            order={currentOrder}
+            count={shiftOrders.orders.length}
+            position={shiftOrders.index + 1}
+            hasShift={Boolean(shiftId)}
+            loading={shiftOrders.loading}
+            error={shiftOrders.error}
+            tenantName={pos.tenantName}
+            branchName={pos.branch.name}
+            staffName={pos.userName}
+            shiftId={shiftId}
+            fallbackCurrency={currency}
+            tableName={currentOrder?.table_id ? (tableStore.map.tables.find((t) => t.id === currentOrder.table_id)?.name ?? null) : null}
+            onStep={shiftOrders.step}
+            /* The MANUAL layer - deliberately receiptStore.present and not
+               presentReceipt, so reviewing an order can never auto-print. */
+            onPresentReceipt={(receipt) => receiptStore.present(receipt)}
+            onReverse={startReverse}
+          />
+        }
       />
 
       <DeliveryModal
