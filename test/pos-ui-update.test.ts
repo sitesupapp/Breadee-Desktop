@@ -1,18 +1,27 @@
-// The POS UI update: order slots, action priority, and the print separations.
+// The POS UI update: the Current Order, action priority, and the print separations.
 //
 // WHAT THESE TESTS ARE FOR. The redesign touched the three surfaces where money
 // and paper meet, so the properties worth pinning are not "does it look right"
 // but "can this new button reach something it must not":
 //
-//   1. Every takeaway action operates on the SELECTED order, and does so because
-//      the selected slot IS the cart - never because an id was threaded past it.
+//   1. Every takeaway action operates on the order actually on screen - the live
+//      cart for a draft, the selected REAL order for a saved one - and never on
+//      an invented slot index.
 //   2. The new manual Print goes to the EXISTING receipt service and cannot pay,
 //      cannot route a kitchen ticket, and cannot trigger the automatic path.
-//   3. Parking an order carries its `client_op_id` and its saved order with it,
-//      so a parked order is never submitted a second time as a new one.
+//   3. The cart still carries its `client_op_id` and its saved order together,
+//      so a retried submission is never a second order.
 //   4. Nothing new prints. There is still exactly one automatic call site per
 //      document type, and the new UI reaches them through the same handlers.
 //   5. No new component hard-codes a colour, so every theme still styles them.
+//
+// 1.0.4 RETARGETED THE SLOT ASSERTIONS RATHER THAN DELETING THEM. The tests that
+// described `Order 1/2/3` described a model that shipped and turned out to be
+// wrong: those numbers were the till's own invention and nothing in the business
+// answered to them. What those tests were really guarding - one selected order,
+// no second order model, no id that can go stale, no way for a view to submit -
+// are all still asserted below, now against the real orders in
+// `state/shiftOrders.ts`. See `pos-1-0-4-hotfix.test.ts` for the rest.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,13 +30,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { stripComments, stripJsxComments } from "./source-helpers.ts";
-import {
-  TAKEAWAY_SLOT_COUNT,
-  canSwitchSlots,
-  slotSummaries,
-  unpaidParkedOrders,
-} from "@/state/takeawayOrders";
-import { EMPTY_CART_SNAPSHOT } from "@/state/cart";
+import { stableSelectionIndex, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { ICON_SECTIONS, POS_ICONS, searchIcons, sectionsWithCounts } from "@/lib/icons/catalog";
 import {
   DEFAULT_ICON_DISPLAY,
@@ -43,65 +46,66 @@ const readSrc = (...p: string[]) => readFileSync(join(root, "..", "src", ...p), 
 const workspace = stripJsxComments(readSrc("screens", "pos", "PosWorkspace.tsx"));
 const cartPanel = stripJsxComments(readSrc("components", "pos", "CartPanel.tsx"));
 const shell = stripJsxComments(readSrc("layouts", "PosShell.tsx"));
-const slotsSrc = stripComments(readSrc("state", "takeawayOrders.ts"));
+const carousel = stripJsxComments(readSrc("components", "pos", "OrderCarousel.tsx"));
 const footer = stripJsxComments(readSrc("components", "pos", "PosFooterBar.tsx"));
 
-// --- 1. the selected order is authoritative ----------------------------------
-
-test("there are three order slots and exactly one of them is ever live", () => {
-  assert.equal(TAKEAWAY_SLOT_COUNT, 3);
-  // Selecting parks the live buffer and UN-parks the target in the same set, so
-  // a snapshot can never exist in two places at once.
-  assert.match(slotsSrc, /next\[current\] = live/);
-  assert.match(slotsSrc, /next\[index\] = null/);
-  assert.match(slotsSrc, /cart\.restore\(target\)/);
+const order = (over: Partial<ShiftOpenOrder> = {}): ShiftOpenOrder => ({
+  id: "o1",
+  order_number: "260817-0004",
+  order_type: "takeaway",
+  status: "sent_to_kitchen",
+  payment_status: "unpaid",
+  payment_method: null,
+  subtotal: 100,
+  discount_amount: 0,
+  total_amount: 100,
+  currency: "USD",
+  table_id: null,
+  customer_id: null,
+  customer_name: null,
+  customer_phone: null,
+  cashier_user_id: null,
+  staff_name: null,
+  notes: null,
+  created_at: null,
+  ...over,
 });
 
-test("switching is refused while another context owns the buffer", () => {
-  assert.equal(canSwitchSlots(null), true);
-  assert.equal(canSwitchSlots({ kind: "takeaway" }), true);
-  assert.equal(canSwitchSlots({ kind: "table", tableId: "t1" }), false);
-  assert.equal(canSwitchSlots({ kind: "delivery", customerId: "c1" }), false);
-  // And the store itself checks, not only the UI.
-  assert.match(slotsSrc, /if \(!canSwitchSlots\(live\.owner\)\) return/);
+// --- 1. the selected order is a REAL order -----------------------------------
+
+test("the fake Order 1/2/3 slot model is gone from the source tree", () => {
+  // RETARGETED, NOT DROPPED (1.0.4). This file used to assert that there were
+  // exactly three slots and that switching parked one cart snapshot for another.
+  // The property that mattered inside those assertions - that there is only ever
+  // ONE selected order and no second order model to disagree with it - is what
+  // is checked now; the three invented numbers are what changed.
+  for (const gone of ["takeawayOrders", "OrderTabs", "TAKEAWAY_SLOT_COUNT", "slotSummaries"]) {
+    assert.equal(workspace.includes(gone), false, `${gone} must not survive in the workspace`);
+  }
+  assert.equal(/Order \{?(slot\.position|props\.index)/.test(workspace + cartPanel), false, "a slot index is not an order number");
+  // And the carousel shows the SERVER's number, prefixed, in the centre.
+  assert.match(carousel, /`#\$\{props\.orderNumber\}`/);
 });
 
-test("a tab describes the slot it actually holds", () => {
-  const saved = { order_id: "o1", order_number: "260816-0001" } as never;
-  const summaries = slotSummaries({
-    parked: [null, { ...EMPTY_CART_SNAPSHOT, savedOrder: saved }, null],
-    index: 0,
-    live: { lines: [{ quantity: 2 }, { quantity: 1 }] as never, savedOrder: null },
-  });
-  assert.equal(summaries.length, 3);
-  // The ACTIVE slot is described from the live cart...
-  assert.deepEqual(summaries[0], { position: 1, used: true, orderNumber: null, itemCount: 3 });
-  // ...and every other slot from its parked snapshot.
-  assert.equal(summaries[1].used, true);
-  assert.equal(summaries[1].orderNumber, "260816-0001");
-  assert.equal(summaries[2].used, false);
-});
-
-test("parked orders that the server accepted can be listed before a shift closes", () => {
-  const saved = (n: string) => ({ order_id: n, order_number: n }) as never;
-  assert.deepEqual(
-    unpaidParkedOrders({
-      parked: [null, { ...EMPTY_CART_SNAPSHOT, savedOrder: saved("A") }, null],
-      index: 0,
-      live: { savedOrder: saved("B") },
-    }),
-    ["B", "A"],
-  );
-  assert.deepEqual(
-    unpaidParkedOrders({ parked: [null, null, null], index: 0, live: { savedOrder: null } }),
-    [],
-  );
+test("exactly one order is selected, and the store decides which", () => {
+  // `stableSelectionIndex` is the whole selection rule, and it is a pure
+  // function so the case that used to be a slot index is testable directly.
+  const orders = [order({ id: "a" }), order({ id: "b" }), order({ id: "c" })];
+  // A just-created order wins outright - that is "it becomes the Current Order".
+  assert.equal(stableSelectionIndex("a", 0, orders, "c"), 2);
+  // Otherwise the selection survives a refresh rather than jumping.
+  assert.equal(stableSelectionIndex("b", 1, orders), 1);
+  // First load selects the newest, which is the one the cashier just took.
+  assert.equal(stableSelectionIndex(null, -1, orders), 2);
+  // And an empty shift selects nothing rather than index 0 of nothing.
+  assert.equal(stableSelectionIndex(null, -1, []), -1);
 });
 
 test("no action takes an order id alongside the cart", () => {
-  // The whole point of parking through `useCart` is that Pay, Send, Print and
-  // Clear read ONE place. A prop that carried an order id into the panel would
-  // reintroduce exactly the disagreement this design removes.
+  // The cart panel renders the UNSAVED draft only, so it has no order to be
+  // given: a prop that carried an order id into it would be the disagreement
+  // between "the order shown" and "the order acted on" all over again. A saved
+  // order is rendered by CurrentOrderPanel, which takes the order explicitly.
   assert.equal(cartPanel.includes("orderId"), false, "the cart panel must not take an order id");
   assert.equal(cartPanel.includes("order_id"), false);
   // Print resolves its target at CALL time from the live cart, never from a
@@ -281,7 +285,8 @@ test("no component added by this update hard-codes a colour", () => {
     ["components", "PosIconGlyph.tsx"],
     ["components", "pos", "MenuCard.tsx"],
     ["components", "pos", "CartPanel.tsx"],
-    ["components", "pos", "OrderTabs.tsx"],
+    ["components", "pos", "OrderCarousel.tsx"],
+    ["components", "pos", "CurrentOrderPanel.tsx"],
     ["components", "pos", "PosFooterBar.tsx"],
     ["components", "pos", "TableCard.tsx"],
     ["layouts", "PosShell.tsx"],

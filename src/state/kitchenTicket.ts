@@ -44,6 +44,14 @@ type KitchenTicketState = {
    * shown, because that is the case where a human has to do something.
    */
   present: (ticket: KitchenTicket, status: KitchenTicketStatus) => void;
+  /**
+   * Store the ticket WITHOUT showing it (1.0.4).
+   *
+   * Used when a failed automatic print is reported as a notice instead of a
+   * modal: the order is committed, so the cashier is told rather than stopped,
+   * and the ticket is still here for `reopen()` to print by hand.
+   */
+  stage: (ticket: KitchenTicket, status: KitchenTicketStatus) => void;
   /** Re-show the last ticket for a manual (re)print. */
   reopen: () => void;
   hide: () => void;
@@ -56,6 +64,8 @@ export const useKitchenTicket = create<KitchenTicketState>((set, get) => ({
   visible: false,
 
   present: (ticket, status) => set({ ticket, status, visible: status.kind !== "auto_sent" }),
+
+  stage: (ticket, status) => set({ ticket, status, visible: false }),
 
   reopen: () => {
     if (!get().ticket) return;

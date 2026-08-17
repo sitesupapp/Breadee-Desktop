@@ -29,7 +29,7 @@ import { OrdersModal } from "@/components/pos/OrdersModal";
 import { DeliveryModal } from "@/components/pos/DeliveryModal";
 import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
-import { reversalActionFor } from "@/lib/pos/orderActions";
+import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { buildReceipt } from "@/lib/receipt";
 import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
@@ -44,8 +44,7 @@ import { useSession } from "@/state/session";
 import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
-import { OrderTabs } from "@/components/pos/OrderTabs";
-import { canSwitchSlots, slotSummaries, useTakeawayOrders } from "@/state/takeawayOrders";
+import { OrderCarousel } from "@/components/pos/OrderCarousel";
 import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
@@ -225,7 +224,16 @@ function PosWorkspaceInner() {
   // --- dialogs ---------------------------------------------------------------
   const [pickerItem, setPickerItem] = useState<{ item: SearchableItem; price: number; groups: ModifierGroup[] } | null>(null);
   const [noteKey, setNoteKey] = useState<string | null>(null);
-  const [payOpen, setPayOpen] = useState(false);
+  /**
+   * What a confirmed payment will settle. Null while the dialog is closed.
+   *
+   * ONE dialog, ONE handler, ONE `pos_pay_order` call - the intent only says
+   * WHICH order the money is for, and it is captured when the operator presses
+   * Pay rather than read again at confirm time. A second payment surface for
+   * "existing orders" would be a second place for the amount, the discount rules
+   * and the receipt to be decided, and they must be decided once.
+   */
+  const [payIntent, setPayIntent] = useState<{ kind: "draft" } | { kind: "order"; order: ShiftOpenOrder } | null>(null);
   const [payError, setPayError] = useState<string | null>(null);
   const [openShiftOpen, setOpenShiftOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
@@ -466,22 +474,44 @@ function PosWorkspaceInner() {
         batchNo: input.batchNo ?? 1,
         ticket,
       });
+
+      // A ticket that printed by itself is already withheld by the store, which
+      // is where that rule lives. The change in 1.0.4 is the FAILURE case: it
+      // used to raise the full ticket modal, which stops a cashier mid-service
+      // to tell them about a printer. The order is committed either way, so it
+      // becomes a notice they can read and dismiss without leaving the till.
+      if (status.kind === "auto_failed") {
+        kitchenStore.stage(ticket, status);
+        toast.push({
+          tone: "warning",
+          message: "Order sent. The kitchen ticket was not printed.",
+          detail: status.message,
+        });
+        return;
+      }
       kitchenStore.present(ticket, status);
     },
-    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId],
+    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId, toast],
   );
 
   /**
    * THE receipt presentation call site, for all three routes.
    *
-   * Presentation first, automatic paper second and detached. The preview is on
-   * screen with its Print button live whatever the printer does, so a branch
-   * with no receipt route, no printer, or a jammed one still has a working till
-   * and a cashier who can read the total off the screen.
+   * AUTO PRINT ON IS SILENT (1.0.4). Until now the preview was raised for every
+   * payment and paper came out behind it, so a busy cashier had to dismiss a
+   * window after every sale to get back to the till - on a lunch rush that is
+   * hundreds of dismissals for information already printed. The receipt is now
+   * STAGED rather than shown, and the preview is raised only when nothing was
+   * printed automatically. The data is stored either way, so Ctrl+P reopens it
+   * and a failed print still has something to retry from.
+   *
+   * The decision is the print result, not a settings read of our own: whatever
+   * `autoPrintReceipt` decided IS what happened to the paper, and asking a
+   * second source would let the screen and the printer disagree.
    */
   const presentReceipt = useCallback(
     (receipt: ReceiptData) => {
-      receiptStore.present(receipt);
+      receiptStore.stage(receipt);
       // A settlement changes an order's lifecycle, so the shift list and its
       // count follow it. Every route presents its receipt through here, which
       // makes this the one place a payment has to be reflected.
@@ -493,13 +523,21 @@ function PosWorkspaceInner() {
         receipt,
         paidAt: receipt.at,
       }).then((printed) => {
+        if (printed.kind === "sent") return; // Paper is coming; stay on the POS.
         if (printed.kind === "failed") {
+          // Never reopen the preview on failure: the sale is done, and a modal
+          // in the cashier's way is the thing this release is removing. A toast
+          // says what happened and Ctrl+P still opens the receipt.
           toast.push({
             tone: "warning",
             message: "The payment succeeded. Only the receipt failed to print.",
             detail: printed.message,
           });
+          return;
         }
+        // `manual`: nothing was printed automatically, so the preview IS the
+        // path to paper and has to be on screen.
+        receiptStore.present(receipt);
       });
     },
     [pos.access, pos.branch.id, receiptStore, refreshShiftOrders, tenantId, toast],
@@ -547,6 +585,10 @@ function PosWorkspaceInner() {
     onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
     onBillDrawerOpen: () => setCartDrawerOpen(true),
+    // Leaves the POS workspace the same way Close does, landing on the settings
+    // page that owns capacity - rather than telling the operator to go and find
+    // the web app, which is what 1.0.3 did.
+    onConfigureTables: () => navigate("/settings/pos#tables"),
     rate,
     // The receipt goes to the same store-owned layer takeaway uses, which is
     // mounted outside this component's loading states on purpose.
@@ -596,10 +638,11 @@ function PosWorkspaceInner() {
 
   // Table state is tenant/branch scoped; drop it when the operator leaves POS.
   useEffect(() => () => tableStore.reset(), []); // eslint-disable-line react-hooks/exhaustive-deps
-  // Parked takeaway orders belong to the session that took them. Dropped on the
-  // way out for the same reason the table map and the customer book are: the
-  // next person to open this till must not inherit the last one's baskets.
-  useEffect(() => () => useTakeawayOrders.getState().reset(), []);
+  // The shift's orders belong to the shift, and the panel that browses them
+  // belongs to this workspace. Dropped on the way out for the same reason the
+  // table map and the customer book are: the next person to open this till must
+  // not walk up to somebody else's order already selected on screen.
+  useEffect(() => () => useShiftOrders.getState().reset(), []);
   // Same for the customer book: a delivery customer must not survive the POS.
   useEffect(() => () => useCustomers.getState().reset(), []);
 
@@ -623,7 +666,14 @@ function PosWorkspaceInner() {
         : addingToTable && dineIn.selected
           ? { kind: "table", tableId: dineIn.selected.id }
           : { kind: "takeaway" };
-    if (useCart.getState().claim(owner)) return true;
+    if (useCart.getState().claim(owner)) {
+      // Adding to the takeaway buffer IS starting a new order, so the column
+      // goes back to the draft. Without this the operator would add items while
+      // a saved order filled the panel - the same class of confusion between a
+      // basket and an order that the slot tabs caused.
+      if (owner.kind === "takeaway") setViewingSavedOrder(false);
+      return true;
+    }
     toast.push({
       tone: "warning",
       message: "The cart is in use",
@@ -679,8 +729,10 @@ function PosWorkspaceInner() {
 
   const newOrder = useCallback(() => {
     cart.reset();
-    setPayOpen(false);
+    setPayIntent(null);
     setPayError(null);
+    // Back to the draft panel: "new order" means the thing being built now.
+    setViewingSavedOrder(false);
   }, [cart]);
 
   /**
@@ -732,6 +784,34 @@ function PosWorkspaceInner() {
     [printKitchenFor],
   );
 
+  /**
+   * Hand a just-created order over to the Current Order carousel.
+   *
+   * The order becomes the selection and the cart is freed for the next
+   * customer - but ONLY once the refreshed list actually contains it. That
+   * condition is the whole point of this function. In 1.0.2 the cart was reset
+   * unconditionally after a submit, and because the only route back to a payable
+   * order was `cart.savedOrder`, a takeaway order that had been sent to the
+   * kitchen became uncollectable from this app; order 260814-0001 is the real
+   * one that happened to. Here the carousel is the route back, so the reset is
+   * safe exactly when the carousel can see the order - and when the refresh
+   * failed (offline, RLS, a slow replica) nothing moves and the till keeps the
+   * 1.0.3 behaviour, with the order still in the cart and Pay still working.
+   *
+   * Returns whether the handover happened, for the caller to reason about.
+   */
+  const adoptCreatedOrder = useCallback(
+    async (orderId: string): Promise<boolean> => {
+      await useShiftOrders.getState().refresh({ tenantId, shiftId, preferId: orderId });
+      const found = useShiftOrders.getState().orders.some((o) => o.id === orderId);
+      if (!found) return false;
+      setViewingSavedOrder(true);
+      useCart.getState().reset();
+      return true;
+    },
+    [shiftId, tenantId],
+  );
+
   const sendToKitchen = useCallback(async () => {
     if (inFlight.current || cart.lines.length === 0) return;
     inFlight.current = true;
@@ -749,25 +829,15 @@ function PosWorkspaceInner() {
             : "Not paid yet - press Pay when the customer settles.",
         });
         await ticketForOrder(saved, submitted);
-        // THE ORDER STAYS ON SCREEN, AND THAT IS THE FIX.
+        // THE ORDER STAYS ON SCREEN - as the REAL order it now is.
         //
-        // This used to call `newOrder()`, which resets the cart INCLUDING
-        // `savedOrder`. Since `ensureOrder()` finds a payable order only through
-        // `savedOrder`, a takeaway order that had been sent to the kitchen could
-        // never be paid from this app again: the money was uncollectable and the
-        // order then blocked End Shift, because `pos_shift_unresolved_orders`
-        // counts it as still open. Found in packaged RC acceptance - order
-        // 260814-0001 is the real one this happened to, and it is still open.
-        //
-        // Keeping the order current makes the documented flow - order, kitchen,
-        // pay, receipt - actually work, and costs nothing: `ensureOrder()`
-        // already returns the saved order rather than submitting a second one,
-        // and a repeat press replays under the same `client_op_id`.
-        //
-        // The cashier moves on with Clear, which now warns first (see
-        // `clearSentOrder`). A takeaway open-orders list is the complete answer
-        // and is deliberately NOT built here - it is a new surface, and this fix
-        // window is for closing the money-stranding hole.
+        // 1.0.2 kept it by leaving it in the cart, because `cart.savedOrder` was
+        // the only handle a payment had. The carousel is that handle now, so the
+        // order moves to where it belongs: `adoptCreatedOrder` selects it, the
+        // panel switches to `CurrentOrderPanel` showing its real number, and Pay
+        // there settles THAT order. If the handover could not be confirmed the
+        // cart keeps the order and nothing is lost - see `adoptCreatedOrder`.
+        await adoptCreatedOrder(saved.order_id);
       }
     } catch (e) {
       const c = classifyError(e);
@@ -776,7 +846,7 @@ function PosWorkspaceInner() {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [cart.lines.length, ensureOrder, ticketForOrder, toast]);
+  }, [adoptCreatedOrder, cart.lines.length, ensureOrder, ticketForOrder, toast]);
 
   /**
    * Clearing the cart, with one question when money is at stake.
@@ -796,32 +866,62 @@ function PosWorkspaceInner() {
     newOrder();
   }, [newOrder]);
 
-  // --- parallel takeaway orders ----------------------------------------------
+  // --- the takeaway Current Order (1.0.4) -------------------------------------
   //
-  // The slot store parks and un-parks the ONE cart, so the selected tab IS the
-  // cart every action below already operates on. Nothing here passes an order id
-  // to Pay, Send or Clear, and that is deliberate: an id threaded alongside the
-  // cart is an id that can disagree with it.
-  const takeawaySlots = useTakeawayOrders();
-  const slots = useMemo(
-    () =>
-      slotSummaries({
-        parked: takeawaySlots.parked,
-        index: takeawaySlots.index,
-        live: { lines: cart.lines, savedOrder: cart.savedOrder },
-      }),
-    [takeawaySlots.parked, takeawaySlots.index, cart.lines, cart.savedOrder],
-  );
+  // WHAT THIS REPLACED. The side column used to hold three parked cart snapshots
+  // labelled `Order 1`, `Order 2`, `Order 3`. Those numbers were the till's own
+  // invention: no order in the business was ever called any of them, so a
+  // cashier had one name on the screen, a different one on the paper and a third
+  // in the Orders list for the same sale - and the buttons underneath acted on
+  // whichever of them the slot happened to hold. In production that is the
+  // ingredient of paying the wrong order.
+  //
+  // THERE IS NOW ONE SOURCE OF ORDERS AND IT IS THE SERVER'S. `useShiftOrders`
+  // already held every order this shift produced, already knew which one was
+  // selected, and was already what the top bar counts and the Orders modal
+  // lists. The carousel walks THAT collection; nothing is cloned into a local
+  // slot, and no second order model exists to disagree with it.
+  //
+  // THE ONE THING THAT IS NOT AN ORDER IS THE DRAFT. A cart being built has no
+  // order number because the server has not been told about it yet. So the
+  // column shows exactly one of two things, and which one is this single flag:
+  //
+  //   * `false` - the live cart, via `CartPanel`, destructive action "Clear cart"
+  //   * `true`  - the selected REAL order, via `CurrentOrderPanel`, "Delete / Void"
+  //
+  // Every transition below is an explicit gesture; nothing infers the mode from
+  // whether the cart happens to be empty, which is what made the panel disappear
+  // underneath cashiers in 1.0.3.
+  const [viewingSavedOrder, setViewingSavedOrder] = useState(false);
+
   /**
-   * Why the tabs are refused, if they are.
+   * Show a real order, from wherever it was chosen.
    *
-   * Only ever true when the shared buffer is holding a table's round or a
-   * caller's basket - which cannot happen while Takeaway is the visible route,
-   * so this is the second of two independent guards rather than the only one.
+   * The Orders dropdown, the Orders modal and the carousel all land here, so
+   * "select an order" means one thing. It is a SELECTION and nothing else: no
+   * submit, no payment, no clone, no cart write - `useShiftOrders.select` moves
+   * an index over rows that are already loaded.
    */
-  const slotsBlockedReason = canSwitchSlots(cart.owner)
-    ? null
-    : "Finish or clear the order in progress before switching.";
+  const showSavedOrder = useCallback(
+    (orderId: string) => {
+      useShiftOrders.getState().select(orderId);
+      setViewingSavedOrder(true);
+      // The Current Order lives in the takeaway column, so an order picked while
+      // a table map or the delivery queue is on screen has somewhere to appear.
+      setMode("takeaway");
+      setOrdersOpen(false);
+    },
+    [],
+  );
+
+  /** The arrows. Stepping is browsing: it selects, and changes nothing else. */
+  const stepSavedOrder = useCallback((direction: 1 | -1) => {
+    useShiftOrders.getState().step(direction);
+    setViewingSavedOrder(true);
+  }, []);
+
+  /** Back to the unsaved cart. The saved order is left exactly as it was. */
+  const showDraft = useCallback(() => setViewingSavedOrder(false), []);
 
   /**
    * Manual print of the SELECTED order.
@@ -857,6 +957,7 @@ function PosWorkspaceInner() {
     }
   }, [printingOrder, printShiftOrder, refreshShiftOrders, toast]);
 
+  /** Pay the DRAFT: `ensureOrder` creates the order, then settles it. */
   const openPayment = useCallback(() => {
     if (cart.lines.length === 0) {
       toast.push({ tone: "warning", message: "The order is empty." });
@@ -871,8 +972,37 @@ function PosWorkspaceInner() {
       return;
     }
     setPayError(null);
-    setPayOpen(true);
+    setPayIntent({ kind: "draft" });
   }, [cart.lines.length, shiftId, pos.gates.takePayments, toast]);
+
+  /**
+   * Pay an order that ALREADY EXISTS, from the Current Order panel.
+   *
+   * The same dialog and the same handler as the draft; only the target differs.
+   * `canSettleOrder` is the shared lifecycle rule the panel already used to
+   * decide whether to render the button at all, checked again here because a
+   * list can refresh between a render and a press - and the one thing this must
+   * never do is take a customer's money for a second time.
+   */
+  const openPaymentForOrder = useCallback(
+    (order: ShiftOpenOrder) => {
+      if (!canSettleOrder(order)) {
+        toast.push({ tone: "warning", message: `Order ${order.order_number ?? ""} can no longer be paid.`.trim() });
+        return;
+      }
+      if (!shiftId) {
+        toast.push({ tone: "warning", message: "Open a shift before taking payment." });
+        return;
+      }
+      if (!pos.gates.takePayments.allowed) {
+        toast.push({ tone: "warning", message: pos.gates.takePayments.reason ?? "Payment is not permitted." });
+        return;
+      }
+      setPayError(null);
+      setPayIntent({ kind: "order", order });
+    },
+    [pos.gates.takePayments, shiftId, toast],
+  );
 
   const confirmPayment = useCallback(
     async (input: {
@@ -881,15 +1011,36 @@ function PosWorkspaceInner() {
       discount: Record<string, unknown>;
       tendered: number | null;
     }) => {
+      const intent = payIntent;
+      if (!intent) return;
       if (inFlight.current) return;
       inFlight.current = true;
       setBusy(true);
       setPayError(null);
       const lines = useCart.getState().lines;
+      const existing = intent.kind === "order";
       try {
-        const saved = await ensureOrder();
-        if (!saved) return;
-        const result = await payOrder({ orderId: saved.order_id, method: input.method, currency: input.currency, discount: input.discount });
+        // ONE settlement, whichever the target was. A draft has its order
+        // created first (under the cart's own `client_op_id`, so a retry never
+        // makes a second one); an existing order is already identified, and
+        // `ensureOrder` is deliberately not reached on that path - it would
+        // submit the cart's unrelated draft.
+        const draft = intent.kind === "draft" ? await ensureOrder() : null;
+        if (intent.kind === "draft" && !draft) return;
+        const orderId = intent.kind === "order" ? intent.order.id : (draft as SubmitOrderResult).order_id;
+        const orderNumber =
+          intent.kind === "order"
+            ? (intent.order.order_number ?? intent.order.id.slice(0, 8))
+            : (draft as SubmitOrderResult).order_number;
+
+        const result = await payOrder({ orderId, method: input.method, currency: input.currency, discount: input.discount });
+
+        // An existing order's lines come from the SERVER: there is no cart
+        // behind it, and a receipt assembled from whatever the buffer happens to
+        // hold would describe a different customer's food. Best-effort, because
+        // the money has already changed hands by this point - a receipt with no
+        // line detail is recoverable, refusing to show one is not.
+        const receiptLines = existing ? await readOrderReceiptLines(orderId).catch(() => []) : null;
 
         // The completion sequence is deterministic and lives in one pure module:
         // present the receipt (data + visibility atomically) BEFORE the dialog
@@ -897,7 +1048,9 @@ function PosWorkspaceInner() {
         const completion = completePayment({
           result,
           lines,
-          fallbackOrderNumber: saved.order_number,
+          receiptLines,
+          existingOrder: existing,
+          fallbackOrderNumber: orderNumber,
           tenantName: pos.tenantName,
           branchName: pos.branch.name,
           operatorName: pos.userName,
@@ -911,7 +1064,7 @@ function PosWorkspaceInner() {
 
         for (const step of completion.steps) {
           if (step === "present-receipt") presentReceipt(completion.receipt);
-          else if (step === "close-payment-dialog") setPayOpen(false);
+          else if (step === "close-payment-dialog") setPayIntent(null);
           else if (step === "reset-cart") newOrder();
         }
 
@@ -922,7 +1075,16 @@ function PosWorkspaceInner() {
         // kitchen still has to be told. The latch makes this safe to call
         // unconditionally: if Send already produced this order's ticket, the key
         // is spent and nothing is printed a second time.
-        void ticketForOrder(saved, lines);
+        //
+        // An EXISTING order is deliberately excluded. It was submitted, routed
+        // and ticketed when it was created, minutes or hours ago; re-sending its
+        // ticket on settlement would put a second copy of already-cooked food in
+        // front of the kitchen. Paying is the only thing that just happened.
+        if (draft) void ticketForOrder(draft, lines);
+
+        // The settled order becomes - or stays - the Current Order, so the
+        // receipt on screen and the order behind the buttons are the same sale.
+        await adoptCreatedOrder(orderId);
       } catch (e) {
         const c = classifyError(e);
         // The saved order is deliberately KEPT so a retry pays this same order.
@@ -933,9 +1095,11 @@ function PosWorkspaceInner() {
       }
     },
     [
+      adoptCreatedOrder,
       currency,
       ensureOrder,
       newOrder,
+      payIntent,
       pos.branch.name,
       pos.tenantName,
       pos.userName,
@@ -1202,7 +1366,9 @@ function PosWorkspaceInner() {
                count beside End shift cannot disagree with the list. */
             shiftOrders={shiftOrders.orders}
             selectedOrderId={currentOrder?.id ?? null}
-            onSelectOrder={shiftOrders.select}
+            /* Choosing an order here loads it into the Current Order panel and
+               nothing more: no submit, no clone, no payment state touched. */
+            onSelectOrder={showSavedOrder}
             onOpenOrders={() => setOrdersOpen(true)}
             onOpenDelivery={() => setDeliveryOpen(true)}
           />
@@ -1301,46 +1467,84 @@ function PosWorkspaceInner() {
               dineIn.bill(layout)
             )
           ) : (
-            /* TAKEAWAY, ALWAYS THIS PANEL - empty or not.
-               It used to swap to a shift-order browser whenever the cart was
-               empty, which meant the order strip and the four actions vanished
-               at exactly the moment a cashier returns to a parked order. The
-               browser has not gone anywhere: it is the Orders rail entry, which
-               opens the same collection with the same print and reversal paths.
+            /* TAKEAWAY. Exactly two things can occupy this column, and which one
+               is an explicit gesture rather than "is the cart empty" - a panel
+               that swaps itself out when a cashier clears a line is a panel that
+               disappears at the worst moment.
 
-               Every control below acts on the SELECTED slot, and the selected
-               slot IS this cart - see `state/takeawayOrders.ts`. */
-            <CartPanel
-              lines={cart.lines}
-              selectedKey={cart.selectedKey}
-              currency={currency}
-              subtotal={subtotal}
-              shiftOpen={Boolean(shiftId)}
-              busy={busy}
-              savedOrderNumber={cart.savedOrder?.order_number ?? null}
-              createGate={createGate}
-              payGate={payGate}
-              onSelect={cart.select}
-              onAdjust={cart.adjustQuantity}
-              onRemove={removeLine}
-              onEditNote={setNoteKey}
-              onSendToKitchen={() => void sendToKitchen()}
-              onPay={openPayment}
-              onOpenShift={() => setOpenShiftOpen(true)}
-              onNewOrder={clearOrder}
-              clearLabel={cart.savedOrder ? "Clear cart (leaves the order unpaid)" : "Clear cart"}
-              orderTabs={
-                <OrderTabs
-                  slots={slots}
-                  index={takeawaySlots.index}
-                  disabledReason={slotsBlockedReason}
-                  onSelect={takeawaySlots.select}
-                  onStep={takeawaySlots.step}
+                 * a SAVED order - real number, real state, and actions bound to
+                   that order;
+                 * the DRAFT - the live cart, with no order number because the
+                   server has not been told about it yet.
+
+               There is no third thing, and in particular no invented `Order 1`. */
+            viewingSavedOrder ? (
+              <section className="flex h-full min-h-0 flex-col border-l border-line bg-white" aria-label="Current order">
+                <CurrentOrderPanel
+                  order={currentOrder}
+                  count={shiftOrders.orders.length}
+                  position={shiftOrders.index + 1}
+                  hasShift={Boolean(shiftId)}
+                  loading={shiftOrders.loading}
+                  error={shiftOrders.error}
+                  tenantName={pos.tenantName}
+                  branchName={pos.branch.name}
+                  staffName={pos.userName}
+                  shiftId={shiftId}
+                  fallbackCurrency={currency}
+                  tableName={
+                    currentOrder?.table_id
+                      ? (tableStore.map.tables.find((t) => t.id === currentOrder.table_id)?.name ?? null)
+                      : null
+                  }
+                  onStep={stepSavedOrder}
+                  /* The MANUAL layer - receiptStore.present and never
+                     presentReceipt, so reviewing an order cannot auto-print. */
+                  onPresentReceipt={(receipt) => receiptStore.present(receipt)}
+                  onPay={openPaymentForOrder}
+                  payGate={payGate}
+                  payBusy={busy}
+                  onNewOrder={showDraft}
+                  onReverse={startReverse}
                 />
-              }
-              onPrint={() => void printCurrentOrder()}
-              printBusy={printingOrder}
-            />
+              </section>
+            ) : (
+              <CartPanel
+                lines={cart.lines}
+                selectedKey={cart.selectedKey}
+                currency={currency}
+                subtotal={subtotal}
+                shiftOpen={Boolean(shiftId)}
+                busy={busy}
+                savedOrderNumber={cart.savedOrder?.order_number ?? null}
+                createGate={createGate}
+                payGate={payGate}
+                onSelect={cart.select}
+                onAdjust={cart.adjustQuantity}
+                onRemove={removeLine}
+                onEditNote={setNoteKey}
+                onSendToKitchen={() => void sendToKitchen()}
+                onPay={openPayment}
+                onOpenShift={() => setOpenShiftOpen(true)}
+                onNewOrder={clearOrder}
+                /* An unsaved draft is scratch, and its destructive action says
+                   so. `Delete / Void` belongs to a saved order and appears only
+                   on the panel above. */
+                clearLabel={cart.savedOrder ? "Clear cart (leaves the order unpaid)" : "Clear cart"}
+                orderCarousel={
+                  <OrderCarousel
+                    orderNumber={null}
+                    count={shiftOrders.orders.length}
+                    position={shiftOrders.index + 1}
+                    draft
+                    draftItemCount={itemCount}
+                    onStep={stepSavedOrder}
+                  />
+                }
+                onPrint={() => void printCurrentOrder()}
+                printBusy={printingOrder}
+              />
+            )
           )
         }
       />
@@ -1361,13 +1565,16 @@ function PosWorkspaceInner() {
         tableNameFor={(id) => (id ? (tableStore.map.tables.find((t) => t.id === id)?.name ?? null) : null)}
         shiftOrders={shiftOrders.orders}
         selectedOrderId={currentOrder?.id ?? null}
-        onSelectOrder={shiftOrders.select}
+        /* View closes the modal and loads that exact order into the Current
+           Order panel behind it - the one place an order is acted on. It is a
+           selection: no submit RPC, no clone, no change of payment state. */
+        onSelectOrder={showSavedOrder}
         onPrintOrder={(o) => void printShiftOrder(o)}
         onReverseOrder={startReverse}
-        /* The selected order in full, rendered by the ONE panel that knows how.
-           It moved here from the takeaway side column, which the approved design
-           gives to the live cart and its order strip. Same component, same
-           reads-only guarantee, same manual receipt path. */
+        /* The same panel, as a read-only preview beside the table. It is
+           deliberately given no Pay and no New order here: settlement belongs
+           beside the till's Current Order, not inside a browsing surface where
+           the operator is comparing rows. */
         detail={
           <CurrentOrderPanel
             order={currentOrder}
@@ -1382,7 +1589,7 @@ function PosWorkspaceInner() {
             shiftId={shiftId}
             fallbackCurrency={currency}
             tableName={currentOrder?.table_id ? (tableStore.map.tables.find((t) => t.id === currentOrder.table_id)?.name ?? null) : null}
-            onStep={shiftOrders.step}
+            onStep={stepSavedOrder}
             /* The MANUAL layer - deliberately receiptStore.present and not
                presentReceipt, so reviewing an order can never auto-print. */
             onPresentReceipt={(receipt) => receiptStore.present(receipt)}
@@ -1397,7 +1604,7 @@ function PosWorkspaceInner() {
         shiftId={shiftId}
         currency={currency}
         shiftOrders={shiftOrders.orders}
-        onSelectOrder={shiftOrders.select}
+        onSelectOrder={showSavedOrder}
         onPrintOrder={(o) => void printShiftOrder(o)}
         onReverseOrder={startReverse}
       />
@@ -1477,17 +1684,29 @@ function PosWorkspaceInner() {
         }}
       />
 
+      {/* ONE payment dialog for both targets. The figure it opens on is the
+          target's own subtotal - the cart's while drafting, the SERVER's stored
+          subtotal for a saved order - and every figure that reaches the receipt
+          afterwards is `pos_pay_order`'s response, never either of these. */}
       <PaymentDialog
-        open={payOpen}
+        open={payIntent !== null}
         busy={busy}
-        subtotal={subtotal}
+        subtotal={
+          payIntent?.kind === "order"
+            ? (payIntent.order.subtotal ?? payIntent.order.total_amount ?? 0)
+            : subtotal
+        }
         primaryCurrency={currency}
         rate={rate}
         discountGate={pos.gates.applyDiscounts}
         payGate={payGate}
-        orderNumber={cart.savedOrder?.order_number ?? null}
+        orderNumber={
+          payIntent?.kind === "order"
+            ? (payIntent.order.order_number ?? null)
+            : (cart.savedOrder?.order_number ?? null)
+        }
         error={payError}
-        onCancel={() => setPayOpen(false)}
+        onCancel={() => setPayIntent(null)}
         onConfirm={(input) => void confirmPayment(input)}
       />
 

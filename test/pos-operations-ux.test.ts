@@ -157,12 +157,24 @@ test("success re-reads authoritatively rather than patching locally", () => {
   assert.match(onDone, /shiftStore\.refreshCashBox\(\)/);
 });
 
-test("the reversal sits above Print in the Current Order panel", () => {
+test("the reversal is the LAST action in the Current Order panel, and unmistakable", () => {
+  // RETARGETED IN 1.0.4. It used to sit above Print because the panel had only
+  // those two controls. The panel is now the takeaway Current Order and carries
+  // Pay, so the destructive action moves to the position every other action
+  // stack in this POS puts it in: last, after Pay, Print and New order. That is
+  // the rule stated in `CartPanel.tsx` - the button under a thumb is never the
+  // one beside the one that was meant - and this asserts the panel follows it.
   const footer = currentOrder.slice(currentOrder.indexOf("shrink-0 space-y-2 border-t"));
-  assert.ok(footer.indexOf("reversalLabel(reversal)") < footer.indexOf('"Preparing..." : "Print"'));
+  const destructive = footer.indexOf("DESTRUCTIVE_ORDER_CTA");
+  assert.ok(destructive > 0, "the destructive action could not be located");
+  assert.ok(footer.indexOf('"Preparing..." : "Print"') < destructive, "Print comes before it");
+  assert.ok(footer.indexOf("props.onPay?.(order)") < destructive, "Pay comes before it");
   assert.match(footer, /variant="danger"/);
   // Absent entirely for a terminal order, rather than present and refused.
   assert.match(currentOrder, /const reversal = order \? reversalActionFor\(order\) : null/);
+  // The precise reversal is still named - the CTA is the plain wording, not a
+  // replacement for telling the operator whether this refunds money.
+  assert.match(footer, /reversalLabel\(reversal\)/);
 });
 
 // --- Orders workspace --------------------------------------------------------

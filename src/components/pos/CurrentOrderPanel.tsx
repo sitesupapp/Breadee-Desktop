@@ -9,13 +9,23 @@
 // refunded orders are part of what a till did, and reviewing them is the point.
 // Lifecycle wording comes from the two stored fields and is never invented.
 //
-// READS ONLY. Browsing cannot change an order. The one side effect - Print -
-// hands the existing store-owned receipt preview a server-built snapshot, so
-// the confirmation naming printer, queue, width and copies still stands between
-// the cashier and paper.
+// 1.0.4: IT IS NOW THE TAKEAWAY CURRENT ORDER. The side column used to show a
+// strip of three invented slots called `Order 1/2/3`; this panel - which was
+// already the one component that knows how to render a real order - takes that
+// place whenever a saved order is selected, and the cart panel keeps it while a
+// new order is being built. That is why Pay and the destructive action are here
+// now: an action offered beside an order must act on THAT order, and the order
+// on screen is the only order this component has.
+//
+// BROWSING IS STILL READS-ONLY. Selecting, stepping and printing issue no
+// write of any kind. The two actions that DO write - Pay and the reversal - are
+// explicit presses, are handed out by the caller, and are offered only when the
+// shared lifecycle rules in `orderActions.ts` say the server would accept them.
 
 import { useEffect, useState } from "react";
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, GatedButton, type Gate } from "@/components/ui";
+import { Glyph } from "@/components/Glyph";
+import { OrderCarousel } from "@/components/pos/OrderCarousel";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { buildReceipt, type ReceiptData, type ReceiptOrderSource } from "@/lib/receipt";
 import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
@@ -25,7 +35,13 @@ import {
   orderRouteLabel,
   type ShiftOpenOrder,
 } from "@/lib/pos/shiftOrderSummary";
-import { reversalActionFor, reversalLabel } from "@/lib/pos/orderActions";
+import {
+  DESTRUCTIVE_ORDER_CTA,
+  canSettleOrder,
+  paymentLabel,
+  reversalActionFor,
+  reversalLabel,
+} from "@/lib/pos/orderActions";
 
 export function CurrentOrderPanel(props: {
   order: ShiftOpenOrder | null;
@@ -50,6 +66,23 @@ export function CurrentOrderPanel(props: {
   onReverse?: (order: ShiftOpenOrder) => void;
   /** Refused reversal, in the gate's own words. Shown instead of a dead button. */
   reverseGateReason?: string | null;
+
+  // --- 1.0.4: this panel is now the takeaway Current Order ------------------
+
+  /**
+   * Settle THIS order. Omitted where settlement is not this surface's job -
+   * the Orders modal, which has its own row actions.
+   *
+   * Whether it is OFFERED is `canSettleOrder`, the shared lifecycle rule, so an
+   * order that is already paid, voided or refunded shows no Pay at all rather
+   * than a button the server would refuse. That is the second accidental
+   * settlement, prevented where the operator can see why.
+   */
+  onPay?: (order: ShiftOpenOrder) => void;
+  payGate?: Gate;
+  payBusy?: boolean;
+  /** Leave the saved order and go back to building a new one. */
+  onNewOrder?: () => void;
 }) {
   const [preparing, setPreparing] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
@@ -67,9 +100,10 @@ export function CurrentOrderPanel(props: {
   }
 
   const currency = (order?.currency ?? props.fallbackCurrency) as CurrencyCode;
-  const arrowsDisabled = props.count <= 1;
   // Null for a terminal order - nothing further can be done to it.
   const reversal = order ? reversalActionFor(order) : null;
+  // The lifecycle's own answer, not this screen's. A paid order offers no Pay.
+  const settleable = order ? canSettleOrder(order) : false;
 
   /**
    * Build the selected order's receipt from the SERVER's rows and present it.
@@ -117,23 +151,16 @@ export function CurrentOrderPanel(props: {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" className="px-2" disabled={arrowsDisabled} onClick={() => props.onStep(-1)} title="Previous order in this shift">
-            ←
-          </Button>
-          <span className="min-w-[112px] text-center text-sm font-extrabold text-ink">
-            {order ? `#${order.order_number ?? order.id.slice(0, 8)}` : "—"}
-          </span>
-          <Button variant="ghost" className="px-2" disabled={arrowsDisabled} onClick={() => props.onStep(1)} title="Next order in this shift">
-            →
-          </Button>
-        </div>
-        {props.count > 0 && (
-          <span className="text-[11px] font-semibold text-sub">
-            {props.position} of {props.count}
-          </span>
-        )}
+      {/* The ONE navigator, shared with the draft panel, so the operator sees
+          the same control whichever of the two is on screen. */}
+      <div className="shrink-0 border-b border-line px-3 py-2">
+        <OrderCarousel
+          orderNumber={order ? (order.order_number ?? order.id.slice(0, 8)) : null}
+          count={props.count}
+          position={props.position}
+          draft={false}
+          onStep={props.onStep}
+        />
       </div>
 
       {props.error && (
@@ -151,9 +178,12 @@ export function CurrentOrderPanel(props: {
           <div className="flex flex-wrap items-center gap-1">
             <Badge tone="slate">{orderRouteLabel(order.order_type)}</Badge>
             <Badge tone={orderLifecycleTone(order)}>{orderLifecycleLabel(order)}</Badge>
-            {order.payment_status && order.payment_status !== "paid" && (
-              <Badge tone="slate">{order.payment_status}</Badge>
-            )}
+            {/* The PAYMENT state on its own badge, always - it is the field
+                every action below is gated on, so it must never be something
+                the operator has to infer from the lifecycle word beside it. */}
+            <Badge tone={order.payment_status === "paid" ? "green" : order.payment_status === "refunded" ? "red" : "amber"}>
+              {paymentLabel(order)}
+            </Badge>
           </div>
           <p className="mt-1 text-[11px] text-sub">
             {order.created_at ? new Date(order.created_at).toLocaleString() : ""}
@@ -194,22 +224,53 @@ export function CurrentOrderPanel(props: {
 
       {order && (
         <div className="shrink-0 space-y-2 border-t border-line p-3">
-          {/* The reversal sits ABOVE Print and is visually distinct, because it
-              is the only destructive action on this panel. It appears only when
-              the order's own state permits one - a voided, cancelled or
-              refunded order offers nothing, rather than a button the server
-              would refuse. */}
-          {reversal && props.onReverse && (
-            <Button variant="danger" className="w-full" onClick={() => props.onReverse?.(order)}>
-              {reversalLabel(reversal)}
+          {/* 1 - Pay. Offered only while the lifecycle says this order can still
+              be settled, so the control that could take a customer's money a
+              second time is not on screen for an order that is already paid. */}
+          {props.onPay && settleable && (
+            <GatedButton
+              gate={props.payGate ?? { allowed: true, reason: null }}
+              size="lg"
+              className="w-full"
+              disabled={props.payBusy}
+              onClick={() => props.onPay?.(order)}
+            >
+              <Glyph name="pay" size={18} />
+              {props.payBusy ? "Working..." : "Pay"}
+            </GatedButton>
+          )}
+
+          {/* 2 - Print. The manual receipt for THIS order and nothing else. */}
+          <Button variant="ghost" className="w-full" disabled={preparing} onClick={() => void print()}>
+            {preparing ? "Preparing..." : "Print"}
+          </Button>
+
+          {/* 3 - Start the next customer. The saved order is left exactly as it
+              is; this only stops looking at it. */}
+          {props.onNewOrder && (
+            <Button variant="outline" className="w-full" onClick={props.onNewOrder}>
+              New order
             </Button>
+          )}
+
+          {/* 4 - The destructive one, last. It says `Delete / Void` because the
+              thing an operator has to distinguish here is "this reaches a real
+              order" from the draft panel's "Clear cart"; WHICH reversal it
+              performs is named directly beneath it and again in the
+              confirmation. It appears only when the order's own state permits
+              one, so a voided, cancelled or refunded order offers nothing. */}
+          {reversal && props.onReverse && (
+            <div>
+              <Button variant="danger" className="w-full" onClick={() => props.onReverse?.(order)}>
+                <Glyph name="trash" size={18} />
+                {DESTRUCTIVE_ORDER_CTA}
+              </Button>
+              <p className="mt-1 text-center text-[11px] text-sub">{reversalLabel(reversal)}</p>
+            </div>
           )}
           {reversal && props.reverseGateReason && (
             <p className="rounded-lg bg-slate-100 px-2 py-1 text-[11px] text-sub">{props.reverseGateReason}</p>
           )}
-          <Button variant="ghost" className="w-full" disabled={preparing} onClick={() => void print()}>
-            {preparing ? "Preparing..." : "Print"}
-          </Button>
         </div>
       )}
     </div>

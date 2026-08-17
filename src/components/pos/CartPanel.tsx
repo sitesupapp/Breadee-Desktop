@@ -14,10 +14,11 @@
 // control on the panel in the position a header usually reserves for the least
 // consequential one.
 //
-// EVERY ACTION HERE ACTS ON THE SELECTED ORDER, and does so by construction
-// rather than by passing an id around: the selected takeaway slot IS this cart
-// (see `state/takeawayOrders.ts`), so there is no order reference that could go
-// stale between the tab strip above and the buttons below.
+// EVERY ACTION HERE ACTS ON THE CART, and does so by construction rather than
+// by passing an id around: this panel is only ever shown for the UNSAVED draft
+// (1.0.4), so there is no order reference that could go stale between the
+// navigator above and the buttons below. A saved order is rendered by
+// `CurrentOrderPanel`, whose actions take that order explicitly.
 
 import type { ReactNode } from "react";
 import { Button, EmptyState, GatedButton, PanelTitle, type Gate } from "@/components/ui";
@@ -59,14 +60,13 @@ export type CartPanelProps = {
   // --- added by the POS UI update -------------------------------------------
 
   /**
-   * The order strip, rendered above the list.
+   * The Current Order navigator, rendered above the list.
    *
-   * A node rather than the slot data, because only takeaway has parallel orders
-   * - dine-in rounds and delivery baskets belong to a table and a caller
-   * respectively, and a tab strip over either would be offering to park work
-   * that is already parked somewhere with a name on it.
+   * A node rather than the data, because only takeaway browses the shift's
+   * orders from its side column - a dine-in round belongs to a table and a
+   * delivery basket to a caller, and both are already reached by name.
    */
-  orderTabs?: ReactNode;
+  orderCarousel?: ReactNode;
   /**
    * Manual print of the SELECTED order. Omitted where there is no such thing.
    *
@@ -97,7 +97,7 @@ export function CartPanel(props: CartPanelProps) {
     <section className="flex h-full min-h-0 flex-col border-l border-line bg-white" aria-label="Current order">
       <div className="shrink-0 space-y-3 border-b border-line px-4 py-3">
         <PanelTitle>Current order</PanelTitle>
-        {props.orderTabs}
+        {props.orderCarousel}
         {props.savedOrderNumber && (
           <p className="text-xs font-semibold text-brand-dark">
             Order {props.savedOrderNumber} is saved - paying will settle this order.
@@ -167,7 +167,7 @@ export function CartPanel(props: CartPanelProps) {
             is at the top of a panel that can be a screen tall, and the moment
             worth protecting is the one where a cashier reaches the bottom of it
             having forgotten which customer they came back for. */}
-        {props.orderTabs && (
+        {props.orderCarousel && (
           <p className="mb-2 flex items-center justify-center gap-1 text-center text-[11px] text-sub">
             <Glyph name="info" size={12} />
             Actions apply to the order shown above

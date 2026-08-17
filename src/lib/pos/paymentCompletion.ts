@@ -12,7 +12,7 @@
 // The receipt is stored FIRST so clearing the cart can never race the data it
 // was built from.
 
-import { buildReceipt, type ReceiptData } from "@/lib/receipt";
+import { buildReceipt, type ReceiptData, type ReceiptLine } from "@/lib/receipt";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { computeChange } from "@/lib/pos/payments";
 import { convertCurrency, hasValidRate, type CurrencyCode } from "@/lib/currency";
@@ -22,6 +22,26 @@ export type PaymentCompletionInput = {
   result: PayOrderResult;
   /** The lines as they were at payment time - captured before the cart resets. */
   lines: CartLine[];
+  /**
+   * The SERVER's lines, when the order being settled already existed (1.0.4).
+   *
+   * Paying a saved order from the Current Order carousel is the same payment,
+   * through the same `pos_pay_order` authority, with one difference: there is no
+   * cart behind it. The lines are read from `pos_order_items` and handed in
+   * here, and they take precedence over `lines` when present - which is also why
+   * `lines` may legitimately be empty on that path. Nothing else about the
+   * receipt changes, so a reprint of a carousel settlement and a reprint of a
+   * till settlement are the same document.
+   */
+  receiptLines?: ReceiptLine[] | null;
+  /**
+   * True when the order already existed before this payment.
+   *
+   * The ONLY thing it changes is whether the cart is reset afterwards: the cart
+   * holds a different, unsaved draft in that case, and clearing it would throw
+   * away a basket the cashier is still building for the next customer.
+   */
+  existingOrder?: boolean;
   /** Fallback order number when the server response omits one. */
   fallbackOrderNumber: string;
   tenantName: string;
@@ -43,6 +63,17 @@ export const COMPLETION_SEQUENCE: CompletionStep[] = [
   "present-receipt",
   "close-payment-dialog",
   "reset-cart",
+];
+
+/**
+ * The same sequence, minus the cart reset, for settling an order that already
+ * existed. The cart was never this order's cart; resetting it would discard an
+ * unrelated draft. Everything else - receipt first, dialog second - is identical
+ * for the reason the ordering exists at all.
+ */
+export const EXISTING_ORDER_COMPLETION_SEQUENCE: CompletionStep[] = [
+  "present-receipt",
+  "close-payment-dialog",
 ];
 
 export type PaymentCompletion = {
@@ -96,14 +127,16 @@ export function buildPaymentReceipt(input: PaymentCompletionInput): ReceiptData 
     paid: true,
     method: result.method,
     currency: input.primaryCurrency,
-    lines: input.lines.map((l) => ({
-      name: l.name,
-      qty: l.quantity,
-      unitPrice: lineTotals(l.base_price, l.modifiers, 1).finalUnitPrice,
-      lineTotal: lineTotals(l.base_price, l.modifiers, l.quantity).lineTotal,
-      modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.price_delta, quantity: m.quantity })),
-      note: l.kitchen_note,
-    })),
+    lines:
+      input.receiptLines ??
+      input.lines.map((l) => ({
+        name: l.name,
+        qty: l.quantity,
+        unitPrice: lineTotals(l.base_price, l.modifiers, 1).finalUnitPrice,
+        lineTotal: lineTotals(l.base_price, l.modifiers, l.quantity).lineTotal,
+        modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.price_delta, quantity: m.quantity })),
+        note: l.kitchen_note,
+      })),
     // Every monetary figure is the server's, never recomputed here.
     subtotal: result.subtotal,
     discount: result.discount,
@@ -119,5 +152,8 @@ export function buildPaymentReceipt(input: PaymentCompletionInput): ReceiptData 
 
 /** The receipt plus the ordered steps the caller must apply. */
 export function completePayment(input: PaymentCompletionInput): PaymentCompletion {
-  return { receipt: buildPaymentReceipt(input), steps: COMPLETION_SEQUENCE };
+  return {
+    receipt: buildPaymentReceipt(input),
+    steps: input.existingOrder ? EXISTING_ORDER_COMPLETION_SEQUENCE : COMPLETION_SEQUENCE,
+  };
 }

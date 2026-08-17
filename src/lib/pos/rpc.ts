@@ -31,6 +31,11 @@ export type PosRpcName =
   // Level 2A - Dine-In table foundation. Read + open.
   | "pos_table_map"
   | "pos_open_table"
+  // 1.0.4 - the branch's configured table capacity, and the SAME contract the
+  // Breadee web app calls. Listed here rather than reached through a desktop
+  // helper of its own precisely because there must be one answer to "how many
+  // tables does this branch have"; `pos.settings.manage` is enforced server-side.
+  | "pos_configure_tables"
   // Level 2C - table operations.
   | "pos_move_table"
   | "pos_close_table"

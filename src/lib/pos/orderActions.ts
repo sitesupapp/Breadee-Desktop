@@ -37,6 +37,20 @@ export function reversalActionFor(order: Pick<ShiftOpenOrder, "status" | "paymen
   return voidActionFor({ payment_status: order.payment_status } as Parameters<typeof voidActionFor>[0]);
 }
 
+/**
+ * The destructive control on a SAVED order, in one wording for every surface.
+ *
+ * Deliberately one label rather than two. The panel that carries it sits where
+ * an unsaved draft shows "Clear cart", and the operator has to be able to tell
+ * those two apart at a glance without first reading the order's payment status:
+ * "Clear cart" throws away something nobody else knows about, this one reaches
+ * an order the server is holding. Which reversal it actually performs - a
+ * cancellation or a refund - is named by `reversalLabel` on the hint beneath it
+ * and again in the confirmation, so nothing is hidden; it is simply not the
+ * thing the button has to say from across a counter.
+ */
+export const DESTRUCTIVE_ORDER_CTA = "Delete / Void";
+
 /** The button's words. A refund is never called a cancellation. */
 export function reversalLabel(action: VoidAction): string {
   return action === "refund" ? "Refund order" : "Cancel order";

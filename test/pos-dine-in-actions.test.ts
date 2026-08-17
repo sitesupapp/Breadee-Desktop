@@ -247,7 +247,8 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // cannot arrive unnoticed, so it is bumped by exactly one, deliberately.
   // RETARGETED AGAIN BY LEVEL 3D: 13 -> 15, for pos_edit_order and
   // pos_void_order. Bumped by exactly the two that were reviewed.
-  assert.equal(members.length, 15, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY DESKTOP 1.0.4: 15 -> 16, for `pos_configure_tables`.
+  assert.equal(members.length, 16, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a fourth cannot arrive unnoticed:

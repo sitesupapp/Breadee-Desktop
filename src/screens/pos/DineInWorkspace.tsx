@@ -119,6 +119,8 @@ export function useDineInWorkspace(input: {
   onEditNote: (key: string) => void;
   onOpenShift: () => void;
   onBillDrawerOpen: () => void;
+  /** Take the operator to where this branch's table capacity is set. */
+  onConfigureTables: () => void;
   /** Tenant USD->LBP rate. Payment in LBP is refused without one - never guessed. */
   rate: number | null;
   /**
@@ -154,6 +156,13 @@ export function useDineInWorkspace(input: {
   const [query, setQuery] = useState("");
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [seatOpen, setSeatOpen] = useState(false);
+  /**
+   * The open dialog is naming a NEW table rather than opening a mapped one.
+   *
+   * Only reachable when the branch has no configured tables, which is the one
+   * case `pos_open_table` accepts free text in.
+   */
+  const [manualOpen, setManualOpen] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -349,15 +358,19 @@ export function useDineInWorkspace(input: {
   );
 
   const confirmOpen = useCallback(
-    async (seats: number | null) => {
-      if (inFlight.current || !selected) return;
+    async (seats: number | null, typedName?: string) => {
+      // A named open has no selected card by definition, so `selected` is only
+      // required for the map path.
+      const name = typedName?.trim() || selected?.name;
+      if (inFlight.current || !name) return;
       if (!openGate.allowed) return;
       inFlight.current = true;
       setBusy(true);
       setOpenError(null);
       try {
-        const result = await openTable({ branchId: ctx.branchId, name: selected.name, seats });
+        const result = await openTable({ branchId: ctx.branchId, name, seats });
         setSeatOpen(false);
+        setManualOpen(false);
         // Re-read the map: the server is the authority on the new state, and the
         // returned STORED name is what the map will now show.
         await tables.refresh(ctx);
@@ -865,6 +878,14 @@ export function useDineInWorkspace(input: {
           if (layout.cartAsDrawer) input.onBillDrawerOpen();
         }}
         onRetry={() => void tables.refresh(ctx)}
+        canOpenTable={openGate.allowed}
+        onOpenTable={() => {
+          // No card to select, so this is the free-text path the server allows
+          // only on a branch with no configured tables.
+          setManualOpen(true);
+          setSeatOpen(true);
+        }}
+        onConfigureTables={input.onConfigureTables}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -992,12 +1013,19 @@ export function useDineInWorkspace(input: {
 
       <SeatCountDialog
         open={seatOpen}
-        table={selected}
+        table={manualOpen ? null : selected}
         busy={busy}
         gate={openGate}
         error={openError}
-        onCancel={() => setSeatOpen(false)}
-        onConfirm={(seats) => void confirmOpen(seats)}
+        namable={manualOpen}
+        // The first table a branch opens is almost always "1"; offering it saves
+        // a keystroke without preventing "Terrace".
+        defaultName={manualOpen ? String(tables.map.tables.length + 1) : ""}
+        onCancel={() => {
+          setSeatOpen(false);
+          setManualOpen(false);
+        }}
+        onConfirm={(seats, name) => void confirmOpen(seats, name)}
       />
 
       {/* An unsent round is never thrown away by a keystroke. Keeping it is the

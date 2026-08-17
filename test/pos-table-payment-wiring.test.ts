@@ -164,7 +164,13 @@ test("Takeaway still pays an ORDER through pos_pay_order, untouched", () => {
   assert.doesNotMatch(payments, /pos_pay_table|table_id/, "the takeaway module learned about tables");
 
   const workspace = read("screens", "pos", "PosWorkspace.tsx");
-  assert.match(workspace, /await payOrder\(\{ orderId: saved\.order_id/, "the takeaway payment call changed");
+  // 1.0.4 named the variable `orderId` rather than reading it off the submit
+  // result, because the same call now settles either the draft's newly created
+  // order or an already-saved one chosen from the carousel. The RPC, the
+  // payload, the single call site and the completion sequence are unchanged -
+  // which is what this regression is actually about.
+  assert.match(workspace, /await payOrder\(\{ orderId, method: input\.method/, "the takeaway payment call changed");
+  assert.equal((workspace.match(/await payOrder\(/g) ?? []).length, 1, "there must be exactly one settlement call");
   assert.match(workspace, /completePayment\(\{/, "takeaway no longer uses its own completion sequence");
 });
 
