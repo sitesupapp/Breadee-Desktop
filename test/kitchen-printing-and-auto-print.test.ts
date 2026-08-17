@@ -576,10 +576,24 @@ test("all three routes share ONE kitchen call site and ONE receipt call site", (
 
 test("sending a takeaway order to the kitchen leaves it payable", () => {
   const send = workspace.slice(workspace.indexOf("const sendToKitchen"), workspace.indexOf("const clearOrder"));
-  // The reset is gone from the success path - that is the whole fix.
+  // The blind reset is still gone from the success path - that is the fix, and
+  // it is the reason order 260814-0001 could not be collected.
   assert.equal(/newOrder\(\)/.test(send), false, "the sent order must not be discarded");
-  // And it is gone from the dependency list too, so it cannot creep back in.
-  assert.match(send, /\[cart\.lines\.length, ensureOrder, ticketForOrder, toast\]/);
+  // 1.0.4 keeps the property and moves WHERE the order is kept. The cart is no
+  // longer the only handle on a payable order: the sent order becomes the
+  // selected Current Order, whose Pay settles it. `adoptCreatedOrder` is the
+  // handover, and it is CONDITIONAL - it frees the cart only once the refreshed
+  // shift list actually contains the order, so a failed refresh leaves the
+  // order exactly where 1.0.3 left it rather than stranding the money again.
+  assert.match(send, /await adoptCreatedOrder\(saved\.order_id\)/);
+  const adopt = workspace.slice(workspace.indexOf("const adoptCreatedOrder"), workspace.indexOf("const sendToKitchen"));
+  assert.match(adopt, /if \(!found\) return false/);
+  assert.match(adopt, /setViewingSavedOrder\(true\)[\s\S]*?useCart\.getState\(\)\.reset\(\)/);
+  // The reset is reachable ONLY after that check, never before it.
+  assert.ok(
+    adopt.indexOf("if (!found) return false") < adopt.indexOf("useCart.getState().reset()"),
+    "the cart must not be freed before the order is known to be in the list",
+  );
 });
 
 test("clearing a SENT order asks first, and clearing a scratch cart does not", () => {
@@ -614,11 +628,17 @@ test("a batch's ticket is presented once, even when its order is paid later", ()
   assert.match(workspace, /const presentedTickets = useRef<Set<string>>\(new Set\(\)\)/);
 });
 
-test("the takeaway pay path still tells the kitchen", () => {
+test("the takeaway pay path still tells the kitchen, and only for the order it just created", () => {
   // Paying without pressing Send is a normal takeaway flow. The latch makes the
-  // unconditional call safe: a ticket already produced by Send is not repeated.
+  // call safe: a ticket already produced by Send is not repeated.
   const pay = workspace.slice(workspace.indexOf("const confirmPayment"), workspace.indexOf("const doOpenShift"));
-  assert.match(pay, /ticketForOrder\(saved, lines\)/);
+  assert.match(pay, /ticketForOrder\(draft, lines\)/);
+  // 1.0.4: settling an order that ALREADY EXISTED must not re-ticket it. It was
+  // routed to the kitchen when it was created, possibly hours earlier, and a
+  // second ticket is a second copy of already-cooked food. `draft` is null on
+  // that path, so the guard is the value itself rather than a flag beside it.
+  assert.match(pay, /if \(draft\) void ticketForOrder/);
+  assert.match(pay, /const draft = intent\.kind === "draft" \? await ensureOrder\(\) : null/);
 });
 
 test("both documents are presented from a store-owned layer outside the workspace", () => {

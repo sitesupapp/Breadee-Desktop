@@ -37,6 +37,7 @@ const readSrc = (...p: string[]) => readFileSync(join(root, "..", "src", ...p), 
 
 const summaryLib = stripComments(readSrc("lib", "pos", "shiftOrderSummary.ts"));
 const panel = stripJsxComments(readSrc("components", "pos", "CurrentOrderPanel.tsx"));
+const carouselSrc = stripJsxComments(readSrc("components", "pos", "OrderCarousel.tsx"));
 const statusBar = stripJsxComments(readSrc("components", "pos", "PosStatusBar.tsx"));
 const ordersStore = stripComments(readSrc("state", "shiftOrders.ts"));
 const workspace = stripJsxComments(readSrc("screens", "pos", "PosWorkspace.tsx"));
@@ -211,28 +212,40 @@ test("the order shows in the right-hand panel, not behind a dropdown", () => {
   );
   assert.match(workspace, /<CartPanel/, "takeaway still renders the cart panel");
   assert.match(workspace, /<CurrentOrderPanel/, "the shift-order browser is still rendered by the workspace");
-  // And it is the ORDERS surface that renders it, not the takeaway column.
+  // The Orders surface still renders it as its detail pane...
   assert.match(workspace, /detail=\{\s*<CurrentOrderPanel/);
-  assert.match(panel, /onStep\(-1\)/);
-  assert.match(panel, /onStep\(1\)/);
+  // ...and in 1.0.4 the takeaway column renders it too, for a SAVED order. That
+  // is the fix for the fake `Order 1/2/3` tabs: the panel that knows how to show
+  // a real order is the one that shows it, in the place the actions live.
+  assert.match(workspace, /viewingSavedOrder \? \(/);
+  // The arrows are the shared carousel's now, so the panel hands the direction
+  // through rather than drawing its own two buttons.
+  assert.match(panel, /onStep=\{props\.onStep\}/);
+  assert.match(carouselSrc, /props\.onStep\(-1\)/);
+  assert.match(carouselSrc, /props\.onStep\(1\)/);
 });
 
-test("the takeaway order strip is driven by the slot store and nothing else", () => {
-  // The selected slot IS the cart, so there is no second order reference for
-  // Pay, Send, Print or Clear to fall out of step with. These assertions are
-  // what stops one being introduced.
-  const slots = stripComments(readSrc("state", "takeawayOrders.ts"));
-  assert.match(workspace, /<OrderTabs/);
-  assert.match(workspace, /onSelect=\{takeawaySlots\.select\}/);
-  assert.match(workspace, /onStep=\{takeawaySlots\.step\}/);
-  // Exactly one cart store, and the slot store parks THROUGH it.
-  assert.match(slots, /useCart\.getState\(\)/);
-  assert.equal(slots.includes("create<"), true, "the slot store is a store, not component state");
+test("the takeaway order strip is driven by the shift's REAL orders and nothing else", () => {
+  // RETARGETED IN 1.0.4. This assertion used to require `<OrderTabs>` and the
+  // slot store behind it. That model shipped and was wrong - `Order 1/2/3` were
+  // the till's own numbers - so the assertion now names what replaced it. What
+  // it was guarding is unchanged and is still every line below: exactly one
+  // order-bearing store, no RPC reachable from navigating, and the cart's
+  // duplicate-order protection intact.
+  const orders = stripComments(readSrc("state", "shiftOrders.ts"));
+  assert.match(workspace, /<OrderCarousel/);
+  assert.match(workspace, /onStep=\{stepSavedOrder\}/);
+  assert.match(workspace, /onSelectOrder=\{showSavedOrder\}/);
+  // One store, and it is a store rather than component state for the same
+  // reason the receipt is one.
+  assert.equal(orders.includes("create<"), true, "the order store is a store, not component state");
+  // BROWSING WRITES NOTHING. This is the assertion that matters most in the
+  // file: selecting or stepping an order must not be able to reach a mutation.
   for (const token of ["callPosRpc", ".rpc(", "pos_submit_order", "pos_pay_order", "autoPrint", "printReceipt"]) {
-    assert.equal(slots.includes(token), false, `${token} must not be reachable from parking an order`);
+    assert.equal(orders.includes(token), false, `${token} must not be reachable from selecting an order`);
   }
-  // Parking must carry the duplicate-order protection with it: an order that
-  // came back without its op id would be submitted again as a new order.
+  // The cart still carries the duplicate-order protection: an order that came
+  // back without its op id would be submitted again as a new order.
   const cart = stripComments(readSrc("state", "cart.ts"));
   assert.match(cart, /snapshot: \(\) => \{[\s\S]*?clientOpId: s\.clientOpId/);
   assert.match(cart, /restore: \(snapshot\) =>[\s\S]*?clientOpId: snapshot\.clientOpId/);

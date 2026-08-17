@@ -135,11 +135,15 @@ test("pos_upsert_customer is the only RPC the customer library calls", () => {
 // RETARGETED BY LEVEL 3D: 13 -> 15, for `pos_edit_order` and `pos_void_order`.
 // Same discipline as every previous bump - the number is a guard against an RPC
 // arriving unnoticed, so it moves by exactly the two that were reviewed.
-test("the RPC allow-list is 15 names and includes pos_upsert_customer", () => {
+test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
-  assert.equal(names.length, 15);
+  // 15 -> 16 in Desktop 1.0.4: `pos_configure_tables`, the web app's own table
+  // capacity contract, so the desktop configures tables rather than sending the
+  // operator to a browser. Reviewed, and it is not an order or money RPC.
+  assert.equal(names.length, 16);
+  assert.ok(names.includes("pos_configure_tables"));
   assert.ok(names.includes("pos_upsert_customer"));
   // Level 3A added exactly one name, and it is not an order or money RPC.
   assert.equal(names.filter((n) => n.includes("customer")).length, 1);

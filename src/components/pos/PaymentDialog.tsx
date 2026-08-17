@@ -153,7 +153,13 @@ export function PaymentDialog(props: PaymentDialogProps) {
       open={props.open}
       title={title}
       subtitle={subtitle}
-      size="lg"
+      /* COMPACT (1.0.4). This was `lg` - 896px of modal for a form whose widest
+         row is three buttons - and on a 1366x768 till the body then had to
+         scroll to reach Confirm, which is the one control that must never be
+         below the fold at the moment money changes hands. Nothing about the
+         arithmetic, the RPC, the discount rules or the tender logic is touched
+         here; this is the same form in the space it actually needs. */
+      size="md"
       onClose={props.onCancel}
       footer={
         <div className="flex items-center justify-between gap-3">
@@ -172,12 +178,14 @@ export function PaymentDialog(props: PaymentDialogProps) {
         </div>
       }
     >
-      <div className="grid gap-5 md:grid-cols-[1fr_260px]">
-        <div className="space-y-4">
+      {/* Two columns from `sm` up rather than `md`, so the compact modal never
+          stacks into a tall single column at a till width. */}
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_212px]">
+        <div className="space-y-3">
           {/* Totals */}
-          <div className="rounded-xl border border-line p-3">
+          <div className="rounded-xl border border-line px-3 py-2">
             {dineIn && (
-              <div className="mb-2 flex items-baseline justify-between border-b border-line pb-2">
+              <div className="mb-1.5 flex items-baseline justify-between border-b border-line pb-1.5">
                 <span className="text-sm font-bold text-ink">{dineIn.tableName}</span>
                 <span className="text-xs font-semibold text-sub">
                   {dineIn.seats != null ? `${dineIn.seats} seats` : "seats not set"}
@@ -188,50 +196,54 @@ export function PaymentDialog(props: PaymentDialogProps) {
             {discount.amount > 0 && (
               <Row label="Discount" value={`- ${formatMoney(discount.amount, props.primaryCurrency)}`} tone="amber" />
             )}
-            <div className="mt-2 flex items-baseline justify-between border-t border-line pt-2">
+            <div className="mt-1.5 flex items-baseline justify-between border-t border-line pt-1.5">
               <span className="text-sm font-bold text-ink">Total</span>
+              {/* Still the largest thing in the dialog. Compact is about the
+                  space around the figures, never about the figures. */}
               <span className="text-2xl font-extrabold tabular-nums text-ink">
                 {formatMoney(discount.finalTotal, props.primaryCurrency)}
               </span>
             </div>
             {currency !== props.primaryCurrency && dueInTender !== null && (
-              <p className="mt-1 text-right text-xs font-semibold text-sub">
+              <p className="mt-0.5 text-right text-xs font-semibold text-sub">
                 = {formatMoney(dueInTender, currency)} in {currency}
               </p>
             )}
           </div>
 
-          {/* Method */}
-          <Field label="Method">
-            <div className="flex gap-2">
-              {PAYMENT_METHODS.map((m) => (
-                <Choice key={m.value} active={method === m.value} onClick={() => setMethod(m.value)}>
-                  {m.label}
-                </Choice>
-              ))}
-            </div>
-          </Field>
-
-          {/* Currency */}
-          <Field label="Currency">
-            <div className="flex gap-2">
-              {(["USD", "LBP"] as CurrencyCode[]).map((c) => {
-                const blocked = Boolean(paymentBlockedReason(c, props.rate));
-                return (
-                  <Choice
-                    key={c}
-                    active={currency === c}
-                    disabled={blocked}
-                    title={blocked ? "No USD/LBP exchange rate is set." : undefined}
-                    onClick={() => setCurrency(c)}
-                  >
-                    {c}
+          {/* Method and currency share a row: two short button groups that used
+              to occupy two full-width blocks between them. */}
+          <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+            <Field label="Method">
+              <div className="flex gap-2">
+                {PAYMENT_METHODS.map((m) => (
+                  <Choice key={m.value} active={method === m.value} onClick={() => setMethod(m.value)}>
+                    {m.label}
                   </Choice>
-                );
-              })}
-            </div>
-            {currencyBlock && <p className="mt-1 text-xs font-semibold text-amber-800">{currencyBlock}</p>}
-          </Field>
+                ))}
+              </div>
+            </Field>
+
+            <Field label="Currency">
+              <div className="flex gap-2">
+                {(["USD", "LBP"] as CurrencyCode[]).map((c) => {
+                  const blocked = Boolean(paymentBlockedReason(c, props.rate));
+                  return (
+                    <Choice
+                      key={c}
+                      active={currency === c}
+                      disabled={blocked}
+                      title={blocked ? "No USD/LBP exchange rate is set." : undefined}
+                      onClick={() => setCurrency(c)}
+                    >
+                      {c}
+                    </Choice>
+                  );
+                })}
+              </div>
+            </Field>
+          </div>
+          {currencyBlock && <p className="text-xs font-semibold text-amber-800">{currencyBlock}</p>}
 
           {/* Discount */}
           <Field label="Discount" hint={props.discountGate.allowed ? undefined : props.discountGate.reason ?? undefined}>
@@ -249,7 +261,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
               ))}
               {discountType !== "none" && (
                 <Input
-                  className="w-32"
+                  className="w-28"
                   inputMode="decimal"
                   value={discountValue}
                   disabled={!props.discountGate.allowed}
@@ -265,10 +277,9 @@ export function PaymentDialog(props: PaymentDialogProps) {
         </div>
 
         {/* Cash handling */}
-        <div className="space-y-3">
+        <div className="space-y-2">
           <Field label={`Tendered (${currency})`}>
             <Input
-              size="lg"
               inputMode="decimal"
               value={tendered}
               onChange={(e) => setTendered(e.target.value)}
@@ -276,7 +287,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
               className="text-right text-lg font-bold"
             />
           </Field>
-          <div className="rounded-xl border border-line p-3">
+          <div className="rounded-xl border border-line px-3 py-1.5">
             <Row label="Due" value={dueInTender === null ? "-" : formatMoney(dueInTender, currency)} />
             <Row
               label="Change"
@@ -284,7 +295,9 @@ export function PaymentDialog(props: PaymentDialogProps) {
               tone={change && change.change > 0 ? "green" : undefined}
             />
           </div>
-          <NumericKeypad value={tendered} onChange={setTendered} allowDecimal={currency === "USD"} />
+          {/* `compact` trims the key height to 44px - still above the 44px touch
+              target this app holds itself to, and 12px x 5 rows shorter. */}
+          <NumericKeypad compact value={tendered} onChange={setTendered} allowDecimal={currency === "USD"} />
         </div>
       </div>
     </Modal>

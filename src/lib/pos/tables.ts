@@ -122,6 +122,93 @@ export async function openTable(input: OpenTableInput): Promise<OpenTableResult>
   };
 }
 
+// --- capacity ----------------------------------------------------------------
+//
+//   * pos_configure_tables({p_branch, p_names}) (m256) - the ONE authoritative
+//     table-capacity contract, and the same one the Breadee web app calls. The
+//     LENGTH of `p_names` is the branch's configured capacity; a blank entry
+//     falls back to the server's own `Table i` default, so raising the count
+//     never requires the desktop to invent a name. Requires
+//     `pos.settings.manage`, enforced server-side. Legacy (unconfigured) rows
+//     are preserved and are deliberately NOT counted as capacity - the server
+//     reports them separately as `legacy_active`.
+//
+// THERE IS NO LOCAL COPY OF THIS SETTING. Capacity is a property of the branch,
+// not of a terminal, so nothing here reads or writes localStorage: a number
+// typed on this till has to be the number the web app and every other till
+// already see, and a second store is how two answers to one question begin.
+
+/** What `pos_configure_tables` reports back. Every figure is the server's. */
+export type ConfigureTablesResult = {
+  requested: number;
+  created: number;
+  renamed: number;
+  reactivated: number;
+  deactivated: number;
+  /** Legacy rows parked because a configured table reclaimed their name. */
+  legacy_parked: number;
+  /** Legacy rows still active. Never part of the configured capacity. */
+  legacy_active: number;
+};
+
+/**
+ * The name list for a requested capacity, preserving what the branch already calls
+ * its tables.
+ *
+ * Position is identity here, exactly as it is server-side: `sort_order` i keeps
+ * its name when the count changes, and a position that has never existed is sent
+ * BLANK so the server applies its own default rather than the desktop inventing
+ * one that the web app would not have chosen. Only CONFIGURED rows are read -
+ * a legacy free-text row is not capacity and must not be promoted into it by
+ * having its name adopted here.
+ */
+export function tableNamesForCount(count: number, tables: TableSummary[]): string[] {
+  const byPosition = new Map<number, string>();
+  for (const t of tables) {
+    if (!t.configured || t.sort_order == null) continue;
+    if (!byPosition.has(t.sort_order)) byPosition.set(t.sort_order, t.name);
+  }
+  return Array.from({ length: Math.max(0, count) }, (_, i) => byPosition.get(i + 1) ?? "");
+}
+
+/**
+ * Validate a typed capacity the way the server will, so an impossible number is
+ * refused at the keyboard instead of as a database exception.
+ */
+export function validateTableCount(raw: string): { count: number | null; error: string | null } {
+  const text = raw.trim();
+  if (text === "") return { count: null, error: "Enter how many tables this branch has." };
+  if (!/^\d+$/.test(text)) return { count: null, error: "The number of tables must be a whole number." };
+  const count = Number(text);
+  if (count > 500) return { count: null, error: "A branch can have at most 500 tables." };
+  return { count, error: null };
+}
+
+/**
+ * Set this branch's configured tables.
+ *
+ * A thin call and nothing more: every rule that matters - the permission, the
+ * refusal to shrink past an occupied table, name uniqueness, what happens to a
+ * legacy row whose name is reclaimed - is the server's, and is deliberately not
+ * restated here where it could drift away from the web app's behaviour.
+ */
+export async function configureTables(input: {
+  branchId: string | null;
+  names: string[];
+}): Promise<ConfigureTablesResult> {
+  if (!input.branchId) throw new Error("A branch is required to configure tables");
+  const row = asRecord(await callPosRpc("pos_configure_tables", { p_branch: input.branchId, p_names: input.names }));
+  return {
+    requested: num(row.requested, input.names.length),
+    created: num(row.created),
+    renamed: num(row.renamed),
+    reactivated: num(row.reactivated),
+    deactivated: num(row.deactivated),
+    legacy_parked: num(row.legacy_parked),
+    legacy_active: num(row.legacy_active),
+  };
+}
+
 // --- presentation helpers ----------------------------------------------------
 
 /**

@@ -19,9 +19,12 @@
 // appears here on the next open, enabled - no code change and no migration.
 
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, Card, EmptyState, ErrorState, Skeleton } from "@/components/ui";
+import { useLocation } from "react-router-dom";
+import { Badge, Button, Card, EmptyState, ErrorState, Input, Skeleton } from "@/components/ui";
 import { Switch } from "@/components/Switch";
 import { usePosContext } from "@/state/pos";
+import { configureTables, loadTableMap, tableNamesForCount, validateTableCount } from "@/lib/pos/tables";
+import type { TableMap } from "@/types/tables";
 import { loadServerPrinters, type ServerPrinter } from "@/lib/pos/printerRegistry";
 import {
   printerAutoPrintEnabled,
@@ -42,6 +45,16 @@ const ROLE_LABEL: Record<ServerPrinter["printer_type"], string> = {
   kitchen: "Kitchen",
   other: "Other",
 };
+
+/** One server-reported table figure. Shows a dash rather than a guessed zero. */
+function Counter({ label, value }: { label: string; value: number | null }) {
+  return (
+    <div className="rounded-xl border border-line px-3 py-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">{label}</p>
+      <p className="text-lg font-extrabold tabular-nums text-ink">{value ?? "—"}</p>
+    </div>
+  );
+}
 
 export function PosSettings() {
   const pos = usePosContext();
@@ -124,6 +137,84 @@ export function PosSettings() {
   const togglePrinter = useCallback((printer: ServerPrinter, next: boolean) => {
     setOverrides(writePrinterAutoPrint(printer.id, next));
   }, []);
+
+  // --- tables ----------------------------------------------------------------
+  //
+  // BRANCH-WIDE, AND SHARED WITH THE WEB APP. Capacity is `pos_configure_tables`
+  // and nothing else: the same RPC the web app calls, so a number typed here is
+  // visible there on the next read and the reverse is true too. Deliberately no
+  // localStorage, no terminal preference and no second record - a till and a
+  // manager's browser disagreeing about how many tables a branch has is the
+  // failure this reuse exists to make impossible.
+  //
+  // THE COUNTERS ARE THE SERVER'S. `pos_table_map` already reports configured,
+  // available and occupied for this branch; nothing is derived here. Legacy
+  // free-text rows are excluded from `configured` by the server, exactly as the
+  // web app shows them.
+  const [tableMap, setTableMap] = useState<TableMap | null>(null);
+  const [tableCount, setTableCount] = useState("");
+  const [tablesError, setTablesError] = useState<string | null>(null);
+  const [tablesSaving, setTablesSaving] = useState(false);
+  const [tablesNotice, setTablesNotice] = useState<string | null>(null);
+
+  const loadTables = useCallback(async () => {
+    if (!branchId) return;
+    try {
+      const map = await loadTableMap(branchId);
+      setTableMap(map);
+      setTableCount(String(map.configured));
+    } catch (e) {
+      setTablesError(e instanceof Error ? e.message : "The tables could not be read.");
+    }
+  }, [branchId]);
+
+  useEffect(() => {
+    void loadTables();
+  }, [loadTables]);
+
+  const saveTables = useCallback(async () => {
+    const parsed = validateTableCount(tableCount);
+    if (parsed.count === null) {
+      setTablesError(parsed.error);
+      setTablesNotice(null);
+      return;
+    }
+    setTablesSaving(true);
+    setTablesError(null);
+    setTablesNotice(null);
+    try {
+      // Existing names are preserved position by position; only positions the
+      // branch has never had are sent blank for the server to name.
+      const names = tableNamesForCount(parsed.count, tableMap?.tables ?? []);
+      const result = await configureTables({ branchId, names });
+      // Authoritative re-read rather than a local patch: the server decides what
+      // was created, renamed, reactivated or parked, and the counters have to be
+      // what it actually did.
+      await loadTables();
+      setTablesNotice(
+        `Saved. ${result.requested} configured table${result.requested === 1 ? "" : "s"}.` +
+          (result.legacy_active > 0
+            ? ` ${result.legacy_active} older free-text table${result.legacy_active === 1 ? "" : "s"} kept, and not counted.`
+            : ""),
+      );
+    } catch (e) {
+      // The server's own words. It refuses to shrink past an occupied table and
+      // says which, and that reason is far more useful than anything invented
+      // here would be.
+      setTablesError(e instanceof Error ? e.message : "The tables could not be saved.");
+    } finally {
+      setTablesSaving(false);
+    }
+  }, [branchId, loadTables, tableCount, tableMap]);
+
+  // Dine-in's "Configure tables" lands on `/settings/pos#tables`, so the section
+  // it names is the one the operator arrives at rather than the top of a page
+  // they then have to scan.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (hash !== "#tables" || loading) return;
+    document.getElementById("tables")?.scrollIntoView({ block: "start" });
+  }, [hash, loading]);
 
   if (!tenantId) {
     return (
@@ -210,6 +301,78 @@ export function PosSettings() {
             hint="Prints the kitchen ticket by itself when an order or a new round is sent — Takeaway, Dine-in and Delivery alike."
           />
         </div>
+      </Card>
+
+      {/* --- tables (branch-wide, shared with the web app) ----------------- */}
+      <Card className="p-6" id="tables">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-sm font-extrabold text-ink">Tables</p>
+            <p className="mt-0.5 text-xs text-sub">
+              How many tables Dine-in offers on this <strong className="text-ink">branch</strong>. Saved to the same
+              place the Breadee web app reads, so both show the same floor.
+            </p>
+          </div>
+          <Badge tone="blue">Branch-wide</Badge>
+        </div>
+
+        {!branchId ? (
+          <div className="mt-3">
+            <EmptyState
+              title="No branch resolved"
+              hint="This terminal is not scoped to a branch, and table capacity belongs to one."
+            />
+          </div>
+        ) : (
+          <>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              <Counter label="Configured" value={tableMap?.configured ?? null} />
+              <Counter label="Available" value={tableMap?.available ?? null} />
+              <Counter label="Occupied" value={tableMap?.occupied ?? null} />
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-end gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-bold text-ink" htmlFor="table-count">
+                  Number of tables
+                </label>
+                <Input
+                  id="table-count"
+                  className="w-32"
+                  inputMode="numeric"
+                  value={tableCount}
+                  disabled={!gate.allowed || tablesSaving}
+                  title={gate.reason ?? undefined}
+                  onChange={(e) => setTableCount(e.target.value)}
+                />
+              </div>
+              <Button disabled={!gate.allowed || tablesSaving} title={gate.reason ?? undefined} onClick={() => void saveTables()}>
+                {tablesSaving ? "Saving…" : "Save changes"}
+              </Button>
+              <Button variant="ghost" disabled={tablesSaving} onClick={() => void loadTables()}>
+                Refresh
+              </Button>
+            </div>
+
+            {!gate.allowed && <p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-sub">{gate.reason}</p>}
+            {tablesError && (
+              <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-[11px] font-semibold text-red-700">{tablesError}</p>
+            )}
+            {tablesNotice && (
+              <p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[11px] font-semibold text-sub">{tablesNotice}</p>
+            )}
+            {(tableMap?.legacy_hidden ?? 0) > 0 && (
+              <p className="mt-3 text-[11px] text-sub">
+                {tableMap?.legacy_hidden} older free-text table{tableMap?.legacy_hidden === 1 ? " is" : "s are"} kept on
+                this branch. They are not part of the configured count and nothing here deletes them.
+              </p>
+            )}
+            <p className="mt-3 text-[11px] text-sub">
+              Reducing the count is refused while a table above the new number is occupied or still holding a bill —
+              settle or clear those first.
+            </p>
+          </>
+        )}
       </Card>
 
       {/* --- this terminal ------------------------------------------------ */}

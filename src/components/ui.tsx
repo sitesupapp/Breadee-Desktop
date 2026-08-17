@@ -63,8 +63,14 @@ export function GatedButton({
   );
 }
 
-export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return <div className={cn("rounded-2xl border border-line bg-white shadow-sm", className)}>{children}</div>;
+export function Card({ id, className, children }: { id?: string; className?: string; children: ReactNode }) {
+  // `id` so a settings section can be linked to directly - Dine-in's "Configure
+  // tables" lands on `/settings/pos#tables` rather than the top of the page.
+  return (
+    <div id={id} className={cn("rounded-2xl border border-line bg-white shadow-sm", className)}>
+      {children}
+    </div>
+  );
 }
 
 export type InputProps = Omit<InputHTMLAttributes<HTMLInputElement>, "size"> & { size?: ControlSize };
