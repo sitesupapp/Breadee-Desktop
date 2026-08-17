@@ -466,22 +466,44 @@ function PosWorkspaceInner() {
         batchNo: input.batchNo ?? 1,
         ticket,
       });
+
+      // A ticket that printed by itself is already withheld by the store, which
+      // is where that rule lives. The change in 1.0.4 is the FAILURE case: it
+      // used to raise the full ticket modal, which stops a cashier mid-service
+      // to tell them about a printer. The order is committed either way, so it
+      // becomes a notice they can read and dismiss without leaving the till.
+      if (status.kind === "auto_failed") {
+        kitchenStore.stage(ticket, status);
+        toast.push({
+          tone: "warning",
+          message: "Order sent. The kitchen ticket was not printed.",
+          detail: status.message,
+        });
+        return;
+      }
       kitchenStore.present(ticket, status);
     },
-    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId],
+    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId, toast],
   );
 
   /**
    * THE receipt presentation call site, for all three routes.
    *
-   * Presentation first, automatic paper second and detached. The preview is on
-   * screen with its Print button live whatever the printer does, so a branch
-   * with no receipt route, no printer, or a jammed one still has a working till
-   * and a cashier who can read the total off the screen.
+   * AUTO PRINT ON IS SILENT (1.0.4). Until now the preview was raised for every
+   * payment and paper came out behind it, so a busy cashier had to dismiss a
+   * window after every sale to get back to the till - on a lunch rush that is
+   * hundreds of dismissals for information already printed. The receipt is now
+   * STAGED rather than shown, and the preview is raised only when nothing was
+   * printed automatically. The data is stored either way, so Ctrl+P reopens it
+   * and a failed print still has something to retry from.
+   *
+   * The decision is the print result, not a settings read of our own: whatever
+   * `autoPrintReceipt` decided IS what happened to the paper, and asking a
+   * second source would let the screen and the printer disagree.
    */
   const presentReceipt = useCallback(
     (receipt: ReceiptData) => {
-      receiptStore.present(receipt);
+      receiptStore.stage(receipt);
       // A settlement changes an order's lifecycle, so the shift list and its
       // count follow it. Every route presents its receipt through here, which
       // makes this the one place a payment has to be reflected.
@@ -493,13 +515,21 @@ function PosWorkspaceInner() {
         receipt,
         paidAt: receipt.at,
       }).then((printed) => {
+        if (printed.kind === "sent") return; // Paper is coming; stay on the POS.
         if (printed.kind === "failed") {
+          // Never reopen the preview on failure: the sale is done, and a modal
+          // in the cashier's way is the thing this release is removing. A toast
+          // says what happened and Ctrl+P still opens the receipt.
           toast.push({
             tone: "warning",
-            message: "The payment succeeded. Only the receipt failed to print.",
+            message: "Payment completed. The receipt failed to print.",
             detail: printed.message,
           });
+          return;
         }
+        // `manual`: nothing was printed automatically, so the preview IS the
+        // path to paper and has to be on screen.
+        receiptStore.present(receipt);
       });
     },
     [pos.access, pos.branch.id, receiptStore, refreshShiftOrders, tenantId, toast],
@@ -547,6 +577,10 @@ function PosWorkspaceInner() {
     onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
     onBillDrawerOpen: () => setCartDrawerOpen(true),
+    // Leaves the POS workspace the same way Close does, landing on the settings
+    // page that owns capacity - rather than telling the operator to go and find
+    // the web app, which is what 1.0.3 did.
+    onConfigureTables: () => navigate("/settings/pos"),
     rate,
     // The receipt goes to the same store-owned layer takeaway uses, which is
     // mounted outside this component's loading states on purpose.

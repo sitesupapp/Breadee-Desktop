@@ -33,6 +33,16 @@ type ReceiptState = {
 
   /** Store the authoritative receipt and show it - one atomic transition. */
   present: (receipt: ReceiptData) => void;
+  /**
+   * Hold the receipt WITHOUT raising the preview (1.0.4).
+   *
+   * Auto Print ON is now silent: the cashier gets paper and stays on the POS.
+   * The data still has to be here, because Ctrl+P must be able to reopen the
+   * last receipt and a print that fails must leave something to retry from - so
+   * the receipt is always stored, and only its visibility depends on whether
+   * paper is coming.
+   */
+  stage: (receipt: ReceiptData) => void;
   /** Re-show the last receipt (Ctrl+P). No-op when there is nothing to show. */
   reopen: () => void;
   /** Close the preview but KEEP the data. */
@@ -46,6 +56,8 @@ export const useReceipt = create<ReceiptState>((set, get) => ({
   visible: false,
 
   present: (receipt) => set({ receipt, visible: true }),
+
+  stage: (receipt) => set({ receipt, visible: false }),
 
   reopen: () => {
     if (!get().receipt) return;

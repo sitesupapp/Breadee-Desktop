@@ -29,7 +29,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateDCW, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect,
     GetDeviceCaps, SelectObject, SetBkMode, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
     DEFAULT_QUALITY, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_RTLREADING,
-    DT_WORDBREAK, FF_DONTCARE, HBRUSH, HDC, HFONT, HGDIOBJ, HORZRES, LOGPIXELSX, LOGPIXELSY,
+    DT_SINGLELINE, DT_WORDBREAK, FF_DONTCARE, HBRUSH, HDC, HFONT, HGDIOBJ, HORZRES, LOGPIXELSX,
+    LOGPIXELSY,
     OUT_DEFAULT_PRECIS, TRANSPARENT, VERTRES,
 };
 use windows::Win32::Graphics::Printing::{
@@ -416,7 +417,11 @@ fn with_font<T>(
     dpi_y: i32,
     f: impl FnOnce(HDC) -> Result<T, PrintError>,
 ) -> Result<T, PrintError> {
-    let points = match style {
+    with_points(hdc, style_points(style), style_bold(style), dpi_y, f)
+}
+
+fn style_points(style: LineStyle) -> i32 {
+    match style {
         LineStyle::Title => 16,
         LineStyle::Total => 13,
         LineStyle::Heading => 10,
@@ -426,8 +431,26 @@ fn with_font<T>(
         // measured and painted as geometry and never consults the font, but the
         // shared `with_font` wrapper still selects one, so it needs a value.
         LineStyle::Blank | LineStyle::Feed | LineStyle::Qr => 8,
-    };
-    let bold = matches!(style, LineStyle::Title | LineStyle::Heading | LineStyle::Total);
+    }
+}
+
+fn style_bold(style: LineStyle) -> bool {
+    matches!(style, LineStyle::Title | LineStyle::Heading | LineStyle::Total)
+}
+
+/// Select a font of an explicit size, run `f`, then restore and delete it.
+///
+/// Split out of `with_font` so the amount column can be re-measured at a smaller
+/// size without duplicating the create/select/restore/delete dance - the part
+/// that must never be got wrong, because a leaked HFONT in a till process that
+/// runs all day is a slow resource leak rather than an obvious failure.
+fn with_points<T>(
+    hdc: HDC,
+    points: i32,
+    bold: bool,
+    dpi_y: i32,
+    f: impl FnOnce(HDC) -> Result<T, PrintError>,
+) -> Result<T, PrintError> {
     let height_px = -(points * dpi_y) / 72;
 
     let face = wide(FONT_FACE);
@@ -465,19 +488,132 @@ fn with_font<T>(
     result
 }
 
-/// The width the description may use once the amount column is reserved.
+/// Smallest size the amount may shrink to before it is moved to its own row.
 ///
-/// A money column on the right narrows the space the description has, so the
-/// two are laid out against different widths. Without this the description
-/// would wrap under the amount and the receipt would look like the figures
-/// belonged to the wrong line.
-fn left_column_width(line: &PageLine, column: i32) -> i32 {
-    let reserved = if line.right.as_deref().is_some_and(|r| !r.is_empty()) {
-        (column * 2) / 5
-    } else {
-        0
+/// 8pt is the same size the receipt already uses for `Small`, so an amount that
+/// has shrunk is still a size this paper is known to render legibly.
+const AMOUNT_MIN_POINTS: i32 = 8;
+
+/// How the amount on a row is going to be laid out.
+///
+/// Decided by MEASURING, never by assuming a fixed share of the paper. The old
+/// code reserved two fifths of the column for the amount and drew into exactly
+/// that rectangle, so any figure wider than the reservation was clipped by GDI -
+/// and the TOTAL row clipped first because it is set in a larger bold face. A
+/// receipt that shows a customer a chopped total is worse than one that is ugly,
+/// so width is now established before anything is committed to paper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmountPlan {
+    /// No amount on this row.
+    None,
+    /// The amount shares the row. `left` is what the description may use.
+    SameRow { left: i32, points: i32, bold: bool },
+    /// The amount did not fit beside the description at any allowed size, so it
+    /// takes its own right-aligned row underneath.
+    OwnRow { points: i32, bold: bool },
+}
+
+/// Gap kept between the description and the amount so they never touch.
+fn amount_gap(column: i32) -> i32 {
+    (column / 40).max(4)
+}
+
+/// Measure a single run of text under the currently selected font.
+fn measure_text(hdc: HDC, text: &str) -> Result<(i32, i32), PrintError> {
+    let mut wide_text = wide(text);
+    let len = wide_text.len().saturating_sub(1);
+    let mut rect = RECT { left: 0, top: 0, right: 1, bottom: 1 };
+    let measured = unsafe {
+        DrawTextW(
+            hdc,
+            &mut wide_text[..len],
+            &mut rect,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        )
     };
-    (column - reserved).max(1)
+    if measured == 0 {
+        return Err(PrintError::RenderFailed { detail: "could not measure an amount".into() });
+    }
+    Ok((rect.right - rect.left, (rect.bottom - rect.top).max(1)))
+}
+
+/// Work out where this row's amount can go without losing a digit.
+///
+/// Deterministic for a given (line, column, dpi): the measuring pass and the
+/// painting pass both call it and must reach the same answer, which is why the
+/// decision is recomputed rather than carried between them.
+fn plan_amount(
+    hdc: HDC,
+    line: &PageLine,
+    column: i32,
+    dpi_y: i32,
+) -> Result<AmountPlan, PrintError> {
+    let Some(amount) = line.right.as_deref().filter(|r| !r.is_empty()) else {
+        return Ok(AmountPlan::None);
+    };
+
+    let bold = style_bold(line.style);
+    let base_points = style_points(line.style);
+    let mut measured: Result<(), PrintError> = Ok(());
+    let plan = plan_amount_from(base_points, bold, column, |points| {
+        match with_points(hdc, points, bold, dpi_y, |hdc| measure_text(hdc, amount)) {
+            Ok((w, _)) => w,
+            Err(e) => {
+                // Remember the first failure and starve the search, so the error
+                // is reported rather than silently becoming a layout decision.
+                if measured.is_ok() {
+                    measured = Err(e);
+                }
+                i32::MAX / 4
+            }
+        }
+    });
+    measured?;
+    Ok(plan)
+}
+
+/// The width-only decision, separated from GDI so it can be tested.
+///
+/// `measure(points)` returns the amount's width at that size.
+fn plan_amount_from(
+    base_points: i32,
+    bold: bool,
+    column: i32,
+    mut measure: impl FnMut(i32) -> i32,
+) -> AmountPlan {
+    let gap = amount_gap(column);
+    // The description keeps at least two fifths of the paper, otherwise an item
+    // name is squeezed to a column of single letters to make room for a figure.
+    let widest_shared = (column * 3) / 5;
+    // Preserve today's geometry whenever the figure fits the historic
+    // reservation: an ordinary receipt must look exactly as it did.
+    let reserved = (column * 2) / 5;
+
+    let mut points = base_points;
+    loop {
+        let needed = measure(points).saturating_add(gap);
+        if needed <= reserved {
+            return AmountPlan::SameRow { left: (column - reserved).max(1), points, bold };
+        }
+        if needed <= widest_shared {
+            return AmountPlan::SameRow { left: (column - needed).max(1), points, bold };
+        }
+        if points <= AMOUNT_MIN_POINTS {
+            // Even at the smallest allowed size it wants more than its share of
+            // the row, so it gets a row to itself and the full paper width.
+            return AmountPlan::OwnRow { points, bold };
+        }
+        points -= 1;
+    }
+}
+
+/// The width the description may use once the amount column is reserved.
+fn left_column_for(plan: AmountPlan, column: i32) -> i32 {
+    match plan {
+        // On its own row the description is free to use the whole width.
+        AmountPlan::None | AmountPlan::OwnRow { .. } => column.max(1),
+        AmountPlan::SameRow { left, .. } => left.max(1),
+    }
 }
 
 fn line_format(line: &PageLine) -> DRAW_TEXT_FORMAT {
@@ -512,19 +648,31 @@ fn measure_line(hdc: HDC, line: &PageLine, x: i32, y: i32, column: i32) -> Resul
         return Ok(mm_to_px(mm, dpi_y).max(4));
     }
 
+    let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
+    let plan = plan_amount(hdc, line, column, dpi_y)?;
+
     let mut text = wide(&line.text);
     // `wide` appends a NUL for the C APIs; DrawTextW takes a counted slice, so
     // the terminator must not be part of it.
     let len = text.len().saturating_sub(1);
     let mut rect =
-        RECT { left: x, top: y, right: x + left_column_width(line, column), bottom: y + 1 };
+        RECT { left: x, top: y, right: x + left_column_for(plan, column), bottom: y + 1 };
 
     let measured =
         unsafe { DrawTextW(hdc, &mut text[..len], &mut rect, line_format(line) | DT_CALCRECT) };
     if measured == 0 {
         return Err(PrintError::RenderFailed { detail: "could not measure a line".into() });
     }
-    Ok((rect.bottom - rect.top).max(1))
+    let described = (rect.bottom - rect.top).max(1);
+
+    // An amount that had to move below the description adds its own row, and
+    // that height has to be reserved here or the next line paints over it.
+    if let AmountPlan::OwnRow { points, bold } = plan {
+        let amount = line.right.as_deref().unwrap_or_default();
+        let extra = with_points(hdc, points, bold, dpi_y, |hdc| measure_text(hdc, amount))?.1;
+        return Ok(described + extra);
+    }
+    Ok(described)
 }
 
 /// Draw one line that has already been measured and found to fit.
@@ -549,32 +697,60 @@ fn paint_line(
         return Ok(());
     }
 
-    let left_column = left_column_width(line, column);
+    let dpi_y = unsafe { GetDeviceCaps(Some(hdc), LOGPIXELSY) };
+    let plan = plan_amount(hdc, line, column, dpi_y)?;
+    let left_column = left_column_for(plan, column);
+
+    // When the amount takes its own row the description keeps only the height it
+    // measured, so the figure below is drawn on clean paper rather than over it.
+    let amount_height = match plan {
+        AmountPlan::OwnRow { points, bold } => {
+            let amount = line.right.as_deref().unwrap_or_default();
+            with_points(hdc, points, bold, dpi_y, |hdc| measure_text(hdc, amount))?.1
+        }
+        _ => 0,
+    };
+    let text_height = (height - amount_height).max(1);
+
     let mut text = wide(&line.text);
     let len = text.len().saturating_sub(1);
-    let mut draw_rect = RECT { left: x, top: y, right: x + left_column, bottom: y + height };
+    let mut draw_rect = RECT { left: x, top: y, right: x + left_column, bottom: y + text_height };
 
     let painted = unsafe { DrawTextW(hdc, &mut text[..len], &mut draw_rect, line_format(line)) };
     if painted == 0 {
         return Err(PrintError::RenderFailed { detail: "could not draw a line".into() });
     }
 
-    // The amount, flush right on the SAME row. Always left-to-right: a price is
-    // a number, and reversing it would be wrong in any language.
-    if let Some(right) = line.right.as_deref().filter(|r| !r.is_empty()) {
-        let mut right_wide = wide(right);
+    // The amount. Always left-to-right: a price is a number, and reversing it
+    // would be wrong in any language. Its rectangle is the width MEASURED for
+    // it, so the last digit always lands on paper.
+    let (amount_top, amount_bottom, points, bold) = match plan {
+        AmountPlan::None => return Ok(()),
+        AmountPlan::SameRow { points, bold, .. } => (y, y + text_height, points, bold),
+        AmountPlan::OwnRow { points, bold } => {
+            (y + text_height, y + text_height + amount_height, points, bold)
+        }
+    };
+    let amount = line.right.as_deref().unwrap_or_default();
+    let left_edge = match plan {
+        // Its own row: right-aligned across the whole paper width.
+        AmountPlan::OwnRow { .. } => x,
+        _ => x + left_column,
+    };
+
+    with_points(hdc, points, bold, dpi_y, |hdc| {
+        let mut right_wide = wide(amount);
         let right_len = right_wide.len().saturating_sub(1);
         let mut right_rect =
-            RECT { left: x + left_column, top: y, right: x + column, bottom: y + height };
+            RECT { left: left_edge, top: amount_top, right: x + column, bottom: amount_bottom };
         let drawn = unsafe {
             DrawTextW(hdc, &mut right_wide[..right_len], &mut right_rect, DT_RIGHT | DT_NOPREFIX)
         };
         if drawn == 0 {
             return Err(PrintError::RenderFailed { detail: "could not draw an amount".into() });
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Draw a QR symbol as filled rectangles.
@@ -711,5 +887,104 @@ mod tests {
         // Nothing is bundled or copied into the repository; this must stay a
         // face that Windows already has, and one that contains Arabic.
         assert_eq!(FONT_FACE, "Tahoma");
+    }
+
+    // --- The clipped TOTAL (1.0.4) --------------------------------------------
+    //
+    // A production receipt showed a TOTAL whose digits ran off the paper. The
+    // cause was a FIXED two-fifths reservation for the amount: anything wider
+    // was cut off by the drawing rectangle, and TOTAL clipped first because it
+    // is set larger and bold. These tests pin the rule that replaced it - the
+    // amount is measured, and it either fits or it moves, but it is never cut.
+
+    /// A column roughly matching 80mm at 203dpi once margins are removed.
+    const COLUMN: i32 = 560;
+
+    /// Width the real face charges for a run of digits, near enough for layout:
+    /// Tahoma's digits are about 0.55em, and the em is the point size in px.
+    fn width_at(text: &str, points: i32) -> i32 {
+        let em = (points * 203) / 72;
+        (text.chars().count() as i32 * em * 55) / 100
+    }
+
+    fn plan_for(amount: &str, points: i32) -> AmountPlan {
+        plan_amount_from(points, true, COLUMN, |p| width_at(amount, p))
+    }
+
+    #[test]
+    fn an_ordinary_total_keeps_the_historic_two_fifths_geometry() {
+        // The look of a normal receipt must not change: a short figure still
+        // sits in the same reserved column it always did.
+        let plan = plan_for("8.00 USD", 13);
+        let reserved = (COLUMN * 2) / 5;
+        assert_eq!(plan, AmountPlan::SameRow { left: COLUMN - reserved, points: 13, bold: true });
+    }
+
+    #[test]
+    fn the_reported_amount_is_not_clipped() {
+        // 450,000 LBP is the figure from the incident report.
+        match plan_for("450,000 LBP", 13) {
+            AmountPlan::SameRow { left, points, .. } => {
+                let available = COLUMN - left;
+                assert!(
+                    width_at("450,000 LBP", points) <= available,
+                    "the amount still does not fit its column",
+                );
+            }
+            AmountPlan::OwnRow { .. } => {}
+            AmountPlan::None => panic!("an amount was supplied"),
+        }
+    }
+
+    #[test]
+    fn every_escalating_amount_still_fits_somewhere() {
+        // The four magnitudes the hotfix must cover, at the TOTAL size.
+        for amount in ["450,000 LBP", "1,250,000 LBP", "12,500,000 LBP", "125,000,000 LBP"] {
+            match plan_for(amount, 13) {
+                AmountPlan::SameRow { left, points, .. } => {
+                    assert!(
+                        width_at(amount, points) <= COLUMN - left,
+                        "{amount} overflows the shared row",
+                    );
+                    assert!(left >= 1, "{amount} left the description no width");
+                }
+                AmountPlan::OwnRow { points, .. } => {
+                    assert!(
+                        width_at(amount, points) <= COLUMN,
+                        "{amount} overflows even its own row",
+                    );
+                }
+                AmountPlan::None => panic!("{amount} produced no plan"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_description_never_loses_more_than_two_fifths_of_the_paper() {
+        // A long figure may take space from the item name, but not all of it.
+        for amount in ["450,000 LBP", "1,250,000 LBP", "12,500,000 LBP", "125,000,000 LBP"] {
+            if let AmountPlan::SameRow { left, .. } = plan_for(amount, 13) {
+                assert!(
+                    left >= (COLUMN * 2) / 5,
+                    "{amount} squeezed the description below two fifths",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shrinking_stops_at_a_readable_size() {
+        // An absurd figure must move to its own row rather than shrink away to
+        // something a customer cannot read.
+        match plan_amount_from(13, true, COLUMN, |_| COLUMN * 4) {
+            AmountPlan::OwnRow { points, .. } => assert_eq!(points, AMOUNT_MIN_POINTS),
+            other => panic!("expected its own row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_row_without_an_amount_uses_the_whole_width() {
+        assert_eq!(left_column_for(AmountPlan::None, COLUMN), COLUMN);
+        assert_eq!(left_column_for(AmountPlan::OwnRow { points: 8, bold: true }, COLUMN), COLUMN);
     }
 }
