@@ -6,6 +6,7 @@ import { pendingCount } from "@/lib/offline/db";
 import { roleLabel } from "@/lib/permissions";
 import { visibleNav } from "@/lib/nav";
 import { Badge } from "@/components/ui";
+import { Glyph } from "@/components/Glyph";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { useUpdates } from "@/state/updates";
 
@@ -65,7 +66,7 @@ export function Shell() {
                 }`
               }
             >
-              <span className="text-base">{n.icon}</span>
+              <Glyph name={n.glyph} size={18} className="shrink-0" />
               {n.label}
             </NavLink>
           ))}

@@ -13,6 +13,7 @@
 
 import { FEATURES, hasFeature, type FeatureMap } from "@/lib/features";
 import { canOperatePOS } from "@/lib/pos/access";
+import { canViewMenuBuilder } from "@/lib/menu/access";
 import type { TenantRole, UserStatus } from "@/lib/types";
 
 export type ModuleAvailability = "desktop" | "planned" | "web";
@@ -92,12 +93,27 @@ export const MODULES: ModuleEntry[] = [
     show: (c) => hasFeature(c.features, FEATURES.ACCOUNTING) && isManagerUp(c.role),
   },
   {
-    key: "menu",
-    label: "Menu",
+    key: "menu_builder",
+    label: "Menu Builder",
     icon: "📋",
-    desc: "Menu builder and e-menu setup.",
+    // The tile now says what the desktop actually does, and the split from
+    // E-Menu below is deliberate: the desktop builds the MENU (the shared
+    // catalogue the POS and the public menu both read) and does not manage
+    // E-Menu settings, analytics or leads, which remain web-only. One tile
+    // claiming both would have been the fourth time this list over-promised.
+    desc: "Categories, items, modifiers and extras, availability and the public QR menu.",
+    availability: "desktop",
+    to: "/menu-builder",
+    // Exactly the gate the web app's Menu Builder page applies server-side.
+    show: (c) => canViewMenuBuilder({ status: c.status, permissions: c.permissions, features: c.features }),
+  },
+  {
+    key: "e_menu",
+    label: "E-Menu",
+    icon: "📱",
+    desc: "E-Menu appearance, settings, analytics and leads.",
     availability: "web",
-    show: (c) => (hasFeature(c.features, FEATURES.MENU_BUILDER) || hasFeature(c.features, FEATURES.E_MENU)) && isManagerUp(c.role),
+    show: (c) => hasFeature(c.features, FEATURES.E_MENU) && isManagerUp(c.role),
   },
   {
     key: "users",

@@ -11,7 +11,7 @@
 
 import type { QrMatrix } from "@/lib/pos/qrCode";
 
-export function QrSymbol({ matrix, size = 96 }: { matrix: QrMatrix; size?: number }) {
+export function QrSymbol({ matrix, size = 96, label = "Payment QR code" }: { matrix: QrMatrix; size?: number; label?: string }) {
   // One module of quiet zone in the viewBox on each side, which is what stops a
   // scanner failing to find the symbol's edges against the paper.
   const quiet = 2;
@@ -29,7 +29,7 @@ export function QrSymbol({ matrix, size = 96 }: { matrix: QrMatrix; size?: numbe
       width={size}
       height={size}
       role="img"
-      aria-label="Payment QR code"
+      aria-label={label}
       shapeRendering="crispEdges"
     >
       <rect width={span} height={span} fill="#ffffff" />

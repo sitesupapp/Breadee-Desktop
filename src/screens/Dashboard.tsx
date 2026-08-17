@@ -60,6 +60,7 @@ export function Dashboard() {
   ];
 
   const canPos = onDesktop.some((m) => m.key === "pos");
+  const canMenuBuilder = onDesktop.some((m) => m.key === "menu_builder");
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -123,6 +124,7 @@ export function Dashboard() {
         <p className="mb-2 font-bold">Desktop tools</p>
         <div className="flex flex-wrap gap-2">
           {canPos && <Link to="/pos" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🧾 POS</Link>}
+          {canMenuBuilder && <Link to="/menu-builder" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">📋 Menu Builder</Link>}
           <Link to="/profile" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">👤 Profile</Link>
           <Link to="/settings/sync" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">↻ Sync Center</Link>
           <Link to="/settings/printing/setup" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🖨 Printers</Link>

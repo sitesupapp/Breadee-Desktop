@@ -4,6 +4,7 @@ import { useSession, resolvePostLoginPath } from "@/state/session";
 import { Login } from "@/screens/Login";
 import { Shell } from "@/screens/Shell";
 import { Dashboard } from "@/screens/Dashboard";
+import { MenuBuilder } from "@/screens/menu/MenuBuilder";
 import { PosWorkspace } from "@/screens/pos/PosWorkspace";
 import { Profile } from "@/screens/Profile";
 import { Settings } from "@/screens/settings/Settings";
@@ -72,6 +73,11 @@ export default function App() {
         >
           <Route index element={<PostLogin />} />
           <Route path="/dashboard" element={<Dashboard />} />
+          {/* Menu Builder belongs to the APPLICATION shell, not to the POS
+              workspace. Keeping it here is also what makes POS pick up menu
+              changes: POS is its own route, so returning to it remounts
+              PosWorkspace and refetches the menu through `loadMenu`. */}
+          <Route path="/menu-builder" element={<MenuBuilder />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/settings/*" element={<Settings />} />
           <Route path="/blocked" element={<Info title="Access blocked" body="This account/tenant is blocked. Contact your administrator." />} />
