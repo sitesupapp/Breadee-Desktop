@@ -14,7 +14,7 @@
 // for the same reason it shows none in the Current Order panel. Nothing is
 // enabled to match a layout.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Badge, Button, Input, cn } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
@@ -61,6 +61,18 @@ export function OrdersModal(props: {
   onPrintOrder: (order: ShiftOpenOrder) => void;
   onEditOrder?: (order: ShiftOpenOrder) => void;
   onReverseOrder: (order: ShiftOpenOrder) => void;
+  /**
+   * The selected order, in full, beside the table.
+   *
+   * Passed in rather than built here so the ONE panel that knows how to render
+   * an order - lines, totals, lifecycle, its manual receipt and its reversal -
+   * is the one that renders it, wherever the operator opened it from. Before
+   * this, "View" selected the row and CLOSED the modal so the workspace's side
+   * panel could show it; the approved design gives that side panel to the live
+   * cart and its order strip, so the detail belongs here, where the operator
+   * already is.
+   */
+  detail?: ReactNode;
 }) {
   const [day, setDay] = useState(() => toDayKey(new Date()));
   const [scope, setScope] = useState<"shift" | "day">("shift");
@@ -179,7 +191,8 @@ export function OrdersModal(props: {
 
         {error && <p className="rounded-lg bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700">{error}</p>}
 
-        <div className="max-h-[52vh] overflow-auto rounded-xl border border-line">
+        <div className={cn("gap-3", props.detail ? "grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px]" : "block")}>
+        <div className="max-h-[52vh] min-w-0 overflow-auto rounded-xl border border-line">
           <table className="w-full text-left text-[12px]">
             <thead className="sticky top-0 bg-slate-50 text-[10px] uppercase tracking-wide text-sub">
               <tr>
@@ -236,13 +249,14 @@ export function OrdersModal(props: {
                       </td>
                       <td className="px-2 py-2">
                         <div className="flex justify-end gap-1">
+                          {/* Selects, and STAYS. The detail pane beside this
+                              table is what View now reveals, so an operator
+                              comparing two orders no longer has to reopen the
+                              workspace between them. */}
                           <Button
                             variant="ghost"
                             className="px-2 py-1 text-[11px]"
-                            onClick={() => {
-                              props.onSelectOrder(o.id);
-                              props.onClose();
-                            }}
+                            onClick={() => props.onSelectOrder(o.id)}
                           >
                             View
                           </Button>
@@ -270,6 +284,13 @@ export function OrdersModal(props: {
                 })}
             </tbody>
           </table>
+        </div>
+
+        {props.detail && (
+          <div className="max-h-[52vh] min-h-[260px] overflow-hidden rounded-xl border border-line bg-white">
+            {props.detail}
+          </div>
+        )}
         </div>
 
         <p className="text-[11px] text-sub">

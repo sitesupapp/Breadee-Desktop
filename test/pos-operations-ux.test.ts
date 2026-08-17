@@ -199,8 +199,22 @@ test("row actions follow the lifecycle, not the layout", () => {
   assert.match(ordersModal, /const editable = canEditOrder\(o\)/);
   assert.match(ordersModal, /\{editable && props\.onEditOrder && \(/);
   assert.match(ordersModal, /\{reversal && \(/);
-  // View selects and closes - it does not duplicate an order-detail screen.
-  assert.match(ordersModal, /props\.onSelectOrder\(o\.id\);\s*props\.onClose\(\);/);
+  // View selects and STAYS, because the detail now sits beside the table. The
+  // original rule behind this assertion - that the modal must not grow its own
+  // second order-detail screen - is unchanged and is what the rest of this test
+  // pins: the detail arrives as a NODE from the workspace, and the modal builds
+  // no order rendering of its own.
+  assert.match(ordersModal, /onClick=\{\(\) => props\.onSelectOrder\(o\.id\)\}/);
+  assert.equal(
+    /props\.onSelectOrder\(o\.id\);\s*props\.onClose\(\);/.test(ordersModal),
+    false,
+    "View must no longer close the surface the detail is on",
+  );
+  assert.match(ordersModal, /detail\?: ReactNode/, "the detail is supplied, not built here");
+  assert.match(ordersModal, /\{props\.detail\}/);
+  for (const token of ["buildReceipt", "readOrderReceiptLines", "reversalLabel"]) {
+    assert.equal(ordersModal.includes(token), false, `${token} belongs to the shared panel, not to this table`);
+  }
 });
 
 test("the Orders table carries the operational columns", () => {
@@ -365,9 +379,18 @@ test("the top bar carries Delivery and Orders without exposing the drawer", () =
 });
 
 test("the Takeaway right panel keeps the live cart and its identity", () => {
-  // Browsing shift orders must not replace the cart a cashier is building.
-  assert.match(workspace, /cart\.lines\.length > 0 \? \(\s*<CartPanel/);
+  // Browsing shift orders must not replace the cart a cashier is building - and
+  // under the approved design it cannot, because the browser is no longer in
+  // this column at all. The takeaway panel is the cart, unconditionally.
+  assert.match(workspace, /<CartPanel/);
+  assert.equal(
+    /cart\.lines\.length > 0 \? \(\s*<CartPanel/.test(workspace),
+    false,
+    "the cart panel must not be swapped out when the cart is empty",
+  );
+  // The browser is still rendered by the workspace, as the Orders detail pane.
   assert.match(workspace, /<CurrentOrderPanel/);
+  assert.match(workspace, /detail=\{\s*<CurrentOrderPanel/);
   // Viewing never mutates the cart or the order.
   for (const token of ["cart.reset()", "useCart.getState().reset()"]) {
     assert.equal(currentOrder.includes(token), false, `${token} must not be reachable from viewing`);

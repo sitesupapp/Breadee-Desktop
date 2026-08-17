@@ -196,14 +196,47 @@ test("the refresh is event-driven, not polled", () => {
 });
 
 test("the order shows in the right-hand panel, not behind a dropdown", () => {
-  // REVISED UX: the "Open orders N" pill over the work area is gone; the order
-  // renders directly in the panel the cashier already looks at. The live cart
-  // still wins whenever there are lines, so taking an order is unchanged.
+  // REVISED UX, TWICE. The "Open orders N" pill over the work area went first.
+  // The approved POS design then gave the takeaway side column to the live cart
+  // PERMANENTLY - it no longer swaps to a shift-order browser when the cart
+  // happens to be empty, which is exactly the moment a cashier returns to a
+  // parked order and needs the order strip and the four actions to still be
+  // there. The browser itself is unchanged and still rendered by the workspace;
+  // it is now the detail pane of the Orders surface.
   assert.equal(workspace.includes("OrderSummaryPanel"), false, "the old pill must be gone");
-  assert.match(workspace, /cart\.lines\.length > 0 \? \(\s*<CartPanel/);
-  assert.match(workspace, /<CurrentOrderPanel/);
+  assert.equal(
+    /cart\.lines\.length > 0 \? \(\s*<CartPanel/.test(workspace),
+    false,
+    "the takeaway panel must no longer be conditional on the cart having lines",
+  );
+  assert.match(workspace, /<CartPanel/, "takeaway still renders the cart panel");
+  assert.match(workspace, /<CurrentOrderPanel/, "the shift-order browser is still rendered by the workspace");
+  // And it is the ORDERS surface that renders it, not the takeaway column.
+  assert.match(workspace, /detail=\{\s*<CurrentOrderPanel/);
   assert.match(panel, /onStep\(-1\)/);
   assert.match(panel, /onStep\(1\)/);
+});
+
+test("the takeaway order strip is driven by the slot store and nothing else", () => {
+  // The selected slot IS the cart, so there is no second order reference for
+  // Pay, Send, Print or Clear to fall out of step with. These assertions are
+  // what stops one being introduced.
+  const slots = stripComments(readSrc("state", "takeawayOrders.ts"));
+  assert.match(workspace, /<OrderTabs/);
+  assert.match(workspace, /onSelect=\{takeawaySlots\.select\}/);
+  assert.match(workspace, /onStep=\{takeawaySlots\.step\}/);
+  // Exactly one cart store, and the slot store parks THROUGH it.
+  assert.match(slots, /useCart\.getState\(\)/);
+  assert.equal(slots.includes("create<"), true, "the slot store is a store, not component state");
+  for (const token of ["callPosRpc", ".rpc(", "pos_submit_order", "pos_pay_order", "autoPrint", "printReceipt"]) {
+    assert.equal(slots.includes(token), false, `${token} must not be reachable from parking an order`);
+  }
+  // Parking must carry the duplicate-order protection with it: an order that
+  // came back without its op id would be submitted again as a new order.
+  const cart = stripComments(readSrc("state", "cart.ts"));
+  assert.match(cart, /snapshot: \(\) => \{[\s\S]*?clientOpId: s\.clientOpId/);
+  assert.match(cart, /restore: \(snapshot\) =>[\s\S]*?clientOpId: snapshot\.clientOpId/);
+  assert.match(cart, /restore: \(snapshot\) =>[\s\S]*?savedOrder: snapshot\.savedOrder/);
 });
 
 test("Print presents the manual preview and can never auto-print", () => {

@@ -9,6 +9,7 @@
 // opens the payment dialog; it never settles anything by itself.
 
 import { Badge, Button, EmptyState, GatedButton, PanelTitle, Skeleton, type Gate } from "@/components/ui";
+import { Glyph } from "@/components/Glyph";
 import { formatMoney } from "@/lib/currency";
 import { linesByBatch, billItemCount } from "@/lib/pos/tableBill";
 import { lineTotals } from "@/lib/pos/modifiers";
@@ -205,6 +206,7 @@ export function TableBillPanel(props: TableBillPanelProps) {
             it, and those two must never be adjacent on a touch screen. */}
         {table && bill && bill.orders.length > 0 && (
           <GatedButton gate={props.payGate} size="lg" className="mb-3 w-full" onClick={props.onPay}>
+            <Glyph name="pay" size={18} />
             Pay (F4)
           </GatedButton>
         )}
@@ -220,19 +222,23 @@ export function TableBillPanel(props: TableBillPanelProps) {
             disabled={!props.addItemsGate.allowed}
             onClick={props.onAddItems}
           >
+            <Glyph name="kitchen" size={18} />
             Add items (A)
           </GatedButton>
         )}
 
-        {/* Level 2C operations. Move and Close sit together; Clear is separated
-            below because it VOIDS the bill, and a destructive action one pixel
-            from a routine one is a mis-tap waiting to happen. */}
-        <div className="grid grid-cols-2 gap-2">
-          <GatedButton gate={props.moveGate} variant="ghost" size="lg" onClick={props.onMove}>
-            Move
+        {/* Level 2C operations, now stacked full-width to match the rest of the
+            POS: a half-width control beside another half-width control is the
+            arrangement a thumb gets wrong, and one of these two ends a table's
+            service. Clear stays separated below because it VOIDS the bill. */}
+        <div className="space-y-2">
+          <GatedButton gate={props.moveGate} variant="ghost" size="lg" className="w-full" onClick={props.onMove}>
+            <Glyph name="move" size={17} />
+            Move table
           </GatedButton>
-          <GatedButton gate={props.closeGate} variant="ghost" size="lg" onClick={props.onClose}>
-            Close
+          <GatedButton gate={props.closeGate} variant="ghost" size="lg" className="w-full" onClick={props.onClose}>
+            <Glyph name="check" size={17} />
+            Close table
           </GatedButton>
         </div>
 
@@ -244,7 +250,8 @@ export function TableBillPanel(props: TableBillPanelProps) {
             className="w-full"
             onClick={props.onClear}
           >
-            Clear (voids the bill)
+            <Glyph name="trash" size={17} />
+            Clear bill (voids the bill)
           </GatedButton>
         </div>
       </div>

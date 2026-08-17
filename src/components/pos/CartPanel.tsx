@@ -1,12 +1,27 @@
 // The persistent cart.
 //
-// Contract: the total and the primary action are pinned to the bottom and are
+// Contract: the totals and the primary action are pinned to the bottom and are
 // visible at every supported size. The list above them scrolls; the panel itself
 // never does. When a shift is not open the actions are disabled WITH the reason
 // and the fix, because "why can't I press Pay" is the most expensive question a
 // cashier can have to ask mid-queue.
+//
+// ACTION ORDER IS THE DESIGN, NOT A PREFERENCE. Pay, then Send to kitchen, then
+// Print, then the destructive one - and each is full width and stacked rather
+// than paired, so the button under a thumb is never the one beside the one that
+// was meant. The destructive action is last and styled as destructive; it used
+// to be a quiet "Clear" in the panel header, which put the only irreversible
+// control on the panel in the position a header usually reserves for the least
+// consequential one.
+//
+// EVERY ACTION HERE ACTS ON THE SELECTED ORDER, and does so by construction
+// rather than by passing an id around: the selected takeaway slot IS this cart
+// (see `state/takeawayOrders.ts`), so there is no order reference that could go
+// stale between the tab strip above and the buttons below.
 
+import type { ReactNode } from "react";
 import { Button, EmptyState, GatedButton, PanelTitle, type Gate } from "@/components/ui";
+import { Glyph } from "@/components/Glyph";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { CartLineRow } from "@/components/pos/CartLineRow";
 import type { CartLine } from "@/types/pos";
@@ -24,11 +39,10 @@ export type CartPanelProps = {
    * OPTIONAL on purpose (Level 3B).
    *
    * Delivery reuses this panel - there is deliberately no second cart - but it
-   * has no payment path at all until Level 3C. Passing a permanently-denied gate
-   * would still render a Pay button, and a disabled Pay is still a Pay: it tells
-   * a cashier that settling here is a thing that exists. Omitting the gate
-   * removes the control from the DOM instead. Takeaway passes it and is
-   * byte-for-byte unchanged.
+   * settles through its own surface. Passing a permanently-denied gate would
+   * still render a Pay button, and a disabled Pay is still a Pay: it tells a
+   * cashier that settling here is a thing that exists. Omitting the gate removes
+   * the control from the DOM instead.
    */
   payGate?: Gate;
   onSelect: (key: string) => void;
@@ -41,28 +55,51 @@ export type CartPanelProps = {
   onNewOrder: () => void;
   /** Label for the primary action. Delivery sends; it never pays. */
   sendLabel?: string;
+
+  // --- added by the POS UI update -------------------------------------------
+
+  /**
+   * The order strip, rendered above the list.
+   *
+   * A node rather than the slot data, because only takeaway has parallel orders
+   * - dine-in rounds and delivery baskets belong to a table and a caller
+   * respectively, and a tab strip over either would be offering to park work
+   * that is already parked somewhere with a name on it.
+   */
+  orderTabs?: ReactNode;
+  /**
+   * Manual print of the SELECTED order. Omitted where there is no such thing.
+   *
+   * Goes to the existing receipt service through the workspace; this panel never
+   * builds or renders a document.
+   */
+  onPrint?: () => void;
+  /** Why Print is unavailable - usually "this order has not been sent yet". */
+  printReason?: string | null;
+  printBusy?: boolean;
+  /** Discount already applied to this order, if any. Renders only the row. */
+  discount?: number;
+  /** Label for the destructive action, which differs by route. */
+  clearLabel?: string;
 };
 
 export function CartPanel(props: CartPanelProps) {
   const empty = props.lines.length === 0;
   const blocked = !props.shiftOpen;
+  const discount = props.discount ?? 0;
+  const total = Math.max(0, props.subtotal - discount);
+  // Nothing to print until the server has accepted the order: a receipt for an
+  // order that does not exist would carry no number, and the number is the only
+  // thing anybody can look the order up by afterwards.
+  const printReason = props.printReason ?? (props.savedOrderNumber ? null : "Send or pay this order first - there is nothing to print yet.");
 
   return (
     <section className="flex h-full min-h-0 flex-col border-l border-line bg-white" aria-label="Current order">
-      <div className="shrink-0 border-b border-line px-4 py-3">
-        <PanelTitle
-          right={
-            !empty ? (
-              <Button variant="ghost" onClick={props.onNewOrder}>
-                Clear
-              </Button>
-            ) : undefined
-          }
-        >
-          Current order
-        </PanelTitle>
+      <div className="shrink-0 space-y-3 border-b border-line px-4 py-3">
+        <PanelTitle>Current order</PanelTitle>
+        {props.orderTabs}
         {props.savedOrderNumber && (
-          <p className="mt-1 text-xs font-semibold text-brand-dark">
+          <p className="text-xs font-semibold text-brand-dark">
             Order {props.savedOrderNumber} is saved - paying will settle this order.
           </p>
         )}
@@ -70,10 +107,13 @@ export function CartPanel(props: CartPanelProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
         {empty ? (
-          <EmptyState
-            title="No items yet"
-            hint="Pick items from the menu, or press Ctrl+K to search. Items with required options open a chooser."
-          />
+          <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+            <span className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-50 text-sub">
+              <Glyph name="bag" size={26} />
+            </span>
+            <p className="text-sm font-bold text-ink">Your cart is empty</p>
+            <p className="max-w-[220px] text-xs text-sub">Add items from the menu to get started.</p>
+          </div>
         ) : (
           <ul className="space-y-2">
             {props.lines.map((line) => (
@@ -106,28 +146,90 @@ export function CartPanel(props: CartPanelProps) {
           </div>
         )}
 
-        <div className="mb-3 flex items-baseline justify-between">
-          <span className="text-sm font-semibold text-sub">Subtotal</span>
-          <span className="text-2xl font-extrabold tabular-nums text-ink">{formatMoney(props.subtotal, props.currency)}</span>
+        <div className="mb-3 space-y-1">
+          <div className="flex items-baseline justify-between text-sm">
+            <span className="font-semibold text-sub">Subtotal</span>
+            <span className="font-semibold tabular-nums text-ink">{formatMoney(props.subtotal, props.currency)}</span>
+          </div>
+          <div className="flex items-baseline justify-between text-sm">
+            <span className="font-semibold text-sub">Discount</span>
+            <span className="font-semibold tabular-nums text-ink">
+              {discount > 0 ? `-${formatMoney(discount, props.currency)}` : formatMoney(0, props.currency)}
+            </span>
+          </div>
+          <div className="flex items-baseline justify-between border-t border-line pt-1.5">
+            <span className="text-sm font-extrabold text-ink">Total</span>
+            <span className="text-2xl font-extrabold tabular-nums text-ink">{formatMoney(total, props.currency)}</span>
+          </div>
         </div>
 
-        {/* One column when there is no payment action, so Delivery's Send is not
-            a half-width button sitting beside a gap where Pay used to be. */}
-        <div className={props.payGate ? "grid grid-cols-2 gap-2" : "grid grid-cols-1"}>
+        {/* Which order these buttons will act on, said out loud. The tab strip
+            is at the top of a panel that can be a screen tall, and the moment
+            worth protecting is the one where a cashier reaches the bottom of it
+            having forgotten which customer they came back for. */}
+        {props.orderTabs && (
+          <p className="mb-2 flex items-center justify-center gap-1 text-center text-[11px] text-sub">
+            <Glyph name="info" size={12} />
+            Actions apply to the order shown above
+          </p>
+        )}
+
+        <div className="space-y-2">
+          {/* 1 - Pay. The primary action, in the theme's strong primary. */}
+          {props.payGate && (
+            <GatedButton
+              gate={props.payGate}
+              size="lg"
+              className="w-full"
+              disabled={empty || props.busy || blocked}
+              onClick={props.onPay}
+            >
+              <Glyph name="pay" size={18} />
+              {props.busy ? "Working..." : "Pay"}
+            </GatedButton>
+          )}
+
+          {/* 2 - Send to kitchen. Routed and printed by the EXISTING flow; this
+              button calls the workspace's one submit path and nothing else. */}
           <GatedButton
             gate={props.createGate}
-            variant={props.payGate ? "ghost" : "primary"}
+            variant={props.payGate ? "outline" : "primary"}
             size="lg"
+            className="w-full"
             disabled={empty || props.busy || blocked}
             onClick={props.onSendToKitchen}
           >
+            <Glyph name="kitchen" size={18} />
             {props.busy && !props.payGate ? "Sending..." : (props.sendLabel ?? "Send to kitchen")}
           </GatedButton>
-          {props.payGate && (
-            <GatedButton gate={props.payGate} size="lg" disabled={empty || props.busy || blocked} onClick={props.onPay}>
-              {props.busy ? "Working..." : "Pay (F4)"}
-            </GatedButton>
+
+          {/* 3 - Print. The existing manual receipt path for THIS order. It does
+              not pay, and it does not route anything to a kitchen. */}
+          {props.onPrint && (
+            <Button
+              variant="ghost"
+              size="lg"
+              className="w-full"
+              disabled={Boolean(printReason) || props.printBusy || props.busy}
+              title={printReason ?? undefined}
+              onClick={props.onPrint}
+            >
+              <Glyph name="print" size={18} />
+              {props.printBusy ? "Preparing..." : "Print"}
+            </Button>
           )}
+
+          {/* 4 - The destructive one, last and unmistakable. */}
+          <Button
+            variant="danger"
+            size="lg"
+            className="w-full"
+            disabled={empty && !props.savedOrderNumber}
+            onClick={props.onNewOrder}
+          >
+            <Glyph name="trash" size={18} />
+            {props.clearLabel ?? "Clear cart"}
+          </Button>
         </div>
       </div>
     </section>

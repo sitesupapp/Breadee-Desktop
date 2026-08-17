@@ -157,7 +157,10 @@ test("every Pay surface renders from the SAME gate value, not its own computatio
 test("Pay and Clear are not adjacent - the collect and the void must not be mis-tapped", () => {
   const panel = read("components", "pos", "TableBillPanel.tsx");
   const pay = panel.indexOf("Pay (F4)");
-  const clear = panel.indexOf("Clear (voids the bill)");
+  // The label gained the word "bill" in the approved design; the property this
+  // test protects - Pay above Clear, with the whole operations block between
+  // them - is unchanged and is what the assertions below still check.
+  const clear = panel.indexOf("Clear bill (voids the bill)");
   assert.ok(pay > 0 && clear > 0, "the Pay/Clear controls could not be located");
   assert.ok(pay < clear, "Pay moved below Clear");
   // Separated by the whole operations block, not merely by a margin.

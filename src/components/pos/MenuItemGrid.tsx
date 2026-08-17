@@ -7,15 +7,15 @@
 // before they tap.
 
 import { useMemo, useRef, useState } from "react";
-import { cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { type CurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { useElementSize } from "@/lib/useElementSize";
 import type { SearchableItem } from "@/lib/pos/menu";
-import { PosIconGlyph } from "@/components/PosIconGlyph";
+import { MenuCard, MENU_CARD_HEIGHT } from "@/components/pos/MenuCard";
 import { iconForItem, readIconAssignments } from "@/lib/icons/assignments";
+import { readIconDisplay } from "@/lib/icons/display";
 
-const CARD_HEIGHT = 104;
+const CARD_HEIGHT = MENU_CARD_HEIGHT;
 const GRID_GAP = 12;
 const ROW_HEIGHT = CARD_HEIGHT + GRID_GAP;
 const OVERSCAN_ROWS = 3;
@@ -44,6 +44,8 @@ export function MenuItemGrid({ items, columns, currency, rate, itemsNeedingChoic
    * service.
    */
   const icons = useMemo(() => readIconAssignments(), []);
+  /** The style and size those icons are drawn at. Read once, for the same reason. */
+  const iconDisplay = useMemo(() => readIconDisplay(), []);
 
   const rows = Math.ceil(items.length / columns);
   const totalHeight = Math.max(0, rows * ROW_HEIGHT - GRID_GAP);
@@ -82,36 +84,21 @@ export function MenuItemGrid({ items, columns, currency, rate, itemsNeedingChoic
             const needsChoice = itemsNeedingChoice.has(item.id);
             const iconKey = iconForItem(icons, item.id);
             return (
-              <button
+              // THE SHARED CARD. The same component the Icons Gallery previews,
+              // so an operator approving an icon in Settings is looking at this
+              // button and not a drawing of it.
+              <MenuCard
                 key={item.id}
-                type="button"
+                name={item.name}
+                price={unpriced ? null : price}
+                currency={currency}
+                iconKey={iconKey}
+                display={iconDisplay}
+                needsChoice={needsChoice}
                 disabled={unpriced}
-                onClick={() => onPick(item, price ?? 0)}
                 title={unpriced ? "This item has no price in the current currency." : undefined}
-                style={{ height: CARD_HEIGHT }}
-                className={cn(
-                  "flex flex-col justify-between rounded-xl border border-line bg-white p-3 text-left transition",
-                  "hover:border-brand hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40",
-                  "disabled:cursor-not-allowed disabled:opacity-50",
-                )}
-              >
-                {/* Icon and name on one row, with the name still the widest
-                    thing on the card. The glyph inherits the card's ink through
-                    `currentColor`, so it is legible in every theme with no
-                    per-theme asset. */}
-                <span className="flex min-w-0 items-start gap-1.5">
-                  {iconKey && <PosIconGlyph iconKey={iconKey} size={18} className="mt-0.5 shrink-0 text-sub" />}
-                  <span className="line-clamp-2 text-sm font-semibold leading-snug text-ink">{item.name}</span>
-                </span>
-                <span className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-extrabold text-brand-dark">
-                    {unpriced ? "No price" : formatMoney(price, currency)}
-                  </span>
-                  {needsChoice && (
-                    <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-bold text-sky-800">Options</span>
-                  )}
-                </span>
-              </button>
+                onClick={() => onPick(item, price ?? 0)}
+              />
             );
           })}
         </div>
