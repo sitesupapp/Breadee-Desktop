@@ -22,6 +22,12 @@ export type GlyphName =
   | "dine-in"
   | "delivery"
   | "orders"
+  // app navigation
+  | "dashboard"
+  | "menu-builder"
+  | "pos"
+  | "profile"
+  | "settings"
   // shell controls
   | "fullscreen"
   | "fullscreen-exit"
@@ -68,6 +74,16 @@ const GLYPHS: Record<GlyphName, string> = {
   delivery:
     "M7 18.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm11 0a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM9.5 16h6M6 13.5 8 7h3l3.5 9M13 7h3.5l2 6.5",
   orders: "M5 4.5h14v15H5v-15Zm3.5 4h7m-7 3.5h7m-7 3.5h4",
+  // App sidebar. Drawn in the same idiom as everything else here, because the
+  // sidebar previously used bare ASCII characters ("#", "P", "@", "*") and one
+  // real glyph beside four letters reads as a rendering fault rather than as a
+  // set. Nothing about the navigation model changes - only what is painted.
+  dashboard: "M4.5 11.5 12 4.5l7.5 7M6.5 10v9.5h11V10M10 19.5v-6h4v6",
+  "menu-builder":
+    "M12 6.5v13M12 6.5C10.5 5 8 4.5 4.5 4.5v13c3.5 0 6 .5 7.5 2M12 6.5c1.5-1.5 4-2 7.5-2v13c-3.5 0-6 .5-7.5 2",
+  pos: "M3.5 7.5h17v10h-17v-10Zm0 3.5h17M6.5 15h4M16 15h1.5",
+  profile: "M12 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM5 20a7 7 0 0 1 14 0",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6",
   fullscreen: "M4 9V4.5h5M20 9V4.5h-5M4 15v4.5h5M20 15v4.5h-5",
   "fullscreen-exit": "M9 4.5V9H4.5M15 4.5V9h4.5M9 19.5V15H4.5M15 19.5V15h4.5",
   close: "M9.5 5.5 4 11l5.5 5.5M4.5 11H16a4 4 0 0 1 0 8h-1.5",

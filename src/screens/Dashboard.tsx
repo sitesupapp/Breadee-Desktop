@@ -4,6 +4,8 @@ import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
 import { roleLabel } from "@/lib/permissions";
 import { hasValidRate } from "@/lib/currency";
+import { connectedLabel } from "@/lib/environment";
+import { env } from "@/env";
 import { visibleModules, type ModuleEntry } from "@/lib/modules";
 import { pendingCount } from "@/lib/offline/db";
 import { Card, Badge } from "@/components/ui";
@@ -60,13 +62,16 @@ export function Dashboard() {
   ];
 
   const canPos = onDesktop.some((m) => m.key === "pos");
+  const canMenuBuilder = onDesktop.some((m) => m.key === "menu_builder");
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-extrabold">Welcome{s.email ? `, ${s.email}` : ""}</h1>
-          <p className="text-sm text-sub">{s.offlineMode ? "Running in offline mode from cached data." : "Connected to Breadee staging."}</p>
+          <p className="text-sm text-sub">
+            {s.offlineMode ? "Running in offline mode from cached data." : connectedLabel(env.APP_ENV)}
+          </p>
         </div>
         <Badge tone={connectionTone}>{connection}</Badge>
       </div>
@@ -123,6 +128,7 @@ export function Dashboard() {
         <p className="mb-2 font-bold">Desktop tools</p>
         <div className="flex flex-wrap gap-2">
           {canPos && <Link to="/pos" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🧾 POS</Link>}
+          {canMenuBuilder && <Link to="/menu-builder" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">📋 Menu Builder</Link>}
           <Link to="/profile" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">👤 Profile</Link>
           <Link to="/settings/sync" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">↻ Sync Center</Link>
           <Link to="/settings/printing/setup" className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-semibold text-ink hover:border-brand">🖨 Printers</Link>
