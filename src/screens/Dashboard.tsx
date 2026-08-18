@@ -4,6 +4,8 @@ import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
 import { roleLabel } from "@/lib/permissions";
 import { hasValidRate } from "@/lib/currency";
+import { connectedLabel } from "@/lib/environment";
+import { env } from "@/env";
 import { visibleModules, type ModuleEntry } from "@/lib/modules";
 import { pendingCount } from "@/lib/offline/db";
 import { Card, Badge } from "@/components/ui";
@@ -67,7 +69,9 @@ export function Dashboard() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-extrabold">Welcome{s.email ? `, ${s.email}` : ""}</h1>
-          <p className="text-sm text-sub">{s.offlineMode ? "Running in offline mode from cached data." : "Connected to Breadee staging."}</p>
+          <p className="text-sm text-sub">
+            {s.offlineMode ? "Running in offline mode from cached data." : connectedLabel(env.APP_ENV)}
+          </p>
         </div>
         <Badge tone={connectionTone}>{connection}</Badge>
       </div>

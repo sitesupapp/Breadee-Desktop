@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useSession, resolvePostLoginPath } from "@/state/session";
 import { Button, Card, Input } from "@/components/ui";
 import { env } from "@/env";
+import { backendLabel } from "@/lib/environment";
 
 export function Login() {
   const navigate = useNavigate();
@@ -56,7 +57,7 @@ export function Login() {
           </form>
         </Card>
         <p className="mt-4 text-center text-[11px] text-slate-400">
-          {env.APP_NAME} Desktop · {env.APP_ENV} · connected to staging Supabase
+          {env.APP_NAME} Desktop · {env.APP_ENV} · {backendLabel(env.APP_ENV)}
         </p>
       </div>
     </div>
