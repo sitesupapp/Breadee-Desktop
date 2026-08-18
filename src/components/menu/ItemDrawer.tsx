@@ -92,22 +92,34 @@ export function ItemDrawer({
     });
   }
 
+  // A save in flight makes the drawer non-dismissable. Dismissing it mid-request
+  // would discard an edit whose outcome is still unknown, which is the one way an
+  // operator could believe they had cancelled a change that then landed.
+  const dismiss = () => {
+    if (!saving) onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={draft.id ? "Edit item" : "Add item"}>
-      <div className="absolute inset-0 bg-ink/40" onClick={onClose} aria-hidden />
+      <div className="absolute inset-0 bg-ink/40" onClick={dismiss} aria-hidden />
       <div className="relative flex h-full w-full max-w-lg flex-col border-l border-line bg-white shadow-2xl">
         <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
           <div className="min-w-0">
             <p className="text-base font-extrabold text-ink">{draft.id ? "Edit item" : "Add item"}</p>
             <p className="mt-0.5 text-xs text-sub">
-              {readOnly ? (saveGate.reason ?? "Read only") : "Saved to the menu your POS and web menu both use."}
+              {saving
+                ? "Saving — waiting for the server to confirm…"
+                : readOnly
+                  ? (saveGate.reason ?? "Read only")
+                  : "Saved to the menu your POS and web menu both use."}
             </p>
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={dismiss}
+            disabled={saving}
             aria-label="Close"
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-line text-sub hover:bg-slate-50"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-line text-sub hover:bg-slate-50 disabled:opacity-40"
           >
             <Glyph name="close" size={18} />
           </button>
@@ -327,7 +339,7 @@ export function ItemDrawer({
           <GatedButton gate={saveGate} className="flex-1" disabled={!isSaveable(errors) || saving} onClick={submit}>
             {saving ? "Saving…" : "Save item"}
           </GatedButton>
-          <Button variant="ghost" disabled={saving} onClick={onClose}>
+          <Button variant="ghost" disabled={saving} onClick={dismiss}>
             Cancel
           </Button>
           {onArchive && (

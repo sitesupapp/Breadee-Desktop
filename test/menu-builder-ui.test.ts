@@ -71,6 +71,43 @@ test("success is only reported when the mutation actually succeeded", () => {
   assert.match(screen, /tone: "error", message: outcome\.failure\.message/);
 });
 
+test("THE DRAWER CLOSES ONLY AFTER THE SERVER CONFIRMS", () => {
+  // Closing first would show the final state before the backend agreed to it,
+  // and would destroy the operator's whole edit - including a chosen photo - on
+  // a refusal, leaving them a toast and nothing to retry.
+  assert.match(screen, /const ok = await run\([\s\S]{0,400}?\);\s*if \(ok\) setDraft\(null\);/);
+  // Every close in the two item handlers is guarded by the outcome - counted
+  // rather than pattern-matched, so an unguarded one cannot hide behind a
+  // guarded one somewhere else in the same slice.
+  const handlers = screen.slice(
+    screen.indexOf("async function submitItem"),
+    screen.indexOf("async function saveCategory"),
+  );
+  assert.ok(handlers.length > 0, "could not locate the item handlers");
+  const closes = (handlers.match(/setDraft\(null\)/g) ?? []).length;
+  const guarded = (handlers.match(/if \(ok\) setDraft\(null\)/g) ?? []).length;
+  assert.equal(closes, 2, "expected exactly one close in submitItem and one in archiveDraftItem");
+  assert.equal(guarded, closes, "every drawer close must be conditional on the server confirming");
+});
+
+test("a save in flight makes the drawer non-dismissable", () => {
+  const drawer = stripJsxComments(read("src/components/menu/ItemDrawer.tsx"));
+  assert.match(drawer, /const dismiss = \(\) => \{\s*if \(!saving\) onClose\(\);/);
+  // Scrim, X and Cancel all route through the same guard - a drawer that can be
+  // dismissed by one of three paths is a drawer that can be dismissed.
+  assert.equal((drawer.match(/onClick=\{dismiss\}/g) ?? []).length, 3);
+  assert.ok(!/onClick=\{onClose\}/.test(drawer), "no control may bypass the dismiss guard");
+});
+
+test("a filter with no control on the Availability tab is declared, not silent", () => {
+  // A category chosen on Items would otherwise hide rows here with nothing on
+  // screen saying so - which is how a stock update misses half the menu.
+  assert.match(screen, /hiddenBy=\{narrowingFilters\(filter, categories\)\}/);
+  const availability = stripJsxComments(read("src/components/menu/AvailabilityTab.tsx"));
+  assert.match(availability, /hiddenBy\.length > 0/);
+  assert.match(availability, /Show all items/);
+});
+
 test("the save control is disabled while the save is in flight", () => {
   const drawer = stripJsxComments(read("src/components/menu/ItemDrawer.tsx"));
   assert.match(drawer, /disabled=\{!isSaveable\(errors\) \|\| saving\}/);

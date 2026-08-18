@@ -24,24 +24,35 @@ import type { Gate } from "@/components/ui";
 export function AvailabilityTab({
   items,
   filter,
+  hiddenBy,
   editGate,
   publishGate,
   draftCount,
   busyId,
   publishing,
   onFilterChange,
+  onClearFilters,
   onStatusChange,
   onAvailabilityChange,
   onPublishAllDrafts,
 }: {
   items: BuilderItem[];
   filter: ItemFilter;
+  /**
+   * Human names of filters set on the Items tab that are ALSO narrowing this
+   * list. The two tabs share one filter so a search carries between them, and
+   * that is useful - but a category chosen on Items silently hiding half the
+   * menu here is how somebody "marks everything back in stock" and misses six
+   * items. So it is stated, with one click to drop it.
+   */
+  hiddenBy: string[];
   editGate: Gate;
   publishGate: Gate;
   draftCount: number;
   busyId: string | null;
   publishing: boolean;
   onFilterChange: (next: ItemFilter) => void;
+  onClearFilters: () => void;
   onStatusChange: (item: BuilderItem, status: ItemStatus) => void;
   onAvailabilityChange: (item: BuilderItem, next: boolean) => void;
   onPublishAllDrafts: () => void;
@@ -70,6 +81,16 @@ export function AvailabilityTab({
           {publishing ? "Publishing…" : `Publish ${draftCount} draft${draftCount === 1 ? "" : "s"}`}
         </GatedButton>
       </div>
+
+      {hiddenBy.length > 0 && (
+        <p className="flex flex-wrap items-center gap-2 border-b border-line bg-amber-50 px-4 py-2 text-xs text-amber-900">
+          <strong>This list is filtered</strong>
+          <span>by {hiddenBy.join(" and ")} — some items are not shown.</span>
+          <button type="button" onClick={onClearFilters} className="font-bold underline underline-offset-2">
+            Show all items
+          </button>
+        </p>
+      )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {items.length === 0 ? (

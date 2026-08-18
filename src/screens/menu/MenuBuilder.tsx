@@ -34,7 +34,17 @@ import { useSession } from "@/state/session";
 import { useMenuBuilder } from "@/state/menuBuilder";
 import { canViewMenuBuilder, hasModifiersFeature, hasQrFeature, isReadOnly, menuBuilderDenialReason, menuBuilderGates } from "@/lib/menu/access";
 import * as repo from "@/lib/menu/repository";
-import { DEFAULT_ITEM_FILTER, filterMenuItems, itemCountsByCategory, menuHealth, sortedCategories, type ItemFilter } from "@/lib/menu/filters";
+import {
+  ALL_CATEGORIES,
+  ANY_STATUS,
+  DEFAULT_ITEM_FILTER,
+  NO_CATEGORY,
+  filterMenuItems,
+  itemCountsByCategory,
+  menuHealth,
+  sortedCategories,
+  type ItemFilter,
+} from "@/lib/menu/filters";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { readIconAssignments } from "@/lib/icons/assignments";
 import { ItemsTab } from "@/components/menu/ItemsTab";
@@ -45,6 +55,7 @@ import { AvailabilityTab } from "@/components/menu/AvailabilityTab";
 import { QrMenuTab } from "@/components/menu/QrMenuTab";
 import { MenuPreview } from "@/components/menu/MenuPreview";
 import type { CurrencyCode } from "@/lib/currency";
+import { ITEM_STATUS_LABELS } from "@/lib/menu/types";
 import type { BuilderCategory, BuilderGroup, BuilderItem, BuilderOption, CategoryDraft, GroupDraft, ItemDraft, ItemStatus, QrSettings } from "@/lib/menu/types";
 
 const TABS = ["Items", "Categories", "Modifiers", "Availability", "QR Menu"] as const;
@@ -112,14 +123,16 @@ function MenuBuilderInner() {
   const pendingCategoryId = pendingSuffix(store.pending, "category:");
   const pendingGroupId = pendingSuffix(store.pending, "modifier:");
 
-  async function run(key: string, action: string, work: () => Promise<void>, success?: string) {
-    if (!tenantId) return;
+  /** Run one mutation, announce the outcome, and report whether it succeeded. */
+  async function run(key: string, action: string, work: () => Promise<void>, success?: string): Promise<boolean> {
+    if (!tenantId) return false;
     const outcome = await store.mutate(key, tenantId, action, work);
     if (outcome.ok) {
       if (success) toast.push({ tone: "success", message: success });
-    } else {
-      toast.push({ tone: "error", message: outcome.failure.message, detail: outcome.failure.detail });
+      return true;
     }
+    toast.push({ tone: "error", message: outcome.failure.message, detail: outcome.failure.detail });
+    return false;
   }
 
   // --- items ----------------------------------------------------------------
@@ -136,15 +149,17 @@ function MenuBuilderInner() {
     setDraft({ ...item, price: resolveMenuPrice(item, item.price, currency, rate).amount, _groups: data.groupsByItem[item.id] ?? [] });
   }
 
+  // THE DRAWER CLOSES ON SUCCESS, NEVER BEFORE IT. Closing first would show the
+  // final state before the backend confirmed it, and - worse - would destroy the
+  // operator's whole edit (including a chosen photo) if the save were refused,
+  // leaving them with a toast and nothing to retry. Keeping it open is also what
+  // makes the "Saving..." state and the disabled Save button visible at all.
   async function submitItem(submit: ItemDrawerSubmit) {
     if (!tenantId) return;
     const id = submit.draft.id;
-    const key = `item:${id ?? "new"}`;
-    const action = id ? "Saving the item" : "Adding the item";
-    setDraft(null);
-    await run(
-      key,
-      action,
+    const ok = await run(
+      `item:${id ?? "new"}`,
+      id ? "Saving the item" : "Adding the item",
       () =>
         repo
           .saveItem({
@@ -159,13 +174,14 @@ function MenuBuilderInner() {
           .then(() => undefined),
       id ? "Item saved" : "Item added",
     );
+    if (ok) setDraft(null);
   }
 
   async function archiveDraftItem() {
     const id = draft?.id;
     if (!id) return;
-    setDraft(null);
-    await run(`item:${id}`, "Archiving the item", () => repo.archiveItem(id), "Item archived");
+    const ok = await run(`item:${id}`, "Archiving the item", () => repo.archiveItem(id), "Item archived");
+    if (ok) setDraft(null);
   }
 
   // --- categories -----------------------------------------------------------
@@ -390,6 +406,8 @@ function MenuBuilderInner() {
                 <AvailabilityTab
                   items={visibleItems}
                   filter={filter}
+                  hiddenBy={narrowingFilters(filter, categories)}
+                  onClearFilters={() => setFilter({ ...DEFAULT_ITEM_FILTER, query: filter.query })}
                   editGate={gates.editItem}
                   publishGate={gates.editItem}
                   draftCount={health.drafts}
@@ -456,4 +474,23 @@ function MenuBuilderInner() {
 function pendingSuffix(pending: string[], prefix: string): string | null {
   const key = pending.find((k) => k.startsWith(prefix));
   return key ? key.slice(prefix.length) : null;
+}
+
+/**
+ * Filters that are narrowing a list WITHOUT their own control on screen.
+ *
+ * The search box and the availability toggle are visible on every tab that
+ * uses them, so they are not reported; the category and status pickers live
+ * only on Items, and silently hiding rows on Availability is how a stock
+ * update misses half the menu.
+ */
+function narrowingFilters(filter: ItemFilter, categories: BuilderCategory[]): string[] {
+  const active: string[] = [];
+  if (filter.categoryId === NO_CATEGORY) {
+    active.push("category “No category”");
+  } else if (filter.categoryId !== ALL_CATEGORIES) {
+    active.push(`category “${categories.find((c) => c.id === filter.categoryId)?.name ?? "unknown"}”`);
+  }
+  if (filter.status !== ANY_STATUS) active.push(`status “${ITEM_STATUS_LABELS[filter.status] ?? filter.status}”`);
+  return active;
 }
