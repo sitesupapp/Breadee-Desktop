@@ -19,13 +19,18 @@
 // that had been open since before a manager changed the setting kept printing
 // the old way.
 
-import { isNativeAvailable, listPrinters, printKitchenTicket, printReceipt } from "@/lib/nativePrinting";
+import {
+  isNativeAvailable,
+  listPrinters,
+  printKitchenTicket,
+  printReceipt,
+  type InstalledPrinter,
+} from "@/lib/nativePrinting";
 import type { ReceiptData } from "@/lib/receipt";
 import { canPrintKitchenTickets, canPrintReceipts, type PosAccessContext } from "@/lib/pos/access";
 import {
   autoPrintLatch,
   decideAutoPrint,
-  kitchenEventKey,
   receiptEventKey,
   skipIsWorthReporting,
   type AutoPrintSkip,
@@ -34,7 +39,6 @@ import { receiptOrderSource, blockMessage } from "@/lib/pos/cashierPrinter";
 import {
   kitchenBlockMessage,
   ORDER_SUCCEEDED_TICKET_DID_NOT,
-  resolveKitchenTarget,
   type KitchenTicket,
 } from "@/lib/pos/kitchenPrinter";
 import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
@@ -44,6 +48,16 @@ import { readAutoPrintSettings, readReceiptDesignSafe } from "@/lib/pos/receiptS
 import { customerRenderOptions, kitchenRenderOptions } from "@/lib/pos/receiptRender";
 import { printerAutoPrintEnabled, readPrinterAutoPrintMap } from "@/lib/pos/autoPrintPrinters";
 import { readShowPaymentQr } from "@/lib/pos/qrCode";
+import { loadItemRoutes } from "@/lib/pos/itemRouteRepository";
+import { loadServerPrinters, type ServerPrinter } from "@/lib/pos/printerRegistry";
+import {
+  printerById,
+  routeFromPrinter,
+  splitTicketByStation,
+  stationEventKey,
+  type StationTicket,
+} from "@/lib/pos/stationTickets";
+import type { Gate } from "@/components/ui";
 import type { KitchenTicketStatus } from "@/state/kitchenTicket";
 
 /**
@@ -132,12 +146,10 @@ export async function autoPrintKitchenTicket(input: {
   ticket: KitchenTicket;
 }): Promise<KitchenTicketStatus> {
   const native = isNativeAvailable();
-  const key = kitchenEventKey({ orderId: input.orderId, batchNo: input.batchNo });
 
-  // Cheap, local refusals first: no server round trip is owed to a build that
-  // cannot print at all, or to an event already handled.
+  // Cheap, local refusal first: no server round trip is owed to a build that
+  // cannot print at all.
   if (!native) return { kind: "manual" };
-  if (autoPrintLatch.claimed(key)) return { kind: "manual" };
 
   const [settings, installed, design] = await Promise.all([
     readAutoPrintSettings({ tenantId: input.tenantId, branchId: input.branchId }),
@@ -152,50 +164,182 @@ export async function autoPrintKitchenTicket(input: {
     orderSource: input.source,
     installed,
   });
+
+  // STATION ROUTING. Read after the settings, on the same post-transaction path,
+  // and never allowed to fail the print: a rules read that throws is treated as
+  // NO RULES, which is precisely the behaviour of every release before this one.
+  // A branch whose routing table is briefly unreachable prints the whole batch
+  // to its usual printer rather than nothing at all.
+  const routes = await loadItemRoutes({ tenantId: input.tenantId, branchId: input.branchId }).catch(() => []);
+  const stations = splitTicketByStation({ ticket: input.ticket, routes, orderSource: input.source });
+
+  // Only read when an explicit rule actually matched. A branch with no station
+  // routing pays nothing for this feature - not a query, not a round trip.
+  const needsPrinters = stations.some((s) => s.printerId !== null);
+  const printers = needsPrinters
+    ? await loadServerPrinters({ tenantId: input.tenantId, branchId: input.branchId }).catch(() => [])
+    : [];
+
+  const render = kitchenRenderOptions(design);
+  const permission = canPrintKitchenTickets(input.access);
+  const outcomes: StationOutcome[] = [];
+
+  for (const station of stations) {
+    outcomes.push(
+      await printOneStation({
+        station,
+        orderId: input.orderId,
+        batchNo: input.batchNo,
+        native,
+        enabled: settings.kitchen,
+        permission,
+        defaultResolution: resolution,
+        printers,
+        installed: installed.ok ? installed.value : [],
+        render,
+      }),
+    );
+  }
+
+  return summariseStations(outcomes);
+}
+
+/** What one destination's attempt did. Aggregated by `summariseStations`. */
+type StationOutcome =
+  | { kind: "sent"; printer: string; copies: number }
+  | { kind: "failed"; message: string }
+  /** Nothing was attempted for this destination, and nobody needs telling. */
+  | { kind: "skipped" };
+
+/**
+ * Print ONE station's copy.
+ *
+ * Extracted so the sequence a single destination goes through - resolve, local
+ * veto, decide, latch, send - is the same sequence whether it is the branch
+ * default or an explicitly routed station. A second inline copy for the default
+ * case is how one of them would eventually stop honouring the terminal's own
+ * printer switches.
+ *
+ * ONE ATTEMPT PER DESTINATION PER BATCH. The latch key names the order, the
+ * batch and the PRINTER (`stationEventKey`), which is the change station
+ * splitting forced: keyed on the batch alone, sending the grill's ticket would
+ * burn the key and the bar would never be told - a missing order rather than a
+ * missing page.
+ */
+async function printOneStation(input: {
+  station: StationTicket;
+  orderId: string;
+  batchNo?: number | null;
+  native: boolean;
+  enabled: boolean;
+  permission: Gate;
+  defaultResolution: PrintResolution;
+  printers: ServerPrinter[];
+  installed: InstalledPrinter[];
+  render: ReturnType<typeof kitchenRenderOptions>;
+}): Promise<StationOutcome> {
+  const { station } = input;
+
+  // The default group keeps the SERVER's resolution untouched, copy count
+  // included. An explicitly routed station is resolved through the same
+  // reachability rules - see `routeFromPrinter`.
+  let resolution: PrintResolution;
+  if (station.printerId === null) {
+    resolution = input.defaultResolution;
+  } else {
+    const printer = printerById(input.printers, station.printerId);
+    if (!printer) {
+      // The rule names a printer this branch no longer has. Reported rather
+      // than silently dropped: those lines are food nobody is being told about.
+      return {
+        kind: "failed",
+        message: "A station rule points at a printer that no longer exists. Check Settings → Printing & Routing → Item routing.",
+      };
+    }
+    const resolved = resolveRouteTarget({
+      route: routeFromPrinter(printer, station.copies),
+      installed: input.installed,
+    });
+    resolution =
+      resolved.kind === "single"
+        ? { kind: "single", target: { ...resolved.target, printerId: printer.id } }
+        : resolved;
+  }
+
   // Checked before the latch is claimed, so switching a printer back on does
   // not find the event key already burned by an attempt that never happened.
-  if (printerIsSilenced(resolution)) return { kind: "manual" };
+  if (printerIsSilenced(resolution)) return { kind: "skipped" };
+
+  const key = stationEventKey({ orderId: input.orderId, batchNo: input.batchNo, printerId: station.printerId });
 
   const decision = decideAutoPrint({
-    nativeAvailable: native,
-    enabled: settings.kitchen,
-    permission: canPrintKitchenTickets(input.access),
-    hasDocument: input.ticket.lines.length > 0,
+    nativeAvailable: input.native,
+    enabled: input.enabled,
+    permission: input.permission,
+    hasDocument: station.ticket.lines.length > 0,
     resolution,
     alreadyAttempted: autoPrintLatch.claimed(key),
   });
 
-  if (decision.kind === "skip") return skipStatus(decision.skip, "kitchen");
-  if (resolution.kind !== "single") return { kind: "manual" };
-  if (!autoPrintLatch.claim(key)) return { kind: "manual" };
+  if (decision.kind === "skip") {
+    const status = skipStatus(decision.skip, "kitchen");
+    return status.kind === "auto_failed" ? { kind: "failed", message: status.message } : { kind: "skipped" };
+  }
+  if (resolution.kind !== "single") return { kind: "skipped" };
+  if (!autoPrintLatch.claim(key)) return { kind: "skipped" };
 
   try {
-    const render = kitchenRenderOptions(design);
     const result = await printKitchenTicket({
       printerName: resolution.target.windowsName,
       paperWidth: resolution.target.paperWidth,
       copies: resolution.target.copies,
-      ticket: { ...input.ticket, sections: render.sections, footer: render.footer },
+      ticket: { ...station.ticket, sections: input.render.sections, footer: input.render.footer },
     });
     if (result.ok) {
-      return {
-        kind: "auto_sent",
-        copies: result.value.copies_accepted,
-        printer: result.value.printer_name,
-      };
+      return { kind: "sent", copies: result.value.copies_accepted, printer: result.value.printer_name };
     }
-    return { kind: "auto_failed", message: `${ORDER_SUCCEEDED_TICKET_DID_NOT} ${result.error.message}` };
+    return { kind: "failed", message: `${resolution.target.printerName}: ${result.error.message}` };
   } catch (e) {
     // A throw from the native boundary is still only a lost ticket. It is
     // caught here so it can never propagate into the caller's post-submit
     // sequence, where it would look like the submission failed.
     return {
-      kind: "auto_failed",
-      message: `${ORDER_SUCCEEDED_TICKET_DID_NOT} ${e instanceof Error ? e.message : "The ticket could not be printed."}`,
+      kind: "failed",
+      message: `${resolution.target.printerName}: ${e instanceof Error ? e.message : "The ticket could not be printed."}`,
     };
   } finally {
     autoPrintLatch.release(key);
   }
+}
+
+/**
+ * One status for the whole batch, from however many stations it went to.
+ *
+ * A FAILURE ANYWHERE IS REPORTED, even when other stations printed. The whole
+ * point of splitting is that each station's paper is the only notice that
+ * station gets, so "three of four printed" is a kitchen missing an order - not
+ * a partial success to round up. The message names the destination, because
+ * which one failed is the only thing the operator can act on.
+ */
+function summariseStations(outcomes: StationOutcome[]): KitchenTicketStatus {
+  const failed = outcomes.filter((o): o is Extract<StationOutcome, { kind: "failed" }> => o.kind === "failed");
+  const sent = outcomes.filter((o): o is Extract<StationOutcome, { kind: "sent" }> => o.kind === "sent");
+
+  if (failed.length > 0) {
+    const others = sent.length > 0 ? ` ${sent.length} other station${sent.length === 1 ? "" : "s"} printed.` : "";
+    return {
+      kind: "auto_failed",
+      message: `${ORDER_SUCCEEDED_TICKET_DID_NOT} ${failed.map((f) => f.message).join(" ")}${others}`,
+    };
+  }
+  if (sent.length > 0) {
+    return {
+      kind: "auto_sent",
+      copies: sent.reduce((total, s) => total + s.copies, 0),
+      printer: [...new Set(sent.map((s) => s.printer))].join(", "),
+    };
+  }
+  return { kind: "manual" };
 }
 
 /**

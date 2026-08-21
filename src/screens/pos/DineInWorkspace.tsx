@@ -539,6 +539,10 @@ export function useDineInWorkspace(input: {
           qty: l.quantity,
           modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
           note: l.kitchen_note,
+          // The canonical item, so this round's lines route to their stations
+          // exactly as a takeaway order's do. The category is resolved by the
+          // shared call site - see `printKitchenFor`.
+          menuItemId: l.menu_item_id,
         })),
       });
     } catch (e) {

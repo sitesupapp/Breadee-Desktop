@@ -16,6 +16,16 @@ import { PosStatusBar } from "@/components/pos/PosStatusBar";
 import { CategoryNavigation } from "@/components/pos/CategoryNavigation";
 import { ALL_CATEGORIES, stepCategory } from "@/lib/pos/categories";
 import { MenuItemGrid } from "@/components/pos/MenuItemGrid";
+import { CustomGrid } from "@/components/pos/grid/CustomGrid";
+import { readLayout } from "@/lib/pos/grid/storage";
+import { isUsableLayout } from "@/lib/pos/grid/model";
+import {
+  autoPrintCollectionTicket,
+  buildCollectionTicket,
+  collectionLinesFromReceipt,
+  printCollectionTicketNow,
+  readCollectionSettings,
+} from "@/lib/pos/collectionTicket";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { ModifierDialog } from "@/components/pos/ModifierDialog";
 import { LineNoteDialog } from "@/components/pos/LineNoteDialog";
@@ -217,6 +227,36 @@ function PosWorkspaceInner() {
     }
     return set;
   }, [menu.items, menu.groupsByItem, menu.groups]);
+
+  // --- the customized cashier layout ------------------------------------------
+  //
+  // OPT-IN, AND OFF FOR EVERY EXISTING INSTALLATION. `readLayout` returns a
+  // disabled layout for a terminal that has never opened the designer, for one
+  // whose stored blob cannot be parsed, and for one written by a newer build -
+  // so every path that is not "somebody deliberately configured this" lands on
+  // the DEFAULT POS, unchanged.
+  //
+  // `isUsableLayout` is checked here as well as in the designer. The designer
+  // refuses to SAVE a broken layout; this refuses to RENDER one, which covers
+  // the cases a save-time check cannot - a layout written by an older build, or
+  // hand-edited storage. A cashier meets the familiar screen rather than a
+  // half-drawn one.
+  //
+  // Read once per mount. POS is a top-level route outside the app Shell, so
+  // leaving for Settings and coming back remounts this component and re-reads -
+  // which is exactly the cadence a decision nobody makes during service needs.
+  const gridLayout = useMemo(() => readLayout({ tenantId, branchId: pos.branch.id }), [tenantId, pos.branch.id]);
+  const customLayoutActive = gridLayout.enabled && isUsableLayout(gridLayout);
+
+  /** The canonical menu by id - what a custom button resolves its price from. */
+  const itemsById = useMemo(() => new Map(indexed.map((i) => [i.id, i])), [indexed]);
+
+  /** `menu_items.id` -> `menu_categories.id`, for station routing. */
+  const categoryByItemId = useMemo(() => {
+    const map = new Map<string, string | null>();
+    for (const item of menu.items) map.set(item.id, item.category_id ?? null);
+    return map;
+  }, [menu.items]);
 
   const subtotal = useMemo(() => selectSubtotal(cart.lines), [cart.lines]);
   const itemCount = useMemo(() => selectItemCount(cart.lines), [cart.lines]);
@@ -439,7 +479,17 @@ function PosWorkspaceInner() {
         orderNumber: input.orderNumber,
         source: input.source,
         at: new Date().toLocaleString(),
-        lines: input.lines,
+        // THE CATEGORY IS RESOLVED HERE, ONCE, for all three routes.
+        //
+        // Each route hands over the lines it submitted and the canonical item id
+        // on each of them; the CATEGORY comes from the menu this workspace has
+        // already loaded. Resolving it in each route instead would mean three
+        // lookups against three menus, and what they would eventually disagree
+        // about is which station cooks a dish.
+        lines: input.lines.map((line) => ({
+          ...line,
+          categoryId: line.menuItemId ? categoryByItemId.get(line.menuItemId) ?? null : null,
+        })),
         tableName: input.tableName,
         batchNo: input.batchNo,
         customerName: input.customerName,
@@ -491,7 +541,7 @@ function PosWorkspaceInner() {
       }
       kitchenStore.present(ticket, status);
     },
-    [kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId, toast],
+    [categoryByItemId, kitchenStore, pos.access, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, refreshShiftOrders, tenantId, toast],
   );
 
   /**
@@ -509,6 +559,35 @@ function PosWorkspaceInner() {
    * `autoPrintReceipt` decided IS what happened to the paper, and asking a
    * second source would let the screen and the printer disagree.
    */
+  /**
+   * Turn a settled receipt into the customer's collection ticket.
+   *
+   * Built from the RECEIPT rather than from the cart, so the docket lists the
+   * same lines the customer just paid for even when the settlement came from a
+   * saved order the buffer never held. `collectionLinesFromReceipt` is where
+   * every money field is dropped, once and by name.
+   */
+  const collectionTicketFor = useCallback(
+    (receipt: ReceiptData) => {
+      const source = receipt.orderSource;
+      if (!source) return null;
+      return {
+        source,
+        ticket: buildCollectionTicket({
+          businessName: pos.tenantName,
+          branchName: pos.branch.name,
+          orderNumber: receipt.orderNumber,
+          source,
+          at: receipt.at,
+          lines: collectionLinesFromReceipt(receipt.lines),
+          tableName: receipt.tableName ?? null,
+          customerName: receipt.customerName ?? null,
+        }),
+      };
+    },
+    [pos.branch.name, pos.tenantName],
+  );
+
   const presentReceipt = useCallback(
     (receipt: ReceiptData) => {
       receiptStore.stage(receipt);
@@ -539,8 +618,35 @@ function PosWorkspaceInner() {
         // path to paper and has to be on screen.
         receiptStore.present(receipt);
       });
+
+      // THE COLLECTION TICKET IS A SEPARATE, INDEPENDENT DOCUMENT.
+      //
+      // Deliberately not chained onto the receipt's promise: it is off by
+      // default, it may go to a different printer, and whether the customer's
+      // FINANCIAL receipt printed is not a reason to withhold - or to send - the
+      // docket they carry to the counter. Its own latch, keyed on this
+      // settlement, is what stops a second one. A failure is a toast; the sale
+      // is finished either way.
+      const collection = collectionTicketFor(receipt);
+      if (collection) {
+        void autoPrintCollectionTicket({
+          tenantId: tenantId ?? "",
+          branchId: pos.branch.id,
+          access: pos.access,
+          source: collection.source,
+          ticket: collection.ticket,
+          paidAt: receipt.at,
+        }).then((printed) => {
+          if (printed.kind !== "failed") return;
+          toast.push({
+            tone: "warning",
+            message: "The order ticket did not print.",
+            detail: `${printed.message} The payment and the receipt are unaffected.`,
+          });
+        });
+      }
     },
-    [pos.access, pos.branch.id, receiptStore, refreshShiftOrders, tenantId, toast],
+    [collectionTicketFor, pos.access, pos.branch.id, receiptStore, refreshShiftOrders, tenantId, toast],
   );
   const [cartDrawerOpen, setCartDrawerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -779,6 +885,11 @@ function PosWorkspaceInner() {
           qty: l.quantity,
           modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
           note: l.kitchen_note,
+          // The canonical item the cart line was built from. Station routing
+          // resolves against THIS, never against the button that added it -
+          // which is what makes the default grid and a custom key produce the
+          // same ticket on the same printer.
+          menuItemId: l.menu_item_id,
         })),
       }),
     [printKitchenFor],
@@ -1319,6 +1430,11 @@ function PosWorkspaceInner() {
         pendingSync={pending}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
+        /* Left or right, in the customized layout only. The DEFAULT layout is
+           pinned to `right` regardless of what a stored layout says, so a
+           terminal that switches back to Default gets the production screen
+           exactly as it was - down to which side the order is on. */
+        cartSide={customLayoutActive ? gridLayout.orderPanel : "right"}
         cartTitle={deliveryActive ? "Customer" : dineInActive ? "Table bill" : "Current order"}
         /* Delivery passes NO summary, so the drawer-width bottom bar - Pay
            included - is not rendered at all. Level 3A has no order to settle,
@@ -1421,9 +1537,15 @@ function PosWorkspaceInner() {
                 )}
               </div>
 
-              <div className="mb-3">
-                <CategoryNavigation categories={categories} counts={categoryCounts} selected={category} onSelect={setCategory} />
-              </div>
+              {/* The category strip belongs to the DEFAULT presentation. In the
+                  customized layout the operator's own category keys are the
+                  navigation, and a second row of categories above them would be
+                  two ways to mean one thing. */}
+              {!customLayoutActive && (
+                <div className="mb-3">
+                  <CategoryNavigation categories={categories} counts={categoryCounts} selected={category} onSelect={setCategory} />
+                </div>
+              )}
 
               {menuState === "loading" && (
                 <div className="grid flex-1 grid-cols-3 content-start gap-3">
@@ -1437,8 +1559,29 @@ function PosWorkspaceInner() {
                 <ErrorState title="The menu could not be loaded" message={menuError ?? ""} onRetry={() => void fetchMenu()} />
               )}
 
+              {/* ONE ENGINE, TWO PRESENTATIONS.
+                  Both branches call the SAME `addItem` with the SAME canonical
+                  item and the SAME resolved price, so everything downstream -
+                  the cart, modifiers, notes, discounts, payment, kitchen
+                  routing, stock and reporting - is identical whichever is on
+                  screen. Nothing below this point knows which one was used.
+
+                  SEARCH STAYS LIVE IN BOTH. When a cashier types, the customized
+                  grid gives way to the searchable menu, because "the customer
+                  wants something that is not on a key" must never be a dead end.
+                  With the field empty the custom grid is back, and it does not
+                  scroll. */}
               {menuState === "ready" &&
-                (visibleItems.length === 0 ? (
+                (customLayoutActive && query.trim() === "" ? (
+                  <CustomGrid
+                    layout={gridLayout}
+                    itemsById={itemsById}
+                    currency={currency}
+                    rate={rate}
+                    itemsNeedingChoice={itemsNeedingChoice}
+                    onPick={addItem}
+                  />
+                ) : visibleItems.length === 0 ? (
                   <EmptyState title="No items match" hint="Try a different category, or clear the search." />
                 ) : (
                   <MenuItemGrid

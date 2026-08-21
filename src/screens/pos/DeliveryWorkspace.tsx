@@ -746,6 +746,9 @@ export function useDeliveryWorkspace(input: {
           qty: l.quantity,
           modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
           note: l.kitchen_note,
+          // The canonical item, so a delivery order's lines route to their
+          // stations exactly as a takeaway order's do.
+          menuItemId: l.menu_item_id,
         })),
       });
 

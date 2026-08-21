@@ -89,10 +89,16 @@ function sources(dir: string, acc: string[] = []): string[] {
 test("NO source states an environment name as a user-facing literal", () => {
   // Where the vocabulary is defined and where it is turned into words.
   const ALLOWED = new Set(["src/env.ts", "src/lib/environment.ts"]);
-  // `paymentQr.ts` maps each environment to its PUBLIC SITE URL. That is a real
+  // `site.ts` maps each environment to its PUBLIC SITE URL. That is a real
   // per-environment value, not a label - a production till printing a staging
   // address on a customer's receipt is exactly what it prevents.
-  ALLOWED.add("src/lib/pos/paymentQr.ts");
+  //
+  // MOVED here from `paymentQr.ts` in 1.0.6, and the allowance moved with it
+  // rather than widening: the desktop now opens web-managed modules in a browser
+  // as well as printing the receipt QR, so the origin is decided in ONE place
+  // and `paymentQr.ts` re-exports it. Exactly one file may still name an
+  // environment, which is the property this test exists to keep.
+  ALLOWED.add("src/lib/site.ts");
 
   const offenders: string[] = [];
   for (const file of sources("src")) {

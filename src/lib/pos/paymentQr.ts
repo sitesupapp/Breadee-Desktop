@@ -18,7 +18,7 @@
 
 import { asRecord, bool, strOrNull } from "@/lib/pos/rpc";
 import { encodeQr, type QrMatrix } from "@/lib/pos/qrCode";
-import { env } from "@/env";
+import { DEFAULT_PUBLIC_SITE, publicSiteOrigin } from "@/lib/site";
 
 /** The tenant/branch public identifier, as stored. */
 export type PublicQrSource = {
@@ -36,21 +36,13 @@ export type PublicQrSource = {
  * is: a production terminal printing a staging URL on a customer's receipt is a
  * code that leads somewhere the customer cannot order from. Overridable with
  * `VITE_PUBLIC_SITE_URL` so a custom domain needs no code change.
+ *
+ * MOVED TO `lib/site.ts` and re-exported here. The desktop now opens web-managed
+ * modules in a browser as well as printing this QR, and both must resolve the
+ * SAME origin - two copies would eventually disagree, and the way they would
+ * disagree is one of them sending a production till to staging.
  */
-export const DEFAULT_PUBLIC_SITE: Record<"staging" | "production", string> = {
-  staging: "https://stagingbreadee.netlify.app",
-  production: "https://breadee.com",
-};
-
-export function publicSiteOrigin(): string {
-  const configured = (import.meta.env.VITE_PUBLIC_SITE_URL as string | undefined)?.trim();
-  const raw = configured && configured !== "" ? configured : DEFAULT_PUBLIC_SITE[env.APP_ENV];
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return DEFAULT_PUBLIC_SITE[env.APP_ENV];
-  }
-}
+export { DEFAULT_PUBLIC_SITE, publicSiteOrigin };
 
 /** `<site>/menu/<slug>` - the same address the web app encodes. */
 export function publicQrUrl(slug: string): string {

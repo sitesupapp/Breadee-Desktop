@@ -125,12 +125,39 @@ test("a ticket carries the order, its source, the time and the items", () => {
   assert.equal(t.orderNumber, "260814-0001");
   assert.equal(t.orderType, "Takeaway");
   assert.equal(t.at, "8/14/2026, 11:20:00 AM");
+  // RETARGETED in 1.0.6, not relaxed. A ticket line now also carries the
+  // canonical ids station routing resolves against; both are null here because
+  // this caller supplied neither, which is the pre-1.0.6 shape's behaviour. The
+  // property this assertion guards - that a ticket line carries exactly these
+  // fields and no price - is asserted in full by the exhaustive key check below.
   assert.deepEqual(t.lines[0], {
     name: "Margherita",
     qty: 2,
     modifiers: [{ name: "Small", quantity: 1 }],
     note: "No olives",
+    menuItemId: null,
+    categoryId: null,
   });
+});
+
+test("routing identity is carried on the line, and only when the caller has it", () => {
+  const t = buildKitchenTicket({
+    businessName: "B",
+    branchName: "Br",
+    orderNumber: "1",
+    source: "takeaway",
+    at: "now",
+    lines: [
+      { name: "Pepsi", qty: 1, menuItemId: "item-pepsi", categoryId: "cat-drinks" },
+      { name: "Mystery", qty: 1 },
+    ],
+  });
+  assert.equal(t.lines[0].menuItemId, "item-pepsi");
+  assert.equal(t.lines[0].categoryId, "cat-drinks");
+  // A line whose caller knows neither is not guessed at; it simply follows the
+  // branch's existing route, exactly as every line did before this release.
+  assert.equal(t.lines[1].menuItemId, null);
+  assert.equal(t.lines[1].categoryId, null);
 });
 
 test("the ticket has nowhere to put money, and the mapper adds none", () => {

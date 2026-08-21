@@ -39,6 +39,14 @@ import {
   unconfiguredDesign,
   type ReceiptDesignSettings,
 } from "@/lib/pos/receiptSettings";
+import {
+  COLLECTION_SOURCES,
+  readCollectionSettings,
+  writeCollectionSettings,
+  type CollectionSource,
+  type CollectionTicketSettings,
+} from "@/lib/pos/collectionTicket";
+import { MAX_COPIES, MIN_COPIES } from "@/lib/nativePrinting";
 
 const ROLE_LABEL: Record<ServerPrinter["printer_type"], string> = {
   cashier: "Cashier",
@@ -136,6 +144,27 @@ export function PosSettings() {
 
   const togglePrinter = useCallback((printer: ServerPrinter, next: boolean) => {
     setOverrides(writePrinterAutoPrint(printer.id, next));
+  }, []);
+
+  // --- collection ticket (this terminal) --------------------------------------
+  //
+  // TERMINAL-LOCAL, LIKE THE PER-PRINTER SWITCHES ABOVE AND FOR THE SAME KIND OF
+  // REASON. "This counter hands out numbered dockets" is a fact about a counter,
+  // not about a branch: the drive-through till and the dine-in till in one
+  // restaurant legitimately answer it differently. It is deliberately NOT stored
+  // in the branch's shared receipt settings - the web app's own normaliser drops
+  // keys its catalog does not know, so a desktop-only block in that JSONB would
+  // vanish the next time a manager saved receipt design in a browser.
+  const [collection, setCollection] = useState<CollectionTicketSettings>(() => readCollectionSettings());
+
+  const patchCollection = useCallback((patch: Partial<CollectionTicketSettings>) => {
+    setCollection((current) => writeCollectionSettings({ ...current, ...patch }));
+  }, []);
+
+  const toggleCollectionSource = useCallback((source: CollectionSource, next: boolean) => {
+    setCollection((current) =>
+      writeCollectionSettings({ ...current, enabled: { ...current.enabled, [source]: next } }),
+    );
   }, []);
 
   // --- tables ----------------------------------------------------------------
@@ -414,6 +443,82 @@ export function PosSettings() {
             ))}
           </div>
         )}
+      </Card>
+
+      {/* --- collection ticket (this terminal) ---------------------------- */}
+      <Card className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-sm font-extrabold text-ink">Order / collection ticket</p>
+            <p className="mt-0.5 text-xs text-sub">
+              A small ticket for the customer with their order number and what they ordered, and{" "}
+              <strong className="text-ink">no prices, no total and no payment details</strong>. For counters where
+              people pay, take a number and wait. The normal customer receipt is unaffected.
+            </p>
+          </div>
+          <Badge tone="slate">This terminal</Badge>
+        </div>
+
+        <div className="mt-2 divide-y divide-line">
+          {COLLECTION_SOURCES.map((source) => (
+            <Switch
+              key={source}
+              checked={collection.enabled[source]}
+              onChange={(next) => toggleCollectionSource(source, next)}
+              label={source === "takeaway" ? "Takeaway" : source === "dine_in" ? "Dine-In" : "Delivery"}
+              hint={`Print one automatically when a ${
+                source === "dine_in" ? "dine-in bill" : source === "delivery" ? "delivery order" : "takeaway order"
+              } is paid at this terminal.`}
+            />
+          ))}
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-end gap-4">
+          <div>
+            <label className="mb-1 block text-xs font-bold text-ink" htmlFor="collection-printer">
+              Printer
+            </label>
+            <select
+              id="collection-printer"
+              className="min-w-[240px] rounded-xl border border-line px-3 py-2 text-sm"
+              value={collection.printerId ?? ""}
+              onChange={(e) => patchCollection({ printerId: e.target.value || null })}
+            >
+              {/* The blank option is a real choice, not an absence: the ticket is
+                  handed over at the same counter as the receipt, so following
+                  the receipt's own route is the right default and stays correct
+                  if that route is later changed. */}
+              <option value="">Wherever the customer receipt goes</option>
+              {printers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-bold text-ink" htmlFor="collection-copies">
+              Copies
+            </label>
+            <select
+              id="collection-copies"
+              className="rounded-xl border border-line px-2 py-2 text-sm"
+              value={collection.copies}
+              onChange={(e) => patchCollection({ copies: Number(e.target.value) })}
+            >
+              {Array.from({ length: MAX_COPIES - MIN_COPIES + 1 }, (_, i) => i + MIN_COPIES).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <p className="mt-3 text-[11px] text-sub">
+          A cashier can also print or reprint one by hand from the receipt window at any time, whether or not these
+          switches are on.
+        </p>
       </Card>
 
       <Card className="p-4">

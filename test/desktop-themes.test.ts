@@ -354,13 +354,49 @@ test("no component hard-codes a colour outside the token layer", () => {
   for (const file of files) {
     const source = stripJsxComments(readFileSync(file, "utf8"));
     const rel = file.slice(root.length + 1).replace(/\\/g, "/");
-    // The QR symbol and the theme definitions are the two deliberate
-    // exceptions, and both are documented in place: a QR must be black on
-    // white to scan, and a theme is literally a list of colours.
-    if (rel.startsWith("src/lib/theme/") || rel === "src/components/pos/QrSymbol.tsx") continue;
+    // Three deliberate exceptions, each documented in place: a QR must be black
+    // on white to scan, a theme is literally a list of colours, and the
+    // customized grid's key palette is a list of colours too.
+    //
+    // THE GRID PALETTE IS THE ONE ADDED IN 1.0.6, and it is an exception for a
+    // stated reason rather than a convenience: a cashier's coloured key is a
+    // landmark they hit without reading, like a physical key cap, so it must NOT
+    // change when the terminal's theme does. Its INK is computed from the fill
+    // by measured contrast, which is what keeps it readable in light and dark -
+    // see the WCAG assertion in `pos-custom-grid.test.ts`. An uncoloured key
+    // uses theme classes like everything else.
+    if (
+      rel.startsWith("src/lib/theme/") ||
+      rel === "src/components/pos/QrSymbol.tsx" ||
+      rel === "src/lib/pos/grid/colors.ts"
+    ) {
+      continue;
+    }
     assert.ok(!/#[0-9a-fA-F]{6}\b/.test(source), `${rel} hard-codes a hex colour`);
     assert.ok(!/(bg|text|border)-\[#/.test(source), `${rel} uses an arbitrary colour value`);
   }
+});
+
+test("the grid palette exception is bounded - components only ever resolve it", () => {
+  // The exception above is only safe while nothing SPREADS it. If a component
+  // could write its own hex "just this once", the palette would stop being one
+  // list and the readability guarantee - which is computed from that list -
+  // would stop covering every button on screen.
+  for (const rel of [
+    "src/components/pos/grid/GridButtonTile.tsx",
+    "src/components/pos/grid/CustomGrid.tsx",
+    "src/components/pos/grid/GridDesigner.tsx",
+    "src/components/pos/grid/AddButtonWizard.tsx",
+    "src/screens/settings/CashierLayout.tsx",
+  ]) {
+    const source = stripJsxComments(readFileSync(join(root, rel), "utf8"));
+    assert.ok(!/#[0-9a-fA-F]{6}\b/.test(source), `${rel} must take its colours from the palette, not a literal`);
+  }
+  // And the layout MODEL stores a token pair, never a colour: a stored hex would
+  // freeze a decision that a future palette revision could not reach.
+  const model = stripJsxComments(readFileSync(join(root, "src/lib/pos/grid/model.ts"), "utf8"));
+  assert.ok(!/#[0-9a-fA-F]{6}\b/.test(model), "a layout must store a colour token, never a hex value");
+  assert.match(model, /hue: string; shade: number/);
 });
 
 test("helpers convert both ways and reject anything that is not a six-digit hex", () => {
