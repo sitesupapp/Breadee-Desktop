@@ -8,11 +8,16 @@
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { Printers } from "@/screens/settings/Printers";
 import { PrintRouting } from "@/screens/settings/PrintRouting";
+import { ItemRouting } from "@/screens/settings/ItemRouting";
 import { PrintTestCenter } from "@/screens/settings/PrintTestCenter";
 
+// Item routing is a FOURTH step, placed after Routing because that is the order
+// the decisions are made in: printers exist, documents are routed, and only then
+// does a branch with more than one station say which of them prepares what.
 const TABS = [
   { to: "setup", label: "Quick Setup" },
   { to: "routing", label: "Routing" },
+  { to: "items", label: "Item routing" },
   { to: "test", label: "Test Center" },
 ];
 
@@ -38,6 +43,7 @@ export function Printing() {
         <Route index element={<Navigate to="/settings/printing/setup" replace />} />
         <Route path="setup" element={<Printers />} />
         <Route path="routing" element={<PrintRouting />} />
+        <Route path="items" element={<ItemRouting />} />
         <Route path="test" element={<PrintTestCenter />} />
       </Routes>
     </div>

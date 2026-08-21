@@ -277,10 +277,16 @@ export function PrintRouting() {
       })}
 
       <Card className="p-5">
-        <p className="font-bold">Not routed here yet</p>
+        <p className="font-bold">Sending items to different stations</p>
+        {/* Corrected in 1.0.6. This used to say category and item routing
+            "arrives on the desktop later", which stopped being true the moment
+            the Item routing tab shipped - and a settings screen that understates
+            what the app can do sends an operator looking somewhere else. Station
+            and section scopes remain Kitchen Ops', and are still named as such. */}
         <p className="mt-1 text-sm text-sub">
-          Sending a document to a specific station, section, menu category or item is configured in Kitchen Ops and
-          arrives on the desktop later.
+          Routing a menu category or an individual item to the station that prepares it is set on the{" "}
+          <strong className="text-ink">Item routing</strong> tab. Those rules take precedence over the routes above;
+          anything without one keeps following them. Station and section routing remain in Kitchen Ops.
         </p>
         {/* POS v1 removed the second half of this paragraph, which said automatic
             printing was "not connected yet" and that routing here was used by the

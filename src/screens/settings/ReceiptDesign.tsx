@@ -83,8 +83,10 @@ function sampleTicket(businessName: string): KitchenTicket {
     customerName: null,
     orderNote: "Allergy: nuts",
     lines: [
-      { name: "Chicken Sandwich", qty: 2, modifiers: [{ name: "Extra cheese", quantity: 1 }], note: "no pickles" },
-      { name: "Fries", qty: 1, modifiers: [], note: null },
+      // A sample ticket references no canonical menu item on purpose: it is a
+      // layout preview, and giving it real ids would make a preview routable.
+      { name: "Chicken Sandwich", qty: 2, modifiers: [{ name: "Extra cheese", quantity: 1 }], note: "no pickles", menuItemId: null, categoryId: null },
+      { name: "Fries", qty: 1, modifiers: [], note: null, menuItemId: null, categoryId: null },
     ],
     test: false,
   };

@@ -13,6 +13,7 @@
 
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { PosSettings } from "@/screens/settings/PosSettings";
+import { CashierLayout } from "@/screens/settings/CashierLayout";
 import { Printing } from "@/screens/settings/Printing";
 import { ReceiptDesign } from "@/screens/settings/ReceiptDesign";
 import { SyncCenter } from "@/screens/settings/SyncCenter";
@@ -24,6 +25,9 @@ import { About } from "@/screens/settings/About";
 
 const TABS = [
   { to: "pos", label: "POS Settings" },
+  // Its own tab rather than a section of POS Settings: the designer is a canvas
+  // that needs the width of the page, and POS Settings is a column of switches.
+  { to: "cashier-layout", label: "Cashier Layout" },
   { to: "printing", label: "Printing & Routing" },
   { to: "receipt", label: "Receipt" },
   { to: "sync", label: "Sync Center" },
@@ -54,6 +58,7 @@ export function Settings() {
       <Routes>
         <Route index element={<Navigate to="/settings/pos" replace />} />
         <Route path="pos" element={<PosSettings />} />
+        <Route path="cashier-layout" element={<CashierLayout />} />
         <Route path="printing/*" element={<Printing />} />
         {/* The pre-P3 address. Kept so a bookmark, a support note or a deep link
             from an older build still lands on the screen it named. */}

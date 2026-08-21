@@ -33,6 +33,11 @@ import {
   type PrintOutcome,
 } from "@/lib/nativePrinting";
 import { QrSymbol } from "@/components/pos/QrSymbol";
+import {
+  buildCollectionTicket,
+  collectionLinesFromReceipt,
+  printCollectionTicketNow,
+} from "@/lib/pos/collectionTicket";
 import { customerRenderOptions, type ReceiptRenderOptions } from "@/lib/pos/receiptRender";
 import { readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
 import { readShowPaymentQr } from "@/lib/pos/qrCode";
@@ -319,6 +324,48 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
   // intentional and is never suppressed - see the manual-print contract.
   const isReprint = data.tendered == null && data.paid;
 
+  /**
+   * The customer's non-financial ORDER TICKET, printed by hand.
+   *
+   * HERE because this is already the one surface every route's receipt arrives
+   * at, and the one an operator reopens with Ctrl+P - so "print the customer
+   * another docket" needs no new screen and no new way to reach a printer.
+   *
+   * Deliberately unlatched (see `printCollectionTicketNow`): a cashier asking
+   * for another copy has looked at the printer and decided. It takes no payment,
+   * touches no order, and carries no amount of any kind.
+   */
+  const [ticketBusy, setTicketBusy] = useState(false);
+  const [ticketNote, setTicketNote] = useState<string | null>(null);
+  const printOrderTicket = useCallback(async () => {
+    if (!source || !tenantId) return;
+    setTicketBusy(true);
+    setTicketNote(null);
+    const result = await printCollectionTicketNow({
+      tenantId,
+      branchId,
+      source,
+      ticket: buildCollectionTicket({
+        businessName: pos.tenantName,
+        branchName: pos.branch.name,
+        orderNumber: data.orderNumber,
+        source,
+        at: data.at,
+        lines: collectionLinesFromReceipt(data.lines),
+        tableName: data.tableName ?? null,
+        customerName: data.customerName ?? null,
+      }),
+    });
+    setTicketNote(
+      result.kind === "sent"
+        ? `${ACCEPTED_MESSAGE} ${result.copies} to ${result.printer}.`
+        : result.kind === "failed"
+          ? result.message
+          : "There is nothing on this order to put on a ticket.",
+    );
+    setTicketBusy(false);
+  }, [branchId, data, pos.branch.name, pos.tenantName, source, tenantId]);
+
   return (
     <Modal
       open
@@ -391,9 +438,26 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
             </div>
           )}
 
+          {ticketNote && (
+            <p className="rounded-lg bg-slate-100 px-3 py-2 text-[11px] font-semibold text-sub">{ticketNote}</p>
+          )}
+
           <div className="flex items-center justify-between gap-2">
             <Badge tone={native ? "slate" : "amber"}>{native ? "Receipt" : "Preview only"}</Badge>
             <div className="flex gap-2">
+              {/* The customer's number ticket: the whole order, no money.
+                  Available whether or not automatic printing is switched on. */}
+              <GatedButton
+                gate={gate}
+                variant="ghost"
+                /* `GatedButton` owns `title` - it is where the gate's refusal
+                   reason is surfaced - so the explanation goes in the label
+                   rather than fighting it for the tooltip. */
+                disabled={ticketBusy || busy || confirming || !source}
+                onClick={() => void printOrderTicket()}
+              >
+                {ticketBusy ? "Sending..." : "Order ticket"}
+              </GatedButton>
               <GatedButton
                 gate={gate}
                 variant="ghost"

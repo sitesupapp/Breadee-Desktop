@@ -81,6 +81,17 @@ export type PosShellProps = {
   };
   cartDrawerOpen: boolean;
   onCartDrawerChange: (open: boolean) => void;
+  /**
+   * Which side the Current Order column sits on. Defaults to `right`.
+   *
+   * A SWAP OF TWO SIBLINGS AND NOTHING ELSE. The same `cart(layout)` node is
+   * rendered either way, so the panel, its state, its buttons and its gates are
+   * identical - there is no second Current Order, and nothing downstream can
+   * tell which side it is on. Below the fixed-cart threshold the cart is a
+   * drawer and this has no effect at all, which is correct: a drawer has no
+   * side to be on.
+   */
+  cartSide?: "left" | "right";
   onExit: () => void;
   onToggleFullscreen: () => void;
   /**
@@ -231,9 +242,17 @@ export function PosShell(props: PosShellProps) {
         {props.statusBar(layout)}
 
         <div className="flex min-h-0 flex-1">
+          {/* The order column, when it belongs on the left. Same node, same
+              props, same component instance shape - only the position differs. */}
+          {!layout.cartAsDrawer && props.cartSide === "left" && (
+            <aside style={{ width: layout.cartWidth ?? 360 }} className="min-h-0 shrink-0">
+              {props.cart(layout)}
+            </aside>
+          )}
+
           <main className="flex min-h-0 min-w-0 flex-1 flex-col p-3">{props.work(layout)}</main>
 
-          {!layout.cartAsDrawer && (
+          {!layout.cartAsDrawer && props.cartSide !== "left" && (
             <aside style={{ width: layout.cartWidth ?? 360 }} className="min-h-0 shrink-0">
               {props.cart(layout)}
             </aside>

@@ -57,16 +57,28 @@ export function kitchenBlockMessage(block: KitchenBlock): string {
 /**
  * A line as the POS holds it, in any of the three routes.
  *
- * `qty`, a name, modifiers and a note - and deliberately nothing else. The cart
- * line, the round buffer line and a re-read order item all carry prices too;
- * they are dropped HERE rather than at the native boundary so there is never a
- * moment where a priced object is what the ticket is made of.
+ * `qty`, a name, modifiers, a note - and its ROUTING IDENTITY. Deliberately
+ * nothing else. The cart line, the round buffer line and a re-read order item
+ * all carry prices too; they are dropped HERE rather than at the native boundary
+ * so there is never a moment where a priced object is what the ticket is made
+ * of.
+ *
+ * `menuItemId` and `categoryId` are the canonical ids station routing resolves
+ * against - see `lib/pos/itemRouting.ts`. They are IDENTITY, not content: they
+ * never reach the printer (`toKitchenTicketDoc` names every field it sends and
+ * neither is among them), and they carry no price, no availability and no
+ * recipe. Both are optional, and a line without them simply follows the branch's
+ * existing route - which is what every line did before station routing existed.
  */
 export type KitchenSourceLine = {
   name: string;
   qty: number;
   modifiers?: { name: string; quantity?: number }[];
   note?: string | null;
+  /** The canonical `menu_items.id`, when the caller knows it. */
+  menuItemId?: string | null;
+  /** The canonical `menu_categories.id`, when the caller knows it. */
+  categoryId?: string | null;
 };
 
 export type KitchenTicket = {
@@ -80,7 +92,15 @@ export type KitchenTicket = {
   batchLabel: string | null;
   customerName: string | null;
   orderNote: string | null;
-  lines: { name: string; qty: number; modifiers: { name: string; quantity: number }[]; note: string | null }[];
+  lines: {
+    name: string;
+    qty: number;
+    modifiers: { name: string; quantity: number }[];
+    note: string | null;
+    /** Routing identity. Carried, never printed - see `KitchenSourceLine`. */
+    menuItemId: string | null;
+    categoryId: string | null;
+  }[];
   test: boolean;
 };
 
@@ -149,6 +169,12 @@ export function buildKitchenTicket(input: {
         qty: l.qty,
         modifiers: (l.modifiers ?? []).map((m) => ({ name: m.name, quantity: m.quantity ?? 1 })),
         note: l.note?.trim() ? l.note.trim() : null,
+        // Carried through so station routing can resolve this line without the
+        // caller having to keep a parallel array aligned to it by index - and an
+        // index-aligned array is exactly what the `qty > 0` filter above would
+        // silently misalign.
+        menuItemId: l.menuItemId ?? null,
+        categoryId: l.categoryId ?? null,
       })),
     test: input.test ?? false,
   };
