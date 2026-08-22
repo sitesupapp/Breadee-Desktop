@@ -384,10 +384,7 @@ test("the grid palette exception is bounded - components only ever resolve it", 
   // would stop covering every button on screen.
   for (const rel of [
     "src/components/pos/grid/GridButtonTile.tsx",
-    // Renamed in the layout-V2 release: one grid renderer now serves Default,
-    // Categories and Customized, so the file this rule guards changed name
-    // while the rule itself is unchanged.
-    "src/components/pos/grid/PosLayoutGrid.tsx",
+    "src/components/pos/grid/CustomGrid.tsx",
     "src/components/pos/grid/GridDesigner.tsx",
     "src/components/pos/grid/AddButtonWizard.tsx",
     "src/screens/settings/CashierLayout.tsx",

@@ -15,24 +15,10 @@ import { PosShell, type PosRoute } from "@/layouts/PosShell";
 import { PosStatusBar } from "@/components/pos/PosStatusBar";
 import { CategoryNavigation } from "@/components/pos/CategoryNavigation";
 import { ALL_CATEGORIES, stepCategory } from "@/lib/pos/categories";
-import { PosLayoutGrid, GridEmptyState } from "@/components/pos/grid/PosLayoutGrid";
+import { MenuItemGrid } from "@/components/pos/MenuItemGrid";
+import { CustomGrid } from "@/components/pos/grid/CustomGrid";
 import { readLayout } from "@/lib/pos/grid/storage";
-import { isUsableLayout, type GridButton, type LayoutMode } from "@/lib/pos/grid/model";
-import {
-  UNCATEGORISED_ID,
-  resolveCategoryButtons,
-  resolveCategoryItems,
-  resolveDefaultButtons,
-  resolveUncategorised,
-} from "@/lib/pos/grid/presentation";
-import { readPosFeatures } from "@/lib/pos/posFeatures";
-import { resolveMenuPrice } from "@/lib/pos/menuPrice";
-import {
-  hasIngredients,
-  kitchenNoteFor,
-  minimumQuantity,
-  type ItemOptionsResult,
-} from "@/lib/pos/itemOptions";
+import { isUsableLayout } from "@/lib/pos/grid/model";
 import {
   autoPrintCollectionTicket,
   buildCollectionTicket,
@@ -260,35 +246,10 @@ function PosWorkspaceInner() {
   // leaving for Settings and coming back remounts this component and re-reads -
   // which is exactly the cadence a decision nobody makes during service needs.
   const gridLayout = useMemo(() => readLayout({ tenantId, branchId: pos.branch.id }), [tenantId, pos.branch.id]);
-  /** The three behaviour switches. Read once per mount, same cadence. */
-  const features = useMemo(() => readPosFeatures(), []);
-
-  /**
-   * Which presentation is actually rendered.
-   *
-   * A CUSTOMIZED layout that fails validation falls back to Default rather than
-   * drawing half a grid - that covers a layout written by an older build or by
-   * a hand-edited store, which a save-time check cannot. Default and Categories
-   * are always renderable: they are derived from the canonical menu.
-   */
-  const layoutMode: LayoutMode =
-    gridLayout.mode === "customized" && !isUsableLayout(gridLayout) ? "default" : gridLayout.mode;
+  const customLayoutActive = gridLayout.enabled && isUsableLayout(gridLayout);
 
   /** The canonical menu by id - what a custom button resolves its price from. */
   const itemsById = useMemo(() => new Map(indexed.map((i) => [i.id, i])), [indexed]);
-
-  /**
-   * Which category page the CATEGORIES layout is showing. `null` is the top.
-   *
-   * Held here rather than in the grid so Back and Main are ordinary state
-   * transitions and neither touches the cart - "Main" returns the cashier to the
-   * category list, it does not start a new order.
-   */
-  const [openCategoryId, setOpenCategoryId] = useState<string | null>(null);
-  const openCategory = useMemo(
-    () => (openCategoryId ? menu.categories.find((c) => c.id === openCategoryId) ?? null : null),
-    [openCategoryId, menu.categories],
-  );
 
   /** `menu_items.id` -> `menu_categories.id`, for station routing. */
   const categoryByItemId = useMemo(() => {
@@ -296,66 +257,6 @@ function PosWorkspaceInner() {
     for (const item of menu.items) map.set(item.id, item.category_id ?? null);
     return map;
   }, [menu.items]);
-
-  /**
-   * The buttons the grid renders, for whichever layout is active.
-   *
-   * ONE list, derived from the canonical menu plus this terminal's presentation
-   * overrides - never a stored copy of the menu. A category or item added in
-   * Menu Builder therefore appears here on the next open with no migration and
-   * no rebuild; see `lib/pos/grid/presentation.ts`.
-   *
-   * SEARCH OVERRIDES THE LAYOUT. Whatever the presentation, typing shows the
-   * matching items: "the customer wants something that is not on a key" must
-   * never be a dead end. Clearing the field returns to the layout.
-   */
-  const layoutButtons = useMemo((): GridButton[] => {
-    const searching = query.trim() !== "";
-    if (searching) {
-      return resolveDefaultButtons(visibleItems, gridLayout.presentation);
-    }
-    if (layoutMode === "customized") {
-      return openCategoryId
-        ? (gridLayout.buttons.find((b) => b.id === openCategoryId)?.children ?? [])
-        : gridLayout.buttons;
-    }
-    if (layoutMode === "categories") {
-      if (openCategoryId === UNCATEGORISED_ID) return resolveUncategorised(menu.items, gridLayout.presentation);
-      if (openCategoryId) return resolveCategoryItems(openCategoryId, menu.items, gridLayout.presentation);
-      const categories = resolveCategoryButtons(menu.categories, menu.items, gridLayout.presentation);
-      const loose = resolveUncategorised(menu.items, gridLayout.presentation);
-      // Items belonging to no category are still products the tenant sells, so
-      // they get a page rather than being unreachable.
-      return loose.length > 0
-        ? [
-            ...categories,
-            {
-              id: UNCATEGORISED_ID,
-              kind: "category" as const,
-              label: "Other",
-              menuItemId: null,
-              iconKey: null,
-              color: null,
-              row: 1,
-              col: 1,
-              width: 1 as const,
-              height: 1 as const,
-              children: loose,
-            },
-          ]
-        : categories;
-    }
-    return resolveDefaultButtons(menu.items, gridLayout.presentation);
-  }, [layoutMode, openCategoryId, gridLayout, menu.items, menu.categories, visibleItems, query]);
-
-  /** How many of a menu item are already on the order. Drawn on the key. */
-  const inOrderByItem = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const line of cart.lines) {
-      map.set(line.menu_item_id, (map.get(line.menu_item_id) ?? 0) + line.quantity);
-    }
-    return map;
-  }, [cart.lines]);
 
   const subtotal = useMemo(() => selectSubtotal(cart.lines), [cart.lines]);
   const itemCount = useMemo(() => selectItemCount(cart.lines), [cart.lines]);
@@ -785,7 +686,7 @@ function PosWorkspaceInner() {
     cartLines: cart.lines,
     cartSelectedKey: cart.selectedKey,
     onSelectLine: cart.select,
-    onAdjustLine: (key: string, delta: number) => cart.adjustQuantity(key, delta, minimumQuantity(features.fractionalQuantity)),
+    onAdjustLine: cart.adjustQuantity,
     onRemoveLine: (key) => removeLine(key),
     onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
@@ -821,7 +722,7 @@ function PosWorkspaceInner() {
     cartLines: cart.lines,
     cartSelectedKey: cart.selectedKey,
     onSelectLine: cart.select,
-    onAdjustLine: (key: string, delta: number) => cart.adjustQuantity(key, delta, minimumQuantity(features.fractionalQuantity)),
+    onAdjustLine: cart.adjustQuantity,
     onRemoveLine: (key) => removeLine(key),
     onEditNote: setNoteKey,
     onOpenShift: () => setOpenShiftOpen(true),
@@ -887,31 +788,21 @@ function PosWorkspaceInner() {
     return false;
   }, [addingToDelivery, delivery.cartOwner, addingToTable, dineIn.selected, toast]);
 
-  /**
-   * THE add-item path, for every layout and every route.
-   *
-   * The dialog opens when there is a QUESTION TO ASK - a required modifier
-   * group, an ingredient list this terminal may edit, or a portion to choose.
-   * With all three features off the condition is `groups.length > 0`, which is
-   * exactly what it was before this release: a plain item on a plain till still
-   * goes straight into the cart on one tap.
-   */
   const addItem = useCallback(
     (item: SearchableItem, price: number) => {
       const groups = groupsForItem(item.id, menu.groupsByItem, menu.groups);
-      const offersIngredients = features.ingredientCustomization && hasIngredients(item);
-      if (groups.length > 0 || offersIngredients || features.fractionalQuantity) {
+      if (groups.length > 0) {
         setPickerItem({ item, price, groups });
         return;
       }
       if (!claimBuffer()) return;
       cart.addLine({ menuItemId: item.id, name: item.name, basePrice: price });
     },
-    [cart, claimBuffer, features.fractionalQuantity, features.ingredientCustomization, menu.groupsByItem, menu.groups],
+    [cart, claimBuffer, menu.groupsByItem, menu.groups],
   );
 
   const confirmPicker = useCallback(
-    (input: ItemOptionsResult) => {
+    (input: { modifiers: SelectedModifier[]; quantity: number; note: string | null }) => {
       if (!pickerItem) return;
       if (!claimBuffer()) return;
       cart.addLine({
@@ -920,13 +811,7 @@ function PosWorkspaceInner() {
         basePrice: pickerItem.price,
         quantity: input.quantity,
         modifiers: input.modifiers,
-        // Removals lead the kitchen note so "NO TOMATO" cannot be pushed off the
-        // end of a thermal line by a longer free-text note - and they are ALSO
-        // carried structurally on the line, which is what reaches the order
-        // payload. The note is what a cook reads; the array is what the system
-        // stores.
-        note: kitchenNoteFor({ removed: input.removedIngredients, note: input.note }),
-        removedIngredients: input.removedIngredients,
+        note: input.note,
       });
       setPickerItem(null);
     },
@@ -1545,10 +1430,11 @@ function PosWorkspaceInner() {
         pendingSync={pending}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
-        /* Left or right, in EVERY layout. The order column is the same
-           component with the same state either way - the shell swaps two
-           siblings and nothing downstream can tell which side it is on. */
-        cartSide={gridLayout.orderPanel}
+        /* Left or right, in the customized layout only. The DEFAULT layout is
+           pinned to `right` regardless of what a stored layout says, so a
+           terminal that switches back to Default gets the production screen
+           exactly as it was - down to which side the order is on. */
+        cartSide={customLayoutActive ? gridLayout.orderPanel : "right"}
         cartTitle={deliveryActive ? "Customer" : dineInActive ? "Table bill" : "Current order"}
         /* Delivery passes NO summary, so the drawer-width bottom bar - Pay
            included - is not rendered at all. Level 3A has no order to settle,
@@ -1651,50 +1537,13 @@ function PosWorkspaceInner() {
                 )}
               </div>
 
-              {/* NAVIGATION, and exactly one kind of it.
-                  Default keeps the category strip it has always had. Categories
-                  and Customized navigate by their own keys, so a second row of
-                  categories above them would be two ways to mean one thing -
-                  they get Back / Main instead. */}
-              {layoutMode === "default" && query.trim() === "" && (
+              {/* The category strip belongs to the DEFAULT presentation. In the
+                  customized layout the operator's own category keys are the
+                  navigation, and a second row of categories above them would be
+                  two ways to mean one thing. */}
+              {!customLayoutActive && (
                 <div className="mb-3">
                   <CategoryNavigation categories={categories} counts={categoryCounts} selected={category} onSelect={setCategory} />
-                </div>
-              )}
-
-              {layoutMode !== "default" && query.trim() === "" && (
-                <div className="mb-2 flex shrink-0 items-center gap-2">
-                  {/* Both controls are always rendered. A cashier reads "Main"
-                      as "start the next selection", and a control that appears
-                      only sometimes is one they cannot rely on. NEITHER touches
-                      the cart: Main returns to the top page, it does not clear
-                      an order. */}
-                  <Button
-                    size="md"
-                    variant="ghost"
-                    disabled={openCategoryId === null}
-                    onClick={() => setOpenCategoryId(null)}
-                    title="Back one level"
-                  >
-                    <span aria-hidden>â†</span> Back
-                  </Button>
-                  <Button
-                    size="md"
-                    variant={openCategoryId === null ? "subtle" : "ghost"}
-                    onClick={() => setOpenCategoryId(null)}
-                    title="Back to the main buttons"
-                  >
-                    Main
-                  </Button>
-                  {openCategoryId && (
-                    <span className="truncate rounded-lg bg-brand-soft px-3 py-2 text-xs font-extrabold text-brand-dark">
-                      {openCategoryId === UNCATEGORISED_ID
-                        ? "Other"
-                        : layoutMode === "categories"
-                          ? (openCategory?.name ?? "Category")
-                          : (gridLayout.buttons.find((b) => b.id === openCategoryId)?.label ?? "Category")}
-                    </span>
-                  )}
                 </div>
               )}
 
@@ -1710,70 +1559,40 @@ function PosWorkspaceInner() {
                 <ErrorState title="The menu could not be loaded" message={menuError ?? ""} onRetry={() => void fetchMenu()} />
               )}
 
-              {/* ONE ENGINE, THREE PRESENTATIONS, ONE GRID.
-                  Default, Categories and Customized differ only in WHICH
-                  BUTTONS EXIST - `layoutButtons` above. They render through the
-                  same component, the same button and the same sizing engine, and
-                  every one of them calls the SAME `addItem` with the SAME
-                  canonical item and the SAME resolved price. Everything
-                  downstream - cart, modifiers, notes, discounts, payment,
-                  kitchen routing, stock, reporting - is identical, and nothing
-                  below this point knows which layout was used. */}
-              {menuState === "ready" && (
-                <PosLayoutGrid
-                  buttons={layoutButtons}
-                  currency={currency}
-                  autoFit={gridLayout.autoFit}
-                  columns={gridLayout.columns}
-                  rows={gridLayout.rows}
-                  /* Only the customized grid carries explicit row/col; the
-                     canonical layouts flow in reading order. */
-                  placed={layoutMode === "customized" && query.trim() === ""}
-                  priceFor={(button) => {
-                    if (!button.menuItemId) return null;
-                    const item = itemsById.get(button.menuItemId);
-                    return item ? resolveMenuPrice(item, item.price, currency, rate).amount : null;
-                  }}
-                  unavailableFor={(button) => {
-                    if (button.kind === "category" || !button.menuItemId) return null;
-                    const item = itemsById.get(button.menuItemId);
-                    if (!item) return "This item is not on the menu right now, so it cannot be ordered.";
-                    return resolveMenuPrice(item, item.price, currency, rate).amount === null
-                      ? "This item has no price in the current currency."
-                      : null;
-                  }}
-                  needsChoiceFor={(button) => (button.menuItemId ? itemsNeedingChoice.has(button.menuItemId) : false)}
-                  hasOptionsFor={(button) => {
-                    if (!button.menuItemId) return false;
-                    if (features.fractionalQuantity) return true;
-                    const item = itemsById.get(button.menuItemId);
-                    return Boolean(features.ingredientCustomization && item && hasIngredients(item));
-                  }}
-                  inOrderQuantityFor={(button) =>
-                    button.menuItemId ? (inOrderByItem.get(button.menuItemId) ?? null) : null
-                  }
-                  onPick={(button) => {
-                    if (button.kind === "category") {
-                      setOpenCategoryId(button.id);
-                      return;
-                    }
-                    if (!button.menuItemId) return;
-                    const item = itemsById.get(button.menuItemId);
-                    if (!item) return;
-                    addItem(item, resolveMenuPrice(item, item.price, currency, rate).amount ?? 0);
-                  }}
-                  empty={
-                    query.trim() !== "" ? (
-                      <GridEmptyState title="No items match" hint="Try a different search, or clear the field." />
-                    ) : (
-                      <GridEmptyState
-                        title="Nothing to show here yet"
-                        hint="Add items in Menu Builder, or change this till's layout in Settings â†’ Cashier Layout."
-                      />
-                    )
-                  }
-                />
-              )}
+              {/* ONE ENGINE, TWO PRESENTATIONS.
+                  Both branches call the SAME `addItem` with the SAME canonical
+                  item and the SAME resolved price, so everything downstream -
+                  the cart, modifiers, notes, discounts, payment, kitchen
+                  routing, stock and reporting - is identical whichever is on
+                  screen. Nothing below this point knows which one was used.
+
+                  SEARCH STAYS LIVE IN BOTH. When a cashier types, the customized
+                  grid gives way to the searchable menu, because "the customer
+                  wants something that is not on a key" must never be a dead end.
+                  With the field empty the custom grid is back, and it does not
+                  scroll. */}
+              {menuState === "ready" &&
+                (customLayoutActive && query.trim() === "" ? (
+                  <CustomGrid
+                    layout={gridLayout}
+                    itemsById={itemsById}
+                    currency={currency}
+                    rate={rate}
+                    itemsNeedingChoice={itemsNeedingChoice}
+                    onPick={addItem}
+                  />
+                ) : visibleItems.length === 0 ? (
+                  <EmptyState title="No items match" hint="Try a different category, or clear the search." />
+                ) : (
+                  <MenuItemGrid
+                    items={visibleItems}
+                    columns={layout.menuColumns}
+                    currency={currency}
+                    rate={rate}
+                    itemsNeedingChoice={itemsNeedingChoice}
+                    onPick={addItem}
+                  />
+                ))}
             </>
             )}
           </div>
@@ -1837,7 +1656,6 @@ function PosWorkspaceInner() {
                 lines={cart.lines}
                 selectedKey={cart.selectedKey}
                 currency={currency}
-                fractionalQuantity={features.fractionalQuantity}
                 subtotal={subtotal}
                 shiftOpen={Boolean(shiftId)}
                 busy={busy}
@@ -1845,9 +1663,7 @@ function PosWorkspaceInner() {
                 createGate={createGate}
                 payGate={payGate}
                 onSelect={cart.select}
-                /* The floor travels with the delta: a portion till may go down
-                   to a quarter, a whole-unit till still stops at 1. */
-                onAdjust={(key, delta) => cart.adjustQuantity(key, delta, minimumQuantity(features.fractionalQuantity))}
+                onAdjust={cart.adjustQuantity}
                 onRemove={removeLine}
                 onEditNote={setNoteKey}
                 onSendToKitchen={() => void sendToKitchen()}
@@ -1988,8 +1804,6 @@ function PosWorkspaceInner() {
         </div>
       </Modal>
 
-      {/* ONE popup for modifiers, ingredients and portion. Two consecutive
-          modals for one tap is the thing this avoids. */}
       <ModifierDialog
         open={Boolean(pickerItem)}
         item={pickerItem?.item ?? null}
@@ -1998,8 +1812,6 @@ function PosWorkspaceInner() {
         optionsByGroup={optionsByGroup}
         currency={currency}
         rate={rate}
-        ingredientCustomization={features.ingredientCustomization}
-        fractionalQuantity={features.fractionalQuantity}
         onCancel={() => setPickerItem(null)}
         onConfirm={confirmPicker}
       />
