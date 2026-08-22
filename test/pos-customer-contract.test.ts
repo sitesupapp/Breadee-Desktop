@@ -183,7 +183,9 @@ test("customer writes are never queued offline", () => {
 // be a second place for someone else's food to end up.
 test("the delivery workspace re-implements neither the menu nor the cart", () => {
   const code = stripComments(workspaceSrc);
-  for (const token of ["MenuItemGrid", "CategoryNavigation", "ModifierDialog", "loadMenu"]) {
+  // `MenuItemGrid` became `PosLayoutGrid` in layout V2 - one renderer for every
+  // layout. The rule is unchanged: Delivery must not declare a grid of its own.
+  for (const token of ["PosLayoutGrid", "CategoryNavigation", "ModifierDialog", "loadMenu"]) {
     assert.equal(code.includes(token), false, `${token} must not be re-implemented for Delivery`);
   }
   // It imports the shared panel rather than declaring one.

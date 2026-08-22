@@ -7,12 +7,14 @@
 import { Button, cn } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { lineTotals } from "@/lib/pos/modifiers";
+import { FRACTION_STEP, formatQuantity, minimumQuantity, removalLabel } from "@/lib/pos/itemOptions";
 import type { CartLine } from "@/types/pos";
 
 export function CartLineRow({
   line,
   selected,
   currency,
+  fractionalQuantity = false,
   onSelect,
   onAdjust,
   onRemove,
@@ -21,12 +23,16 @@ export function CartLineRow({
   line: CartLine;
   selected: boolean;
   currency: CurrencyCode;
+  /** Whether portions are enabled on this terminal. Decides the -/+ floor. */
+  fractionalQuantity?: boolean;
   onSelect: () => void;
   onAdjust: (delta: number) => void;
   onRemove: () => void;
   onEditNote: () => void;
 }) {
   const { finalUnitPrice, lineTotal } = lineTotals(line.base_price, line.modifiers, line.quantity);
+  /** A quarter when portions are on, a whole unit when they are not. */
+  const step = fractionalQuantity ? FRACTION_STEP : 1;
 
   return (
     <li
@@ -49,6 +55,14 @@ export function CartLineRow({
               ))}
             </ul>
           )}
+          {/* Removed ingredients, called out in their own colour. They change
+              what the kitchen makes, so they must not read as an afterthought
+              below a longer free-text note. */}
+          {(line.removed_ingredients?.length ?? 0) > 0 && (
+            <p className="mt-1 text-xs font-bold text-red-700">
+              {(line.removed_ingredients ?? []).map(removalLabel).join(" · ")}
+            </p>
+          )}
           {line.kitchen_note && <p className="mt-1 truncate text-xs italic text-amber-700">Note: {line.kitchen_note}</p>}
           <p className="mt-1 text-xs text-sub">{formatMoney(finalUnitPrice, currency)} each</p>
         </div>
@@ -62,20 +76,26 @@ export function CartLineRow({
             aria-label={`Decrease ${line.name}`}
             onClick={(e) => {
               e.stopPropagation();
-              onAdjust(-1);
+              onAdjust(-step);
             }}
-            disabled={line.quantity <= 1}
+            /* The floor is the MODE's, not a literal 1: a quarter when
+               fractional quantity is on, one when it is off - so a till with
+               the feature disabled stops exactly where it does today. */
+            disabled={line.quantity <= minimumQuantity(fractionalQuantity)}
             className="flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-white text-lg font-bold text-ink disabled:opacity-40"
           >
             -
           </button>
-          <span className="w-10 text-center text-base font-extrabold tabular-nums">{line.quantity}</span>
+          {/* Formatted: `2`, not `2.00`; `0.5`, not `0.5000000000000001`. */}
+          <span className="w-12 text-center text-base font-extrabold tabular-nums">
+            {formatQuantity(line.quantity)}
+          </span>
           <button
             type="button"
             aria-label={`Increase ${line.name}`}
             onClick={(e) => {
               e.stopPropagation();
-              onAdjust(1);
+              onAdjust(step);
             }}
             className="flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-white text-lg font-bold text-ink"
           >

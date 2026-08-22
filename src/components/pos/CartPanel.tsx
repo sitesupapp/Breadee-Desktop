@@ -81,6 +81,8 @@ export type CartPanelProps = {
   discount?: number;
   /** Label for the destructive action, which differs by route. */
   clearLabel?: string;
+  /** Portions enabled on this terminal - decides the -/+ step and floor. */
+  fractionalQuantity?: boolean;
 };
 
 export function CartPanel(props: CartPanelProps) {
@@ -122,6 +124,7 @@ export function CartPanel(props: CartPanelProps) {
                 line={line}
                 selected={line.key === props.selectedKey}
                 currency={props.currency}
+                fractionalQuantity={props.fractionalQuantity}
                 onSelect={() => props.onSelect(line.key)}
                 onAdjust={(delta) => props.onAdjust(line.key, delta)}
                 onRemove={() => props.onRemove(line.key)}

@@ -39,6 +39,7 @@ import {
 } from "@/lib/nativePrinting";
 import { canPrintReceipts, type PosAccessContext } from "@/lib/pos/access";
 import { autoPrintLatch } from "@/lib/pos/autoPrint";
+import { formatQuantity } from "@/lib/pos/itemOptions";
 import { loadServerPrinters } from "@/lib/pos/printerRegistry";
 import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
@@ -255,7 +256,12 @@ export function toCollectionReport(ticket: CollectionTicket): ReportDoc {
   for (const line of ticket.lines) {
     // The quantity is the VALUE column, so a column of quantities lines up down
     // the right-hand edge and a customer can count their order at a glance.
-    lines.push({ label: line.name, value: `x${line.qty}`, kind: "body" });
+    //
+    // FORMATTED, never raw: a whole number reads `x2` and a portion reads
+    // `x0.5`. Printing the raw value would show `x0.7500000000000001` after a
+    // few taps, and rounding it would tell the customer they are getting a
+    // whole pizza.
+    lines.push({ label: line.name, value: `x${formatQuantity(line.qty)}`, kind: "body" });
     for (const modifier of line.modifiers) lines.push({ label: `  + ${modifier}`, kind: "body" });
     if (line.note) lines.push({ label: `  ${line.note}`, kind: "body" });
   }
