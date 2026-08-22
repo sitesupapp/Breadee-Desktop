@@ -30,10 +30,7 @@ const OPERATIONAL_SOURCES = [
   "components/pos/CartPanel.tsx",
   "components/pos/CartLineRow.tsx",
   "components/pos/CategoryNavigation.tsx",
-  // The one grid every layout renders through, since layout V2 replaced the
-  // per-layout grids. Same rule, current file.
-  "components/pos/grid/PosLayoutGrid.tsx",
-  "components/pos/grid/GridButtonTile.tsx",
+  "components/pos/MenuItemGrid.tsx",
   "components/pos/ModifierDialog.tsx",
   "components/pos/PaymentDialog.tsx",
   "components/pos/ShiftDialog.tsx",

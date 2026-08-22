@@ -47,7 +47,6 @@ import {
   type CollectionTicketSettings,
 } from "@/lib/pos/collectionTicket";
 import { MAX_COPIES, MIN_COPIES } from "@/lib/nativePrinting";
-import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 
 const ROLE_LABEL: Record<ServerPrinter["printer_type"], string> = {
   cashier: "Cashier",
@@ -145,19 +144,6 @@ export function PosSettings() {
 
   const togglePrinter = useCallback((printer: ServerPrinter, next: boolean) => {
     setOverrides(writePrinterAutoPrint(printer.id, next));
-  }, []);
-
-  // --- POS behaviour switches (this terminal) ---------------------------------
-  //
-  // Three INDEPENDENT switches. Auto-fit is about the screen, ingredient
-  // customization is about what a kitchen is told, and fractional quantity is
-  // about what a customer is charged - a pizzeria wants halves and no ingredient
-  // popup, a burger bar wants the opposite. See `lib/pos/posFeatures.ts` for why
-  // their defaults are not symmetrical.
-  const [features, setFeatures] = useState<PosFeatures>(() => readPosFeatures());
-
-  const setFeature = useCallback((key: keyof PosFeatures, next: boolean) => {
-    setFeatures((current) => writePosFeatures({ ...current, [key]: next }));
   }, []);
 
   // --- collection ticket (this terminal) --------------------------------------
@@ -457,41 +443,6 @@ export function PosSettings() {
             ))}
           </div>
         )}
-      </Card>
-
-      {/* --- cashier behaviour (this terminal) ---------------------------- */}
-      <Card className="p-6">
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div>
-            <p className="text-sm font-extrabold text-ink">Cashier screen</p>
-            <p className="mt-0.5 text-xs text-sub">
-              How the ordering screen behaves on <strong className="text-ink">this terminal</strong>. Which layout it
-              uses is set under Settings → Cashier Layout.
-            </p>
-          </div>
-          <Badge tone="slate">This terminal</Badge>
-        </div>
-
-        <div className="mt-2 divide-y divide-line">
-          <Switch
-            checked={features.autoFit}
-            onChange={(next) => setFeature("autoFit", next)}
-            label="Auto-fit POS layout to screen"
-            hint="Sizes the grid and its buttons to fill the space available, so ordering never needs scrolling. With this off, your chosen number of columns and rows is used exactly as saved."
-          />
-          <Switch
-            checked={features.ingredientCustomization}
-            onChange={(next) => setFeature("ingredientCustomization", next)}
-            label="Ingredient customization"
-            hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Tomato”. It changes only that line: the menu item, its recipe and its cost are untouched."
-          />
-          <Switch
-            checked={features.fractionalQuantity}
-            onChange={(next) => setFeature("fractionalQuantity", next)}
-            label="Fractional quantity"
-            hint="Lets an order line be a portion — 1/4 · 1/2 · 3/4 · Full — for mixed pizzas and the like. The price is worked out pro rata from the item's own selling price."
-          />
-        </div>
       </Card>
 
       {/* --- collection ticket (this terminal) ---------------------------- */}

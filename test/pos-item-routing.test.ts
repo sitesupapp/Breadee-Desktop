@@ -356,8 +356,7 @@ test("the custom grid holds no routing of its own", () => {
   for (const rel of [
     "src/lib/pos/grid/model.ts",
     "src/lib/pos/grid/storage.ts",
-    "src/components/pos/grid/PosLayoutGrid.tsx",
-    "src/lib/pos/grid/presentation.ts",
+    "src/components/pos/grid/CustomGrid.tsx",
     "src/components/pos/grid/AddButtonWizard.tsx",
   ]) {
     const source = stripJsxComments(read(rel));

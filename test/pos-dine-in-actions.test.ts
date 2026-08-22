@@ -187,15 +187,11 @@ test("the table map owns the work area unless Add Items borrowed the menu", () =
   const source = read("screens", "pos", "PosWorkspace.tsx");
   const workProp = source.indexOf("work={(layout) =>");
   const dineInWork = source.indexOf("dineIn.work(layout)");
-  // RETARGETED for layout V2: `MenuItemGrid` became `PosLayoutGrid`, the one
-  // renderer Default, Categories and Customized all share. The property is
-  // unchanged and is now stronger - there is one grid for the whole POS rather
-  // than one per layout.
-  const menuGrid = source.indexOf("<PosLayoutGrid");
+  const menuGrid = source.indexOf("<MenuItemGrid");
   assert.ok(dineInWork > workProp, "the table map is not inside the work prop");
   assert.ok(menuGrid > dineInWork, "the menu grid is reached before the dine-in branch");
-  // The menu is shared rather than duplicated: exactly one grid exists.
-  assert.equal(source.split("<PosLayoutGrid").length - 1, 1, "a second menu implementation appeared");
+  // The menu is shared rather than duplicated: exactly one MenuItemGrid exists.
+  assert.equal(source.split("<MenuItemGrid").length - 1, 1, "a second menu implementation appeared");
   assert.match(source, /dineIn\.view === "map"/, "the work area no longer branches on the dine-in view");
 });
 
