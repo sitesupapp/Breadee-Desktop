@@ -88,34 +88,91 @@ export const ORDER_PANEL_SIDES = ["left", "right"] as const;
 export type OrderPanelSide = (typeof ORDER_PANEL_SIDES)[number];
 
 /**
- * The whole customized-layout decision for one terminal.
+ * WHICH PRESENTATION THE TILL USES. Three strategies over ONE POS engine.
  *
- * `enabled: false` is the ONLY safe default and is what every existing
- * installation gets: with it off, the workspace renders exactly the production
- * POS it rendered before this feature existed. Nothing about the layout below is
- * consulted while it is off.
+ *   default     every available menu item, in the canonical order
+ *   categories  the tenant's own menu categories, opening to their items
+ *   customized  a hand-built grid of keys
+ *
+ * They differ in WHICH BUTTONS EXIST and nothing else. All three share the cart,
+ * the order, the routes, tables, customers, modifiers, discounts, payment,
+ * printing, persistence and reporting - and all three render through the same
+ * grid, the same button component and the same sizing engine.
+ */
+export const LAYOUT_MODES = ["default", "categories", "customized"] as const;
+export type LayoutMode = (typeof LAYOUT_MODES)[number];
+
+export function isLayoutMode(value: unknown): value is LayoutMode {
+  return typeof value === "string" && (LAYOUT_MODES as readonly string[]).includes(value);
+}
+
+/**
+ * The whole cashier-layout decision for one terminal.
+ *
+ * `mode: "default"` is the ONLY safe default and is what every existing
+ * installation resolves to: the workspace renders the production POS it rendered
+ * before, and no `buttons` entry is consulted.
+ *
+ * MIGRATED FROM `enabled: boolean`, WHICH 1.0.6 SHIPPED. A stored layout with
+ * `enabled: true` becomes `customized` and one with `enabled: false` becomes
+ * `default`, so a terminal that built a custom grid keeps it - see
+ * `storage.ts::parseLayout`. The old key is still WRITTEN alongside the new one
+ * so a downgrade to 1.0.6 still reads the layout correctly; that is cheap here
+ * and it is the difference between a rollback being possible and not.
  */
 export type PosGridLayout = {
   version: typeof GRID_SCHEMA_VERSION;
-  enabled: boolean;
+  mode: LayoutMode;
   orderPanel: OrderPanelSide;
+  /**
+   * Let the sizing engine choose the grid, rather than the stored columns/rows.
+   *
+   * ON for anything new. An installation that has already SAVED a layout keeps
+   * whatever it saved - see `parseLayout`, which only defaults this when the
+   * stored blob does not mention it at all.
+   */
+  autoFit: boolean;
   columns: number;
   rows: number;
   buttons: GridButton[];
+  /**
+   * Presentation overrides for the two CANONICAL layouts.
+   *
+   * Keyed by canonical `menu_categories.id` / `menu_items.id`. Holds only what
+   * the cashier changed - order, colour, icon, label, hidden - never a copy of
+   * the menu itself. See `presentation.ts` for why that direction matters.
+   */
+  presentation: PresentationMap;
 };
+
+/** What a cashier changed about ONE canonical category or item's button. */
+export type PresentationOverride = {
+  /** Removed from THIS till's layout. The canonical record is untouched. */
+  hidden?: boolean;
+  /** Sort position within its page. Absent = canonical order. */
+  sort?: number;
+  color?: GridColorRef;
+  iconKey?: string | null;
+  /** A display label for the till. Absent = the canonical name. */
+  label?: string;
+};
+
+export type PresentationMap = Record<string, PresentationOverride>;
 
 export const DEFAULT_COLUMNS = 5;
 export const DEFAULT_ROWS = 4;
 
-/** A brand-new, switched-off layout. The safe default for any installation. */
+/** A brand-new layout: the Default presentation, auto-fitted. */
 export function emptyLayout(): PosGridLayout {
   return {
     version: GRID_SCHEMA_VERSION,
-    enabled: false,
+    mode: "default",
     orderPanel: "right",
+    autoFit: true,
     columns: DEFAULT_COLUMNS,
     rows: DEFAULT_ROWS,
     buttons: [],
+    presentation: {},
   };
 }
 

@@ -36,11 +36,14 @@ import {
   MIN_COLUMNS,
   MIN_ROWS,
   emptyLayout,
+  isLayoutMode,
   type GridButton,
   type GridButtonKind,
   type GridColorRef,
   type OrderPanelSide,
   type PosGridLayout,
+  type PresentationMap,
+  type PresentationOverride,
 } from "@/lib/pos/grid/model";
 
 /** The namespace prefix. Shares the family, never the key, with the others. */
@@ -113,6 +116,32 @@ function parseButton(value: unknown, depth: number): GridButton | null {
   };
 }
 
+/** One presentation override, made safe. Unknown fields are dropped. */
+function parseOverride(value: unknown): PresentationOverride | null {
+  const r = asRecord(value);
+  const out: PresentationOverride = {};
+  if (r.hidden === true) out.hidden = true;
+  if (typeof r.sort === "number" && Number.isFinite(r.sort)) out.sort = Math.trunc(r.sort);
+  const color = parseColor(r.color);
+  if (color) out.color = color;
+  if (typeof r.iconKey === "string" && r.iconKey !== "") out.iconKey = r.iconKey;
+  if (typeof r.label === "string" && r.label.trim() !== "") out.label = r.label;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function parsePresentation(value: unknown): PresentationMap {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: PresentationMap = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    // Keys are `category:<uuid>` / `item:<uuid>`. Anything else is not
+    // something this build wrote and is not something it can resolve.
+    if (!/^(category|item):.+/.test(key)) continue;
+    const parsed = parseOverride(entry);
+    if (parsed) out[key] = parsed;
+  }
+  return out;
+}
+
 /**
  * Turn whatever is in storage into a layout.
  *
@@ -121,6 +150,21 @@ function parseButton(value: unknown, depth: number): GridButton | null {
  * deeper page or a placement rule this one cannot honour, and rendering half of
  * it would put a cashier in front of a grid with items missing from it. Falling
  * back is visible and recoverable; a partial grid is neither.
+ *
+ * THE 1.0.6 MIGRATION LIVES HERE, and it is the reason this release cannot just
+ * rename a field. 1.0.6 stored `enabled: boolean`; this build stores `mode`. A
+ * terminal that built a custom grid has `enabled: true` and no `mode`, and it
+ * must come back as `customized` - losing it would mean a manager rebuilding
+ * their whole till after an automatic update. So:
+ *
+ *   `mode` present and valid  ->  use it (written by this build or newer)
+ *   otherwise `enabled === true` -> customized
+ *   otherwise                 ->  default
+ *
+ * The version is NOT bumped for this, deliberately: the shape is a strict
+ * superset, every 1.0.6 field is still read, and bumping it would make 1.0.6
+ * reject a layout it can in fact understand - turning a downgrade into a
+ * silently blank grid.
  */
 export function parseLayout(raw: unknown): PosGridLayout {
   if (typeof raw !== "string" || raw.trim() === "") return emptyLayout();
@@ -139,11 +183,15 @@ export function parseLayout(raw: unknown): PosGridLayout {
 
   return {
     version: GRID_SCHEMA_VERSION,
-    enabled: r.enabled === true,
+    mode: isLayoutMode(r.mode) ? r.mode : r.enabled === true ? "customized" : "default",
     orderPanel: (r.orderPanel === "left" ? "left" : "right") as OrderPanelSide,
+    // Only defaulted when the key is ABSENT. A terminal that deliberately
+    // switched auto-fit off keeps it off through every future upgrade.
+    autoFit: typeof r.autoFit === "boolean" ? r.autoFit : true,
     columns: clampInt(r.columns, MIN_COLUMNS, MAX_COLUMNS, DEFAULT_COLUMNS),
     rows: clampInt(r.rows, MIN_ROWS, MAX_ROWS, DEFAULT_ROWS),
     buttons,
+    presentation: parsePresentation(r.presentation),
   };
 }
 
@@ -178,7 +226,17 @@ export function writeLayout(scope: GridScope, layout: PosGridLayout, storage?: W
   const store = storage ?? (typeof localStorage === "undefined" ? null : localStorage);
   if (!store) return { ok: false, error: "This terminal has no local storage, so the layout cannot be saved." };
   try {
-    store.setItem(gridStorageKey(scope), JSON.stringify({ ...layout, version: GRID_SCHEMA_VERSION }));
+    store.setItem(
+      gridStorageKey(scope),
+      JSON.stringify({
+        ...layout,
+        version: GRID_SCHEMA_VERSION,
+        // The 1.0.6 field, still written. It costs one boolean and it is the
+        // difference between rolling back to 1.0.6 and a manager finding their
+        // custom grid gone. Derived from `mode`, never edited independently.
+        enabled: layout.mode === "customized",
+      }),
+    );
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "The layout could not be saved on this terminal." };

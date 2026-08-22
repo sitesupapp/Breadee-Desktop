@@ -1,14 +1,22 @@
-// One key on the customized cashier grid.
+// THE POS BUTTON. One component, every cashier layout.
 //
-// ONE COMPONENT, TWO CALLERS - the live grid and the designer - for the same
-// reason `MenuCard` is shared with the Icons Gallery: a preview drawn by a
-// second component is a preview of a button that does not exist, and the whole
-// promise of a layout designer is "this is what your till will look like".
+// Default, Categories and Customized all render this, and so does the layout
+// designer's preview - so what a manager approves in Settings is the button, not
+// a drawing of it, and the three layouts cannot drift into three looks.
+//
+// THE INTERNAL LAYOUT IS DELIBERATE, AND IT IS THE THING THAT CHANGED.
+//
+// The previous version stacked the name at the top and the price at the bottom
+// with `justify-between`. On a tall key that puts two or three centimetres of
+// nothing between the two pieces of information a cashier actually reads, and
+// the eye has to travel the whole button to price one item. The content is now
+// ONE CENTRED BLOCK: name, then price immediately beneath it, with the icon
+// inline. Whatever space is left over becomes even margin around the block
+// instead of a gap through the middle of it.
 //
 // THE PRICE IS PASSED IN, NEVER STORED. It arrives resolved from the canonical
 // menu item on every render, so a price changed in Menu Builder is on this
-// button the next time the POS opens - with nothing to sync and nothing that can
-// go stale. There is no price prop on the layout model at all.
+// button the next time the POS opens - nothing to sync, nothing to go stale.
 //
 // COLOUR IS EXPLICIT, INK IS COMPUTED - see `lib/pos/grid/colors.ts`. An
 // uncoloured button uses theme classes and follows the terminal's theme exactly;
@@ -19,8 +27,8 @@ import { PosIconGlyph } from "@/components/PosIconGlyph";
 import { cn } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { resolveColor, SECONDARY_INK_OPACITY } from "@/lib/pos/grid/colors";
-import type { GridMetrics } from "@/lib/pos/grid/fit";
-import { spanSize } from "@/lib/pos/grid/fit";
+import { spanSize, type GridMetrics } from "@/lib/pos/grid/fit";
+import { formatQuantity } from "@/lib/pos/itemOptions";
 import type { GridButton } from "@/lib/pos/grid/model";
 
 export type GridButtonTileProps = {
@@ -33,7 +41,13 @@ export type GridButtonTileProps = {
   unavailableReason?: string | null;
   /** True for a required-choice item, so the cashier knows a dialog is coming. */
   needsChoice?: boolean;
+  /** True when tapping opens the ingredient / portion options popup. */
+  hasOptions?: boolean;
   selected?: boolean;
+  /** How many of this item are already on the order. Null hides the badge. */
+  inOrderQuantity?: number | null;
+  /** Explicit placement, for the customized grid. Omitted = flow order. */
+  placed?: boolean;
   onClick?: () => void;
   onContextMenu?: (event: React.MouseEvent) => void;
 };
@@ -45,7 +59,10 @@ export function GridButtonTile({
   currency,
   unavailableReason = null,
   needsChoice = false,
+  hasOptions = false,
   selected = false,
+  inOrderQuantity = null,
+  placed = true,
   onClick,
   onContextMenu,
 }: GridButtonTileProps) {
@@ -53,6 +70,14 @@ export function GridButtonTile({
   const size = spanSize(metrics, button.width, button.height);
   const isCategory = button.kind === "category";
   const disabled = Boolean(unavailableReason);
+
+  // The secondary line: what a category opens, or what an item costs. Exactly
+  // one line either way, so every key in a grid has the same silhouette.
+  const secondary = isCategory
+    ? `${button.children.length > 0 ? `${button.children.length} items` : "Open"}`
+    : price === null
+      ? "No price"
+      : formatMoney(price, currency);
 
   return (
     <button
@@ -63,10 +88,14 @@ export function GridButtonTile({
       title={unavailableReason ?? button.label}
       aria-label={button.label}
       style={{
-        // Placed by the grid parent; the size is stated so a 2-wide button
-        // spans two cells PLUS the gap between them rather than two cell widths.
-        gridColumn: `${button.col} / span ${button.width}`,
-        gridRow: `${button.row} / span ${button.height}`,
+        ...(placed
+          ? {
+              // Placed by the grid parent; the size is stated so a 2-wide button
+              // spans two cells PLUS the gap between them, not two cell widths.
+              gridColumn: `${button.col} / span ${button.width}`,
+              gridRow: `${button.row} / span ${button.height}`,
+            }
+          : {}),
         width: size.width,
         height: size.height,
         borderRadius: metrics.radiusPx,
@@ -75,7 +104,7 @@ export function GridButtonTile({
         borderWidth: selected ? 3 : 1,
       }}
       className={cn(
-        "flex min-w-0 flex-col items-start justify-between overflow-hidden text-left transition",
+        "relative flex min-w-0 flex-col items-center justify-center overflow-hidden text-center transition",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50",
         // The uncoloured default is FULLY THEMED - the same tokens every other
         // surface in the app uses, so it follows Light, Dark and every brand.
@@ -85,48 +114,64 @@ export function GridButtonTile({
         disabled && "cursor-not-allowed opacity-45",
       )}
     >
-      <span className="flex w-full min-w-0 items-start gap-1.5">
+      {/* Corner marks. Absolutely positioned so they annotate the key without
+          taking a row from the content block and re-introducing dead space. */}
+      {inOrderQuantity !== null && inOrderQuantity > 0 && (
+        <span
+          style={{ fontSize: Math.max(9, metrics.priceFontPx - 3) }}
+          className={cn(
+            "absolute left-1 top-1 rounded-md px-1 font-extrabold tabular-nums",
+            fill ? "bg-black/15" : "bg-brand text-onbrand",
+          )}
+        >
+          {formatQuantity(inOrderQuantity)}
+        </span>
+      )}
+      {isCategory && (
+        <span
+          aria-hidden
+          style={{ fontSize: Math.max(10, metrics.priceFontPx) }}
+          className="absolute right-1.5 top-1 font-bold"
+          // A category needs to read as "this opens something" at a glance, so
+          // it carries a chevron as well as a different secondary line.
+        >
+          ›
+        </span>
+      )}
+
+      {/* ONE CENTRED BLOCK: icon, name, price. Nothing is pinned to an edge, so
+          leftover height becomes margin around the group rather than a gap
+          through the middle of it. */}
+      <span className="flex min-w-0 max-w-full flex-col items-center justify-center gap-0.5">
         {button.iconKey && (
-          <span className="shrink-0 opacity-90">
+          <span className="opacity-90">
             <PosIconGlyph iconKey={button.iconKey} size={metrics.iconPx} />
           </span>
         )}
         <span
           style={{ fontSize: metrics.labelFontPx, lineHeight: 1.15 }}
-          className="min-w-0 flex-1 break-words font-bold"
+          className="line-clamp-2 w-full break-words font-bold"
         >
           {button.label}
         </span>
-      </span>
-
-      <span className="flex w-full items-baseline justify-between gap-1">
         <span
           style={{ fontSize: metrics.priceFontPx, opacity: SECONDARY_INK_OPACITY }}
-          className="truncate font-extrabold tabular-nums"
+          className="w-full truncate font-extrabold tabular-nums"
         >
-          {/* A category is navigation and has no price of its own. Showing a
-              total, or a zero, would be inventing a figure the business does
-              not have. */}
-          {isCategory
-            ? `${button.children.length} item${button.children.length === 1 ? "" : "s"}`
-            : price === null
-              ? "No price"
-              : formatMoney(price, currency)}
+          {secondary}
         </span>
-        {needsChoice && !isCategory && (
-          <span
-            style={{ fontSize: Math.max(9, metrics.priceFontPx - 3), opacity: SECONDARY_INK_OPACITY }}
-            className="shrink-0 font-bold"
-          >
-            Options
-          </span>
-        )}
-        {isCategory && (
-          <span style={{ fontSize: Math.max(9, metrics.priceFontPx - 2), opacity: SECONDARY_INK_OPACITY }} className="shrink-0">
-            ›
-          </span>
-        )}
       </span>
+
+      {/* A single quiet marker when tapping will ask a question. Bottom-anchored
+          and tiny: it is a hint, not a second label. */}
+      {!isCategory && (needsChoice || hasOptions) && (
+        <span
+          style={{ fontSize: Math.max(8, metrics.priceFontPx - 4), opacity: SECONDARY_INK_OPACITY }}
+          className="absolute bottom-1 font-bold uppercase tracking-wide"
+        >
+          {needsChoice ? "Options" : "Custom"}
+        </span>
+      )}
     </button>
   );
 }

@@ -374,32 +374,48 @@ export function ItemRouting() {
                     </div>
 
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {printers.map((entry) => {
-                        const checked = draft.printerIds.includes(entry.printer.id);
-                        return (
-                          <button
-                            key={entry.printer.id}
-                            type="button"
-                            disabled={!gate.allowed || busy}
-                            onClick={() => toggle(source, entry.printer.id)}
-                            title={
-                              entry.printer.system_printer_name
-                                ? `Windows: ${entry.printer.system_printer_name}`
-                                : "No Windows printer chosen yet"
-                            }
-                            className={cn(
-                              "min-h-[36px] rounded-lg border px-3 text-xs font-semibold transition",
-                              checked
-                                ? "border-brand bg-brand-soft text-brand-dark"
-                                : "border-line bg-white text-ink hover:border-brand/50",
-                              (!gate.allowed || busy) && "cursor-not-allowed opacity-60",
-                            )}
-                          >
-                            {checked ? "✓ " : ""}
-                            {entry.printer.name}
-                          </button>
-                        );
-                      })}
+                      {/* ACTIVE printers only, plus any this cell already names.
+                          The registry is read with `includeInactive` so a
+                          disabled printer can still be SEEN and cleared here -
+                          but offering one as a new destination would configure a
+                          rule that silently never prints: `resolve_print_route`
+                          and `resolveRouteTarget` both require an active
+                          printer. This matches `printerOptions()` on the Routing
+                          tab, which has always filtered the same way; the two
+                          screens disagreeing was the defect. */}
+                      {printers
+                        .filter((entry) => entry.printer.is_active || draft.printerIds.includes(entry.printer.id))
+                        .map((entry) => {
+                          const checked = draft.printerIds.includes(entry.printer.id);
+                          const disabledPrinter = !entry.printer.is_active;
+                          return (
+                            <button
+                              key={entry.printer.id}
+                              type="button"
+                              disabled={!gate.allowed || busy}
+                              onClick={() => toggle(source, entry.printer.id)}
+                              title={
+                                disabledPrinter
+                                  ? `${entry.printer.name} is switched off, so this rule cannot print. Clear it, or re-enable the printer in Quick Setup.`
+                                  : entry.printer.system_printer_name
+                                    ? `Windows: ${entry.printer.system_printer_name}`
+                                    : "No Windows printer chosen yet"
+                              }
+                              className={cn(
+                                "min-h-[36px] rounded-lg border px-3 text-xs font-semibold transition",
+                                checked
+                                  ? "border-brand bg-brand-soft text-brand-dark"
+                                  : "border-line bg-white text-ink hover:border-brand/50",
+                                disabledPrinter && "border-amber-400 bg-amber-50 text-amber-900",
+                                (!gate.allowed || busy) && "cursor-not-allowed opacity-60",
+                              )}
+                            >
+                              {checked ? "✓ " : ""}
+                              {entry.printer.name}
+                              {disabledPrinter && " · off"}
+                            </button>
+                          );
+                        })}
                     </div>
 
                     <p className="mt-1.5 text-[11px] text-sub">

@@ -86,12 +86,19 @@ test("the gallery reads the menu and writes only an icon key", () => {
 });
 
 test("the menu grid renders an icon without changing what a tap does", () => {
-  const source = stripJsxComments(read("src/components/pos/MenuItemGrid.tsx"));
-  // Still exactly one handler, still passing the same two arguments: an icon
-  // must not be able to alter what adding an item to the cart means.
-  assert.ok(source.includes("onPick(item, price ?? 0)"), "the pick handler is unchanged");
-  assert.equal(source.split("onClick=").length - 1, 1, "there is still one handler on a card");
-  assert.ok(!source.includes("writeIconAssignment"), "the POS grid never assigns an icon");
+  // RETARGETED for layout V2: the per-layout grids were replaced by one
+  // renderer plus one button, so the property is now asserted across the pair.
+  // What it guards is unchanged - an icon must not be able to alter what adding
+  // an item to the cart means.
+  const grid = stripJsxComments(read("src/components/pos/grid/PosLayoutGrid.tsx"));
+  const tile = stripJsxComments(read("src/components/pos/grid/GridButtonTile.tsx"));
+  assert.ok(grid.includes("onPick(button)"), "the pick handler is unchanged");
+  assert.equal(tile.split("onClick=").length - 1, 1, "there is still one handler on a button");
+  for (const source of [grid, tile]) {
+    assert.ok(!source.includes("writeIconAssignment"), "the POS grid never assigns an icon");
+  }
+  // And the icon is drawn from the button's stored key, nothing more.
+  assert.ok(tile.includes("PosIconGlyph"), "the shared button still draws the assigned glyph");
 });
 
 test("assign, change and remove are all offered", () => {

@@ -104,23 +104,30 @@ function category(over: Partial<GridButton> = {}): GridButton {
 
 // --- one, the default POS is untouched ---------------------------------------
 
-test("a brand-new layout is switched OFF, which is the default POS", () => {
+// RETARGETED FOR LAYOUT V2. `enabled: boolean` became `mode`, because there are
+// now three presentations rather than two. Every property these tests guarded is
+// unchanged and is asserted against the new field; the migration itself is
+// covered by its own tests below.
+
+test("a brand-new layout is the DEFAULT presentation, auto-fitted", () => {
   const layout = emptyLayout();
-  assert.equal(layout.enabled, false);
+  assert.equal(layout.mode, "default");
+  assert.equal(layout.autoFit, true, "a new terminal fits its screen without being asked");
   assert.equal(layout.buttons.length, 0);
   assert.equal(layout.orderPanel, "right");
   assert.equal(layout.columns, DEFAULT_COLUMNS);
   assert.equal(layout.rows, DEFAULT_ROWS);
+  assert.deepEqual(layout.presentation, {});
 });
 
 test("a terminal with no stored layout gets the default POS", () => {
   const store = memoryStorage();
-  assert.equal(readLayout({ tenantId: "t1", branchId: "b1" }, store).enabled, false);
+  assert.equal(readLayout({ tenantId: "t1", branchId: "b1" }, store).mode, "default");
 });
 
 test("unreadable, malformed and empty storage all resolve to the default POS", () => {
-  for (const raw of ["", "   ", "{", "null", "[]", '"a string"', "{}", '{"enabled":true}']) {
-    assert.equal(parseLayout(raw).enabled, false, `${JSON.stringify(raw)} must not enable a customized layout`);
+  for (const raw of ["", "   ", "{", "null", "[]", '"a string"', "{}"]) {
+    assert.equal(parseLayout(raw).mode, "default", `${JSON.stringify(raw)} must not select another layout`);
   }
 });
 
@@ -128,8 +135,61 @@ test("a layout written by a NEWER build falls back rather than half-rendering", 
   // A future version may add a button kind, a deeper page or a placement rule
   // this build cannot honour. Drawing the half it understands would put a
   // cashier in front of a grid with items missing from it.
-  const future = JSON.stringify({ version: GRID_SCHEMA_VERSION + 1, enabled: true, columns: 4, rows: 4, buttons: [] });
-  assert.equal(parseLayout(future).enabled, false);
+  const future = JSON.stringify({ version: GRID_SCHEMA_VERSION + 1, mode: "customized", columns: 4, rows: 4, buttons: [] });
+  assert.equal(parseLayout(future).mode, "default");
+});
+
+// --- the 1.0.6 -> V2 migration ------------------------------------------------
+
+test("a 1.0.6 CUSTOM grid survives the upgrade", () => {
+  // The one that matters: a manager who built a grid must not find it gone
+  // after an automatic update. 1.0.6 wrote `enabled`, never `mode`.
+  const stored = JSON.stringify({
+    version: GRID_SCHEMA_VERSION,
+    enabled: true,
+    orderPanel: "left",
+    columns: 4,
+    rows: 3,
+    buttons: [{ id: "btn-1", kind: "menu_item", label: "Pizza", menuItemId: "item-pizza", row: 1, col: 1 }],
+  });
+  const back = parseLayout(stored);
+  assert.equal(back.mode, "customized", "enabled:true means the customized layout");
+  assert.equal(back.buttons.length, 1, "the grid itself survives");
+  assert.equal(back.orderPanel, "left");
+});
+
+test("a 1.0.6 layout that was switched OFF stays on Default", () => {
+  const stored = JSON.stringify({ version: GRID_SCHEMA_VERSION, enabled: false, columns: 5, rows: 4, buttons: [] });
+  assert.equal(parseLayout(stored).mode, "default");
+});
+
+test("`mode` wins over the legacy flag when both are present", () => {
+  // Written by this build or a newer one; the legacy field is derived output.
+  const stored = JSON.stringify({ version: GRID_SCHEMA_VERSION, mode: "categories", enabled: true, buttons: [] });
+  assert.equal(parseLayout(stored).mode, "categories");
+});
+
+test("auto-fit defaults ON only when the stored layout never mentions it", () => {
+  // An explicit choice must survive every future upgrade; an absent key is the
+  // only case a default may fill.
+  assert.equal(parseLayout(JSON.stringify({ version: GRID_SCHEMA_VERSION, buttons: [] })).autoFit, true);
+  assert.equal(parseLayout(JSON.stringify({ version: GRID_SCHEMA_VERSION, autoFit: false, buttons: [] })).autoFit, false);
+  assert.equal(parseLayout(JSON.stringify({ version: GRID_SCHEMA_VERSION, autoFit: true, buttons: [] })).autoFit, true);
+});
+
+test("the legacy flag is still WRITTEN, so a rollback to 1.0.6 still reads the grid", () => {
+  const store = memoryStorage();
+  const scope = { tenantId: "t", branchId: "b" };
+  writeLayout(scope, { ...emptyLayout(), mode: "customized", buttons: [item()] }, store);
+  const raw = JSON.parse(store.getItem(gridStorageKey(scope)) as string) as Record<string, unknown>;
+  assert.equal(raw.enabled, true, "1.0.6 reads `enabled`, so this build keeps writing it");
+  assert.equal(raw.mode, "customized");
+
+  writeLayout(scope, { ...emptyLayout(), mode: "categories" }, store);
+  const asCategories = JSON.parse(store.getItem(gridStorageKey(scope)) as string) as Record<string, unknown>;
+  // Categories is not the customized grid, so a 1.0.6 build must fall back to
+  // its own Default rather than render an empty custom grid.
+  assert.equal(asCategories.enabled, false);
 });
 
 test("layouts are scoped per tenant AND branch, so a till never inherits another's", () => {
@@ -147,7 +207,7 @@ test("a saved layout survives a round trip through storage", () => {
   const store = memoryStorage();
   const layout: PosGridLayout = {
     ...emptyLayout(),
-    enabled: true,
+    mode: "customized",
     orderPanel: "left",
     columns: 4,
     rows: 3,
@@ -155,21 +215,23 @@ test("a saved layout survives a round trip through storage", () => {
   };
   assert.deepEqual(writeLayout({ tenantId: "t", branchId: "b" }, layout, store), { ok: true });
   const back = readLayout({ tenantId: "t", branchId: "b" }, store);
-  assert.equal(back.enabled, true);
+  assert.equal(back.mode, "customized");
   assert.equal(back.orderPanel, "left");
   assert.deepEqual(back.buttons[0].color, { hue: "amber", shade: 500 });
   assert.equal(back.buttons[0].iconKey, "burger");
 });
 
-test("switching Customized off leaves the buttons alone, so it can be switched back on", () => {
+test("switching away from Customized leaves the buttons alone, so it can be switched back", () => {
   const store = memoryStorage();
   const scope = { tenantId: "t", branchId: "b" };
-  const on: PosGridLayout = { ...emptyLayout(), enabled: true, buttons: [item()] };
+  const on: PosGridLayout = { ...emptyLayout(), mode: "customized", buttons: [item()] };
   writeLayout(scope, on, store);
-  writeLayout(scope, { ...on, enabled: false }, store);
-  const back = readLayout(scope, store);
-  assert.equal(back.enabled, false);
-  assert.equal(back.buttons.length, 1, "turning it off must not destroy the layout");
+  for (const mode of ["default", "categories"] as const) {
+    writeLayout(scope, { ...on, mode }, store);
+    const back = readLayout(scope, store);
+    assert.equal(back.mode, mode);
+    assert.equal(back.buttons.length, 1, `switching to ${mode} must not destroy the custom grid`);
+  }
 });
 
 // --- two, a sellable button is always a real menu item -----------------------
@@ -188,7 +250,7 @@ test("a menu item button with no canonical item is REFUSED, everywhere", () => {
   // ...and at the storage boundary, so it cannot even be loaded.
   const smuggled = JSON.stringify({
     version: GRID_SCHEMA_VERSION,
-    enabled: true,
+    mode: "customized",
     columns: 4,
     rows: 4,
     buttons: [{ id: "x", kind: "menu_item", label: "Free Pizza", row: 1, col: 1 }],
@@ -211,11 +273,19 @@ test("the model has NOWHERE to store a price, a tax rule or a recipe", () => {
 });
 
 test("the live grid resolves its price from the canonical item on every render", () => {
-  const tile = stripJsxComments(read("src/components/pos/grid/CustomGrid.tsx"));
-  assert.match(tile, /resolveMenuPrice/);
-  assert.match(tile, /itemsById\.get/);
+  // RETARGETED: the price is now resolved by the WORKSPACE and handed to the
+  // shared grid as `priceFor`, so the assertion follows it there. The property
+  // is the same and is if anything stronger - there is now one resolution for
+  // all three layouts rather than one per grid.
+  const workspace = stripJsxComments(read("src/screens/pos/PosWorkspace.tsx"));
+  assert.match(workspace, /priceFor=\{\(button\)/);
+  assert.match(workspace, /resolveMenuPrice\(item, item\.price, currency, rate\)/);
+  assert.match(workspace, /itemsById\.get/);
   // And it hands the workspace's own handler the CANONICAL item, not a copy.
-  assert.match(tile, /onPick\(item, price \?\? 0\)/);
+  assert.match(workspace, /addItem\(item, resolveMenuPrice\(item, item\.price, currency, rate\)\.amount \?\? 0\)/);
+  // The shared button never looks a price up for itself.
+  const tile = stripJsxComments(read("src/components/pos/grid/GridButtonTile.tsx"));
+  assert.equal(tile.includes("resolveMenuPrice"), false, "the button is given a price, it does not find one");
 });
 
 test("a category's children must reference canonical items too", () => {
@@ -392,9 +462,12 @@ test("the whole grid is laid out inside its box - there is nothing to scroll", (
 test("the live grid has no scroll container of its own", () => {
   // The requirement is structural, so the check is too: a scrollbar added here
   // later would silently satisfy "it renders" while breaking "it fits".
-  const source = stripJsxComments(read("src/components/pos/grid/CustomGrid.tsx"));
+  const source = stripJsxComments(read("src/components/pos/grid/PosLayoutGrid.tsx"));
   assert.equal(/overflow-y-auto|overflow-auto|overflow-scroll/.test(source), false);
-  assert.match(source, /too_small/, "it must have a path for a screen it cannot fit");
+  // The two paths for a rectangle that cannot hold everything, and NEITHER is a
+  // scrollbar: page it, or say the screen is too small.
+  assert.match(source, /plan\.paged/, "it must be able to page rather than scroll");
+  assert.match(source, /too small/i, "it must have a path for a screen it cannot fit at all");
 });
 
 test("a span covers its cells PLUS the gaps between them", () => {
@@ -451,33 +524,49 @@ test("an unrecognised colour token falls back to the theme rather than a guess",
 
 // --- the engine is not duplicated ---------------------------------------------
 
-test("the customized grid adds NO ordering, payment or printing logic", () => {
-  const source = stripJsxComments(read("src/components/pos/grid/CustomGrid.tsx"));
-  for (const forbidden of [
-    "useCart",
-    "submitOrder",
-    "payOrder",
-    "pos_submit_order",
-    "pos_pay_order",
-    "printReceipt",
-    "printKitchenTicket",
-    "resolvePrintRoute",
-    "buildSubmitPayload",
+test("the shared grid adds NO ordering, payment or printing logic", () => {
+  for (const rel of [
+    "src/components/pos/grid/PosLayoutGrid.tsx",
+    "src/components/pos/grid/GridButtonTile.tsx",
+    "src/lib/pos/grid/presentation.ts",
+    "src/lib/pos/grid/autofit.ts",
   ]) {
-    assert.equal(source.includes(forbidden), false, `the grid must not reach ${forbidden}`);
+    const source = stripJsxComments(read(rel));
+    for (const forbidden of [
+      "useCart",
+      "submitOrder",
+      "payOrder",
+      "pos_submit_order",
+      "pos_pay_order",
+      "printReceipt",
+      "printKitchenTicket",
+      "resolvePrintRoute",
+      "buildSubmitPayload",
+    ]) {
+      assert.equal(source.includes(forbidden), false, `${rel} must not reach ${forbidden}`);
+    }
   }
 });
 
-test("both presentations call ONE handler with the same canonical item", () => {
+test("ALL THREE presentations render through one grid and one handler", () => {
   const workspace = stripJsxComments(read("src/screens/pos/PosWorkspace.tsx"));
-  // The default grid and the custom grid are given the same `addItem`.
-  assert.match(workspace, /<CustomGrid[\s\S]*?onPick=\{addItem\}/);
-  assert.match(workspace, /<MenuItemGrid[\s\S]*?onPick=\{addItem\}/);
+  // Exactly one grid element, given one button list that the layout mode
+  // chooses. Three grids would be three places for a tap to mean something
+  // different.
+  assert.equal((workspace.match(/<PosLayoutGrid/g) ?? []).length, 1, "there is one grid, not one per layout");
+  assert.match(workspace, /buttons=\{layoutButtons\}/);
+  assert.match(workspace, /addItem\(item,/, "every layout ends in the one addItem");
+  // And the button list is derived per mode rather than by three components.
+  for (const resolver of ["resolveDefaultButtons", "resolveCategoryButtons", "resolveCategoryItems"]) {
+    assert.ok(workspace.includes(resolver), `${resolver} feeds the shared grid`);
+  }
 });
 
-test("the default layout is pinned to the right, whatever a stored layout says", () => {
+test("the Current Order side applies to EVERY layout, not just the customized one", () => {
   const workspace = stripJsxComments(read("src/screens/pos/PosWorkspace.tsx"));
-  assert.match(workspace, /cartSide=\{customLayoutActive \? gridLayout\.orderPanel : "right"\}/);
+  // 1.0.6 pinned Default to the right; layout V2 honours the setting in all
+  // three, because the shell swaps two siblings and nothing downstream can tell.
+  assert.match(workspace, /cartSide=\{gridLayout\.orderPanel\}/);
 });
 
 test("the shell renders ONE cart node whichever side it is on", () => {
