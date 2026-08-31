@@ -55,7 +55,8 @@ import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
 import { OrderCarousel } from "@/components/pos/OrderCarousel";
-import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
+import { filterItems, loadPosMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
+import { MENU_CHANGED_EVENT } from "@/lib/menu/events";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
@@ -129,15 +130,17 @@ function PosWorkspaceInner() {
     setMenuState("loading");
     setMenuError(null);
     try {
-      const data = await loadMenu(tenantId);
+      // The SELL surface reads the authoritative OU projection (pos_menu) for the
+      // operator's branch, so the till only ever offers items this OU can sell.
+      const data = await loadPosMenu(pos.branch.id);
       setMenu(data);
       setMenuStale(null);
       setMenuState("ready");
       void cacheMenu(data, tenantId, pos.branch.id);
     } catch (e) {
       // A cached menu is still worth showing - the cashier can see prices even
-      // though ordering is blocked while offline.
-      const cached = await readCachedMenu(tenantId).catch(() => null);
+      // though ordering is blocked while offline. The cache is tenant+OU scoped.
+      const cached = await readCachedMenu(tenantId, pos.branch.id).catch(() => null);
       if (cached) {
         setMenu(cached.menu);
         setMenuStale(cached.cachedAt);
@@ -149,8 +152,29 @@ function PosWorkspaceInner() {
     }
   }, [tenantId, pos.branch.id]);
 
+  // Load on open, and re-run whenever the OU (branch) changes — `fetchMenu`
+  // depends on `pos.branch.id`, so switching OU refetches that OU's menu.
   useEffect(() => {
     if (pos.allowed && tenantId) void fetchMenu();
+  }, [pos.allowed, tenantId, fetchMenu]);
+
+  // Refresh when the window regains focus / becomes visible (a menu edited on
+  // the web or another device appears without a manual reload) and when a local
+  // Menu Builder save announces a change. This only replaces the MENU list; it
+  // never touches the active cart, selected category, or search.
+  useEffect(() => {
+    if (!pos.allowed || !tenantId) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void fetchMenu();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener(MENU_CHANGED_EVENT, refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener(MENU_CHANGED_EVENT, refresh);
+    };
   }, [pos.allowed, tenantId, fetchMenu]);
 
   // --- shift -----------------------------------------------------------------
