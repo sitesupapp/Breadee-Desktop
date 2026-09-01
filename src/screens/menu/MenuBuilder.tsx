@@ -33,7 +33,8 @@ import { Glyph } from "@/components/Glyph";
 import { useSession } from "@/state/session";
 import { useMenuBuilder } from "@/state/menuBuilder";
 import { canViewMenuBuilder, hasModifiersFeature, hasQrFeature, isReadOnly, menuBuilderDenialReason, menuBuilderGates } from "@/lib/menu/access";
-import * as repo from "@/lib/menu/repository";
+import * as ou from "@/lib/menu/ouRepository";
+import { emitMenuChanged } from "@/lib/menu/events";
 import {
   ALL_CATEGORIES,
   ANY_STATUS,
@@ -77,9 +78,17 @@ function MenuBuilderInner() {
   const store = useMenuBuilder();
 
   const tenantId = session.tenant?.id ?? null;
-  const mainBranchId = session.tenant?.main_branch_id ?? null;
   const currency: CurrencyCode = session.currency.primary;
   const rate = session.currency.rate;
+
+  // The SELECTED Operating Unit. Null = nothing chosen yet: the workspace is blank
+  // and every operational write is refused. There is no implicit Main.
+  const branchId = store.branchId;
+  const selectedBranch = store.branches.find((b) => b.id === branchId) ?? null;
+  function selectOU(id: string | null) {
+    store.setBranchId(id);
+    if (tenantId) void store.load(tenantId);
+  }
 
   const accessCtx = useMemo(
     () => ({ status: session.membership?.status, permissions: session.permissions, features: session.features }),
@@ -101,7 +110,10 @@ function MenuBuilderInner() {
   const icons = useMemo(() => readIconAssignments(), []);
 
   useEffect(() => {
-    if (tenantId) void store.load(tenantId);
+    if (tenantId) {
+      void store.loadBranches(tenantId);
+      void store.load(tenantId); // blank until an Operating Unit is chosen
+    }
     return () => useMenuBuilder.getState().reset();
     // The store is a stable zustand reference; depending on it would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -126,8 +138,15 @@ function MenuBuilderInner() {
   /** Run one mutation, announce the outcome, and report whether it succeeded. */
   async function run(key: string, action: string, work: () => Promise<void>, success?: string): Promise<boolean> {
     if (!tenantId) return false;
+    if (!branchId) {
+      // No implicit Main: an operational write is refused until a unit is chosen.
+      toast.push({ tone: "error", message: "Select an Operating Unit to edit this menu." });
+      return false;
+    }
     const outcome = await store.mutate(key, tenantId, action, work);
     if (outcome.ok) {
+      // Nudge an open POS (same terminal) to re-read this OU's menu after a change.
+      emitMenuChanged();
       if (success) toast.push({ tone: "success", message: success });
       return true;
     }
@@ -155,21 +174,23 @@ function MenuBuilderInner() {
   // leaving them with a toast and nothing to retry. Keeping it open is also what
   // makes the "Saving..." state and the disabled Save button visible at all.
   async function submitItem(submit: ItemDrawerSubmit) {
-    if (!tenantId) return;
+    if (!tenantId || !branchId) return;
     const id = submit.draft.id;
     const ok = await run(
       `item:${id ?? "new"}`,
       id ? "Saving the item" : "Adding the item",
       () =>
-        repo
-          .saveItem({
+        ou
+          .saveItemOU({
             tenantId,
+            branchId,
             draft: submit.draft,
             price: submit.price,
             groupIds: submit.groupIds,
             file: submit.file,
             clearImage: submit.clearImage,
-            nextSortOrder: data.items.length,
+            // On edit keep the item's current position; on create append.
+            nextSortOrder: (id ? data.items.find((i) => i.id === id)?.sort_order : undefined) ?? data.items.length,
           })
           .then(() => undefined),
       id ? "Item saved" : "Item added",
@@ -179,18 +200,26 @@ function MenuBuilderInner() {
 
   async function archiveDraftItem() {
     const id = draft?.id;
-    if (!id) return;
-    const ok = await run(`item:${id}`, "Archiving the item", () => repo.archiveItem(id), "Item archived");
+    if (!id || !branchId) return;
+    const ok = await run(`item:${id}`, "Archiving the item", () => ou.archiveItemOU(branchId, id), "Item archived");
     if (ok) setDraft(null);
   }
 
   // --- categories -----------------------------------------------------------
   async function saveCategory(categoryDraft: CategoryDraft) {
-    if (!tenantId) return;
+    if (!tenantId || !branchId) return;
+    // On edit, carry the current row's sort/status so the OU upsert never resets them.
+    const cur = categoryDraft.id ? data.categories.find((c) => c.id === categoryDraft.id) : null;
     await run(
       `category:${categoryDraft.id ?? "new"}`,
       categoryDraft.id ? "Saving the category" : "Adding the category",
-      () => repo.saveCategory(tenantId, categoryDraft, data.categories.length),
+      () => ou.saveCategoryOU(branchId, {
+        category_id: categoryDraft.id ?? null,
+        name: (categoryDraft.name ?? "").trim(),
+        name_ar: categoryDraft.name_ar?.trim() ? categoryDraft.name_ar.trim() : null,
+        sort_order: cur?.sort_order ?? data.categories.length,
+        status: cur?.status ?? "active",
+      }),
       "Category saved",
     );
   }
@@ -198,68 +227,76 @@ function MenuBuilderInner() {
   async function moveCategory(index: number, direction: -1 | 1) {
     const target = categories[index + direction];
     const current = categories[index];
-    if (!current || !target) return;
-    await run(`category:${current.id}`, "Reordering categories", () => repo.swapCategoryOrder(current, target));
+    if (!current || !target || !branchId) return;
+    await run(`category:${current.id}`, "Reordering categories", async () => {
+      await ou.saveCategoryOU(branchId, { category_id: current.id, name: current.name, name_ar: current.name_ar, sort_order: target.sort_order, status: current.status });
+      await ou.saveCategoryOU(branchId, { category_id: target.id, name: target.name, name_ar: target.name_ar, sort_order: current.sort_order, status: target.status });
+    });
   }
 
   async function toggleCategory(category: BuilderCategory) {
+    if (!branchId) return;
     const next = category.status === "active" ? "hidden" : "active";
-    await run(`category:${category.id}`, "Changing the category", () => repo.setCategoryStatus(category.id, next));
+    await run(`category:${category.id}`, "Changing the category", () => ou.saveCategoryOU(branchId, { category_id: category.id, name: category.name, name_ar: category.name_ar, sort_order: category.sort_order, status: next }));
   }
 
   async function archiveCategory(category: BuilderCategory) {
-    await run(`category:${category.id}`, "Archiving the category", () => repo.archiveCategory(category.id), "Category archived");
+    if (!branchId) return;
+    await run(`category:${category.id}`, "Archiving the category", () => ou.saveCategoryOU(branchId, { category_id: category.id, name: category.name, name_ar: category.name_ar, sort_order: category.sort_order, status: "archived" }), "Category archived");
   }
 
   // --- modifiers ------------------------------------------------------------
   async function saveGroup(groupDraft: GroupDraft) {
-    if (!tenantId) return;
+    if (!tenantId || !branchId) return;
     await run(
       `modifier:${groupDraft.id ?? "new"}`,
       groupDraft.id ? "Saving the group" : "Adding the group",
-      () => repo.saveGroup(tenantId, groupDraft),
+      () => ou.saveGroupOU(branchId, groupDraft),
       "Modifier group saved",
     );
   }
 
   async function archiveGroup(group: BuilderGroup) {
-    await run(`modifier:${group.id}`, "Archiving the group", () => repo.archiveGroup(group.id), "Modifier group archived");
+    if (!branchId) return;
+    await run(`modifier:${group.id}`, "Archiving the group", () => ou.archiveGroupOU(branchId, group.id), "Modifier group archived");
   }
 
   async function addOption(group: BuilderGroup, name: string, extra: number, entered: CurrencyCode) {
-    if (!tenantId) return;
-    const nextSort = data.options.filter((o) => o.modifier_group_id === group.id).length;
-    await run(`modifier:${group.id}`, "Adding the option", () => repo.addOption(tenantId, group.id, name, extra, entered, nextSort));
+    if (!tenantId || !branchId) return;
+    await run(`modifier:${group.id}`, "Adding the option", () => ou.addOptionOU(branchId, group.id, name, extra, entered));
   }
 
   async function archiveOption(option: BuilderOption) {
-    await run(`modifier:${option.modifier_group_id}`, "Archiving the option", () => repo.archiveOption(option.id));
+    if (!branchId) return;
+    await run(`modifier:${option.modifier_group_id}`, "Archiving the option", () => ou.archiveOptionOU(branchId, option.id));
   }
 
   // --- availability ---------------------------------------------------------
   async function changeStatus(item: BuilderItem, status: ItemStatus) {
-    await run(`item:${item.id}`, "Changing the status", () => repo.setItemStatus(item.id, status));
+    if (!branchId) return;
+    await run(`item:${item.id}`, "Changing the status", () => ou.setItemStatusOU(branchId, item, status));
   }
 
   async function changeAvailability(item: BuilderItem, next: boolean) {
-    await run(`item:${item.id}`, "Changing availability", () => repo.setItemAvailability(item.id, next));
+    if (!branchId) return;
+    await run(`item:${item.id}`, "Changing availability", () => ou.setItemAvailabilityOU(branchId, item, next));
   }
 
   async function publishDrafts() {
-    if (!tenantId) return;
-    await run("publish:all", "Publishing drafts", () => repo.publishAllDrafts(tenantId).then(() => undefined), "Drafts published");
+    if (!tenantId || !branchId) return;
+    await run("publish:all", "Publishing drafts", () => ou.publishAllDraftsOU(branchId).then(() => undefined), "Drafts published");
   }
 
-  // --- QR -------------------------------------------------------------------
+  // --- QR (per Operating Unit) ----------------------------------------------
   async function createQr() {
-    if (!tenantId) return;
-    await run("qr:create", "Setting up the public menu", () => repo.ensureQrSettings(tenantId, mainBranchId).then(() => undefined), "Public menu ready");
+    if (!tenantId || !branchId) return;
+    await run("qr:create", "Setting up the public menu", () => ou.ensureQrSettingsOU(tenantId, branchId).then(() => undefined), "Public menu ready");
   }
 
   async function patchQr(patch: Partial<QrSettings>) {
     const id = data.qr?.id;
     if (!id) return;
-    await run("qr:save", "Saving the public menu", () => repo.saveQrSettings(id, patch));
+    await run("qr:save", "Saving the public menu", () => ou.saveQrSettingsOU(id, patch));
   }
 
   function copyLink(url: string) {
@@ -281,9 +318,21 @@ function MenuBuilderInner() {
           <p className="text-sm text-sub">Manage the menu used by POS and your Breadee web menu.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge tone="slate" title="Categories, items and modifiers are shared by every branch">
-            {session.tenant?.business_name ?? "—"} · all branches
-          </Badge>
+          <label className="flex items-center gap-2 text-xs font-semibold text-sub" title="Each Operating Unit has its own operational menu">
+            <span>Operating Unit</span>
+            <select
+              className="rounded-lg border border-line bg-white px-2.5 py-1.5 text-xs font-semibold text-ink"
+              value={branchId ?? ""}
+              onChange={(e) => selectOU(e.target.value || null)}
+              disabled={!store.branchesLoaded}
+            >
+              <option value="">Select an Operating Unit…</option>
+              {store.branches.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}{b.is_main ? " (Main)" : ""}</option>
+              ))}
+            </select>
+          </label>
+          {selectedBranch && <Badge tone="green" title="Edits land in this Operating Unit only">{selectedBranch.name}</Badge>}
           {readOnly && <Badge tone="amber">Read only</Badge>}
           {store.refreshing ? (
             <Badge tone="slate">Refreshing…</Badge>
@@ -319,7 +368,17 @@ function MenuBuilderInner() {
         </Card>
       )}
 
-      {store.status === "ready" && (
+      {store.status === "ready" && !branchId && (
+        <Card className="p-8 text-center">
+          <p className="font-bold text-ink">Select an Operating Unit</p>
+          <p className="mt-1 text-sm text-sub">
+            The Menu Builder edits one Operating Unit&apos;s menu at a time. Choose a unit above to view and edit its
+            items, categories and modifiers. A brand-new unit starts empty — nothing is inherited from another unit.
+          </p>
+        </Card>
+      )}
+
+      {store.status === "ready" && branchId && (
         <>
           <div className="flex flex-wrap items-center gap-3 text-xs text-sub">
             <span>
