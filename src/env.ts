@@ -87,6 +87,29 @@ function normalizeSupabaseUrl(input: string): string {
 
 const SUPABASE_URL = normalizeSupabaseUrl(raw.SUPABASE_URL);
 
+// RUNTIME ENVIRONMENT PIN (staging builds only).
+//
+// A build that DECLARES staging must talk to the staging Supabase project and
+// must NEVER talk to production. This fails the app closed at startup (a blank
+// window with this error is far safer than a "staging" till silently reading or
+// writing production tenants). A production build is unaffected, so this is safe
+// to carry in shared code.
+const STAGING_SUPABASE_REF = "azjxprewycygsocusxjn";
+const PRODUCTION_SUPABASE_REF = "cltlqfqormkhppmbvyrv";
+if (APP_ENV === "staging") {
+  const projectRef = new URL(SUPABASE_URL).hostname.split(".")[0];
+  if (projectRef === PRODUCTION_SUPABASE_REF) {
+    throw new Error(
+      "SECURITY: this build is pinned to STAGING and must never connect to the production Supabase project.",
+    );
+  }
+  if (projectRef !== STAGING_SUPABASE_REF) {
+    throw new Error(
+      `SECURITY: this STAGING build must connect only to the staging project (${STAGING_SUPABASE_REF}); refusing "${projectRef}".`,
+    );
+  }
+}
+
 // Safety: never allow the well-known service_role prefix or a JWT that isn't the anon key.
 if (raw.SUPABASE_ANON_KEY.includes("service_role")) {
   throw new Error("SECURITY: a service_role key must never be used in the desktop app.");

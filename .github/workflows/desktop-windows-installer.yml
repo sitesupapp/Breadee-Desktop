@@ -84,12 +84,31 @@ jobs:
       #    if the Supabase vars are missing, which renders a blank window).
       #    STAGING Supabase only — supplied via encrypted GitHub Actions
       #    secrets, never a committed .env.
+      # STAGING PINNED — deterministic, NOT from repo secrets. The Supabase URL and
+      # the PUBLIC anon key (RLS-enforced; safe to expose, it already ships inside
+      # the client bundle) are hard-pinned to the staging project azjxprewycygsocusxjn.
+      # The build-time guard in vite.config.ts fails the build if these are ever the
+      # production project cltlqfqormkhppmbvyrv or any non-staging project.
       - name: Build frontend
         run: npm run build
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: https://azjxprewycygsocusxjn.supabase.co
+          VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF6anhwcmV3eWN5Z3NvY3VzeGpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMzNjIwNDQsImV4cCI6MjA5ODkzODA0NH0.F9CD5-Vod5w3aNelUA4KZzPfhvUXPtGKvdoQwDWX8p0
           VITE_APP_ENV: staging
+
+      # PROOF: the built bundle contains the STAGING project ref and does NOT
+      # contain the production ref. Fails the job if either assertion is violated.
+      - name: Verify staging-only bundle (no production ref)
+        shell: bash
+        run: |
+          echo "Asserting staging ref present and production ref absent in dist/ …"
+          if ! grep -rq "azjxprewycygsocusxjn" dist; then
+            echo "FAIL: staging project ref not found in the built bundle"; exit 1
+          fi
+          if grep -rq "cltlqfqormkhppmbvyrv" dist; then
+            echo "FAIL: PRODUCTION project ref found in the built bundle"; exit 1
+          fi
+          echo "OK: staging ref present, production ref absent in dist/."
 
       # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
@@ -110,8 +129,10 @@ jobs:
       - name: Build Tauri installer
         run: npm run tauri:build
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # Same STAGING pin as the frontend step (tauri:build re-runs the frontend
+          # build via beforeBuildCommand). Guards fail the build off-staging.
+          VITE_SUPABASE_URL: https://azjxprewycygsocusxjn.supabase.co
+          VITE_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF6anhwcmV3eWN5Z3NvY3VzeGpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMzNjIwNDQsImV4cCI6MjA5ODkzODA0NH0.F9CD5-Vod5w3aNelUA4KZzPfhvUXPtGKvdoQwDWX8p0
           VITE_APP_ENV: staging
 
       # 9. Upload the generated Windows installer as a build artifact.
