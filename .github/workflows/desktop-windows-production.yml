@@ -157,6 +157,16 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The Rust cache restores the previously-compiled app crate, and Tauri
+      # embeds the frontend INTO that crate at compile time. Cargo's fingerprint
+      # does not invalidate when only dist/ changes, so the cached crate keeps
+      # its OLD embedded frontend - which shipped a stale bundle (wrong in-app
+      # version) even though the dist rebuilt correctly. Clean just the app crate
+      # so the next build re-runs its build script and re-embeds the fresh dist;
+      # dependency caching is untouched.
+      - name: Force fresh frontend embed (bust stale app-crate cache)
+        run: cargo clean -p breadee-desktop --manifest-path src-tauri/Cargo.toml
+
       # 4. tauri:build re-runs the frontend build via beforeBuildCommand, so the
       #    same production env must be present here too.
       - name: Build Tauri installer
