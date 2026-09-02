@@ -15,6 +15,7 @@ import {
   downloadAndInstall,
   isUpdaterAvailable,
   relaunchApp,
+  resolveRuntimeVersion,
   type UpdateState,
 } from "@/lib/updater";
 
@@ -29,6 +30,8 @@ type UpdatesState = {
 
   check: (options: { silent: boolean }) => Promise<void>;
   checkOnStartup: () => Promise<void>;
+  /** Replace the displayed version with the one the running binary actually reports. */
+  resolveVersion: () => Promise<void>;
   install: () => Promise<void>;
   restart: () => Promise<void>;
   dismiss: () => void;
@@ -61,6 +64,14 @@ export const useUpdates = create<UpdatesState>((set, get) => ({
     // A fresh check supersedes an earlier dismissal: if the user said "Later"
     // and then deliberately pressed "Check for updates", they want to see it.
     set({ state: result, dismissed: options.silent ? get().dismissed : false });
+  },
+
+  resolveVersion: async () => {
+    // Read the true installed version from the binary (see resolveRuntimeVersion).
+    // The initial `version` is the Vite-baked value, used until this resolves and
+    // as the fallback when Tauri is unavailable, so the display is never blank.
+    const v = await resolveRuntimeVersion();
+    if (v && v !== get().version) set({ version: v });
   },
 
   checkOnStartup: async () => {

@@ -16,8 +16,11 @@ export function About() {
   const available = isUpdaterAvailable();
   const reason = unavailableReason();
 
-  // Reflect a check that the banner may already have started.
+  // Show the version the installed binary actually reports (not the Vite-baked
+  // value, which a stale frontend cache can leave behind after an update), and
+  // reflect a check that the banner may already have started.
   useEffect(() => {
+    void useUpdates.getState().resolveVersion();
     void useUpdates.getState().checkOnStartup();
   }, []);
 
