@@ -22,6 +22,7 @@ import {
   checkSettlementTarget,
   classifySettlement,
   deliveryFeeFromFinance,
+  parseDeliveryFee,
   createSettlementLatch,
   deliveryIsSettled,
   deliveryPaymentGate,
@@ -146,7 +147,41 @@ test("the payload has exactly the keys pos_pay_order consumes", () => {
     "currency_code",
     "discount_type",
     "discount_value",
+    "delivery_fee",
   ]);
+});
+
+// --- the settlement-time delivery fee ---------------------------------------
+
+test("parseDeliveryFee: blank not valid, 0 valid, positive valid, negative/junk rejected", () => {
+  assert.deepEqual(parseDeliveryFee(""), { valid: false, value: 0, provided: false });
+  assert.deepEqual(parseDeliveryFee("0"), { valid: true, value: 0, provided: true });
+  assert.deepEqual(parseDeliveryFee("2"), { valid: true, value: 2, provided: true });
+  assert.deepEqual(parseDeliveryFee("2.5"), { valid: true, value: 2.5, provided: true });
+  assert.equal(parseDeliveryFee("-2").valid, false);
+  assert.equal(parseDeliveryFee("abc").valid, false);
+});
+
+test("the settlement payload carries delivery_fee when the cashier entered one", () => {
+  const p = buildDeliveryPaymentPayload({ orderId: "o1", method: "cash", currency: "USD", discount: {}, deliveryFee: 2 });
+  assert.equal(p.delivery_fee, 2);
+  for (const key of Object.keys(p)) assert.ok(DELIVERY_PAYMENT_PAYLOAD_KEYS.includes(key as never));
+});
+
+test("a zero delivery fee is sent (free delivery is explicit); no fee means no key", () => {
+  assert.equal(buildDeliveryPaymentPayload({ orderId: "o1", method: "cash", currency: "USD", discount: {}, deliveryFee: 0 }).delivery_fee, 0);
+  assert.equal("delivery_fee" in buildDeliveryPaymentPayload({ orderId: "o1", method: "cash", currency: "USD", discount: {} }), false);
+});
+
+test("the settlement payload NEVER carries a client-computed total or amount", () => {
+  // The client sends only the fee; pos_pay_order computes the payable via finance.
+  const p = buildDeliveryPaymentPayload({
+    orderId: "o1", method: "cash", currency: "USD",
+    discount: { discount_type: "amount", discount_value: 1 }, deliveryFee: 2,
+  }) as Record<string, unknown>;
+  for (const forbidden of ["amount", "total", "total_amount", "final_total", "finalTotal", "subtotal"]) {
+    assert.equal(forbidden in p, false, `${forbidden} must never be sent from the client`);
+  }
 });
 
 test("the delivery fee is read from the finance charge line, never inferred", () => {

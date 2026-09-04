@@ -66,7 +66,6 @@ import {
   buildDeliveryPayload,
   createDeliveryLatch,
   deliveryOrderGate,
-  parseDeliveryFee,
   kitchenStateLabel,
   loadOpenDeliveryOrders,
   performDeliveryOrder,
@@ -256,10 +255,6 @@ export function useDeliveryWorkspace(input: {
   // --- Level 3B ordering state ------------------------------------------------
   const [view, setView] = useState<DeliveryView>("customer");
   const [orderNote, setOrderNote] = useState("");
-  // Manual delivery fee for THIS order, entered before Send. Held as a raw string;
-  // parsed/validated by the shared helper and persisted via pos_save_order.
-  const [deliveryFeeInput, setDeliveryFeeInput] = useState("");
-  const parsedDeliveryFee = parseDeliveryFee(deliveryFeeInput);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ order: OpenDeliveryOrder; recovered: boolean } | null>(null);
@@ -406,10 +401,9 @@ export function useDeliveryWorkspace(input: {
         customerId,
         addressId,
         lineCount: deliveryLines.length,
-        deliveryFeeValid: parsedDeliveryFee.valid,
         sending,
       }),
-    [accessGate, input.createOrders, input.shiftId, online, customerId, addressId, deliveryLines.length, parsedDeliveryFee.valid, sending],
+    [accessGate, input.createOrders, input.shiftId, online, customerId, addressId, deliveryLines.length, sending],
   );
 
   /** Entering Add Items needs a customer and an address, but not yet a cart. */
@@ -659,9 +653,6 @@ export function useDeliveryWorkspace(input: {
       // retry, and cleared only once an order is definitively accepted.
       clientOpId: useCart.getState().ensureOpId(),
       note: orderNote.trim() === "" ? null : orderNote.trim(),
-      // The manual delivery fee at the instant Send was pressed. Parsed here so
-      // the exact value that leaves the till is the one the operator saw.
-      deliveryFee: parseDeliveryFee(deliveryFeeInput).value,
     };
     if (!snapshot.customerId || !snapshot.addressId) return;
 
@@ -684,7 +675,6 @@ export function useDeliveryWorkspace(input: {
         customerId: snapshot.customerId,
         addressId: snapshot.addressId,
         orderNote: snapshot.note,
-        deliveryFee: snapshot.deliveryFee,
       });
 
       const outcome = await performDeliveryOrder({
@@ -765,7 +755,6 @@ export function useDeliveryWorkspace(input: {
       // Only this delivery basket. Takeaway and dine-in state is untouched.
       useCart.getState().reset();
       setOrderNote("");
-      setDeliveryFeeInput("");
       setView("customer");
       // Authoritative history refresh - server values, never a local increment.
       await useCustomers.getState().refresh();
@@ -782,7 +771,7 @@ export function useDeliveryWorkspace(input: {
     } finally {
       setSending(false);
     }
-  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, deliveryFeeInput, pos.branch.id, pos.tenantId, toast]);
+  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, pos.branch.id, pos.tenantId, toast]);
 
   const requestSend = useCallback(() => void send(), [send]);
 
@@ -815,7 +804,6 @@ export function useDeliveryWorkspace(input: {
     // next send cannot replay under the previous order's key.
     useCart.getState().reset();
     setOrderNote("");
-    setDeliveryFeeInput("");
     setSubmitted(null);
     void useCustomers.getState().select(id);
   }, [switchTo]);
@@ -986,6 +974,8 @@ export function useDeliveryWorkspace(input: {
       discountType: DiscountType;
       discountValue: string;
       tendered: number | null;
+      /** The manual delivery fee entered at the pay step; null when none. */
+      deliveryFee: number | null;
     }) => {
       const order = payTarget.order;
       if (!order || !payGate.allowed) return;
@@ -1020,6 +1010,9 @@ export function useDeliveryWorkspace(input: {
             // Named fields only - `tendered` travels in the same object and has
             // no column on `pos_payments`.
             discount: discount.fields,
+            // The manual delivery fee. pos_pay_order persists it and the finance
+            // engine computes the total - the client sends only the fee.
+            deliveryFee: confirm.deliveryFee,
           }),
           submit: payDeliveryOrder,
           // Used only after a failure, and it asks BOTH questions: what the
@@ -1387,7 +1380,6 @@ export function useDeliveryWorkspace(input: {
     setSendError(null);
     useCart.getState().reset();
     setOrderNote("");
-    setDeliveryFeeInput("");
   }, []);
 
   // Ctrl+Enter sends, through the SAME gate and latch as the button. Live only
@@ -1491,7 +1483,7 @@ export function useDeliveryWorkspace(input: {
   );
 
   const noteBox = (
-    <div className="rounded-2xl border border-line bg-white p-3 space-y-3">
+    <div className="rounded-2xl border border-line bg-white p-3">
       <label className="block">
         <span className="text-xs font-bold text-ink">Delivery note</span>
         {/* The order-level note. Kept separate from an item's kitchen note: the
@@ -1504,30 +1496,6 @@ export function useDeliveryWorkspace(input: {
           placeholder="Anything about this order as a whole"
           onChange={(e) => setOrderNote(e.target.value)}
         />
-      </label>
-      {/* Delivery fee — required for a delivery order, 0 = free delivery. Only the
-          fee is entered here; the server + finance engine compute the payable
-          total. Persisted to the order on Send. */}
-      <label className="block">
-        <span className="text-xs font-bold text-ink">
-          Delivery fee <span className="font-normal text-sub">({input.currency})</span>
-        </span>
-        <input
-          type="number"
-          inputMode="decimal"
-          min={0}
-          step="any"
-          className="mt-1 w-full rounded-xl border border-line px-3 py-2 text-base outline-none focus:border-brand-green"
-          value={deliveryFeeInput}
-          placeholder="0"
-          aria-invalid={!parsedDeliveryFee.valid}
-          onChange={(e) => setDeliveryFeeInput(e.target.value)}
-        />
-        {!parsedDeliveryFee.valid && (
-          <span className="mt-1 block text-[13px] text-red-600">
-            Enter a delivery fee (0 or more). Use 0 for free delivery.
-          </span>
-        )}
       </label>
     </div>
   );

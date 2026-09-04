@@ -119,20 +119,6 @@ export class DeliveryAmbiguousError extends Error {
  * orders but not money must still be able to work here; payment is Level 3C's
  * gate, not this one.
  */
-/**
- * Parse the manual delivery-fee input. Delivery orders always carry the concept,
- * so unlike the web helper there is no order-type branch here: an empty field is
- * "not entered yet" (Send stays disabled), 0 is valid (free delivery), and a
- * negative or non-numeric value is rejected.
- */
-export function parseDeliveryFee(raw: string | null | undefined): { valid: boolean; value: number; provided: boolean } {
-  const t = (raw ?? "").trim();
-  if (t === "") return { valid: false, value: 0, provided: false };
-  const n = Number(t);
-  if (!Number.isFinite(n) || n < 0) return { valid: false, value: 0, provided: true };
-  return { valid: true, value: n, provided: true };
-}
-
 export function deliveryOrderGate(input: {
   deliveryAccess: Gate;
   createOrders: Gate;
@@ -141,8 +127,6 @@ export function deliveryOrderGate(input: {
   customerId: string | null;
   addressId: string | null;
   lineCount: number;
-  /** The manual delivery fee must be a valid amount (>= 0) before sending. */
-  deliveryFeeValid: boolean;
   sending: boolean;
 }): Gate {
   if (!input.deliveryAccess.allowed) return input.deliveryAccess;
@@ -150,7 +134,6 @@ export function deliveryOrderGate(input: {
   if (!input.customerId) return { allowed: false, reason: "Choose a customer first." };
   if (!input.addressId) return { allowed: false, reason: "Choose the delivery address first." };
   if (input.lineCount === 0) return { allowed: false, reason: "Add at least one item." };
-  if (!input.deliveryFeeValid) return { allowed: false, reason: "Enter a delivery fee (0 or more)." };
   // Stated before the connection check because it is the more actionable of the
   // two: an operator with no shift can open one, but cannot conjure a network.
   if (!input.hasOpenShift) return { allowed: false, reason: "Open a shift before sending a delivery order." };
@@ -212,11 +195,6 @@ export const DELIVERY_PAYLOAD_KEYS = [
   "notes",
   "customer_id",
   "address_id",
-  // The manual delivery fee. Unlike a discount (which `pos_pay_order` owns and
-  // would overwrite at settlement), `pos_save_order` stores this on the order
-  // header and `pos_pay_order` does NOT touch it - the finance engine only reads
-  // it - so it belongs on the order at creation, not at payment.
-  "delivery_fee",
   "items",
 ] as const;
 
@@ -249,8 +227,6 @@ export function buildDeliveryPayload(input: {
   customerId: string | null;
   addressId: string | null;
   orderNote?: string | null;
-  /** The manual delivery fee (>= 0). Persisted on the order at creation. */
-  deliveryFee?: number | null;
 }): SubmitOrderPayload {
   if (!input.customerId) throw new CustomerRequiredError();
   if (!input.addressId) throw new AddressRequiredError();
@@ -266,7 +242,6 @@ export function buildDeliveryPayload(input: {
     status: "sent_to_kitchen",
     customerId: input.customerId,
     addressId: input.addressId,
-    deliveryFee: input.deliveryFee ?? null,
   });
 }
 

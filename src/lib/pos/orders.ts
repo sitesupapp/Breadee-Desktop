@@ -62,14 +62,6 @@ export type SubmitOrderPayload = {
    */
   customer_id?: string;
   address_id?: string;
-  /**
-   * Delivery only. The manually-entered delivery fee. `pos_save_order` persists
-   * it to `pos_orders.delivery_fee` (delivery routes only; it normalises every
-   * other route to NULL server-side) and the finance engine folds it into the
-   * settlement total. Omitted for takeaway and dine-in so their payloads are
-   * byte-for-byte unchanged. 0 is a valid value (free delivery).
-   */
-  delivery_fee?: number;
   items: SubmitOrderItem[];
 };
 
@@ -117,19 +109,6 @@ export class AddressRequiredError extends Error {
   }
 }
 
-/**
- * A delivery submission with a negative delivery fee.
- *
- * The server rejects it too (`pos_save_order` raises "Delivery fee cannot be
- * negative"); refusing here keeps a nonsensical amount from ever leaving the till.
- */
-export class DeliveryFeeInvalidError extends Error {
-  constructor() {
-    super("The delivery fee cannot be negative");
-    this.name = "DeliveryFeeInvalidError";
-  }
-}
-
 /** Mint an operation id for one logical order. One cart => one id, reused on retry. */
 export function newClientOpId(): string {
   return crypto.randomUUID();
@@ -152,21 +131,12 @@ export function buildSubmitPayload(input: {
   /** Delivery only. Both required for `delivery`, absent for every other type. */
   customerId?: string | null;
   addressId?: string | null;
-  /**
-   * Delivery only. The manual delivery fee (>= 0). Included in the payload only
-   * for a delivery order and only when provided; the server re-validates and is
-   * the authority. Negative is rejected before the request is built.
-   */
-  deliveryFee?: number | null;
 }): SubmitOrderPayload {
   if (!input.shiftId) throw new ShiftRequiredError();
   if (input.orderType === "dine_in" && !input.tableId) throw new TableRequiredError();
   if (input.orderType === "delivery") {
     if (!input.customerId) throw new CustomerRequiredError();
     if (!input.addressId) throw new AddressRequiredError();
-  }
-  if (input.orderType === "delivery" && input.deliveryFee != null && input.deliveryFee < 0) {
-    throw new DeliveryFeeInvalidError();
   }
   return {
     branch_id: input.branchId,
@@ -183,11 +153,6 @@ export function buildSubmitPayload(input: {
     // belongs in an order payload.
     ...(input.orderType === "delivery" && input.customerId && input.addressId
       ? { customer_id: input.customerId, address_id: input.addressId }
-      : {}),
-    // Present ONLY for delivery, and ONLY when a fee was entered. The server
-    // stores it on the order header and folds it into the total at settlement.
-    ...(input.orderType === "delivery" && input.deliveryFee != null
-      ? { delivery_fee: input.deliveryFee }
       : {}),
     items: input.lines.map((l) => ({
       menu_item_id: l.menu_item_id,

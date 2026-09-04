@@ -119,6 +119,20 @@ export function deliveryPaymentGate(input: {
 
 // --- the payload -------------------------------------------------------------
 
+/**
+ * Parse the manual delivery-fee input at settlement. An empty field is "not
+ * entered yet" (Confirm stays disabled), 0 is valid (free delivery), and a
+ * negative or non-numeric value is rejected. Pure, so the exact bytes the
+ * payment dialog acts on are testable without a network.
+ */
+export function parseDeliveryFee(raw: string | null | undefined): { valid: boolean; value: number; provided: boolean } {
+  const t = (raw ?? "").trim();
+  if (t === "") return { valid: false, value: 0, provided: false };
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0) return { valid: false, value: 0, provided: true };
+  return { valid: true, value: n, provided: true };
+}
+
 /** Exactly the keys `pos_pay_order` consumes for a delivery settlement. */
 export type DeliveryPaymentPayload = {
   order_id: string;
@@ -126,6 +140,14 @@ export type DeliveryPaymentPayload = {
   currency_code: CurrencyCode;
   discount_type?: "percent" | "amount";
   discount_value?: number;
+  /**
+   * The manual delivery fee entered at the settlement step. Persisted by
+   * `pos_pay_order` to `pos_orders.delivery_fee` immediately BEFORE the canonical
+   * finance layer runs (delivery orders only; the server re-validates and ignores
+   * it on any other route). This is the ONLY money field the client sends - never
+   * an amount or total. Present only when a fee was entered.
+   */
+  delivery_fee?: number;
 };
 
 export const DELIVERY_PAYMENT_PAYLOAD_KEYS = [
@@ -134,6 +156,7 @@ export const DELIVERY_PAYMENT_PAYLOAD_KEYS = [
   "currency_code",
   "discount_type",
   "discount_value",
+  "delivery_fee",
 ] as const;
 
 /**
@@ -170,6 +193,8 @@ export function buildDeliveryPaymentPayload(input: {
   method: PaymentMethod;
   currency: CurrencyCode;
   discount: { discount_type?: "percent" | "amount"; discount_value?: number };
+  /** The manual delivery fee (>= 0), when the cashier entered one. */
+  deliveryFee?: number | null;
 }): DeliveryPaymentPayload {
   const payload: DeliveryPaymentPayload = {
     order_id: input.orderId,
@@ -178,6 +203,9 @@ export function buildDeliveryPaymentPayload(input: {
   };
   if (input.discount.discount_type !== undefined) payload.discount_type = input.discount.discount_type;
   if (input.discount.discount_value !== undefined) payload.discount_value = input.discount.discount_value;
+  // Only the fee travels to the server - never an amount or total. The server
+  // persists it and the finance engine computes the payable.
+  if (input.deliveryFee != null) payload.delivery_fee = input.deliveryFee;
   return payload;
 }
 

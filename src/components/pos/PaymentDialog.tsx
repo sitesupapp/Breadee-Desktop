@@ -17,6 +17,7 @@ import { useShortcuts } from "@/lib/keyboard/provider";
 import { convertCurrency, formatMoney, hasValidRate, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { computeDiscount, discountPayload, fixedDiscountToPrimary, type DiscountType } from "@/lib/pos/discounts";
 import { computeChange, paymentBlockedReason, PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
+import { parseDeliveryFee } from "@/lib/pos/deliverySettlement";
 
 export type PaymentDialogProps = {
   open: boolean;
@@ -61,6 +62,13 @@ export type PaymentDialogProps = {
     discountValue: string;
     /** What the cashier actually handed over, in the tender currency. */
     tendered: number | null;
+    /**
+     * The manual delivery fee entered here (delivery settlement only). `null` for
+     * takeaway/dine-in. Sent as the ONLY money field to `pos_pay_order`, which
+     * persists it and lets the finance engine compute the payable - the client
+     * never sends a total.
+     */
+    deliveryFee: number | null;
   }) => void;
 };
 
@@ -70,6 +78,10 @@ export function PaymentDialog(props: PaymentDialogProps) {
   const [discountType, setDiscountType] = useState<DiscountType>("none");
   const [discountValue, setDiscountValue] = useState("");
   const [tendered, setTendered] = useState("");
+  // Delivery settlement only: the manual fee the cashier enters here. Held as a raw
+  // string and parsed by the shared helper; it is the ONLY money field this dialog
+  // ever sends, and the server computes the payable from it.
+  const [deliveryFee, setDeliveryFee] = useState("");
 
   useEffect(() => {
     if (props.open) {
@@ -78,6 +90,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
       setDiscountType("none");
       setDiscountValue("");
       setTendered("");
+      setDeliveryFee("");
     }
   }, [props.open, props.primaryCurrency]);
 
@@ -86,18 +99,29 @@ export function PaymentDialog(props: PaymentDialogProps) {
   const discountInPrimary = fixedDiscountToPrimary(discountType, discountValue, currency, props.primaryCurrency, props.rate);
   const discount = computeDiscount(props.subtotal, props.discountGate.allowed ? discountType : "none", discountInPrimary);
 
+  // Delivery settlement only: the manual fee (delivery orders show the input).
+  const isDelivery = props.delivery != null;
+  const feeParsed = parseDeliveryFee(deliveryFee);
+  const feeValue = isDelivery && feeParsed.valid ? feeParsed.value : 0;
+  // DISPLAY PREVIEW ONLY, so the cashier sees what to collect and change is right.
+  // This is never sent to the server: pos_pay_order re-derives the authoritative
+  // amount from the persisted fee via the finance engine, and the receipt uses that
+  // server figure. The dialog stays non-authoritative, exactly like the discount
+  // preview above it.
+  const payableInPrimary = discount.finalTotal + feeValue;
+
   const currencyBlock = paymentBlockedReason(currency, props.rate);
 
   // Amount due in the TENDER currency, for the cash drawer.
   const dueInTender = useMemo(() => {
-    if (currency === props.primaryCurrency) return discount.finalTotal;
+    if (currency === props.primaryCurrency) return payableInPrimary;
     if (!hasValidRate(props.rate)) return null;
     try {
-      return convertCurrency(discount.finalTotal, props.primaryCurrency, currency, props.rate);
+      return convertCurrency(payableInPrimary, props.primaryCurrency, currency, props.rate);
     } catch {
       return null;
     }
-  }, [currency, props.primaryCurrency, props.rate, discount.finalTotal]);
+  }, [currency, props.primaryCurrency, props.rate, payableInPrimary]);
 
   const tenderedNum = parseAmount(tendered);
   const change = dueInTender === null ? null : computeChange(dueInTender, tenderedNum, currency);
@@ -105,6 +129,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
   const blockedReason =
     currencyBlock ??
     (!discount.valid ? discount.error : null) ??
+    (isDelivery && !feeParsed.valid ? "Enter a delivery fee (0 or more). Use 0 for free delivery." : null) ??
     (!props.payGate.allowed ? props.payGate.reason : null) ??
     (change?.short ? "The tendered amount does not cover the bill." : null);
 
@@ -120,6 +145,8 @@ export function PaymentDialog(props: PaymentDialogProps) {
       discountType: permitted,
       discountValue: permitted === "none" ? "" : discountInPrimary,
       tendered: tendered.trim() === "" ? null : tenderedNum,
+      // Only the fee itself — never a computed total. Delivery settlement only.
+      deliveryFee: isDelivery ? feeValue : null,
     });
   }
 
@@ -196,12 +223,16 @@ export function PaymentDialog(props: PaymentDialogProps) {
             {discount.amount > 0 && (
               <Row label="Discount" value={`- ${formatMoney(discount.amount, props.primaryCurrency)}`} tone="amber" />
             )}
+            {isDelivery && feeValue > 0 && (
+              <Row label="Delivery Fee" value={formatMoney(feeValue, props.primaryCurrency)} />
+            )}
             <div className="mt-1.5 flex items-baseline justify-between border-t border-line pt-1.5">
               <span className="text-sm font-bold text-ink">Total</span>
               {/* Still the largest thing in the dialog. Compact is about the
-                  space around the figures, never about the figures. */}
+                  space around the figures, never about the figures. A preview:
+                  pos_pay_order returns the authoritative amount the receipt shows. */}
               <span className="text-2xl font-extrabold tabular-nums text-ink">
-                {formatMoney(discount.finalTotal, props.primaryCurrency)}
+                {formatMoney(payableInPrimary, props.primaryCurrency)}
               </span>
             </div>
             {currency !== props.primaryCurrency && dueInTender !== null && (
@@ -274,6 +305,26 @@ export function PaymentDialog(props: PaymentDialogProps) {
               <p className="mt-1 text-xs font-semibold text-amber-800">{discount.error}</p>
             )}
           </Field>
+
+          {/* Delivery fee — DELIVERY settlement only. The cashier enters ONLY the
+              fee; the server + finance engine compute the payable. 0 = free. */}
+          {isDelivery && (
+            <Field label={`Delivery fee (${props.primaryCurrency})`}>
+              <Input
+                inputMode="decimal"
+                value={deliveryFee}
+                onChange={(e) => setDeliveryFee(e.target.value)}
+                placeholder="0"
+                className="w-28 text-right font-bold"
+                aria-invalid={!feeParsed.valid}
+              />
+              {!feeParsed.valid && (
+                <p className="mt-1 text-xs font-semibold text-amber-800">
+                  Enter a delivery fee (0 or more). Use 0 for free delivery.
+                </p>
+              )}
+            </Field>
+          )}
         </div>
 
         {/* Cash handling */}

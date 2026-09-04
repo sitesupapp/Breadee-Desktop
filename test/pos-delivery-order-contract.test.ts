@@ -12,7 +12,6 @@ import assert from "node:assert/strict";
 import {
   AddressRequiredError,
   CustomerRequiredError,
-  DeliveryFeeInvalidError,
   ShiftRequiredError,
   buildSubmitPayload,
 } from "@/lib/pos/orders";
@@ -22,7 +21,6 @@ import {
   buildDeliveryPayload,
   createDeliveryLatch,
   deliveryOrderGate,
-  parseDeliveryFee,
 } from "@/lib/pos/deliveryOrder";
 import { sameOwner, type CartOwner } from "@/state/cart";
 import type { CartLine } from "@/types/pos";
@@ -206,7 +204,6 @@ const gateBase = {
   customerId: "c1",
   addressId: "a1",
   lineCount: 1,
-  deliveryFeeValid: true,
   sending: false,
 };
 
@@ -219,7 +216,6 @@ test("the gate refuses in the order an operator can act on", () => {
   assert.match(deliveryOrderGate({ ...gateBase, addressId: null }).reason ?? "", /delivery address/i);
   assert.match(deliveryOrderGate({ ...gateBase, lineCount: 0 }).reason ?? "", /at least one item/i);
   assert.match(deliveryOrderGate({ ...gateBase, hasOpenShift: false }).reason ?? "", /Open a shift/i);
-  assert.match(deliveryOrderGate({ ...gateBase, deliveryFeeValid: false }).reason ?? "", /delivery fee/i);
   assert.match(deliveryOrderGate({ ...gateBase, online: false }).reason ?? "", /needs a connection/i);
   assert.match(deliveryOrderGate({ ...gateBase, sending: true }).reason ?? "", /already being sent/i);
 });
@@ -249,52 +245,19 @@ test("the latch admits one sender and refuses the rest synchronously", () => {
   assert.equal(latch.acquire(), true);
 });
 
-// --- the manual delivery fee -------------------------------------------------
+// --- the delivery fee is NOT a creation-time concept -------------------------
 
-test("parseDeliveryFee: blank not valid, 0 valid, positive valid, negative/junk rejected", () => {
-  assert.deepEqual(parseDeliveryFee(""), { valid: false, value: 0, provided: false });
-  assert.deepEqual(parseDeliveryFee("  "), { valid: false, value: 0, provided: false });
-  assert.deepEqual(parseDeliveryFee("0"), { valid: true, value: 0, provided: true });
-  assert.deepEqual(parseDeliveryFee("2"), { valid: true, value: 2, provided: true });
-  assert.deepEqual(parseDeliveryFee("2.5"), { valid: true, value: 2.5, provided: true });
-  assert.equal(parseDeliveryFee("-2").valid, false);
-  assert.equal(parseDeliveryFee("abc").valid, false);
-});
-
-test("a delivery payload carries delivery_fee when a fee is entered", () => {
-  const p = buildDeliveryPayload({ ...base, deliveryFee: 2 }) as Record<string, unknown>;
-  assert.equal(p.delivery_fee, 2);
-  // still only allowed keys.
-  for (const key of Object.keys(p)) {
-    assert.ok(DELIVERY_PAYLOAD_KEYS.includes(key as never), `unexpected key ${key}`);
-  }
-});
-
-test("a zero delivery fee is sent (free delivery is an explicit choice)", () => {
-  const p = buildDeliveryPayload({ ...base, deliveryFee: 0 }) as Record<string, unknown>;
-  assert.equal(p.delivery_fee, 0);
-});
-
-test("no fee entered means no delivery_fee key at all", () => {
-  const p = buildDeliveryPayload(base) as Record<string, unknown>;
+test("order creation never carries a delivery_fee (the fee is a settlement concept)", () => {
+  // The fee is entered at the payment step, not when the order is created, so the
+  // create payload is byte-for-byte what it was before the fee feature.
+  const p = buildDeliveryPayload({ ...base, orderNote: "note" }) as Record<string, unknown>;
   assert.equal("delivery_fee" in p, false);
-});
-
-test("a negative fee is refused before the request exists", () => {
-  assert.throws(() => buildDeliveryPayload({ ...base, deliveryFee: -2 }), DeliveryFeeInvalidError);
-});
-
-test("takeaway and dine-in never carry a delivery_fee, even if one is passed", () => {
-  for (const orderType of ["takeaway", "dine_in"] as const) {
-    const p = buildSubmitPayload({
-      branchId: "b1",
-      shiftId: "s1",
-      orderType,
-      clientOpId: "op-1",
-      lines: [line()],
-      tableId: orderType === "dine_in" ? "t1" : undefined,
-      deliveryFee: 2,
-    }) as Record<string, unknown>;
-    assert.equal("delivery_fee" in p, false, `${orderType} must not carry a delivery fee`);
-  }
+  const takeaway = buildSubmitPayload({
+    branchId: "b1",
+    shiftId: "s1",
+    orderType: "takeaway",
+    clientOpId: "op-1",
+    lines: [line()],
+  }) as Record<string, unknown>;
+  assert.equal("delivery_fee" in takeaway, false);
 });
