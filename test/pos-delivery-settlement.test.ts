@@ -21,6 +21,7 @@ import {
   buildDeliveryPaymentPayload,
   checkSettlementTarget,
   classifySettlement,
+  deliveryFeeFromFinance,
   createSettlementLatch,
   deliveryIsSettled,
   deliveryPaymentGate,
@@ -146,6 +147,23 @@ test("the payload has exactly the keys pos_pay_order consumes", () => {
     "discount_type",
     "discount_value",
   ]);
+});
+
+test("the delivery fee is read from the finance charge line, never inferred", () => {
+  // The explicit charge the server returns.
+  const finance = {
+    charges: [
+      { charge_type: "delivery_fee", amount: 2, name: "Delivery Fee" },
+      { charge_type: "service", amount: 1, name: "Service" },
+    ],
+    total_due: 13,
+  };
+  assert.equal(deliveryFeeFromFinance(finance), 2);
+  // No delivery fee charged.
+  assert.equal(deliveryFeeFromFinance({ charges: [{ charge_type: "service", amount: 1 }] }), null);
+  // No finance layer at all (plain order).
+  assert.equal(deliveryFeeFromFinance(null), null);
+  assert.equal(deliveryFeeFromFinance(undefined), null);
 });
 
 test("tendered and change head the forbidden list, and client_op_id follows", () => {

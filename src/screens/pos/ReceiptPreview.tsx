@@ -154,6 +154,15 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
           <span>-{formatMoney(data.discount, data.currency)}</span>
         </div>
       )}
+      {/* Delivery fee: its own line between discount and total, present only when
+          the server actually charged one. Data gated (like the native renderer),
+          so the paper and the preview show the same line. */}
+      {data.deliveryFee != null && data.deliveryFee > 0 && (
+        <div className="flex justify-between">
+          <span>Delivery Fee</span>
+          <span>{formatMoney(data.deliveryFee, data.currency)}</span>
+        </div>
+      )}
       {show("total") && (
         <div className="mt-1 flex justify-between text-sm font-bold">
           <span>Total</span>

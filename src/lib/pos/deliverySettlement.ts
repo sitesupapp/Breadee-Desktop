@@ -209,12 +209,36 @@ export type DeliveryPaymentResult = {
   method: string;
   subtotal: number;
   discount: number;
+  /**
+   * The delivery fee the server actually charged, read from the finance
+   * breakdown's `delivery_fee` charge line - NEVER inferred from
+   * `amount - subtotal`, which would be wrong the moment a tax or another charge
+   * exists. `null` when there was no fee. It is already inside `amount`.
+   */
+  delivery_fee: number | null;
   amount: number;
   order_number: string;
   currency_code: CurrencyCode;
   original_amount: number;
   exchange_rate: number | null;
 };
+
+/**
+ * Pull the delivery fee out of `pos_pay_order`'s finance breakdown.
+ *
+ * The RPC returns `finance` = the finance engine's calc, whose `charges` array
+ * carries a `charge_type = 'delivery_fee'` entry when one was charged. This reads
+ * that explicit figure; it does not compute one.
+ */
+export function deliveryFeeFromFinance(finance: unknown): number | null {
+  const f = asRecord(finance);
+  const charges = Array.isArray(f.charges) ? f.charges : [];
+  for (const c of charges) {
+    const r = asRecord(c);
+    if (str(r.charge_type) === "delivery_fee") return num(r.amount);
+  }
+  return null;
+}
 
 export async function payDeliveryOrder(payload: DeliveryPaymentPayload): Promise<DeliveryPaymentResult> {
   const row = asRecord(await callPosRpc("pos_pay_order", { p_payload: payload }));
@@ -225,6 +249,7 @@ export async function payDeliveryOrder(payload: DeliveryPaymentPayload): Promise
     method: str(row.method, payload.method),
     subtotal: num(row.subtotal),
     discount: num(row.discount),
+    delivery_fee: deliveryFeeFromFinance(row.finance),
     amount: num(row.amount),
     order_number: str(row.order_number),
     currency_code: currency === "LBP" ? "LBP" : "USD",
