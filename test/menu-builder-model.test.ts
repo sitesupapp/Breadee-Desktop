@@ -76,6 +76,10 @@ const EXPECTED_TABLES = [
   "menu_item_modifier_groups",
   "qr_menu_settings",
   "public_menu_themes",
+  // The OU-aware Menu Builder backend (relocated into this one door) reads the
+  // authorable Operating Units and publishes per-OU membership rows.
+  "branches",
+  "menu_item_branch_availability",
 ];
 
 test("the repository touches exactly the web Menu Builder's tables", () => {
@@ -90,9 +94,13 @@ test("the repository touches exactly the web Menu Builder's tables", () => {
   }
 });
 
-test("the repository calls exactly the two secured price RPCs", () => {
+test("the repository's directly-named RPCs are the sanctioned menu-builder RPCs", () => {
+  // Tenant-wide writes go through direct table ops + the two secured price RPCs;
+  // the OU-aware backend additionally reads its menu projection via `menu_builder_ou`.
+  // (The per-OU write RPCs are issued through the private `rpc()` helper, i.e.
+  // `supabase.rpc(fn)` with a variable, and are intentionally not named inline.)
   const rpcs = new Set([...repository.matchAll(/\.rpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]));
-  assert.deepEqual([...rpcs].sort(), ["set_menu_item_price", "set_modifier_option_price"]);
+  assert.deepEqual([...rpcs].sort(), ["menu_builder_ou", "set_menu_item_price", "set_modifier_option_price"]);
 });
 
 test("images go to the shared public bucket, not a desktop one", () => {
