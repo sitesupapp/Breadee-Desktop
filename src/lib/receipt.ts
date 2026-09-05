@@ -66,6 +66,14 @@ export type ReceiptData = {
   lines: ReceiptLine[];
   subtotal: number;
   discount: number;
+  /**
+   * Delivery orders only: the manually-entered delivery fee, already folded into
+   * `total` by the server's finance engine. Carried on its own so the receipt can
+   * show it as a line between Subtotal and Total. Absent/0 prints nothing, and it
+   * never appears on takeaway/dine-in. Passed IN from the server response, never
+   * computed here.
+   */
+  deliveryFee?: number | null;
   total: number;
   /** Cash handling, in the TENDER currency. Null when not a cash tender. */
   tenderCurrency?: CurrencyCode | null;

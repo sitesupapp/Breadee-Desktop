@@ -974,6 +974,8 @@ export function useDeliveryWorkspace(input: {
       discountType: DiscountType;
       discountValue: string;
       tendered: number | null;
+      /** The manual delivery fee entered at the pay step; null when none. */
+      deliveryFee: number | null;
     }) => {
       const order = payTarget.order;
       if (!order || !payGate.allowed) return;
@@ -1008,6 +1010,9 @@ export function useDeliveryWorkspace(input: {
             // Named fields only - `tendered` travels in the same object and has
             // no column on `pos_payments`.
             discount: discount.fields,
+            // The manual delivery fee. pos_pay_order persists it and the finance
+            // engine computes the total - the client sends only the fee.
+            deliveryFee: confirm.deliveryFee,
           }),
           submit: payDeliveryOrder,
           // Used only after a failure, and it asks BOTH questions: what the
@@ -1070,6 +1075,11 @@ export function useDeliveryWorkspace(input: {
             // Server figures win over anything computed here.
             subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
             discount: money?.discount ?? 0,
+            // The delivery fee the server actually charged, read from the finance
+            // breakdown - its own receipt line, already inside `total`. Null on the
+            // recovered path (no payment response), where the fee simply isn't
+            // itemised; the total still includes it.
+            deliveryFee: money?.delivery_fee ?? null,
             total: money?.amount ?? settled!.total_amount ?? 0,
             tenderCurrency: (money?.currency_code ?? confirm.currency) as CurrencyCode,
             tenderTotal: money?.original_amount ?? null,

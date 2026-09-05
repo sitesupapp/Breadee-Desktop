@@ -244,3 +244,20 @@ test("the latch admits one sender and refuses the rest synchronously", () => {
   latch.release();
   assert.equal(latch.acquire(), true);
 });
+
+// --- the delivery fee is NOT a creation-time concept -------------------------
+
+test("order creation never carries a delivery_fee (the fee is a settlement concept)", () => {
+  // The fee is entered at the payment step, not when the order is created, so the
+  // create payload is byte-for-byte what it was before the fee feature.
+  const p = buildDeliveryPayload({ ...base, orderNote: "note" }) as Record<string, unknown>;
+  assert.equal("delivery_fee" in p, false);
+  const takeaway = buildSubmitPayload({
+    branchId: "b1",
+    shiftId: "s1",
+    orderType: "takeaway",
+    clientOpId: "op-1",
+    lines: [line()],
+  }) as Record<string, unknown>;
+  assert.equal("delivery_fee" in takeaway, false);
+});
