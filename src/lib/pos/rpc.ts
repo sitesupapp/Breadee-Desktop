@@ -73,7 +73,16 @@ export type PosRpcName =
   // paid order re-settles it, and that belongs with its own verification rather
   // than riding along here.
   | "pos_edit_order"
-  | "pos_void_order";
+  | "pos_void_order"
+  // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
+  // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
+  // once and recovers a lost response by an authoritative re-read rather than by
+  // retrying blindly. The SERVER owns every figure (outstanding / paid / discount
+  // / payment status); the desktop shows previews and prints what the RPC returns.
+  // Never enqueued to the offline outbox - on-account is online-only.
+  // See `lib/pos/onAccount.ts`.
+  | "pos_complete_on_account"
+  | "pos_complete_table_on_account";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

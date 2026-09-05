@@ -12,6 +12,7 @@ import {
   canEndShift,
   canOpenShift,
   canOperatePOS,
+  canTakeOnAccount,
   canTakePayments,
   canUseOrderType,
   posAccessDenialReason,
@@ -34,6 +35,7 @@ export type PosContext = {
   gates: {
     createOrders: Gate;
     takePayments: Gate;
+    takeOnAccount: Gate;
     applyDiscounts: Gate;
     openShift: Gate;
     endOwnShift: Gate;
@@ -99,6 +101,7 @@ export function usePosContext(): PosContext {
       gates: {
         createOrders: canCreateOrders(access),
         takePayments: canTakePayments(access),
+        takeOnAccount: canTakeOnAccount(access),
         applyDiscounts: canApplyDiscounts(access),
         openShift: canOpenShift(access),
         endOwnShift: canEndShift(access, true),

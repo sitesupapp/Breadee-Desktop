@@ -142,7 +142,13 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // 15 -> 16 in Desktop 1.0.4: `pos_configure_tables`, the web app's own table
   // capacity contract, so the desktop configures tables rather than sending the
   // operator to a browser. Reviewed, and it is not an order or money RPC.
-  assert.equal(names.length, 16);
+  // 16 -> 18 in Wave 2C: `pos_complete_on_account` and
+  // `pos_complete_table_on_account`, the shared receivables settlement RPCs.
+  // Reviewed, state-guarded (no idempotency key, like pos_pay_order), and gated
+  // behind the dark `pos.receivables` feature.
+  assert.equal(names.length, 18);
+  assert.ok(names.includes("pos_complete_on_account"));
+  assert.ok(names.includes("pos_complete_table_on_account"));
   assert.ok(names.includes("pos_configure_tables"));
   assert.ok(names.includes("pos_upsert_customer"));
   // Level 3A added exactly one name, and it is not an order or money RPC.

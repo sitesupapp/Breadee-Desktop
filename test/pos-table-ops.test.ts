@@ -307,9 +307,10 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // RETARGETED AGAIN IN LEVEL 3A: 12 -> 13, for `pos_upsert_customer`; AGAIN IN
   // LEVEL 3D: 13 -> 15, for the two order-management RPCs; and AGAIN IN DESKTOP
   // 1.0.4: 15 -> 16, for `pos_configure_tables`, the web app's existing table
-  // capacity contract. Same discipline as the 11 -> 12 bump above - the number
+  // capacity contract; and WAVE 2C: 16 -> 18, for the two receivables
+  // settlement RPCs. Same discipline as the 11 -> 12 bump above - the number
   // moves by exactly what was reviewed.
-  assert.equal(members.length, 16, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.equal(members.length, 18, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

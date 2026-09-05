@@ -25,6 +25,10 @@ export const FEATURES = {
   E_MENU: "e_menu",
   BRANCHES: "branches",
   REPORTS: "reports",
+  // Customer Receivables / On Account. The server emits this key via
+  // `get_tenant_effective_features`; the desktop stays dark unless the tenant is
+  // entitled, exactly like every other POS sub-feature.
+  POS_RECEIVABLES: "pos.receivables",
 } as const;
 
 export type FeatureMap = Record<string, boolean>;

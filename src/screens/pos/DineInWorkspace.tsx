@@ -63,7 +63,14 @@ import {
   validateTableDiscount,
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
-import { billIsCleared, buildTablePaymentReceipt } from "@/lib/pos/tablePaymentCompletion";
+import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt } from "@/lib/pos/tablePaymentCompletion";
+import {
+  completeTableOnAccount,
+  createOnAccountLatch,
+  performOnAccount,
+  type OnAccountVerdict,
+} from "@/lib/pos/onAccount";
+import { useCustomerPicker } from "@/state/customerPicker";
 import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
@@ -204,6 +211,17 @@ export function useDineInWorkspace(input: {
    * payment attempt begins, never on a re-render.
    */
   const completionDone = useRef(false);
+  // Customer Receivables / On Account. Its own latch, and a customer picker that
+  // is live only while the payment dialog is open and on-account is reachable.
+  const onAccountLatch = useRef(createOnAccountLatch());
+  const onAccountReachable = payOpen && pos.gates.takeOnAccount.allowed && input.online;
+  const customerPicker = useCustomerPicker({
+    access: pos.access,
+    branchId: pos.branch.id,
+    online: input.online,
+    enabled: onAccountReachable,
+    onError: (message) => setPayError(message),
+  });
 
   const ctx = useMemo(
     () => ({ tenantId: pos.tenantId, branchId: pos.branch.id }),
@@ -777,6 +795,137 @@ export function useDineInWorkspace(input: {
     [selected, payGate.allowed, pos.gates.applyDiscounts, input.currency, input.rate, ctx, readTableState, runCompletion, toast],
   );
 
+  /**
+   * Put the whole TABLE bill on account. Exactly one submit, ever.
+   *
+   * The sibling of `confirmPay`: the same re-read-then-once shape and the same
+   * completion order (server view, proof the table freed, cash box, receipt),
+   * but the money call is `pos_complete_table_on_account` and the receipt is a
+   * receivable. ONLINE ONLY and a customer is REQUIRED.
+   */
+  const confirmTableOnAccount = useCallback(
+    async (dialog: {
+      mode: "account" | "partial";
+      amountNow: number;
+      customerId: string;
+      method: PaymentMethod;
+      discountType: DiscountType;
+      discountValue: string;
+    }) => {
+      const table = selected;
+      const shownBill = useTables.getState().bill;
+      if (!table || !shownBill || !payGate.allowed) return;
+      if (!input.online) {
+        setPayError("On-account sales need a connection. Reconnect before putting a bill on account.");
+        return;
+      }
+      if (!dialog.customerId) {
+        setPayError("Choose a customer before putting a bill on account.");
+        return;
+      }
+
+      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
+      const discountFields =
+        dialog.discountType !== "none" && dialog.discountValue.trim() !== ""
+          ? { discountType: dialog.discountType as "percent" | "amount", discountValue: Number(dialog.discountValue) }
+          : {};
+
+      completionDone.current = false;
+      setPaying(true);
+      setPayError(null);
+      try {
+        const outcome = await performOnAccount({
+          latch: onAccountLatch.current,
+          submit: () =>
+            completeTableOnAccount({
+              tableId: table.id,
+              customerId: dialog.customerId,
+              amount: dialog.amountNow,
+              method: dialog.method,
+              ...discountFields,
+            }),
+          // Lost-response re-read: a table on-account completion frees the table,
+          // so a cleared bill is proof it landed.
+          reread: async (): Promise<OnAccountVerdict> => {
+            await tables.refresh(ctx);
+            const after = readTableState();
+            return billIsCleared(after.bill, after.table) ? "committed" : "open";
+          },
+        });
+
+        if (!outcome.ok) {
+          const c = classifyError(outcome.error);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+          if (!outcome.retryable) {
+            toast.push({ tone: c.expected ? "warning" : "error", message: c.message, detail: c.hint });
+          }
+          return;
+        }
+
+        if (completionDone.current) return;
+        completionDone.current = true;
+
+        // Server view of the table, then proof the bill is gone, then the cash box.
+        await tables.refresh(ctx);
+        const after = readTableState();
+        const cleared = billIsCleared(after.bill, after.table);
+        await input.refreshCashBox();
+
+        input.onPresentReceipt(
+          buildTableOnAccountReceipt({
+            bill: shownBill,
+            table,
+            result: outcome.result
+              ? {
+                  bill_total: outcome.result.bill_total,
+                  paid_usd: outcome.result.paid_usd,
+                  outstanding_primary: outcome.result.outstanding_primary,
+                  subtotal: outcome.result.subtotal,
+                  discount: outcome.result.discount,
+                }
+              : null,
+            requestedDiscount: 0,
+            requestedPaidNow: dialog.amountNow,
+            method: dialog.method,
+            tenantName: pos.tenantName,
+            branchName: pos.branch.name,
+            operatorName: pos.userName,
+            primaryCurrency,
+            shiftId: input.shiftId,
+            at: new Date().toLocaleString(),
+          }),
+        );
+
+        setPayOpen(false);
+        setPayError(null);
+        // Final authoritative bill read, so Pay is no longer reachable.
+        setFocusedId(table.id);
+        await tables.loadBill(ctx);
+
+        toast.push({
+          tone: "success",
+          message: outcome.recovered
+            ? `${table.name} was already put on account`
+            : outcome.result && outcome.result.paid_usd > 0
+              ? `${table.name} partly paid - balance on account`
+              : `${table.name} put on account`,
+        });
+
+        if (!cleared) {
+          toast.push({
+            tone: "warning",
+            message: "The bill went on account, but this table still shows an open bill",
+            detail: "Refresh the table map and check it before taking any further action.",
+          });
+        }
+      } finally {
+        setPaying(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, payGate.allowed, input.online, input.currency, input.shiftId, ctx, readTableState, toast],
+  );
+
   // A payment dialog left open over a table that is no longer selected would
   // settle nothing and confuse everything.
   useEffect(() => {
@@ -977,6 +1126,17 @@ export function useDineInWorkspace(input: {
           selected
             ? { tableName: selected.name, seats: selected.seats, orderCount: tables.bill?.orders.length ?? 0 }
             : null
+        }
+        onAccount={
+          pos.gates.takeOnAccount.allowed && input.online
+            ? {
+                enabled: true,
+                customer: customerPicker.selected,
+                search: customerPicker.searchProps,
+                onClearCustomer: customerPicker.clearSelection,
+                onConfirmAccount: (v) => void confirmTableOnAccount(v),
+              }
+            : undefined
         }
         error={payError}
         onCancel={() => setPayOpen(false)}
