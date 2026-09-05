@@ -6,6 +6,7 @@ import { Shell } from "@/screens/Shell";
 import { Dashboard } from "@/screens/Dashboard";
 import { MenuBuilder } from "@/screens/menu/MenuBuilder";
 import { PosWorkspace } from "@/screens/pos/PosWorkspace";
+import { CustomerAccounts } from "@/screens/CustomerAccounts";
 import { Profile } from "@/screens/Profile";
 import { Settings } from "@/screens/settings/Settings";
 import { Info } from "@/screens/Info";
@@ -78,6 +79,13 @@ export default function App() {
               changes: POS is its own route, so returning to it remounts
               PosWorkspace and refetches the menu through `loadMenu`. */}
           <Route path="/menu-builder" element={<MenuBuilder />} />
+          {/* Customer Accounts (Wave 3C): an operational receivables surface. It
+              lives in the app Shell rather than the POS workspace because it takes
+              no orders and needs no cart, shift-mode or menu subscription - it
+              searches customers, shows balances and collects. Its own gate
+              (canViewReceivables) fails closed; the nav item is hidden unless
+              entitled. */}
+          <Route path="/receivables" element={<CustomerAccounts />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/settings/*" element={<Settings />} />
           <Route path="/blocked" element={<Info title="Access blocked" body="This account/tenant is blocked. Contact your administrator." />} />

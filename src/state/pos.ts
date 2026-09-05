@@ -8,6 +8,7 @@ import { loadBranchContext, UNKNOWN_BRANCH, type BranchContext } from "@/lib/bra
 import { loadOperatorName } from "@/lib/operator";
 import {
   canApplyDiscounts,
+  canCollectReceivables,
   canCreateOrders,
   canEndShift,
   canOpenShift,
@@ -15,6 +16,7 @@ import {
   canTakeOnAccount,
   canTakePayments,
   canUseOrderType,
+  canViewReceivables,
   posAccessDenialReason,
   type PosAccessContext,
 } from "@/lib/pos/access";
@@ -39,6 +41,8 @@ export type PosContext = {
     applyDiscounts: Gate;
     openShift: Gate;
     endOwnShift: Gate;
+    viewReceivables: Gate;
+    collectReceivables: Gate;
   };
   routes: {
     takeaway: boolean;
@@ -105,6 +109,8 @@ export function usePosContext(): PosContext {
         applyDiscounts: canApplyDiscounts(access),
         openShift: canOpenShift(access),
         endOwnShift: canEndShift(access, true),
+        viewReceivables: canViewReceivables(access),
+        collectReceivables: canCollectReceivables(access),
       },
       routes: {
         takeaway: canUseOrderType(access, FEATURES.POS_TAKEAWAY),

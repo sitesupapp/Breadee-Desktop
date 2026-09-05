@@ -72,6 +72,13 @@ export const POS_PERMISSIONS = {
   // Customer Receivables / On Account. The single key `pos_complete_on_account`
   // and `pos_complete_table_on_account` both check for themselves.
   RECEIVABLES_CREATE: "pos.receivables.create",
+  // Wave 3C operational surface. VIEW is what the two receivables READ RPCs
+  // (`pos_receivables_search` / `pos_receivables_customer`) demand; COLLECT is
+  // what `pos_receivable_collect` checks for itself before booking a payment.
+  // Two separate keys, because inspecting a balance and taking money against it
+  // are two separate authorities - the server treats them so, and so does this.
+  RECEIVABLES_VIEW: "pos.receivables.view",
+  RECEIVABLES_COLLECT: "pos.receivables.collect",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -153,6 +160,49 @@ export function canTakeOnAccount(ctx: PosAccessContext): Gate {
   const pay = canTakePayments(ctx);
   if (!pay.allowed) return pay;
   return gate(perm(ctx, POS_PERMISSIONS.RECEIVABLES_CREATE), "You do not have permission to sell on account.");
+}
+
+/**
+ * Viewing the Customer Accounts surface (Wave 3C).
+ *
+ * The order the two receivables READ RPCs would refuse in: POS access (carrying
+ * the owner block, mirroring `pos_assert_operator`), the `pos.receivables`
+ * sub-feature (dark unless the tenant is entitled), then the `pos.receivables.view`
+ * permission the reads check for themselves. STRICTER than a bare lookup, never
+ * looser. Not a security boundary - the RPCs and RLS re-enforce every rule - it
+ * exists so the surface is only offered where the server would answer.
+ */
+export function canViewReceivables(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_RECEIVABLES)) {
+    return { allowed: false, reason: "Customer accounts are not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.RECEIVABLES_VIEW), "You do not have permission to view customer accounts.");
+}
+
+/**
+ * Collecting against a receivable balance (Wave 3C).
+ *
+ * A DISTINCT authority from viewing: a cashier who may inspect a customer's debt
+ * is not thereby a cashier who may take money against it, and `pos_receivable_collect`
+ * agrees - it demands `pos.receivables.collect`, not `.view`. Built on the same
+ * POS-access + feature prerequisites so a view-only operator sees the balance but
+ * finds the Collect control refused, exactly as the server would refuse it.
+ *
+ * Connectivity is NOT part of this gate - it is an authorisation decision, and a
+ * user's permissions do not change when the network drops. The online-only rule
+ * for a collection is enforced separately at the call site, where the connection
+ * actually matters.
+ */
+export function canCollectReceivables(ctx: PosAccessContext): Gate {
+  const view = canViewReceivables(ctx);
+  if (!view.allowed) return view;
+  return gate(
+    perm(ctx, POS_PERMISSIONS.RECEIVABLES_COLLECT),
+    "You do not have permission to collect payments on customer accounts.",
+  );
 }
 
 /** Opening a shift additionally requires the `pos.shifts` sub-feature (m223). */

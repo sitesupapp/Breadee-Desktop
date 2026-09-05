@@ -82,7 +82,27 @@ export type PosRpcName =
   // Never enqueued to the offline outbox - on-account is online-only.
   // See `lib/pos/onAccount.ts`.
   | "pos_complete_on_account"
-  | "pos_complete_table_on_account";
+  | "pos_complete_table_on_account"
+  // Customer Receivables / On Account — Wave 3C operational surface.
+  //
+  // TWO READS and ONE WRITE, shared with the web app.
+  //
+  // `pos_receivables_search` and `pos_receivables_customer` are READS: they gate
+  // on `pos.receivables.view`, are scoped to the operator's accessible OUs, and
+  // move no money. The desktop shows what they return as a PROJECTION - never as
+  // authority - and re-reads after any collection so the server figure wins.
+  //
+  // `pos_receivable_collect` is the ONLY money mover here, and the ONLY new RPC
+  // that does: it books a payment against an existing receivable order, attaches
+  // it to the collector's OWN open shift, and gates on `pos.receivables.collect`
+  // + OU + owner-block. UNLIKE `pos_complete_on_account`, it is IDEMPOTENT on a
+  // client-supplied `client_op_id`, so a repeat of the SAME id replays the first
+  // result rather than collecting twice; the client mints exactly one id per
+  // collection and reuses it on retry. Online-only: never enqueued to the offline
+  // outbox. See `lib/pos/receivables.ts`.
+  | "pos_receivables_search"
+  | "pos_receivables_customer"
+  | "pos_receivable_collect";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

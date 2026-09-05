@@ -547,8 +547,10 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
   // Level 3D took it to 15; Desktop 1.0.4's `pos_configure_tables` is the 16th;
-  // Wave 2C adds the two receivables settlement RPCs (17th, 18th).
-  assert.equal(names.length, 18);
+  // Wave 2C adds the two receivables settlement RPCs (17th, 18th); Wave 3C adds
+  // the Customer Accounts surface's two reads and one money write (19th-21st).
+  assert.equal(names.length, 21);
+  assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_complete_on_account"));
