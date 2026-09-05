@@ -458,3 +458,209 @@ export async function ensureQrSettings(tenantId: string, mainBranchId: string | 
 export async function saveQrSettings(id: string, patch: Partial<QrSettings>): Promise<void> {
   unwrap(await supabase.from("qr_menu_settings").update(patch).eq("id", id).select("id"));
 }
+
+// =============================================================================
+// OPERATING-UNIT MENU BUILDER BACKEND
+//
+// The OU-aware Menu Builder authors ONE Operating Unit's operational menu, via
+// the same per-OU RPCs the web Menu Builder calls. It used to live in a separate
+// `ouRepository.ts`, which imported the Supabase client directly and so was a
+// SECOND backend door — the exact thing the model-parity guard forbids. The code
+// is relocated here VERBATIM so there is genuinely ONE module that talks to
+// Supabase; `ouRepository.ts` is now a thin re-export of the functions below.
+// Behaviour is unchanged.
+// =============================================================================
+
+async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+  const { data, error } = await supabase.rpc(fn as never, args as never);
+  if (error) throw error;
+  return data as T;
+}
+
+// --- operating units (branches the signed-in user may author) ----------------
+
+export type OUBranch = { id: string; name: string; is_main: boolean };
+
+/**
+ * The Operating Units this user can author, straight from `branches` under RLS:
+ * an owner sees every branch; a branch-scoped user sees only their own. No Main
+ * is pre-selected by the caller — the screen starts with nothing chosen.
+ */
+export async function listBranches(tenantId: string): Promise<OUBranch[]> {
+  const rows = unwrap(
+    await supabase.from("branches").select("id, name, is_main").eq("tenant_id", tenantId).order("is_main", { ascending: false }).order("name"),
+  ) as OUBranch[] | null;
+  return rows ?? [];
+}
+
+/**
+ * Everything one Menu Builder session needs, for ONE Operating Unit. The menu is
+ * the `menu_builder_ou` projection for the branch; QR settings are that unit's
+ * own row (a fresh unit has none) and themes are tenant-wide.
+ */
+export async function loadMenuBuilderOU(tenantId: string, branchId: string): Promise<MenuBuilderData> {
+  const [menuRes, qr, themes] = await Promise.all([
+    supabase.rpc("menu_builder_ou" as never, { p_branch: branchId } as never),
+    supabase.from("qr_menu_settings").select("*").eq("tenant_id", tenantId).eq("branch_id", branchId).order("created_at").limit(1),
+    supabase.from("public_menu_themes").select("*"),
+  ]);
+  if (menuRes.error) throw menuRes.error;
+  if (qr.error) throw qr.error;
+  if (themes.error) throw themes.error;
+  const menu = ((menuRes.data ?? {}) as {
+    categories?: BuilderCategory[]; items?: BuilderItem[]; groups?: BuilderGroup[]; options?: BuilderOption[];
+    item_groups?: { menu_item_id: string; modifier_group_id: string }[];
+  });
+  const groupsByItem: Record<string, string[]> = {};
+  for (const row of menu.item_groups ?? []) {
+    (groupsByItem[row.menu_item_id] ??= []).push(row.modifier_group_id);
+  }
+  return {
+    categories: (menu.categories ?? []) as BuilderCategory[],
+    items: (menu.items ?? []) as unknown as BuilderItem[],
+    groups: (menu.groups ?? []) as BuilderGroup[],
+    options: (menu.options ?? []) as unknown as BuilderOption[],
+    groupsByItem,
+    qr: ((qr.data ?? [])[0] as QrSettings | undefined) ?? null,
+    themes: (themes.data ?? []) as MenuTheme[],
+  };
+}
+
+export type CategoryOUWrite = { category_id: string | null; name: string; name_ar: string | null; sort_order: number; status: string };
+export async function saveCategoryOU(branchId: string, p: CategoryOUWrite): Promise<void> {
+  await rpc("menu_ou_save_category", { p_payload: { branch_id: branchId, ...p } });
+}
+
+export type SaveItemOUInput = {
+  tenantId: string;
+  branchId: string;
+  draft: ItemDraft;
+  price: { amount: number; currency: CurrencyCode } | null;
+  groupIds?: string[];
+  file?: File | null;
+  clearImage?: boolean;
+  nextSortOrder: number;
+};
+
+export async function saveItemOU(input: SaveItemOUInput): Promise<{ id: string }> {
+  const { tenantId, branchId, draft, price, groupIds, file, clearImage, nextSortOrder } = input;
+  let image_url = clearImage ? null : (draft.image_url ?? null);
+  let thumbnail_url = clearImage ? null : (draft.thumbnail_url ?? null);
+  if (file) {
+    const invalid = validateImageFile(file);
+    if (invalid) throw new Error(invalid);
+    const { main, thumb } = await optimizeMenuImage(file);
+    const store = supabase.storage.from(MENU_IMAGE_BUCKET);
+    const key = draft.id ?? `new-${Date.now()}`;
+    const bust = Date.now();
+    const mainPath = menuImagePath(tenantId, key, "main", main.ext, bust);
+    const thumbPath = menuImagePath(tenantId, key, "thumb", thumb.ext, bust);
+    const [mu, tu] = await Promise.all([
+      store.upload(mainPath, main.blob, { upsert: true, contentType: main.contentType }),
+      store.upload(thumbPath, thumb.blob, { upsert: true, contentType: thumb.contentType }),
+    ]);
+    if (mu.error || tu.error) throw (mu.error ?? tu.error) as Error;
+    image_url = store.getPublicUrl(mainPath).data.publicUrl;
+    thumbnail_url = store.getPublicUrl(thumbPath).data.publicUrl;
+  }
+
+  const saved = await rpc<{ menu_item_id?: string } | null>("menu_ou_save_item", { p_payload: {
+    branch_id: branchId, menu_item_id: draft.id ?? null,
+    name: (draft.name ?? "").trim(), name_ar: draft.name_ar?.trim() ? draft.name_ar.trim() : null,
+    description: draft.description?.trim() ? draft.description.trim() : null,
+    category_id: draft.category_id ?? null, status: (draft.status ?? "draft") as ItemStatus,
+    is_available: draft.is_available ?? true, image_url, thumbnail_url,
+    sort_order: nextSortOrder,
+  } });
+  const itemId = saved?.menu_item_id ?? draft.id;
+  if (!itemId) throw new Error("The item was not saved.");
+  if (groupIds) await rpc("menu_ou_set_item_modifiers", { p_payload: { branch_id: branchId, menu_item_id: itemId, group_ids: groupIds } });
+  if (price) await setItemPriceOU(branchId, itemId, price.amount, price.currency);
+  return { id: itemId };
+}
+
+export async function setItemPriceOU(branchId: string, itemId: string, amount: number, currency: CurrencyCode): Promise<void> {
+  await rpc("set_menu_item_branch_price_override", { p_menu_item: itemId, p_branch: branchId, p_amount: amount, p_currency: currency });
+}
+
+export async function setItemStatusOU(branchId: string, item: BuilderItem, status: ItemStatus): Promise<void> {
+  await rpc("menu_ou_save_item", { p_payload: {
+    branch_id: branchId, menu_item_id: item.id, name: item.name, name_ar: item.name_ar,
+    description: item.description, category_id: item.category_id, is_available: item.is_available,
+    image_url: item.image_url, sort_order: item.sort_order, status,
+  } });
+}
+
+export async function setItemAvailabilityOU(branchId: string, item: BuilderItem, isAvailable: boolean): Promise<void> {
+  await rpc("menu_ou_save_item", { p_payload: {
+    branch_id: branchId, menu_item_id: item.id, name: item.name, name_ar: item.name_ar,
+    description: item.description, category_id: item.category_id, is_available: isAvailable,
+    image_url: item.image_url, sort_order: item.sort_order, status: item.status,
+  } });
+}
+
+/** Remove an item from THIS unit's menu only (identity + order history preserved). */
+export async function archiveItemOU(branchId: string, itemId: string): Promise<void> {
+  await rpc("menu_ou_remove_item", { p_menu_item: itemId, p_branch: branchId });
+}
+
+/** Publish this unit's drafts (per-OU membership rows), independently of other units. */
+export async function publishAllDraftsOU(branchId: string): Promise<void> {
+  const { error } = await supabase
+    .from("menu_item_branch_availability")
+    .update({ status: "published" } as never)
+    .eq("branch_id", branchId)
+    .filter("status", "eq", "draft")
+    .select("menu_item_id");
+  if (error) throw error;
+}
+
+export async function saveGroupOU(branchId: string, draft: GroupDraft): Promise<void> {
+  const name = (draft.name ?? "").trim();
+  const config = canonicalGroupPayload(draft);
+  await rpc("menu_ou_save_modifier_group", { p_payload: { branch_id: branchId, modifier_group_id: draft.id ?? null, name, ...config } });
+}
+
+export async function archiveGroupOU(branchId: string, groupId: string): Promise<void> {
+  await rpc("menu_ou_remove_modifier_group", { p_group: groupId, p_branch: branchId });
+}
+
+export async function addOptionOU(branchId: string, groupId: string, name: string, extra: number, currency: CurrencyCode): Promise<void> {
+  const created = await rpc<{ modifier_option_id?: string } | null>("menu_ou_save_modifier_option", {
+    p_payload: { branch_id: branchId, modifier_group_id: groupId, name: name.trim() },
+  });
+  const optId = created?.modifier_option_id;
+  if (!optId) throw new Error("The option was not added.");
+  await rpc("set_modifier_option_branch_price_override", { p_option: optId, p_branch: branchId, p_amount: extra, p_currency: currency });
+}
+
+export async function archiveOptionOU(branchId: string, optionId: string): Promise<void> {
+  await rpc("menu_ou_remove_modifier_option", { p_option: optionId, p_branch: branchId });
+}
+
+export async function ensureQrSettingsOU(tenantId: string, branchId: string): Promise<QrSettings> {
+  const existing = unwrap(
+    await supabase.from("qr_menu_settings").select("*").eq("tenant_id", tenantId).eq("branch_id", branchId).order("created_at").limit(1),
+  ) as QrSettings[] | null;
+  const current = existing?.[0] ?? null;
+  if (current?.public_slug) return current;
+  const slug = `breadee-${Math.random().toString(36).slice(2, 9)}`;
+  if (current) {
+    const patched = unwrap(
+      await supabase.from("qr_menu_settings").update({ public_slug: slug }).eq("id", current.id).select("*").maybeSingle(),
+    ) as QrSettings | null;
+    if (!patched) throw new Error("The public menu could not be created.");
+    return patched;
+  }
+  const created = unwrap(
+    await supabase.from("qr_menu_settings")
+      .upsert({ tenant_id: tenantId, branch_id: branchId, public_slug: slug, show_prices: true, is_public: false }, { onConflict: "tenant_id,branch_id" })
+      .select("*").maybeSingle(),
+  ) as QrSettings | null;
+  if (!created) throw new Error("The public menu could not be created.");
+  return created;
+}
+
+export async function saveQrSettingsOU(id: string, patch: Partial<QrSettings>): Promise<void> {
+  unwrap(await supabase.from("qr_menu_settings").update(patch).eq("id", id).select("id"));
+}

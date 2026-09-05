@@ -19,14 +19,17 @@
 name: Desktop Windows Build Check
 
 on:
-  # Run on every push to the working branch for the desktop app (post-merge gate).
+  # Run on every push to a working/integration branch for the desktop app
+  # (post-merge gate). `candidate/desktop-1.0.9-ou-menu` is the active 1.0.9
+  # integration base; PRs into it previously ran NO checks at all.
   push:
-    branches: [desktop-staging]
-  # Run as a gate on PRs into either integration branch. `desktop-staging` was
+    branches: [desktop-staging, candidate/desktop-1.0.9-ou-menu]
+  # Run as a gate on PRs into an integration branch. `desktop-staging` was
   # added after Level 1 integration found that PRs into it ran NO checks at all
-  # and had to be gated by manual workflow_dispatch.
+  # and had to be gated by manual workflow_dispatch; the 1.0.9 candidate base is
+  # added here for the same reason.
   pull_request:
-    branches: [main, desktop-staging]
+    branches: [main, desktop-staging, candidate/desktop-1.0.9-ou-menu]
   # Allow running it manually from the Actions tab (recovery / diagnostics).
   workflow_dispatch:
 
@@ -87,7 +90,12 @@ jobs:
       #    Vite inlines these VITE_* values at build time (src/env.ts fails fast
       #    if the Supabase vars are missing). STAGING Supabase only — supplied
       #    via encrypted GitHub Actions secrets, never a committed .env.
+      # `if: !cancelled()` on the build + Rust steps so the native gate reports
+      # independently: a red in an earlier, unrelated step (e.g. an existing
+      # non-Rust test) must not silently skip the Rust compile/receipt tests,
+      # which are the whole reason this Windows runner exists.
       - name: Build frontend
+        if: ${{ !cancelled() }}
         run: npm run build
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
@@ -96,10 +104,12 @@ jobs:
 
       # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
+        if: ${{ !cancelled() }}
         uses: dtolnay/rust-toolchain@stable
 
       # 7. Cache Rust build artifacts to speed up subsequent runs.
       - name: Cache Rust build
+        if: ${{ !cancelled() }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -107,6 +117,7 @@ jobs:
       # 8. Compile-check the native Tauri crate ONLY (no build, no installer).
       #    --locked enforces the committed Cargo.lock.
       - name: Cargo check (src-tauri)
+        if: ${{ !cancelled() }}
         working-directory: src-tauri
         run: cargo check --locked
 
@@ -117,5 +128,6 @@ jobs:
       #    machine crashes rustc with 0xC0000005 and cannot be trusted to run
       #    them; this runner is the authoritative Rust gate.
       - name: Cargo test (src-tauri)
+        if: ${{ !cancelled() }}
         working-directory: src-tauri
         run: cargo test --locked
