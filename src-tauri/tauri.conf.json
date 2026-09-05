@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Breadee",
+  "productName": "Breadee Staging",
   "version": "1.0.9",
-  "identifier": "app.breadee.desktop",
+  "identifier": "app.breadee.desktop.staging",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Breadee",
+        "title": "Breadee Staging",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,
@@ -46,7 +46,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json"
+        "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-staging-channel/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3Nzk5OUQ4MjFGODJGRDcKUldUWEwvZ2gySmw1dHhzVmRVUENEdmVUTFFJNGpJSkFTQSs5RSsxdERRZUR4SFlEQVBOcmFNcGkK",
       "windows": {
