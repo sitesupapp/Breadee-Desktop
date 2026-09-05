@@ -645,8 +645,9 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
   // 16 since Desktop 1.0.4; 18 since Wave 2C added the two receivables
-  // settlement RPCs (`pos_complete_on_account`, `pos_complete_table_on_account`).
-  assert.equal(names.length, 18);
+  // settlement RPCs (`pos_complete_on_account`, `pos_complete_table_on_account`);
+  // 21 since Wave 3C added the Customer Accounts surface (two reads + one write).
+  assert.equal(names.length, 21);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_complete_on_account"));

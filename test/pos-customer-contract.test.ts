@@ -146,13 +146,21 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // `pos_complete_table_on_account`, the shared receivables settlement RPCs.
   // Reviewed, state-guarded (no idempotency key, like pos_pay_order), and gated
   // behind the dark `pos.receivables` feature.
-  assert.equal(names.length, 18);
+  // 18 -> 21 in Wave 3C: the operational Customer Accounts surface adds two
+  // READS (`pos_receivables_search`, `pos_receivables_customer`) and ONE money
+  // WRITE (`pos_receivable_collect`, idempotent on client_op_id). All three
+  // reviewed and gated behind the same dark `pos.receivables` feature.
+  assert.equal(names.length, 21);
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
   assert.ok(names.includes("pos_configure_tables"));
   assert.ok(names.includes("pos_upsert_customer"));
-  // Level 3A added exactly one name, and it is not an order or money RPC.
-  assert.equal(names.filter((n) => n.includes("customer")).length, 1);
+  assert.ok(names.includes("pos_receivables_search"));
+  assert.ok(names.includes("pos_receivables_customer"));
+  assert.ok(names.includes("pos_receivable_collect"));
+  // Two RPC names now carry "customer": `pos_upsert_customer` (Level 3A) and
+  // `pos_receivables_customer` (Wave 3C's account read). Neither is a money RPC.
+  assert.equal(names.filter((n) => n.includes("customer")).length, 2);
   // Level 3D's two, and not the third one it deliberately left behind.
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
