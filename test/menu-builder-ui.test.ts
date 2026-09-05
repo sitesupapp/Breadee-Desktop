@@ -46,11 +46,19 @@ function featureFiles(): string[] {
 test("every write goes through the store's single mutate()", () => {
   // The screen is the only place repository writes are invoked, and each one is
   // wrapped in `run(...)`, which is `store.mutate` plus a toast.
-  const calls = [...screen.matchAll(/repo\.(\w+)\(/g)].map((m) => m[1]);
-  assert.ok(calls.length > 0);
+  //
+  // Resilient to the backend module's import ALIAS: the screen imports the menu
+  // backend door as a namespace (`import * as <alias> from ".../repository"` or
+  // its `ouRepository` re-export), historically `repo`, currently `ou`. We derive
+  // the alias rather than hard-code it, so a harmless rename cannot make this
+  // guard silently stop protecting the architecture.
+  const aliasMatch = screen.match(/import \* as (\w+) from "@\/lib\/menu\/(?:ouR|r)epository"/);
+  assert.ok(aliasMatch, "the screen must import the menu backend door as a namespace");
+  const alias = aliasMatch![1];
+  const calls = [...screen.matchAll(new RegExp(`\\b${alias}\\.(\\w+)\\(`, "g"))].map((m) => m[1]);
+  assert.ok(calls.length > 0, "the screen must invoke the backend through the namespaced door");
   for (const call of calls) {
-    if (call === "ensureQrSettings" || call === "loadMenuBuilderData") continue;
-    assert.match(screen, new RegExp(`run\\([\\s\\S]{0,240}repo\\.${call}\\(`), `repo.${call} must run through run()/mutate`);
+    assert.match(screen, new RegExp(`run\\([\\s\\S]{0,240}${alias}\\.${call}\\(`), `${alias}.${call} must run through run()/mutate`);
   }
   assert.match(screen, /const outcome = await store\.mutate\(key, tenantId, action, work\)/);
 });
@@ -133,7 +141,13 @@ test("the POS picks up menu changes through its EXISTING loader", () => {
   assert.match(app, /<Route\s+path="\/pos"/);
   assert.match(app, /<Route path="\/menu-builder" element=\{<MenuBuilder \/>\} \/>/);
   const workspace = stripJsxComments(read("src/screens/pos/PosWorkspace.tsx"));
-  assert.match(workspace, /const data = await loadMenu\(tenantId\)/);
+  // The POS consumes Menu Builder changes through the ONE canonical POS menu
+  // module (@/lib/pos/menu) and adds no private/duplicate menu source. The loader
+  // was renamed `loadMenu` -> `loadPosMenu` and made OU-aware (it takes the
+  // SELECTED Operating Unit / branch id, not the tenant id) for the OU menu work;
+  // the existing single-path property is what this guards, resilient to that rename.
+  assert.match(workspace, /from "@\/lib\/pos\/menu"/);
+  assert.match(workspace, /const data = await loadPosMenu\(pos\.branch\.id\)/);
   assert.match(workspace, /if \(pos\.allowed && tenantId\) void fetchMenu\(\)/);
 });
 
