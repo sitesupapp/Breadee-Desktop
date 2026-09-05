@@ -507,7 +507,7 @@ export async function readSettledOrder(orderId: string): Promise<OpenDeliveryOrd
   const { data, error } = await supabase
     .from("pos_orders")
     .select(
-      "id, order_number, status, payment_status, total_amount, primary_currency_snapshot, customer_id, address_id, notes, created_at",
+      "id, order_number, status, payment_status, subtotal, delivery_fee, total_amount, primary_currency_snapshot, customer_id, address_id, notes, created_at",
     )
     .eq("id", orderId)
     .maybeSingle();
@@ -520,6 +520,8 @@ export async function readSettledOrder(orderId: string): Promise<OpenDeliveryOrd
     order_number: strOrNull(r.order_number),
     status: str(r.status),
     payment_status: str(r.payment_status),
+    subtotal: r.subtotal == null ? null : num(r.subtotal),
+    delivery_fee: r.delivery_fee == null ? null : num(r.delivery_fee),
     total_amount: r.total_amount == null ? null : num(r.total_amount),
     currency: strOrNull(r.primary_currency_snapshot),
     customer_id: strOrNull(r.customer_id),

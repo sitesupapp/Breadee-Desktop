@@ -46,6 +46,14 @@ export type PaymentDialogProps = {
    * unchanged.
    */
   delivery?: { customerName: string; address: string | null } | null;
+  /**
+   * Delivery settlement only: the fee already persisted on the order (entered
+   * during the delivery order flow). The dialog PRE-FILLS its fee input with this
+   * so settlement REUSES the one canonical fee rather than asking for it a second
+   * time. The operator may still edit it (it re-persists the same column — never a
+   * second, additive charge). Null/absent leaves the input empty.
+   */
+  initialDeliveryFee?: number | null;
   error: string | null;
   onCancel: () => void;
   onConfirm: (input: {
@@ -90,9 +98,11 @@ export function PaymentDialog(props: PaymentDialogProps) {
       setDiscountType("none");
       setDiscountValue("");
       setTendered("");
-      setDeliveryFee("");
+      // Pre-fill from the fee already persisted on the order, so settlement reuses
+      // the one canonical value instead of asking again. Empty when there is none.
+      setDeliveryFee(props.initialDeliveryFee != null ? String(props.initialDeliveryFee) : "");
     }
-  }, [props.open, props.primaryCurrency]);
+  }, [props.open, props.primaryCurrency, props.initialDeliveryFee]);
 
   // A fixed discount typed in the tender currency is converted to the order's
   // primary currency, which is what pos_pay_order operates in.

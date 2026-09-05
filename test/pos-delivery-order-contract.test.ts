@@ -245,19 +245,35 @@ test("the latch admits one sender and refuses the rest synchronously", () => {
   assert.equal(latch.acquire(), true);
 });
 
-// --- the delivery fee is NOT a creation-time concept -------------------------
+// --- the delivery fee belongs to the ORDER, entered before it is sent --------
+//
+// Final business rule: the fee is a property of the delivery order, not only of
+// the Pay action. It is enterable before the order is sent, persisted with it, and
+// shown on the unpaid bill. It is delivery-only, and blank means "no fee yet".
 
-test("order creation never carries a delivery_fee (the fee is a settlement concept)", () => {
-  // The fee is entered at the payment step, not when the order is created, so the
-  // create payload is byte-for-byte what it was before the fee feature.
+test("a delivery order created WITHOUT a fee carries no delivery_fee key", () => {
+  // Blank at creation leaves the key absent — the order simply has no fee yet (it
+  // can still be set at settlement).
   const p = buildDeliveryPayload({ ...base, orderNote: "note" }) as Record<string, unknown>;
   assert.equal("delivery_fee" in p, false);
+  assert.equal("delivery_fee" in (buildDeliveryPayload({ ...base, deliveryFee: null }) as Record<string, unknown>), false);
+});
+
+test("a delivery order created WITH a fee carries the canonical delivery_fee", () => {
+  // Entering the fee before send persists it, so an unpaid order already shows it.
+  // 0 is a real value (free delivery) and is sent; a positive fee is sent as given.
+  assert.equal(buildDeliveryPayload({ ...base, deliveryFee: 2 }).delivery_fee, 2);
+  assert.equal(buildDeliveryPayload({ ...base, deliveryFee: 0 }).delivery_fee, 0);
+});
+
+test("takeaway and dine-in never carry a delivery_fee, even if one is passed", () => {
   const takeaway = buildSubmitPayload({
     branchId: "b1",
     shiftId: "s1",
     orderType: "takeaway",
     clientOpId: "op-1",
     lines: [line()],
+    deliveryFee: 5,
   }) as Record<string, unknown>;
   assert.equal("delivery_fee" in takeaway, false);
 });

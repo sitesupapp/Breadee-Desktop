@@ -338,6 +338,13 @@ export type ReceiptDoc = {
   }[];
   subtotal: number;
   discount: number;
+  /**
+   * Delivery orders only: the manual delivery fee, already folded into `total` by
+   * the server's finance engine. Its own receipt line between Subtotal and Total.
+   * Null/0 prints nothing. Named `deliveryFee` because the Rust `ReceiptDoc` uses
+   * `#[serde(rename_all = "camelCase")]`, so this maps to its `delivery_fee` field.
+   */
+  deliveryFee: number | null;
   total: number;
   tenderCurrency: string | null;
   tenderTotal: number | null;
@@ -398,6 +405,7 @@ export function toReceiptDoc(receipt: {
   }[];
   subtotal: number;
   discount: number;
+  deliveryFee?: number | null;
   total: number;
   tenderCurrency?: string | null;
   tenderTotal?: number | null;
@@ -439,6 +447,9 @@ export function toReceiptDoc(receipt: {
     })),
     subtotal: receipt.subtotal,
     discount: receipt.discount,
+    // The delivery fee its own line on the printed receipt, mirroring the preview.
+    // Mapped to the Rust `delivery_fee` (camelCase serde). Null/0 prints nothing.
+    deliveryFee: receipt.deliveryFee ?? null,
     total: receipt.total,
     tenderCurrency: receipt.tenderCurrency ?? null,
     tenderTotal: receipt.tenderTotal ?? null,

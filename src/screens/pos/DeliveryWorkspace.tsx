@@ -79,6 +79,7 @@ import {
   createSettlementLatch,
   deliveryIsSettled,
   deliveryPaymentGate,
+  parseDeliveryFee,
   payDeliveryOrder,
   performDeliverySettlement,
   readOrderReceiptLines,
@@ -129,7 +130,7 @@ import { cartSubtotal } from "@/lib/pos/orders";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { DeliveryOrderSummary } from "@/components/pos/DeliveryOrderSummary";
 import { addressLine } from "@/components/pos/CustomerCard";
-import { Button, EmptyState, GatedButton, Textarea } from "@/components/ui";
+import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { useShortcuts } from "@/lib/keyboard/provider";
@@ -255,6 +256,11 @@ export function useDeliveryWorkspace(input: {
   // --- Level 3B ordering state ------------------------------------------------
   const [view, setView] = useState<DeliveryView>("customer");
   const [orderNote, setOrderNote] = useState("");
+  // The manual delivery fee, entered during the delivery order flow BEFORE the
+  // order is sent — the fee belongs to the order, not only to payment. Held as a
+  // raw string and parsed by the shared helper; sent to pos_save_order, which
+  // persists it and applies the finance layer. Empty = no fee (0).
+  const [orderDeliveryFee, setOrderDeliveryFee] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ order: OpenDeliveryOrder; recovered: boolean } | null>(null);
@@ -653,8 +659,15 @@ export function useDeliveryWorkspace(input: {
       // retry, and cleared only once an order is definitively accepted.
       clientOpId: useCart.getState().ensureOpId(),
       note: orderNote.trim() === "" ? null : orderNote.trim(),
+      // The manual fee, parsed once against the SNAPSHOT so it validates exactly
+      // what will be sent. Blank = no fee (null); 0 = free delivery.
+      deliveryFee: parseDeliveryFee(orderDeliveryFee),
     };
     if (!snapshot.customerId || !snapshot.addressId) return;
+    if (snapshot.deliveryFee.provided && !snapshot.deliveryFee.valid) {
+      setSendError("Enter a valid delivery fee (0 or more), or leave it blank for no fee.");
+      return;
+    }
 
     setSendError(null);
     setSending(true);
@@ -675,6 +688,9 @@ export function useDeliveryWorkspace(input: {
         customerId: snapshot.customerId,
         addressId: snapshot.addressId,
         orderNote: snapshot.note,
+        // The fee travels with the order at creation. Only when actually entered;
+        // blank leaves the order with no fee (it can still be set at settlement).
+        deliveryFee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
       });
 
       const outcome = await performDeliveryOrder({
@@ -715,6 +731,11 @@ export function useDeliveryWorkspace(input: {
         order_number: outcome.result.order_number,
         status: "sent_to_kitchen",
         payment_status: "unpaid",
+        // The server's own figures from the submit result, plus the fee we sent,
+        // so the just-created order shows Subtotal + Delivery Fee = Total even on
+        // the rare fallback path where the re-read did not find the row.
+        subtotal: outcome.result.subtotal,
+        delivery_fee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
         total_amount: outcome.result.total,
         currency: null,
         customer_id: snapshot.customerId,
@@ -755,6 +776,7 @@ export function useDeliveryWorkspace(input: {
       // Only this delivery basket. Takeaway and dine-in state is untouched.
       useCart.getState().reset();
       setOrderNote("");
+      setOrderDeliveryFee("");
       setView("customer");
       // Authoritative history refresh - server values, never a local increment.
       await useCustomers.getState().refresh();
@@ -771,7 +793,7 @@ export function useDeliveryWorkspace(input: {
     } finally {
       setSending(false);
     }
-  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, pos.branch.id, pos.tenantId, toast]);
+  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, orderDeliveryFee, pos.branch.id, pos.tenantId, toast]);
 
   const requestSend = useCallback(() => void send(), [send]);
 
@@ -997,7 +1019,10 @@ export function useDeliveryWorkspace(input: {
 
         const discount = validateDeliveryDiscount({
           canDiscount: input.applyDiscounts,
-          subtotal: fresh?.total_amount ?? intended.total,
+          // The ITEMS subtotal is the discount base — the delivery fee is not
+          // discountable. Falls back to the total for a legacy order that carried
+          // no separate subtotal.
+          subtotal: fresh?.subtotal ?? fresh?.total_amount ?? intended.total,
           type: confirm.discountType,
           value: confirm.discountValue,
         });
@@ -1501,6 +1526,38 @@ export function useDeliveryWorkspace(input: {
   );
 
   /**
+   * The delivery fee, entered on the ORDER before it is sent.
+   *
+   * The fee belongs to the order, not only to the Pay action: entering it here
+   * lets the server persist it and apply the canonical finance layer, so an
+   * unpaid delivery order already shows the fee on its bill/receipt and settlement
+   * reuses the same value. Blank = no fee; 0 = free delivery. The number is
+   * validated the same way the settlement input is.
+   */
+  const feeInputParsed = parseDeliveryFee(orderDeliveryFee);
+  const deliveryFeeBox = (
+    <div className="rounded-2xl border border-line bg-white p-3">
+      <label className="block">
+        <span className="text-xs font-bold text-ink">Delivery fee ({input.currency})</span>
+        <p className="mt-0.5 text-[11px] text-sub">
+          Saved with the order and shown on the bill before payment. Leave blank for none; 0 = free delivery.
+        </p>
+        <Input
+          className="mt-1 w-32 text-right font-bold"
+          inputMode="decimal"
+          value={orderDeliveryFee}
+          placeholder="0"
+          aria-invalid={feeInputParsed.provided && !feeInputParsed.valid}
+          onChange={(e) => setOrderDeliveryFee(e.target.value)}
+        />
+        {feeInputParsed.provided && !feeInputParsed.valid && (
+          <p className="mt-1 text-[11px] font-semibold text-amber-800">Enter a fee of 0 or more, or leave it blank.</p>
+        )}
+      </label>
+    </div>
+  );
+
+  /**
    * The one switch between taking an order and managing the ones already taken.
    *
    * Two buttons rather than a new route: Delivery is a single workspace with a
@@ -1676,6 +1733,7 @@ export function useDeliveryWorkspace(input: {
       ) : view === "add_items" ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
           {noteBox}
+          {deliveryFeeBox}
           <div className="min-h-0 flex-1">{cartPanel}</div>
           {sendError && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{sendError}</p>
@@ -1726,7 +1784,14 @@ export function useDeliveryWorkspace(input: {
            describes the order that would actually be charged - whether it was
            just sent, or opened from the Level 3D queue while a different
            customer happens to be selected behind it. */
-        subtotal={payTarget.order?.total_amount ?? 0}
+        /* The ITEMS subtotal, not the total: the fee lives on the order now, so
+           the dialog shows Subtotal + Delivery Fee = Total rather than adding a
+           fee on top of a total that already contains one. Falls back to the total
+           for a legacy order saved before the fee was applied at creation. */
+        subtotal={payTarget.order?.subtotal ?? payTarget.order?.total_amount ?? 0}
+        /* Pre-fill the fee already persisted on the order, so settlement REUSES the
+           one canonical fee instead of asking again. */
+        initialDeliveryFee={payTarget.order?.delivery_fee ?? null}
         primaryCurrency={input.currency}
         rate={input.rate}
         discountGate={input.applyDiscounts}
