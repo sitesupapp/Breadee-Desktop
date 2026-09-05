@@ -195,6 +195,10 @@ export const DELIVERY_PAYLOAD_KEYS = [
   "notes",
   "customer_id",
   "address_id",
+  // The manual delivery fee, entered before the order is sent. Persisted by
+  // pos_save_order to pos_orders.delivery_fee; the finance engine computes the
+  // total. Present only when a fee was entered.
+  "delivery_fee",
   "items",
 ] as const;
 
@@ -227,6 +231,8 @@ export function buildDeliveryPayload(input: {
   customerId: string | null;
   addressId: string | null;
   orderNote?: string | null;
+  /** The manual delivery fee (>= 0) entered before sending, or null for none. */
+  deliveryFee?: number | null;
 }): SubmitOrderPayload {
   if (!input.customerId) throw new CustomerRequiredError();
   if (!input.addressId) throw new AddressRequiredError();
@@ -242,6 +248,9 @@ export function buildDeliveryPayload(input: {
     status: "sent_to_kitchen",
     customerId: input.customerId,
     addressId: input.addressId,
+    // The fee belongs to the order. Sent at creation so an unpaid order can show
+    // it; the server persists it as the ONE canonical value.
+    deliveryFee: input.deliveryFee ?? null,
   });
 }
 
@@ -281,6 +290,10 @@ export type OpenDeliveryOrder = {
   order_number: string | null;
   status: string;
   payment_status: string;
+  /** Items subtotal, before discount and the delivery fee. */
+  subtotal?: number | null;
+  /** The canonical persisted delivery fee, already folded into `total_amount`. */
+  delivery_fee?: number | null;
   total_amount: number | null;
   currency: string | null;
   customer_id: string | null;
@@ -298,6 +311,8 @@ function toOpenOrder(raw: unknown): OpenDeliveryOrder | null {
     order_number: strOrNull(r.order_number),
     status: str(r.status),
     payment_status: str(r.payment_status),
+    subtotal: r.subtotal == null ? null : num(r.subtotal),
+    delivery_fee: r.delivery_fee == null ? null : num(r.delivery_fee),
     total_amount: r.total_amount == null ? null : num(r.total_amount),
     currency: strOrNull(r.primary_currency_snapshot),
     customer_id: strOrNull(r.customer_id),
@@ -308,7 +323,7 @@ function toOpenOrder(raw: unknown): OpenDeliveryOrder | null {
 }
 
 const OPEN_ORDER_COLUMNS =
-  "id, order_number, status, payment_status, total_amount, primary_currency_snapshot, customer_id, address_id, notes, created_at";
+  "id, order_number, status, payment_status, subtotal, delivery_fee, total_amount, primary_currency_snapshot, customer_id, address_id, notes, created_at";
 
 /**
  * The live, unpaid delivery orders for one customer at this branch.

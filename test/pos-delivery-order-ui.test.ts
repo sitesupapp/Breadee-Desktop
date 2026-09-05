@@ -483,6 +483,38 @@ test("every figure on a reprint is the server's, and cash handling is left blank
   assert.equal(r.currency, "USD");
 });
 
+test("a delivery reprint shows the persisted Delivery Fee from canonical data, once", () => {
+  // The confirmed defect: the reprint/detail path dropped the fee. It now carries
+  // the ORDER's own delivery_fee — its own line, never derived from total - subtotal.
+  const withFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 67_500, delivery_fee: 2, total_amount: 67_502, payment_status: "paid" }),
+    payment: { method: "cash", currency: "LBP", amount: 67_502, originalAmount: 67_502, exchangeRate: null, paidAt: null },
+    lines: [],
+    party,
+    fallbackCurrency: "LBP",
+    at: "x",
+  });
+  assert.equal(withFee.subtotal, 67_500);
+  assert.equal(withFee.deliveryFee, 2);
+  assert.equal(withFee.total, 67_502);
+  // A delivery order with no fee shows no fee line (null, never a phantom 0).
+  const noFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 10, total_amount: 10, payment_status: "paid" }),
+    payment: null,
+    lines: [],
+    party,
+    fallbackCurrency: "USD",
+    at: "x",
+  });
+  assert.equal(noFee.deliveryFee ?? null, null);
+});
+
 test("an unpaid order's receipt says unpaid rather than pretending otherwise", () => {
   const r = buildHistoricalReceipt({
     tenantName: null,

@@ -51,6 +51,12 @@ export type DeliveryQueueOrder = {
   payment_method: string | null;
   subtotal: number | null;
   discount_amount: number | null;
+  /**
+   * The canonical persisted delivery fee, already folded into `total_amount`.
+   * Optional so pre-fee callers and fixtures need not set it; the queue/detail
+   * reader always populates it from the `delivery_fee` column.
+   */
+  delivery_fee?: number | null;
   total_amount: number | null;
   currency: string | null;
   customer_id: string | null;
@@ -76,6 +82,7 @@ function toQueueOrder(raw: unknown): DeliveryQueueOrder | null {
     payment_method: strOrNull(r.payment_method),
     subtotal: r.subtotal == null ? null : num(r.subtotal),
     discount_amount: r.discount_amount == null ? null : num(r.discount_amount),
+    delivery_fee: r.delivery_fee == null ? null : num(r.delivery_fee),
     total_amount: r.total_amount == null ? null : num(r.total_amount),
     currency: strOrNull(r.primary_currency_snapshot),
     customer_id: strOrNull(r.customer_id),
@@ -95,7 +102,7 @@ export function todayBounds(now: Date): { start: string; end: string } {
 }
 
 const QUEUE_COLUMNS =
-  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
+  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, delivery_fee, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
 
 /**
  * The operator's delivery queue.

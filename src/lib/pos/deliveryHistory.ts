@@ -191,6 +191,10 @@ export function toOpenDeliveryOrder(o: DeliveryQueueOrder): OpenDeliveryOrder {
     order_number: o.order_number,
     status: o.status,
     payment_status: o.payment_status,
+    // Carried through so the settlement dialog can show the items subtotal and
+    // the already-persisted fee instead of re-deriving them from the total.
+    subtotal: o.subtotal,
+    delivery_fee: o.delivery_fee,
     total_amount: o.total_amount,
     currency: o.currency,
     customer_id: o.customer_id,
@@ -342,9 +346,14 @@ export function buildHistoricalReceipt(input: {
     method: input.payment?.method ?? o.payment_method ?? null,
     currency: orderCurrency ?? input.payment?.currency ?? input.fallbackCurrency,
     lines: input.lines,
-    // Server figures, all three. Nothing on a reprint is recomputed here.
+    // Server figures, all four. Nothing on a reprint is recomputed here. The
+    // delivery fee is the ORDER's own persisted `delivery_fee`, already folded
+    // into `total` by the finance engine — its own receipt line between Subtotal
+    // and Total, so the bill reconciles. 0/absent prints nothing; NEVER derived
+    // from total - subtotal.
     subtotal: o.subtotal ?? total,
     discount: o.discount_amount ?? 0,
+    deliveryFee: o.delivery_fee ?? null,
     total,
     tenderCurrency: input.payment?.currency ?? null,
     tenderTotal: input.payment?.originalAmount ?? null,
