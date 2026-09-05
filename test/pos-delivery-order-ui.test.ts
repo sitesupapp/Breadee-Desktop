@@ -244,9 +244,12 @@ test("F4 stays Level 3C's, and reaches the same gate from both views", () => {
 });
 
 test("the payment dialog describes the order that would actually be charged", () => {
-  // Not "whoever is selected on the customer half" - that is how the wrong name
-  // reaches a receipt when an order is opened from the queue.
-  assert.match(workspace, /subtotal=\{payTarget\.order\?\.total_amount \?\? 0\}/);
+  // The ITEMS subtotal (the fee is shown on its own line, not added on top of a
+  // total that already contains it), the persisted fee PRE-FILLED so settlement
+  // reuses it, and the identity from the ORDER - never whoever is selected behind
+  // it, which is how the wrong name reaches a receipt from the queue.
+  assert.match(workspace, /subtotal=\{payTarget\.order\?\.subtotal \?\? payTarget\.order\?\.total_amount \?\? 0\}/);
+  assert.match(workspace, /initialDeliveryFee=\{payTarget\.order\?\.delivery_fee \?\? null\}/);
   assert.match(workspace, /orderNumber=\{payTarget\.order\?\.order_number \?\? null\}/);
   assert.match(workspace, /receiptIdentity\(payTarget\.order\)/);
 });
@@ -641,9 +644,12 @@ test("the queue row shape is converted for settlement rather than re-implemented
   assert.equal(open.total_amount, o.total_amount);
   assert.equal(open.customer_id, o.customer_id);
   assert.equal(open.address_id, o.address_id);
-  // Queue-only fields do not travel into the settlement shape.
+  // shift_id is queue-only and does not travel into the settlement shape.
   assert.equal("shift_id" in open, false);
-  assert.equal("subtotal" in open, false);
+  // The items subtotal and the persisted fee DO travel now: settlement shows
+  // Subtotal + Delivery Fee = Total and reuses the one canonical fee.
+  assert.equal(open.subtotal, o.subtotal);
+  assert.equal(open.delivery_fee ?? null, o.delivery_fee ?? null);
 });
 
 // --- permissions -------------------------------------------------------------
