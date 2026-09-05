@@ -194,26 +194,33 @@ export function PaymentDialog(props: PaymentDialogProps) {
 
   const canConfirmAccount = !props.busy && !accountBlocked;
 
+  // The message shown in the footer follows the active mode; the two confirm
+  // buttons below are split so the full-pay one keeps its exact, separately
+  // tested shape (`disabled={!canConfirm}`) and on-account gets its own.
   const activeBlocked = effectiveMode === "full" ? blockedReason : accountBlocked;
-  const activeCanConfirm = effectiveMode === "full" ? canConfirm : canConfirmAccount;
 
+  // Full payment. UNCHANGED from before Customer Receivables: the guard is the
+  // first statement so Ctrl+Enter cannot bypass the button's conditions, and the
+  // payload is exactly the one `pos_pay_order` consumes.
   function confirm() {
+    if (!canConfirm) return;
     const permitted = props.discountGate.allowed ? discountType : "none";
-    if (effectiveMode === "full") {
-      if (!canConfirm) return;
-      props.onConfirm({
-        method,
-        currency,
-        discount: discountPayload(props.discountGate.allowed, props.subtotal, discountType, discountInPrimary),
-        discountType: permitted,
-        discountValue: permitted === "none" ? "" : discountInPrimary,
-        tendered: tendered.trim() === "" ? null : tenderedNum,
-      });
-      return;
-    }
-    // On account. The server owns every figure; this only says how much is paid
-    // now (0 for a full receivable) and against which customer.
+    props.onConfirm({
+      method,
+      currency,
+      discount: discountPayload(props.discountGate.allowed, props.subtotal, discountType, discountInPrimary),
+      discountType: permitted,
+      discountValue: permitted === "none" ? "" : discountInPrimary,
+      tendered: tendered.trim() === "" ? null : tenderedNum,
+    });
+  }
+
+  // On account. A separate handler, so the full-pay path above is untouched. The
+  // server owns every figure; this only says how much is paid now (0 for a full
+  // receivable) and against which customer.
+  function confirmAccount() {
     if (!oa || !oa.customer || !canConfirmAccount) return;
+    const permitted = props.discountGate.allowed ? discountType : "none";
     oa.onConfirmAccount({
       mode: effectiveMode === "account" ? "account" : "partial",
       amountNow: effectiveMode === "account" ? 0 : paidNowNum,
@@ -272,19 +279,21 @@ export function PaymentDialog(props: PaymentDialogProps) {
             <Button variant="ghost" size="lg" onClick={props.onCancel} disabled={props.busy}>
               Cancel
             </Button>
-            <Button size="lg" onClick={confirm} disabled={!activeCanConfirm} title={activeBlocked ?? undefined}>
-              {effectiveMode === "full"
-                ? props.busy
-                  ? "Charging..."
-                  : `Confirm ${formatMoney(dueInTender ?? discount.finalTotal, currency)}`
-                : effectiveMode === "account"
+            {effectiveMode === "full" ? (
+              <Button size="lg" onClick={confirm} disabled={!canConfirm} title={blockedReason ?? undefined}>
+                {props.busy ? "Charging..." : `Confirm ${formatMoney(dueInTender ?? discount.finalTotal, currency)}`}
+              </Button>
+            ) : (
+              <Button size="lg" onClick={confirmAccount} disabled={!canConfirmAccount} title={accountBlocked ?? undefined}>
+                {effectiveMode === "account"
                   ? props.busy
                     ? "Saving..."
                     : "Put on account"
                   : props.busy
                     ? "Saving..."
                     : `Take ${formatMoney(Math.max(0, paidNowNum), props.primaryCurrency)} now`}
-            </Button>
+              </Button>
+            )}
           </div>
         </div>
       }
@@ -423,7 +432,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
                     )}
                   </div>
                   {oa.search && oa.onClearCustomer && (
-                    <Button variant="ghost" size="sm" onClick={oa.onClearCustomer} disabled={props.busy}>
+                    <Button variant="ghost" size="md" onClick={oa.onClearCustomer} disabled={props.busy}>
                       Change
                     </Button>
                   )}

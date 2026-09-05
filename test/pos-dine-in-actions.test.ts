@@ -248,15 +248,26 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // RETARGETED AGAIN BY LEVEL 3D: 13 -> 15, for pos_edit_order and
   // pos_void_order. Bumped by exactly the two that were reviewed.
   // AND AGAIN BY DESKTOP 1.0.4: 15 -> 16, for `pos_configure_tables`.
-  assert.equal(members.length, 16, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY WAVE 2C: 16 -> 18, for the two receivables settlement RPCs
+  // `pos_complete_on_account` / `pos_complete_table_on_account`.
+  assert.equal(members.length, 18, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
-  // The money-moving names, counted so a fourth cannot arrive unnoticed:
-  // submit, the two pays, and - since Level 3D - void, which refunds a paid
-  // order. `pos_remove_order_item` would be the fifth and is deliberately absent.
+  // The money-moving names, counted so a new one cannot arrive unnoticed:
+  // submit, the two pays, void (which refunds a paid order), and - since Wave 2C
+  // - the two `complete_*_on_account` receivables settlements. The name pattern
+  // includes `complete` so a receivables money RPC cannot slip past this guard.
+  // `pos_remove_order_item` is deliberately absent.
   assert.deepEqual(
-    members.filter((m) => /submit|pay|void|refund/.test(m)).sort(),
-    ["pos_pay_order", "pos_pay_table", "pos_submit_order", "pos_void_order"],
+    members.filter((m) => /submit|pay|void|refund|complete/.test(m)).sort(),
+    [
+      "pos_complete_on_account",
+      "pos_complete_table_on_account",
+      "pos_pay_order",
+      "pos_pay_table",
+      "pos_submit_order",
+      "pos_void_order",
+    ],
   );
 });
 
