@@ -157,3 +157,79 @@ export function completePayment(input: PaymentCompletionInput): PaymentCompletio
     steps: input.existingOrder ? EXISTING_ORDER_COMPLETION_SEQUENCE : COMPLETION_SEQUENCE,
   };
 }
+
+// --- Customer Receivables / On Account ---------------------------------------
+//
+// A receivable receipt is NOT a paid receipt. The full-pay builder above
+// hardcodes `paid: true` and a tendered/change pair; an on-account sale has an
+// outstanding balance, so this sibling carries `paid: false`, the SERVER's
+// payment status, and the paid/balance split instead. Every figure is the
+// server's - nothing here is recomputed - and the full-pay path is untouched.
+
+export type OnAccountCompletionInput = {
+  /** The server's answer, whose figures win outright. */
+  result: {
+    payment_status: "unpaid" | "partial";
+    paid_usd: number;
+    outstanding_usd: number;
+    order_number: string;
+    subtotal: number;
+    discount: number;
+  };
+  lines: CartLine[];
+  receiptLines?: ReceiptLine[] | null;
+  existingOrder?: boolean;
+  fallbackOrderNumber: string;
+  method: string | null;
+  tenantName: string;
+  branchName: string;
+  operatorName: string;
+  /** The order's primary (selling) currency - the currency every figure is in. */
+  primaryCurrency: CurrencyCode;
+  shiftId: string | null;
+  at: string;
+};
+
+export function buildOnAccountReceipt(input: OnAccountCompletionInput): ReceiptData {
+  const { result } = input;
+  return buildReceipt({
+    businessName: input.tenantName,
+    branchName: input.branchName,
+    staffName: input.operatorName,
+    orderSource: "takeaway",
+    orderNumber: result.order_number || input.fallbackOrderNumber,
+    at: input.at,
+    // Not paid - there is a balance. `paymentStatus` says how much.
+    paid: false,
+    paymentStatus: result.payment_status,
+    paidAmount: result.paid_usd,
+    balanceDue: result.outstanding_usd,
+    method: input.method,
+    currency: input.primaryCurrency,
+    lines:
+      input.receiptLines ??
+      input.lines.map((l) => ({
+        name: l.name,
+        qty: l.quantity,
+        unitPrice: lineTotals(l.base_price, l.modifiers, 1).finalUnitPrice,
+        lineTotal: lineTotals(l.base_price, l.modifiers, l.quantity).lineTotal,
+        modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.price_delta, quantity: m.quantity })),
+        note: l.kitchen_note,
+      })),
+    subtotal: result.subtotal,
+    discount: result.discount,
+    // The bill total owed, before what was paid now.
+    total: result.subtotal - result.discount,
+    // A receivable takes no cash tender at the drawer, so no tender/change block.
+    tenderCurrency: null,
+    shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,
+  });
+}
+
+/** The receivable receipt plus the ordered steps the caller must apply. */
+export function completeOnAccountReceipt(input: OnAccountCompletionInput): PaymentCompletion {
+  return {
+    receipt: buildOnAccountReceipt(input),
+    steps: input.existingOrder ? EXISTING_ORDER_COMPLETION_SEQUENCE : COMPLETION_SEQUENCE,
+  };
+}

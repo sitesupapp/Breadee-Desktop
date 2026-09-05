@@ -191,3 +191,84 @@ export function completeTablePayment(input: TableReceiptInput): {
 } {
   return { receipt: buildTablePaymentReceipt(input), steps: TABLE_COMPLETION_SEQUENCE };
 }
+
+// --- Customer Receivables / On Account (dine-in) -----------------------------
+//
+// The sibling of `buildTablePaymentReceipt` for a table put on account. It is not
+// an extension of it: a receivable receipt carries `paid: false`, the paid/balance
+// split and no tendered/change pair, where the full-pay one carries `paid: true`
+// and a cash tender. The IDENTITY still comes from the pre-payment bill, and every
+// figure still comes from the server; the full-pay builder is untouched.
+
+export type TableOnAccountReceiptInput = {
+  /** The bill as it stood immediately before completion - the ONLY source of identity. */
+  bill: TableBill;
+  table: TableSummary;
+  /** Null when the completion was recovered rather than directly confirmed. */
+  result: {
+    bill_total: number;
+    paid_usd: number;
+    outstanding_primary: number;
+    subtotal: number;
+    discount: number;
+  } | null;
+  /** The discount amount the client asked for. Only used on the recovered path. */
+  requestedDiscount: number;
+  /** What the customer paid now, as the client asked. Only used on the recovered path. */
+  requestedPaidNow: number;
+  method: PaymentMethod;
+  tenantName: string;
+  branchName: string;
+  operatorName: string;
+  /** The bill's selling currency. */
+  primaryCurrency: CurrencyCode;
+  shiftId: string | null;
+  at: string;
+};
+
+export function buildTableOnAccountReceipt(input: TableOnAccountReceiptInput): ReceiptData {
+  // Server figures win outright; the fallback is the honest best account for a
+  // recovered completion whose response was lost, from the pre-payment bill.
+  const subtotal = input.result?.subtotal ?? input.bill.subtotal ?? 0;
+  const discount = input.result ? input.result.discount : Math.max(0, input.requestedDiscount);
+  const total = input.result?.bill_total ?? Math.max(0, subtotal - discount);
+  const paidNow = input.result ? input.result.paid_usd : Math.max(0, input.requestedPaidNow);
+  const balance = input.result ? input.result.outstanding_primary : Math.max(0, total - paidNow);
+
+  const orderNumbers = input.bill.orders.map((o) => o.order_number).filter(Boolean);
+
+  return buildReceipt({
+    businessName: input.tenantName,
+    branchName: input.branchName,
+    staffName: input.operatorName,
+    orderType: "Dine-in",
+    orderSource: "dine_in",
+    tableName: input.table.name,
+    seats: input.table.seats,
+    orderNumber: orderNumbers.join(", ") || input.table.name,
+    at: input.at,
+    paid: false,
+    paymentStatus: paidNow > 0 ? "partial" : "unpaid",
+    paidAmount: paidNow,
+    balanceDue: balance,
+    method: input.method,
+    currency: input.primaryCurrency,
+    lines: input.bill.orders.flatMap((order) =>
+      order.lines.map((l) => ({
+        name: l.name,
+        qty: l.quantity,
+        unitPrice: l.final_unit_price,
+        lineTotal: l.line_total,
+        modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.price_delta, quantity: m.quantity })),
+        note: l.kitchen_note,
+      })),
+    ),
+    subtotal,
+    discount,
+    total,
+    // A receivable takes no cash tender at the drawer, so no tender/change block.
+    tenderCurrency: null,
+    exchangeRate: input.bill.orders[0]?.exchange_rate ?? null,
+    shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,
+  });
+}

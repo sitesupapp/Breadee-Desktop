@@ -13,10 +13,60 @@ import { useEffect, useMemo, useState } from "react";
 import { Modal } from "@/components/overlays";
 import { Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
+import { CustomerSearch, type CustomerSearchProps } from "@/components/pos/CustomerSearch";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import { convertCurrency, formatMoney, hasValidRate, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { computeDiscount, discountPayload, fixedDiscountToPrimary, type DiscountType } from "@/lib/pos/discounts";
 import { computeChange, paymentBlockedReason, PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
+
+/**
+ * How a sale is being settled.
+ *
+ *   full    - the ordinary payment path, unchanged. The only mode a dialog
+ *             without an `onAccount` prop can ever be in.
+ *   account - the WHOLE bill goes on account (amount paid now = 0).
+ *   partial - part is paid now, the remainder goes on account.
+ */
+export type SettlementMode = "full" | "account" | "partial";
+
+/**
+ * The optional Customer Receivables capability.
+ *
+ * ABSENT BY DEFAULT. When this prop is not passed (or `enabled` is false) the
+ * dialog renders EXACTLY as it always has - no mode control, no customer slot,
+ * Confirm routes to `onConfirm`. Every field below is inert until on-account is
+ * both entitled and permitted (`canTakeOnAccount`), which is what the workspace
+ * decides before passing this.
+ */
+export type PaymentDialogOnAccount = {
+  /** Only true when on-account is entitled, permitted and online. */
+  enabled: boolean;
+  /**
+   * The customer the receivable is booked against. MANDATORY before an
+   * on-account confirm. For delivery it is fixed (the order's own customer); for
+   * takeaway/dine-in it is whatever the picker below selected.
+   */
+  customer: { id: string; name: string | null; phone?: string | null } | null;
+  /**
+   * The customer picker, forwarded verbatim to `CustomerSearch`. Absent when the
+   * customer is fixed (delivery), which shows the name read-only instead.
+   */
+  search?: CustomerSearchProps;
+  /** Clears the picked customer so another can be chosen. Paired with `search`. */
+  onClearCustomer?: () => void;
+  /**
+   * Confirm an on-account sale. `amountNow` is in the order/bill PRIMARY currency
+   * (0 for a full receivable). The server owns every resulting figure.
+   */
+  onConfirmAccount: (input: {
+    mode: "account" | "partial";
+    amountNow: number;
+    customerId: string;
+    method: PaymentMethod;
+    discountType: DiscountType;
+    discountValue: string;
+  }) => void;
+};
 
 export type PaymentDialogProps = {
   open: boolean;
@@ -45,6 +95,11 @@ export type PaymentDialogProps = {
    * unchanged.
    */
   delivery?: { customerName: string; address: string | null } | null;
+  /**
+   * Customer Receivables / On Account (optional). When absent or disabled the
+   * dialog is byte-identical to its full-pay self - see `PaymentDialogOnAccount`.
+   */
+  onAccount?: PaymentDialogOnAccount;
   error: string | null;
   onCancel: () => void;
   onConfirm: (input: {
@@ -70,6 +125,10 @@ export function PaymentDialog(props: PaymentDialogProps) {
   const [discountType, setDiscountType] = useState<DiscountType>("none");
   const [discountValue, setDiscountValue] = useState("");
   const [tendered, setTendered] = useState("");
+  // Customer Receivables. `mode` only ever leaves "full" when on-account is
+  // enabled, so a dialog without the capability behaves exactly as before.
+  const [mode, setMode] = useState<SettlementMode>("full");
+  const [paidNow, setPaidNow] = useState("");
 
   useEffect(() => {
     if (props.open) {
@@ -78,6 +137,8 @@ export function PaymentDialog(props: PaymentDialogProps) {
       setDiscountType("none");
       setDiscountValue("");
       setTendered("");
+      setMode("full");
+      setPaidNow("");
     }
   }, [props.open, props.primaryCurrency]);
 
@@ -110,16 +171,56 @@ export function PaymentDialog(props: PaymentDialogProps) {
 
   const canConfirm = !props.busy && !blockedReason;
 
+  // --- Customer Receivables / On Account -------------------------------------
+  const oa = props.onAccount ?? null;
+  const accountEnabled = Boolean(oa?.enabled);
+  // Without the capability the dialog can only be in "full" mode, so nothing
+  // below the segmented control ever renders and the default path is unchanged.
+  const effectiveMode: SettlementMode = accountEnabled ? mode : "full";
+
+  // The amount owed after discount, in the order's PRIMARY currency. On-account
+  // amounts are never tendered in a foreign currency, so this - not the tender
+  // total - is what the receivable is measured against.
+  const dueInPrimary = discount.finalTotal;
+  const paidNowNum = parseAmount(paidNow);
+  const accountBalance = Math.max(0, dueInPrimary - paidNowNum);
+
+  const accountBlocked =
+    (!oa?.customer ? "Choose a customer before putting this sale on account." : null) ??
+    (!discount.valid ? discount.error : null) ??
+    (effectiveMode === "partial" && !(paidNowNum > 0 && paidNowNum < dueInPrimary)
+      ? `Enter a paid amount between 0 and ${formatMoney(dueInPrimary, props.primaryCurrency)}.`
+      : null);
+
+  const canConfirmAccount = !props.busy && !accountBlocked;
+
+  const activeBlocked = effectiveMode === "full" ? blockedReason : accountBlocked;
+  const activeCanConfirm = effectiveMode === "full" ? canConfirm : canConfirmAccount;
+
   function confirm() {
-    if (!canConfirm) return;
     const permitted = props.discountGate.allowed ? discountType : "none";
-    props.onConfirm({
+    if (effectiveMode === "full") {
+      if (!canConfirm) return;
+      props.onConfirm({
+        method,
+        currency,
+        discount: discountPayload(props.discountGate.allowed, props.subtotal, discountType, discountInPrimary),
+        discountType: permitted,
+        discountValue: permitted === "none" ? "" : discountInPrimary,
+        tendered: tendered.trim() === "" ? null : tenderedNum,
+      });
+      return;
+    }
+    // On account. The server owns every figure; this only says how much is paid
+    // now (0 for a full receivable) and against which customer.
+    if (!oa || !oa.customer || !canConfirmAccount) return;
+    oa.onConfirmAccount({
+      mode: effectiveMode === "account" ? "account" : "partial",
+      amountNow: effectiveMode === "account" ? 0 : paidNowNum,
+      customerId: oa.customer.id,
       method,
-      currency,
-      discount: discountPayload(props.discountGate.allowed, props.subtotal, discountType, discountInPrimary),
       discountType: permitted,
       discountValue: permitted === "none" ? "" : discountInPrimary,
-      tendered: tendered.trim() === "" ? null : tenderedNum,
     });
   }
 
@@ -164,15 +265,25 @@ export function PaymentDialog(props: PaymentDialogProps) {
       footer={
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            {blockedReason && <p className="truncate text-xs font-semibold text-amber-800">{blockedReason}</p>}
+            {activeBlocked && <p className="truncate text-xs font-semibold text-amber-800">{activeBlocked}</p>}
             {props.error && <p className="truncate text-xs font-semibold text-red-700">{props.error}</p>}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button variant="ghost" size="lg" onClick={props.onCancel} disabled={props.busy}>
               Cancel
             </Button>
-            <Button size="lg" onClick={confirm} disabled={!canConfirm} title={blockedReason ?? undefined}>
-              {props.busy ? "Charging..." : `Confirm ${formatMoney(dueInTender ?? discount.finalTotal, currency)}`}
+            <Button size="lg" onClick={confirm} disabled={!activeCanConfirm} title={activeBlocked ?? undefined}>
+              {effectiveMode === "full"
+                ? props.busy
+                  ? "Charging..."
+                  : `Confirm ${formatMoney(dueInTender ?? discount.finalTotal, currency)}`
+                : effectiveMode === "account"
+                  ? props.busy
+                    ? "Saving..."
+                    : "Put on account"
+                  : props.busy
+                    ? "Saving..."
+                    : `Take ${formatMoney(Math.max(0, paidNowNum), props.primaryCurrency)} now`}
             </Button>
           </div>
         </div>
@@ -182,6 +293,26 @@ export function PaymentDialog(props: PaymentDialogProps) {
           stacks into a tall single column at a till width. */}
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_212px]">
         <div className="space-y-3">
+          {/* Settlement mode. Rendered ONLY when Customer Receivables is enabled;
+              otherwise there is no control and the dialog is its full-pay self. */}
+          {accountEnabled && (
+            <Field label="Settlement">
+              <div className="flex gap-2">
+                {(
+                  [
+                    ["full", "Pay now"],
+                    ["partial", "Partial"],
+                    ["account", "On account"],
+                  ] as [SettlementMode, string][]
+                ).map(([value, label]) => (
+                  <Choice key={value} active={mode === value} onClick={() => setMode(value)}>
+                    {label}
+                  </Choice>
+                ))}
+              </div>
+            </Field>
+          )}
+
           {/* Totals */}
           <div className="rounded-xl border border-line px-3 py-2">
             {dineIn && (
@@ -274,31 +405,97 @@ export function PaymentDialog(props: PaymentDialogProps) {
               <p className="mt-1 text-xs font-semibold text-amber-800">{discount.error}</p>
             )}
           </Field>
+
+          {/* MANDATORY customer slot for a receivable. Rendered only when a
+              balance will remain (any non-full mode). When the customer is fixed
+              (delivery) the name shows read-only; otherwise the picker chooses
+              one, reusing the shared customer authority. */}
+          {effectiveMode !== "full" && oa && (
+            <Field label="Customer">
+              {oa.customer ? (
+                <div className="flex items-center justify-between gap-2 rounded-xl border border-line px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold text-ink">
+                      {oa.customer.name || oa.customer.phone || "Selected customer"}
+                    </p>
+                    {oa.customer.name && oa.customer.phone && (
+                      <p className="truncate text-xs text-sub">{oa.customer.phone}</p>
+                    )}
+                  </div>
+                  {oa.search && oa.onClearCustomer && (
+                    <Button variant="ghost" size="sm" onClick={oa.onClearCustomer} disabled={props.busy}>
+                      Change
+                    </Button>
+                  )}
+                </div>
+              ) : oa.search ? (
+                <CustomerSearch {...oa.search} />
+              ) : (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
+                  This order has no customer, so it cannot be put on account.
+                </p>
+              )}
+            </Field>
+          )}
         </div>
 
-        {/* Cash handling */}
-        <div className="space-y-2">
-          <Field label={`Tendered (${currency})`}>
-            <Input
-              inputMode="decimal"
-              value={tendered}
-              onChange={(e) => setTendered(e.target.value)}
-              placeholder={dueInTender !== null ? String(dueInTender) : "0"}
-              className="text-right text-lg font-bold"
-            />
-          </Field>
-          <div className="rounded-xl border border-line px-3 py-1.5">
-            <Row label="Due" value={dueInTender === null ? "-" : formatMoney(dueInTender, currency)} />
-            <Row
-              label="Change"
-              value={change === null ? "-" : formatMoney(change.change, currency)}
-              tone={change && change.change > 0 ? "green" : undefined}
-            />
+        {effectiveMode === "full" ? (
+          /* Cash handling. Unchanged, and shown only when settling in full. */
+          <div className="space-y-2">
+            <Field label={`Tendered (${currency})`}>
+              <Input
+                inputMode="decimal"
+                value={tendered}
+                onChange={(e) => setTendered(e.target.value)}
+                placeholder={dueInTender !== null ? String(dueInTender) : "0"}
+                className="text-right text-lg font-bold"
+              />
+            </Field>
+            <div className="rounded-xl border border-line px-3 py-1.5">
+              <Row label="Due" value={dueInTender === null ? "-" : formatMoney(dueInTender, currency)} />
+              <Row
+                label="Change"
+                value={change === null ? "-" : formatMoney(change.change, currency)}
+                tone={change && change.change > 0 ? "green" : undefined}
+              />
+            </div>
+            {/* `compact` trims the key height to 44px - still above the 44px touch
+                target this app holds itself to, and 12px x 5 rows shorter. */}
+            <NumericKeypad compact value={tendered} onChange={setTendered} allowDecimal={currency === "USD"} />
           </div>
-          {/* `compact` trims the key height to 44px - still above the 44px touch
-              target this app holds itself to, and 12px x 5 rows shorter. */}
-          <NumericKeypad compact value={tendered} onChange={setTendered} allowDecimal={currency === "USD"} />
-        </div>
+        ) : (
+          /* On-account handling. The amount is always in the PRIMARY currency -
+             a receivable is not tendered in a foreign currency - and every figure
+             the server returns replaces these previews on the receipt. */
+          <div className="space-y-2">
+            {effectiveMode === "partial" && (
+              <Field label={`Paid now (${props.primaryCurrency})`}>
+                <Input
+                  inputMode="decimal"
+                  value={paidNow}
+                  onChange={(e) => setPaidNow(e.target.value)}
+                  placeholder="0.00"
+                  className="text-right text-lg font-bold"
+                />
+              </Field>
+            )}
+            <div className="rounded-xl border border-line px-3 py-1.5">
+              <Row label="Total" value={formatMoney(dueInPrimary, props.primaryCurrency)} />
+              <Row
+                label="Paid now"
+                value={formatMoney(effectiveMode === "account" ? 0 : Math.max(0, paidNowNum), props.primaryCurrency)}
+              />
+              <Row
+                label="Balance due"
+                value={formatMoney(effectiveMode === "account" ? dueInPrimary : accountBalance, props.primaryCurrency)}
+                tone="amber"
+              />
+            </div>
+            <p className="text-[11px] text-sub">
+              The balance is recorded against the customer. The server confirms the exact amounts.
+            </p>
+          </div>
+        )}
       </div>
     </Modal>
   );

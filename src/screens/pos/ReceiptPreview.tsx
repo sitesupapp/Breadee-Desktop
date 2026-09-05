@@ -161,6 +161,27 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
         </div>
       )}
 
+      {/* Customer Receivables / On Account. Rendered only when the server booked a
+          receivable (`paidAmount`/`balanceDue` set); a full-pay receipt leaves
+          both undefined and nothing shows, so the paid receipt is unchanged.
+          Deliberately NOT gated by `show()`: a receivable's outstanding balance is
+          the point of the receipt, not a template-optional cosmetic line, so it
+          appears regardless of the tenant's saved section list. (The native
+          thermal receipt keeps these as `not_printed` in the catalog until it
+          gains the fields in a signed build.) */}
+      {data.paidAmount != null && (
+        <div className="mt-1 flex justify-between">
+          <span>Paid now</span>
+          <span>{formatMoney(data.paidAmount, data.currency)}</span>
+        </div>
+      )}
+      {data.balanceDue != null && (
+        <div className="mt-0.5 flex justify-between font-bold">
+          <span>Balance due</span>
+          <span>{formatMoney(data.balanceDue, data.currency)}</span>
+        </div>
+      )}
+
       {data.tenderCurrency && data.tenderCurrency !== data.currency && data.tenderTotal != null && (
         <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
           <span>Charged in {data.tenderCurrency}</span>
@@ -182,7 +203,15 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
 
       {show("payment_method") && (
         <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
-          <span>{data.paid ? `Paid - ${data.method ?? "cash"}` : "Unpaid"}</span>
+          <span>
+            {data.paid
+              ? `Paid - ${data.method ?? "cash"}`
+              : data.paymentStatus === "partial"
+                ? `Partial - ${data.method ?? "cash"}`
+                : data.paymentStatus === "unpaid"
+                  ? "On account"
+                  : "Unpaid"}
+          </span>
           <span>{data.currency}</span>
         </div>
       )}

@@ -61,6 +61,22 @@ export type ReceiptData = {
   /** Human-readable time captured when the receipt was built. */
   at: string;
   paid: boolean;
+  /**
+   * Customer Receivables / On Account. All three are the SERVER's figures, and
+   * all three are optional so every existing receipt (full-pay takeaway, dine-in,
+   * delivery, reprints) is untouched: they stay undefined and the paid/balance
+   * blocks render nothing.
+   *
+   *   paymentStatus - 'unpaid' (whole bill on account) or 'partial'. Absent on a
+   *                   fully-paid receipt, whose `paid` flag already says so.
+   *   paidAmount    - what the customer paid now, in `currency`. 0 on a full
+   *                   receivable.
+   *   balanceDue    - what is still owed, in `currency`. The one figure a
+   *                   receivable receipt exists to carry.
+   */
+  paymentStatus?: "unpaid" | "partial";
+  paidAmount?: number | null;
+  balanceDue?: number | null;
   method: string | null;
   currency: CurrencyCode;
   lines: ReceiptLine[];

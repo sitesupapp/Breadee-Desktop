@@ -69,6 +69,9 @@ export const POS_PERMISSIONS = {
   // Native receipt printing (Level 3E-B). The registry documents this key as
   // "Print or reprint receipts" under the `pos.printing` sub-feature.
   PRINT_RECEIPTS: "pos.print_receipts",
+  // Customer Receivables / On Account. The single key `pos_complete_on_account`
+  // and `pos_complete_table_on_account` both check for themselves.
+  RECEIVABLES_CREATE: "pos.receivables.create",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -126,6 +129,30 @@ export function canTakePayments(ctx: PosAccessContext): Gate {
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.APPLY_DISCOUNTS), "You do not have permission to apply discounts.");
+}
+
+/**
+ * Selling on account (Customer Receivables).
+ *
+ * The order the server would refuse in: POS access (which carries the owner
+ * block, mirroring `pos_assert_operator`), the `pos.receivables` sub-feature
+ * (dark unless the tenant is entitled), then the ordinary payment permission,
+ * then the receivables permission the two on-account RPCs check for themselves.
+ *
+ * STRICTER than a bare permission lookup on purpose - never looser. This is not a
+ * security boundary; `pos_complete_on_account` re-enforces every rule. It exists
+ * so the "On account" control is only offered where the server would honour it.
+ */
+export function canTakeOnAccount(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_RECEIVABLES)) {
+    return { allowed: false, reason: "On-account sales are not enabled for this plan." };
+  }
+  const pay = canTakePayments(ctx);
+  if (!pay.allowed) return pay;
+  return gate(perm(ctx, POS_PERMISSIONS.RECEIVABLES_CREATE), "You do not have permission to sell on account.");
 }
 
 /** Opening a shift additionally requires the `pos.shifts` sub-feature (m223). */
