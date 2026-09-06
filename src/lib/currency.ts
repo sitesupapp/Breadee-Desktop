@@ -70,6 +70,41 @@ export function formatMoney(amount: number | null | undefined, code: CurrencyCod
   return `$${n.toFixed(2)}`;
 }
 
+/**
+ * Normalise a receipt currency code (Slice 6B-1).
+ *
+ * A receipt's currency is the order's OWN historical currency, which for a future
+ * third-currency tenant is not one of the two `CurrencyCode` values. It arrives as a
+ * runtime string, so it is validated here (3-letter ISO, upper-cased) and falls back
+ * to USD for anything malformed, so a receipt never renders a blank or injected code.
+ */
+export function normalizeCurrencyCode(input: string | null | undefined): string {
+  const c = String(input ?? "").trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(c) ? c : "USD";
+}
+
+/**
+ * Format a receipt amount in the order's own currency at a given precision (Slice 6B-1).
+ *
+ * USD and LBP delegate to `formatMoney`, so existing receipts are BYTE-IDENTICAL
+ * ("$10.50" / "900,000 LBP") and `digits` is not consulted for them. Any other
+ * currency — a server-provided, gated operational currency — renders as
+ * "<amount> <CODE>" at the SERVER-PROVIDED `decimal_digits` (JOD/KWD = 3): no local
+ * currency catalog, no hard-coded 2-decimal assumption, and no USD/LBP `$`/`LBP`
+ * leakage. Deliberately mirrors the native Rust `format_money` so the on-screen
+ * preview and the printed paper agree.
+ */
+export function formatReceiptMoney(
+  amount: number | null | undefined,
+  currency: string,
+  digits: number,
+): string {
+  const code = normalizeCurrencyCode(currency);
+  if (code === "USD" || code === "LBP") return formatMoney(amount, code as CurrencyCode);
+  const d = Number.isFinite(digits) && digits >= 0 ? Math.trunc(digits) : 2;
+  return `${Number(amount ?? 0).toFixed(d)} ${code}`;
+}
+
 // USD -> LBP using the tenant's exchange rate. Returns 0 when no valid rate is set.
 export function convertUsdToLbp(usd: number | null | undefined, rate: number | null | undefined): number {
   if (!hasValidRate(rate)) return 0;
