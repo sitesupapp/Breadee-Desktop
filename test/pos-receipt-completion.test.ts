@@ -49,6 +49,10 @@ const baseInput = {
   branchName: "Main Branch",
   operatorName: "Cashier",
   primaryCurrency: "USD" as const,
+  // 6B-2: the server-provided historical currency + precision. For USD these mirror the
+  // primary currency; the caller obtains them from finance_order_financials.
+  receiptCurrency: "USD",
+  decimalDigits: 2,
   tenderCurrency: "USD" as const,
   rate: 89500,
   tenderedInput: 20,

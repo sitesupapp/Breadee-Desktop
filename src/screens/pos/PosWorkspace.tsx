@@ -60,6 +60,7 @@ import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
+import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
 import type { DiscountType } from "@/lib/pos/discounts";
@@ -354,6 +355,10 @@ function PosWorkspaceInner() {
         const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
           ? order.order_type
           : "takeaway") as "takeaway" | "dine_in" | "delivery";
+        // 6B-2: the order's OWN historical currency + precision, from the server. A
+        // third-currency order with no valid server precision refuses here (caught below)
+        // rather than reprinting at a guessed 2 decimals.
+        const receiptMeta = await fetchReceiptCurrency(order.id, currency);
         receiptStore.present(
           buildReceipt({
             businessName: pos.tenantName,
@@ -365,7 +370,8 @@ function PosWorkspaceInner() {
             at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
             paid: order.payment_status === "paid",
             method: null,
-            currency: (order.currency ?? currency) as CurrencyCode,
+            currency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
             lines,
             subtotal: order.subtotal ?? order.total_amount ?? 0,
             discount: order.discount_amount,
@@ -1170,6 +1176,10 @@ function PosWorkspaceInner() {
         // The completion sequence is deterministic and lives in one pure module:
         // present the receipt (data + visibility atomically) BEFORE the dialog
         // closes and the cart resets, so neither can race the receipt.
+        // 6B-2: the order's own historical currency + server precision. Best-effort for
+        // USD/LBP (falls back to the client currency if the read is unavailable); a
+        // third-currency order with no valid server precision refuses (caught below).
+        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
         const completion = completePayment({
           result,
           lines,
@@ -1180,6 +1190,8 @@ function PosWorkspaceInner() {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: currency,
+          receiptCurrency: receiptMeta.currency,
+          decimalDigits: receiptMeta.decimalDigits,
           tenderCurrency: input.currency,
           rate,
           tenderedInput: input.tendered,
@@ -1324,6 +1336,8 @@ function PosWorkspaceInner() {
 
         const receiptLines = existing ? await readOrderReceiptLines(orderId).catch(() => []) : null;
 
+        // 6B-2: the order's own historical currency + server precision for the receivable.
+        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
         const completion = completeOnAccountReceipt({
           result,
           lines,
@@ -1335,6 +1349,8 @@ function PosWorkspaceInner() {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: currency,
+          receiptCurrency: receiptMeta.currency,
+          decimalDigits: receiptMeta.decimalDigits,
           shiftId,
           at: new Date().toLocaleString(),
         });
