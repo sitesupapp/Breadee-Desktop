@@ -244,9 +244,12 @@ test("F4 stays Level 3C's, and reaches the same gate from both views", () => {
 });
 
 test("the payment dialog describes the order that would actually be charged", () => {
-  // Not "whoever is selected on the customer half" - that is how the wrong name
-  // reaches a receipt when an order is opened from the queue.
-  assert.match(workspace, /subtotal=\{payTarget\.order\?\.total_amount \?\? 0\}/);
+  // The ITEMS subtotal (the fee is shown on its own line, not added on top of a
+  // total that already contains it), the persisted fee PRE-FILLED so settlement
+  // reuses it, and the identity from the ORDER - never whoever is selected behind
+  // it, which is how the wrong name reaches a receipt from the queue.
+  assert.match(workspace, /subtotal=\{payTarget\.order\?\.subtotal \?\? payTarget\.order\?\.total_amount \?\? 0\}/);
+  assert.match(workspace, /initialDeliveryFee=\{payTarget\.order\?\.delivery_fee \?\? null\}/);
   assert.match(workspace, /orderNumber=\{payTarget\.order\?\.order_number \?\? null\}/);
   assert.match(workspace, /receiptIdentity\(payTarget\.order\)/);
 });
@@ -483,6 +486,38 @@ test("every figure on a reprint is the server's, and cash handling is left blank
   assert.equal(r.currency, "USD");
 });
 
+test("a delivery reprint shows the persisted Delivery Fee from canonical data, once", () => {
+  // The confirmed defect: the reprint/detail path dropped the fee. It now carries
+  // the ORDER's own delivery_fee — its own line, never derived from total - subtotal.
+  const withFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 67_500, delivery_fee: 2, total_amount: 67_502, payment_status: "paid" }),
+    payment: { method: "cash", currency: "LBP", amount: 67_502, originalAmount: 67_502, exchangeRate: null, paidAt: null },
+    lines: [],
+    party,
+    fallbackCurrency: "LBP",
+    at: "x",
+  });
+  assert.equal(withFee.subtotal, 67_500);
+  assert.equal(withFee.deliveryFee, 2);
+  assert.equal(withFee.total, 67_502);
+  // A delivery order with no fee shows no fee line (null, never a phantom 0).
+  const noFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 10, total_amount: 10, payment_status: "paid" }),
+    payment: null,
+    lines: [],
+    party,
+    fallbackCurrency: "USD",
+    at: "x",
+  });
+  assert.equal(noFee.deliveryFee ?? null, null);
+});
+
 test("an unpaid order's receipt says unpaid rather than pretending otherwise", () => {
   const r = buildHistoricalReceipt({
     tenantName: null,
@@ -609,9 +644,12 @@ test("the queue row shape is converted for settlement rather than re-implemented
   assert.equal(open.total_amount, o.total_amount);
   assert.equal(open.customer_id, o.customer_id);
   assert.equal(open.address_id, o.address_id);
-  // Queue-only fields do not travel into the settlement shape.
+  // shift_id is queue-only and does not travel into the settlement shape.
   assert.equal("shift_id" in open, false);
-  assert.equal("subtotal" in open, false);
+  // The items subtotal and the persisted fee DO travel now: settlement shows
+  // Subtotal + Delivery Fee = Total and reuses the one canonical fee.
+  assert.equal(open.subtotal, o.subtotal);
+  assert.equal(open.delivery_fee ?? null, o.delivery_fee ?? null);
 });
 
 // --- permissions -------------------------------------------------------------
