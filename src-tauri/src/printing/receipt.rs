@@ -75,6 +75,11 @@ pub struct ReceiptDoc {
     #[serde(default)]
     pub method: Option<String>,
     pub currency: String,
+    /// Display precision for `currency` (Slice 6B-1). Non-LBP amounts print at this many
+    /// decimals — USD 2, JOD/KWD 3 — from the server contract, never a local catalog.
+    /// Defaults to 2 so a payload built before this field still renders USD correctly.
+    #[serde(default = "default_decimal_digits")]
+    pub decimal_digits: u8,
     pub lines: Vec<ReceiptLine>,
     #[serde(default)]
     pub subtotal: f64,
@@ -254,27 +259,38 @@ pub fn validate_receipt(doc: &ReceiptDoc) -> Result<(), PrintError> {
     Ok(())
 }
 
+/// The display precision used when a payload predates `ReceiptDoc::decimal_digits`.
+/// Two decimals keeps USD (and any 2dp currency) rendering exactly as before.
+fn default_decimal_digits() -> u8 {
+    2
+}
+
 /// Format money the way the on-screen receipt does.
 ///
-/// USD to two decimals; LBP has no minor unit in practice and is printed whole
-/// with thousands separators, which is how prices are written and read here. A
-/// receipt showing "150000" instead of "150,000" is technically correct and
-/// practically unreadable at a till.
-pub fn format_money(amount: f64, currency: &str) -> String {
+/// LBP has no minor unit in practice and is printed whole with thousands separators,
+/// which is how prices are written and read here — a receipt showing "150000" instead
+/// of "150,000" is technically correct and practically unreadable at a till.
+///
+/// Every other currency prints at `digits` decimals followed by its ISO code
+/// ("7.00 USD", "45.000 JOD"). The precision comes from the server contract
+/// (`ReceiptDoc::decimal_digits`), never a hard-coded 2 — so JOD/KWD render at 3 while
+/// USD (precision 2) is byte-identical to before. Mirrors the TypeScript
+/// `formatReceiptMoney`, so the on-screen preview and the paper agree.
+pub fn format_money(amount: f64, currency: &str, digits: usize) -> String {
     if currency.eq_ignore_ascii_case("LBP") {
         let rounded = amount.round().abs() as i64;
         let sign = if amount < 0.0 { "-" } else { "" };
-        let digits = rounded.to_string();
+        let digit_str = rounded.to_string();
         let mut grouped = String::new();
-        for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
+        for (i, c) in digit_str.chars().enumerate() {
+            if i > 0 && (digit_str.len() - i) % 3 == 0 {
                 grouped.push(',');
             }
             grouped.push(c);
         }
         return format!("{sign}{grouped} LBP");
     }
-    format!("{amount:.2} {currency}")
+    format!("{amount:.prec$} {currency}", prec = digits)
 }
 
 /// Quantities print as integers when they are whole, which they almost always
@@ -420,17 +436,19 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     // total with nothing to explain it - which is a tenant's decision to make
     // for, say, a duplicate card slip. `validate_receipt` still refuses a
     // document that HAS no items, which is a different thing entirely.
+    // Display precision for the order's OWN currency (6B-1). USD stays 2, JOD/KWD 3.
+    let digits = doc.decimal_digits as usize;
     for line in doc.lines.iter().filter(|_| doc.shows("items")) {
         out.push(PageLine::pair(
             format!("{}x {}", format_qty(line.qty), line.name),
-            format_money(line.line_total, &doc.currency),
+            format_money(line.line_total, &doc.currency, digits),
             LineStyle::Body,
             direction_for(&line.name),
         ));
         for m in &line.modifiers {
             let count = if m.quantity > 1.0 { format!("{} x ", format_qty(m.quantity)) } else { String::new() };
             let amount = if m.price_delta != 0.0 {
-                format_money(m.price_delta, &doc.currency)
+                format_money(m.price_delta, &doc.currency, digits)
             } else {
                 String::new()
             };
@@ -452,7 +470,7 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     if doc.shows("subtotal") {
         out.push(PageLine::pair(
             "Subtotal",
-            format_money(doc.subtotal, &doc.currency),
+            format_money(doc.subtotal, &doc.currency, digits),
             LineStyle::Body,
             Direction::Auto,
         ));
@@ -460,7 +478,7 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     if doc.shows("discount") && doc.discount > 0.0 {
         out.push(PageLine::pair(
             "Discount",
-            format!("-{}", format_money(doc.discount, &doc.currency)),
+            format!("-{}", format_money(doc.discount, &doc.currency, digits)),
             LineStyle::Body,
             Direction::Auto,
         ));
@@ -468,7 +486,7 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     if doc.shows("total") {
         out.push(PageLine::pair(
             "TOTAL",
-            format_money(doc.total, &doc.currency),
+            format_money(doc.total, &doc.currency, digits),
             LineStyle::Total,
             Direction::Auto,
         ));
@@ -478,9 +496,12 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     // against a USD total, and the paper should say what was actually charged.
     if let (Some(tc), Some(tt)) = (doc.tender_currency.as_deref(), doc.tender_total) {
         if !tc.eq_ignore_ascii_case(&doc.currency) {
+            // A different tender currency is the USD/LBP dual-tender pair; LBP ignores
+            // digits and USD is 2. (Phase-1 third-currency tender is operational-only,
+            // i.e. the same currency as the order, so it never reaches this branch.)
             out.push(PageLine::pair(
                 format!("Charged in {tc}"),
-                format_money(tt, tc),
+                format_money(tt, tc, 2),
                 LineStyle::Small,
                 Direction::Auto,
             ));
@@ -489,10 +510,13 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
 
     // --- cash handling, only when it genuinely exists ------------------------
     if let (Some(tendered), Some(tc)) = (doc.tendered, doc.tender_currency.as_deref()) {
-        out.push(PageLine::pair("Tendered", format_money(tendered, tc), LineStyle::Small, Direction::Auto));
+        // Same-currency tender (incl. a third operational currency) uses the order's
+        // precision; a USD/LBP cross-tender uses 2 (LBP's branch ignores it anyway).
+        let tender_digits = if tc.eq_ignore_ascii_case(&doc.currency) { digits } else { 2 };
+        out.push(PageLine::pair("Tendered", format_money(tendered, tc, tender_digits), LineStyle::Small, Direction::Auto));
         out.push(PageLine::pair(
             "Change",
-            format_money(doc.change.unwrap_or(0.0), tc),
+            format_money(doc.change.unwrap_or(0.0), tc, tender_digits),
             LineStyle::Small,
             Direction::Auto,
         ));
@@ -555,6 +579,7 @@ mod tests {
             paid: true,
             method: Some("cash".into()),
             currency: "USD".into(),
+            decimal_digits: 2,
             lines: vec![line("Margherita", 1.0, 7.0)],
             subtotal: 7.0,
             discount: 0.0,
@@ -689,11 +714,49 @@ mod tests {
 
     #[test]
     fn lbp_is_grouped_and_usd_has_two_decimals() {
-        assert_eq!(format_money(7.0, "USD"), "7.00 USD");
-        assert_eq!(format_money(626500.0, "LBP"), "626,500 LBP");
-        assert_eq!(format_money(1000.0, "LBP"), "1,000 LBP");
-        assert_eq!(format_money(999.0, "LBP"), "999 LBP");
-        assert_eq!(format_money(-2.5, "USD"), "-2.50 USD");
+        assert_eq!(format_money(7.0, "USD", 2), "7.00 USD");
+        assert_eq!(format_money(626500.0, "LBP", 0), "626,500 LBP");
+        assert_eq!(format_money(1000.0, "LBP", 0), "1,000 LBP");
+        assert_eq!(format_money(999.0, "LBP", 0), "999 LBP");
+        assert_eq!(format_money(-2.5, "USD", 2), "-2.50 USD");
+        // LBP has no minor unit, so the digit count is ignored entirely.
+        assert_eq!(format_money(626500.0, "LBP", 3), "626,500 LBP");
+    }
+
+    #[test]
+    fn third_currencies_use_server_precision_without_dollar_or_lbp() {
+        // AED/SAR render at 2dp; JOD/KWD at 3dp — the precision is the caller's
+        // (server `decimal_digits`), never a hard-coded 2 and never a local catalog.
+        assert_eq!(format_money(45.0, "AED", 2), "45.00 AED");
+        assert_eq!(format_money(45.0, "SAR", 2), "45.00 SAR");
+        assert_eq!(format_money(45.678, "JOD", 3), "45.678 JOD");
+        assert_eq!(format_money(45.0, "KWD", 3), "45.000 KWD");
+        // No USD "$" and no "LBP" ever leak onto a third-currency amount.
+        let s = format_money(45.0, "JOD", 3);
+        assert!(!s.contains('$'), "no $ on a third currency");
+        assert!(!s.contains("LBP"), "no LBP on a third currency");
+    }
+
+    #[test]
+    fn a_third_currency_receipt_prints_at_three_decimals_total_once() {
+        // End-to-end through the page builder: a JOD order renders every money line at
+        // 3dp, with no USD/LBP notation, and the total (which already folds in any
+        // delivery fee server-side — the desktop has no separate fee line) prints once.
+        let mut d = doc();
+        d.currency = "JOD".into();
+        d.decimal_digits = 3;
+        d.subtotal = 40.0;
+        d.discount = 0.0;
+        d.total = 45.0;
+        d.lines = vec![line("Mansaf", 1.0, 40.0)];
+        let p = build_receipt_page(&d, PaperWidth::Mm80);
+        let r = rights(&p);
+        assert!(r.contains(&"40.000 JOD".to_string()));
+        assert!(r.contains(&"45.000 JOD".to_string()));
+        assert!(!r.iter().any(|x| x.contains('$') || x.contains("LBP")), "no USD/LBP leakage");
+        let total_lines: Vec<_> = p.iter().filter(|l| l.text == "TOTAL").collect();
+        assert_eq!(total_lines.len(), 1, "the total is stated exactly once");
+        assert_eq!(total_lines[0].right.as_deref(), Some("45.000 JOD"));
     }
 
     #[test]

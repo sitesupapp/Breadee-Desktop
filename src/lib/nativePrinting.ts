@@ -329,6 +329,9 @@ export type ReceiptDoc = {
   paid: boolean;
   method: string | null;
   currency: string;
+  /** Display precision for `currency` (6B-1). Rust renders non-LBP amounts at this many
+   *  decimals; USD stays 2, JOD/KWD are 3. `#[serde(default)]` on the Rust side. */
+  decimalDigits: number;
   lines: {
     name: string;
     qty: number;
@@ -389,6 +392,7 @@ export function toReceiptDoc(receipt: {
   paid: boolean;
   method?: string | null;
   currency: string;
+  decimalDigits?: number;
   lines: {
     name: string;
     qty: number;
@@ -426,6 +430,7 @@ export function toReceiptDoc(receipt: {
     paid: receipt.paid,
     method: receipt.method ?? null,
     currency: receipt.currency,
+    decimalDigits: receipt.decimalDigits ?? 2,
     lines: receipt.lines.map((l) => ({
       name: l.name,
       qty: l.qty,

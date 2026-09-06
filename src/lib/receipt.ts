@@ -78,13 +78,28 @@ export type ReceiptData = {
   paidAmount?: number | null;
   balanceDue?: number | null;
   method: string | null;
-  currency: CurrencyCode;
+  /**
+   * The order's OWN currency (Slice 6B-1). Widened from `CurrencyCode` to a runtime
+   * string so a future third-currency tenant's historical order can print in its own
+   * currency. USD/LBP render exactly as before; any other code renders as
+   * "<amount> <CODE>". The value is validated at the formatter boundary
+   * (`normalizeCurrencyCode`).
+   */
+  currency: string;
+  /**
+   * Display precision for `currency` (Slice 6B-1). USD/LBP ignore it (they render by
+   * code); a third currency uses it (JOD/KWD = 3). Sourced from the server contract
+   * `finance_order_financials.decimal_digits` once the assembly is wired (6B-2) — never
+   * derived from a local currency catalog.
+   */
+  decimalDigits: number;
   lines: ReceiptLine[];
   subtotal: number;
   discount: number;
   total: number;
-  /** Cash handling, in the TENDER currency. Null when not a cash tender. */
-  tenderCurrency?: CurrencyCode | null;
+  /** Cash handling, in the TENDER currency. Null when not a cash tender. Widened to a
+   *  runtime string in 6B-1 for the same reason as `currency`. */
+  tenderCurrency?: string | null;
   tenderTotal?: number | null;
   tendered?: number | null;
   change?: number | null;
@@ -108,9 +123,10 @@ export type ReceiptData = {
   deliveryAddress?: string | null;
 };
 
-export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType"> & {
+export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType" | "decimalDigits"> & {
   businessName: string | null | undefined;
   orderType?: string;
+  decimalDigits?: number;
 };
 
 export function buildReceipt(input: BuildReceiptInput): ReceiptData {
@@ -118,6 +134,10 @@ export function buildReceipt(input: BuildReceiptInput): ReceiptData {
     ...input,
     businessName: input.businessName?.trim() || "Breadee",
     orderType: input.orderType ?? "Takeaway",
+    // 6B-1: the receipt model now carries display precision. Until the assembly is wired
+    // to finance_order_financials (6B-2) callers omit it, and USD/LBP render by code (the
+    // formatter ignores digits for them), so this default is never consulted for them.
+    decimalDigits: input.decimalDigits ?? 2,
   };
 }
 
