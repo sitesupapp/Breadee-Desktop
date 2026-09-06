@@ -105,8 +105,16 @@ export type TableReceiptInput = {
   tenantName: string;
   branchName: string;
   operatorName: string;
-  /** The bill's selling currency. */
+  /** The bill's selling currency — kept for the tender math below. */
   primaryCurrency: CurrencyCode;
+  /**
+   * The bill's HISTORICAL currency + precision from the server (Slice 6B-2), read from a
+   * representative order of the table (all orders on a table share the operational
+   * currency). Authoritative for display; a third currency requires a valid server
+   * `decimalDigits`, never the 2-decimal default.
+   */
+  receiptCurrency: string;
+  decimalDigits: number;
   /** The currency actually tendered at the drawer. */
   tenderCurrency: CurrencyCode;
   rate: number | null;
@@ -161,7 +169,8 @@ export function buildTablePaymentReceipt(input: TableReceiptInput): ReceiptData 
     at: input.at,
     paid: true,
     method: input.method,
-    currency: input.primaryCurrency,
+    currency: input.receiptCurrency,
+    decimalDigits: input.decimalDigits,
     lines: input.bill.orders.flatMap((order) =>
       order.lines.map((l) => ({
         name: l.name,
@@ -222,6 +231,9 @@ export type TableOnAccountReceiptInput = {
   operatorName: string;
   /** The bill's selling currency. */
   primaryCurrency: CurrencyCode;
+  /** The bill's HISTORICAL currency + precision from the server (Slice 6B-2). */
+  receiptCurrency: string;
+  decimalDigits: number;
   shiftId: string | null;
   at: string;
 };
@@ -252,7 +264,8 @@ export function buildTableOnAccountReceipt(input: TableOnAccountReceiptInput): R
     paidAmount: paidNow,
     balanceDue: balance,
     method: input.method,
-    currency: input.primaryCurrency,
+    currency: input.receiptCurrency,
+    decimalDigits: input.decimalDigits,
     lines: input.bill.orders.flatMap((order) =>
       order.lines.map((l) => ({
         name: l.name,

@@ -47,8 +47,17 @@ export type PaymentCompletionInput = {
   tenantName: string;
   branchName: string;
   operatorName: string;
-  /** The tenant's primary (selling) currency. */
+  /** The tenant's primary (selling) currency — kept for the tender math below. */
   primaryCurrency: CurrencyCode;
+  /**
+   * The order's HISTORICAL currency and display precision, from the server contract
+   * `finance_order_financials` (Slice 6B-2). Authoritative for what the receipt shows —
+   * never today's tenant currency, `finance_base_currency`, or a local catalog. For a
+   * third-currency order the caller must obtain a valid `decimalDigits` from the server
+   * (see `fetchReceiptCurrency`), never the 2-decimal default.
+   */
+  receiptCurrency: string;
+  decimalDigits: number;
   /** The currency actually tendered. */
   tenderCurrency: CurrencyCode;
   rate: number | null;
@@ -126,7 +135,8 @@ export function buildPaymentReceipt(input: PaymentCompletionInput): ReceiptData 
     at: input.at,
     paid: true,
     method: result.method,
-    currency: input.primaryCurrency,
+    currency: input.receiptCurrency,
+    decimalDigits: input.decimalDigits,
     lines:
       input.receiptLines ??
       input.lines.map((l) => ({
@@ -186,6 +196,9 @@ export type OnAccountCompletionInput = {
   operatorName: string;
   /** The order's primary (selling) currency - the currency every figure is in. */
   primaryCurrency: CurrencyCode;
+  /** The order's HISTORICAL currency + precision from finance_order_financials (6B-2). */
+  receiptCurrency: string;
+  decimalDigits: number;
   shiftId: string | null;
   at: string;
 };
@@ -205,7 +218,8 @@ export function buildOnAccountReceipt(input: OnAccountCompletionInput): ReceiptD
     paidAmount: result.paid_usd,
     balanceDue: result.outstanding_usd,
     method: input.method,
-    currency: input.primaryCurrency,
+    currency: input.receiptCurrency,
+    decimalDigits: input.decimalDigits,
     lines:
       input.receiptLines ??
       input.lines.map((l) => ({
