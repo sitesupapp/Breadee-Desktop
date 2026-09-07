@@ -29,8 +29,11 @@ export class ReceiptCurrencyError extends Error {
 // ISO-4217 minor units never exceed 4; the catalog in use tops out at 3 (JOD/KWD).
 const MAX_SUPPORTED_DIGITS = 4;
 
-function digitsInRange(d: number): boolean {
-  return Number.isInteger(d) && d >= 0 && d <= MAX_SUPPORTED_DIGITS;
+// A valid precision must actually BE a whole number in range. Crucially it must be a real
+// `number` — `Number(null)` is 0 and `Number("")` is 0, so coercing first would let a
+// MISSING server precision masquerade as a valid 0 and defeat the third-currency fail-close.
+function validDigits(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_SUPPORTED_DIGITS;
 }
 
 /**
@@ -62,22 +65,21 @@ export function resolveReceiptCurrency(
       `Refusing receipt: the server returned no valid currency (${JSON.stringify(meta.currency)}).`,
     );
   }
-  const digits = Number(meta.decimal_digits);
-  const validDigits = digitsInRange(digits);
+  const rawDigits = meta.decimal_digits;
 
   if (currency === "USD" || currency === "LBP") {
     // The formatter renders USD/LBP by code and ignores this count, so 2 is a harmless
     // fallback when the server value is absent — it never reaches the output.
-    return { currency, decimalDigits: validDigits ? digits : 2 };
+    return { currency, decimalDigits: validDigits(rawDigits) ? rawDigits : 2 };
   }
 
-  if (!validDigits) {
+  if (!validDigits(rawDigits)) {
     throw new ReceiptCurrencyError(
       `Refusing ${currency} receipt: the server supplied no valid decimal_digits ` +
-        `(${JSON.stringify(meta.decimal_digits)}); a third currency's precision must not be guessed.`,
+        `(${JSON.stringify(rawDigits)}); a third currency's precision must not be guessed.`,
     );
   }
-  return { currency, decimalDigits: digits };
+  return { currency, decimalDigits: rawDigits };
 }
 
 /**
