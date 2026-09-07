@@ -11,7 +11,11 @@
 //! figure here arrives already decided by the server and is only formatted.
 //! There is no tax line, no service charge, no receipt sequence number and no
 //! rounding: none of those exist authoritatively in this system, and printing a
-//! plausible-looking one would be inventing a record.
+//! plausible-looking one would be inventing a record. The one order-level charge
+//! that IS authoritative - a delivery order's manually-entered delivery fee - is
+//! carried as its own optional figure (`delivery_fee`) and printed only when the
+//! server actually provides it, exactly like every other number here: decided
+//! upstream, only formatted below.
 //!
 //! TENDERED AND CHANGE ARE CONDITIONAL, AND THAT IS THE POINT. They are captured
 //! at the till during a live payment and are stored nowhere. A reprint of last
@@ -80,6 +84,11 @@ pub struct ReceiptDoc {
     pub subtotal: f64,
     #[serde(default)]
     pub discount: f64,
+    /// Delivery orders only: the manually-entered delivery fee, already folded
+    /// into `total` by the server's finance engine. Carried separately so the
+    /// paper can show it on its own line. `None` (or 0) prints nothing.
+    #[serde(default)]
+    pub delivery_fee: Option<f64>,
     #[serde(default)]
     pub total: f64,
     // --- cash handling: present ONLY during a live payment ------------------
@@ -465,6 +474,20 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
             Direction::Auto,
         ));
     }
+    // Delivery fee: its own line between the discount and the total, present ONLY
+    // when the server actually charged one (a delivery order with a fee > 0). Data
+    // gated rather than template gated, like Tendered/Change, so an existing tenant
+    // whose saved template predates this line still sees the fee they were charged.
+    if let Some(fee) = doc.delivery_fee {
+        if fee > 0.0 {
+            out.push(PageLine::pair(
+                "Delivery Fee",
+                format_money(fee, &doc.currency),
+                LineStyle::Body,
+                Direction::Auto,
+            ));
+        }
+    }
     if doc.shows("total") {
         out.push(PageLine::pair(
             "TOTAL",
@@ -558,6 +581,7 @@ mod tests {
             lines: vec![line("Margherita", 1.0, 7.0)],
             subtotal: 7.0,
             discount: 0.0,
+            delivery_fee: None,
             total: 7.0,
             tender_currency: None,
             tender_total: None,
@@ -951,6 +975,42 @@ mod tests {
         let joined = texts(&build_receipt_page(&d, PaperWidth::Mm80)).join(" ").to_lowercase();
         for invented in ["vat", "tax", "service charge", "invoice no", "fiscal", "receipt no"] {
             assert!(!joined.contains(invented), "the receipt must not invent {invented:?}");
+        }
+        // A delivery fee is a REAL server figure, not an invented one - but it must
+        // never appear when the server did not send one (delivery_fee: None here).
+        assert!(!joined.contains("delivery fee"), "no fee was charged, so none may print");
+    }
+
+    #[test]
+    fn a_delivery_fee_prints_on_its_own_line_when_the_server_charged_one() {
+        // $10 items + $2 delivery fee = $12, exactly as the finance engine returns.
+        let mut d = doc();
+        d.subtotal = 10.0;
+        d.delivery_fee = Some(2.0);
+        d.total = 12.0;
+        let page = build_receipt_page(&d, PaperWidth::Mm80);
+        let fee = page.iter().find(|l| l.text == "Delivery Fee").expect("the Delivery Fee line is drawn");
+        assert_eq!(fee.right.as_deref(), Some("2.00 USD"));
+        // It sits between the subtotal and the total, and the total is unchanged.
+        let idx = |t: &str| page.iter().position(|l| l.text == t).unwrap();
+        assert!(idx("Subtotal") < idx("Delivery Fee") && idx("Delivery Fee") < idx("TOTAL"));
+        assert_eq!(page.iter().find(|l| l.text == "TOTAL").unwrap().right.as_deref(), Some("12.00 USD"));
+    }
+
+    #[test]
+    fn a_zero_delivery_fee_prints_nothing() {
+        // Free delivery: the server persisted 0, and a $0 line would be noise.
+        let mut d = doc();
+        d.delivery_fee = Some(0.0);
+        assert!(!texts(&build_receipt_page(&d, PaperWidth::Mm80)).contains(&"Delivery Fee".to_string()));
+    }
+
+    #[test]
+    fn a_non_delivery_receipt_has_no_delivery_fee_line() {
+        // Takeaway/dine-in carry no fee (None), so the line is never fabricated.
+        for t in ["Takeaway", "Dine-in"] {
+            let d = routed(t);
+            assert!(!texts(&build_receipt_page(&d, PaperWidth::Mm80)).contains(&"Delivery Fee".to_string()));
         }
     }
 }
