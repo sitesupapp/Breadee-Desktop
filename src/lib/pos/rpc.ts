@@ -102,7 +102,12 @@ export type PosRpcName =
   // outbox. See `lib/pos/receivables.ts`.
   | "pos_receivables_search"
   | "pos_receivables_customer"
-  | "pos_receivable_collect";
+  | "pos_receivable_collect"
+  // i18n Slice 6B-2 — the authoritative RECEIPT-financial read. Returns the order's
+  // historical currency and decimal_digits (from finance_currencies, the sole catalog),
+  // so a receipt prints in the order's own currency at the server's precision. A READ:
+  // it moves no money and gates on tenant + can_access_branch server-side.
+  | "finance_order_financials";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

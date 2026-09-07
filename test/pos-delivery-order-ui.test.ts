@@ -453,6 +453,8 @@ test("a past order's receipt is a Delivery receipt, with the identity it was sen
     lines: [{ name: "Pizza", qty: 1, unitPrice: 8, lineTotal: 8, modifiers: [{ name: "Small", price_delta: 0, quantity: 1 }] }],
     party,
     fallbackCurrency: "USD",
+    receiptCurrency: "USD",
+    decimalDigits: 2,
     at: "10/08/2026, 09:00",
   });
   // Without the explicit order type this inherits "Takeaway" - wrong on the one
@@ -476,6 +478,9 @@ test("every figure on a reprint is the server's, and cash handling is left blank
     lines: [],
     party,
     fallbackCurrency: "LBP",
+    // 6B-2: the server returns the order's own currency (USD here) — it wins over the fallback.
+    receiptCurrency: "USD",
+    decimalDigits: 2,
     at: "x",
   });
   assert.equal(r.subtotal, 10);
@@ -499,6 +504,8 @@ test("an unpaid order's receipt says unpaid rather than pretending otherwise", (
     lines: [],
     party: UNKNOWN_PARTY,
     fallbackCurrency: "USD",
+    receiptCurrency: "USD",
+    decimalDigits: 2,
     at: "x",
   });
   assert.equal(r.paid, false);

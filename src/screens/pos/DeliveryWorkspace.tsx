@@ -127,6 +127,7 @@ import { computeDiscount } from "@/lib/pos/discounts";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
+import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import { submitOrder } from "@/lib/pos/orders";
 import type { KitchenSourceLine } from "@/lib/pos/kitchenPrinter";
@@ -1051,6 +1052,8 @@ export function useDeliveryWorkspace(input: {
 
         const money = outcome.result;
         const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
+        // 6B-2: the order's own historical currency + server precision.
+        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1074,7 +1077,8 @@ export function useDeliveryWorkspace(input: {
             // the reopen must be financially identical, so both now read the
             // same stored snapshot. The tender currency has its own field two
             // lines down, where "Charged in LBP" belongs.
-            currency: (settled!.currency ?? input.currency) as CurrencyCode,
+            currency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
             lines,
             // Server figures win over anything computed here.
             subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
@@ -1215,6 +1219,8 @@ export function useDeliveryWorkspace(input: {
         const paidNow = money ? money.paid_usd : confirm.mode === "partial" ? confirm.amountNow : 0;
         const balance = money ? money.outstanding_usd : Math.max(0, total - paidNow);
         const who = receiptIdentity(order);
+        // 6B-2: the order's own historical currency + server precision.
+        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1229,7 +1235,8 @@ export function useDeliveryWorkspace(input: {
             paidAmount: paidNow,
             balanceDue: balance,
             method: confirm.method,
-            currency: (settled.currency ?? input.currency) as CurrencyCode,
+            currency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
             lines,
             subtotal: money?.subtotal ?? settled.total_amount ?? 0,
             discount: money?.discount ?? 0,

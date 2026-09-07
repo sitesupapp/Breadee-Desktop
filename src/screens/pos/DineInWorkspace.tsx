@@ -64,6 +64,7 @@ import {
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
 import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt } from "@/lib/pos/tablePaymentCompletion";
+import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import {
   completeTableOnAccount,
   createOnAccountLatch,
@@ -636,6 +637,11 @@ export function useDineInWorkspace(input: {
       await input.refreshCashBox();
 
       // 4. Receipt, from the PRE-payment bill (identity) + the server's figures.
+      //    6B-2: the bill's historical currency + server precision, read from a
+      //    representative order of the table (all orders on a table share the
+      //    operational currency). A third-currency table with no valid server precision
+      //    refuses rather than printing at a guessed 2 decimals.
+      const receiptMeta = await fetchReceiptCurrency(snapshot.bill.orders[0]?.id, snapshot.primaryCurrency);
       input.onPresentReceipt(
         buildTablePaymentReceipt({
           bill: snapshot.bill,
@@ -647,6 +653,8 @@ export function useDineInWorkspace(input: {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: snapshot.primaryCurrency,
+          receiptCurrency: receiptMeta.currency,
+          decimalDigits: receiptMeta.decimalDigits,
           tenderCurrency: snapshot.tenderCurrency,
           rate: input.rate,
           tenderedInput: snapshot.tendered,
@@ -871,6 +879,8 @@ export function useDineInWorkspace(input: {
         const cleared = billIsCleared(after.bill, after.table);
         await input.refreshCashBox();
 
+        // 6B-2: the bill's historical currency + server precision (representative order).
+        const receiptMeta = await fetchReceiptCurrency(shownBill.orders[0]?.id, primaryCurrency);
         input.onPresentReceipt(
           buildTableOnAccountReceipt({
             bill: shownBill,
@@ -891,6 +901,8 @@ export function useDineInWorkspace(input: {
             branchName: pos.branch.name,
             operatorName: pos.userName,
             primaryCurrency,
+            receiptCurrency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
             shiftId: input.shiftId,
             at: new Date().toLocaleString(),
           }),
