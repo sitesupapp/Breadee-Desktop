@@ -121,10 +121,17 @@ test("decimalDigits defaults to 2 when a caller omits it (6B-1 pre-wiring)", () 
   assert.equal(receipt.decimalDigits, 2);
 });
 
-test("the delivery fee cannot be double-counted: it lives inside `total`, not a separate field", () => {
-  // The desktop receipt has no dedicated fee line (the server folds the fee into the
-  // order total), so there is structurally no second place for it to appear.
-  const doc = toReceiptDoc(
+test("the delivery fee cannot be double-counted: it lives inside `total`, and the fee line is a breakdown, never an addition", () => {
+  // The server folds the fee into the order total. The receipt now shows a Delivery
+  // Fee breakdown line (Delivery Fee lifecycle), but that line is DISPLAY only: the
+  // doc's `total` is the server total verbatim, and `deliveryFee` is a view of a
+  // component already inside it - it is never added on top. Two properties pin this:
+  //   1. with NO fee supplied, `deliveryFee` is null (the line prints nothing), so
+  //      total stands alone exactly as before the feature existed; and
+  //   2. surfacing the fee as a breakdown line does NOT inflate `total`: the same
+  //      server total (45) stands whether `deliveryFee` is null or 5 - the line is
+  //      a view of a component already inside it, never a second charge added on top.
+  const noFee = toReceiptDoc(
     buildReceipt({
       businessName: "Test",
       branchName: "Main",
@@ -141,7 +148,35 @@ test("the delivery fee cannot be double-counted: it lives inside `total`, not a 
       total: 45, // includes a 5 delivery fee, folded in by the server
     }),
   );
-  assert.equal(doc.total, 45);
-  assert.ok(!("deliveryFee" in doc), "no separate delivery-fee field exists to double-count");
-  assert.equal(formatReceiptMoney(doc.total, doc.currency, doc.decimalDigits), "45.000 JOD");
+  assert.equal(noFee.total, 45);
+  // The field exists (the native ReceiptDoc always carries it) but is INERT: null,
+  // so nothing prints and there is nothing to double-count.
+  assert.equal(noFee.deliveryFee, null, "an unsupplied fee is null/inert, not additive");
+  assert.equal(formatReceiptMoney(noFee.total, noFee.currency, noFee.decimalDigits), "45.000 JOD");
+
+  // Same order, now WITH the fee surfaced as a breakdown line.
+  const withFee = toReceiptDoc(
+    buildReceipt({
+      businessName: "Test",
+      branchName: "Main",
+      staffName: null,
+      orderNumber: "A-3",
+      at: "now",
+      paid: true,
+      method: "cash",
+      currency: "JOD",
+      decimalDigits: 3,
+      lines: [{ name: "Item", qty: 1, unitPrice: 40, lineTotal: 40 }],
+      subtotal: 40,
+      discount: 0,
+      deliveryFee: 5,
+      total: 45, // STILL the server total - the fee is inside it, not added to it
+    }),
+  );
+  // The decisive anti-double-count assertion: surfacing the fee line leaves `total`
+  // exactly as the server sent it - the SAME 45 as the no-fee doc, never 50.
+  assert.equal(withFee.total, 45);
+  assert.equal(withFee.total, noFee.total, "showing the fee line must not inflate the total");
+  assert.equal(withFee.deliveryFee, 5);
+  assert.equal(formatReceiptMoney(withFee.total, withFee.currency, withFee.decimalDigits), "45.000 JOD");
 });
