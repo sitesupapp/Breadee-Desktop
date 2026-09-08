@@ -1,4 +1,4 @@
-﻿//! Orchestration: validate, then drive a device through one document per copy.
+//! Orchestration: validate, then drive a device through one document per copy.
 //!
 //! The platform lives behind two small traits, so the parts that are easy to get
 //! wrong - refusing an unknown printer, bounding the copy count, aborting a
@@ -595,6 +595,7 @@ mod tests {
             }],
             subtotal: 7.0,
             discount: 0.0,
+            delivery_fee: None,
             total: 7.0,
             tender_currency: None,
             tender_total: None,

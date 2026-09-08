@@ -160,7 +160,7 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
       {data.deliveryFee != null && data.deliveryFee > 0 && (
         <div className="flex justify-between">
           <span>Delivery Fee</span>
-          <span>{formatMoney(data.deliveryFee, data.currency)}</span>
+          <span>{formatReceiptMoney(data.deliveryFee, data.currency, data.decimalDigits)}</span>
         </div>
       )}
       {show("total") && (

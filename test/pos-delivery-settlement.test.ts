@@ -509,3 +509,33 @@ test("settled means paid AND completed - the state payment itself produces", () 
   assert.equal(deliveryIsSettled(order()), false);
   assert.equal(deliveryIsSettled(null), false);
 });
+
+// RECONCILIATION REGRESSION. Delivery Fee and Customer Receivables were built on
+// separate branches, each assuming a different meaning for PaymentDialog's
+// `subtotal` prop. Delivery Fee moved the fee OUT of `subtotal` (items only) and
+// into `feeValue`, folded back only on the full-pay path (`payableInPrimary`).
+// Receivables measured the on-account balance against `subtotal` directly. Merged
+// naively, an on-account settlement of a delivery order would DISPLAY and VALIDATE
+// a balance short by the delivery fee (the server still booked correctly, so it
+// was never a mis-charge - but the operator saw the wrong obligation and a valid
+// partial between subtotal and total was wrongly rejected). The reconciliation
+// makes BOTH paths read the ONE canonical payable: the settlement MODE may differ,
+// the customer's OBLIGATION must not.
+test("on-account due IS the full-pay payable - one authority, delivery fee included", async () => {
+  const fs = await import("node:fs");
+  const src = fs.readFileSync(
+    new URL("../src/components/pos/PaymentDialog.tsx", import.meta.url).pathname.replace(/^\//, ""),
+    "utf8",
+  );
+  // The full-pay payable is subtotal-after-discount PLUS the delivery fee.
+  assert.match(src, /const payableInPrimary = discount\.finalTotal \+ feeValue;/);
+  // The on-account due is not a second, parallel calculation - it IS that payable,
+  // so under ANY subtotal/discount/fee the two are identical by construction.
+  assert.match(src, /const dueInPrimary = payableInPrimary;/);
+  // The fee-short form must never come back.
+  assert.equal(/const dueInPrimary = discount\.finalTotal;(?!\s*\+)/.test(src), false);
+  // The client stays non-authoritative: on-account confirm sends how much is paid
+  // NOW (0 for a full receivable, the entered amount for a partial) and never a
+  // total - pos_pay_order / the receivable engine own every booked figure.
+  assert.match(src, /amountNow: effectiveMode === "account" \? 0 : paidNowNum/);
+});
