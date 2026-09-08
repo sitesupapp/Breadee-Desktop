@@ -1,4 +1,4 @@
-// POS operations: the Orders workspace, the shift report, reversals, delivery.
+﻿// POS operations: the Orders workspace, the shift report, reversals, delivery.
 //
 // The properties worth pinning here are all about AUTHORITY:
 //   * one lifecycle decides what an order permits, so three screens cannot
@@ -104,6 +104,18 @@ test("a terminal order offers nothing at all", () => {
 test("settlement is offered once, and never to a paid order", () => {
   assert.equal(canSettleOrder(order({ payment_status: "unpaid" })), true);
   assert.equal(canSettleOrder(order({ payment_status: "paid" })), false);
+});
+
+test("a completed on-account order is a receivable, never re-paid via pos_pay_order", () => {
+  // `pos_complete_on_account` is the only producer of a completed-but-unpaid
+  // order. It must NOT show the plain Pay control, which routes to
+  // `pos_pay_order` and would take the full total a second time. Collection is
+  // the receivables flow, not this one.
+  assert.equal(canSettleOrder(order({ status: "completed", payment_status: "unpaid" })), false);
+  assert.equal(canSettleOrder(order({ status: "completed", payment_status: "partial" })), false);
+  // A genuinely open order awaiting settlement is sent_to_kitchen, not
+  // completed, and stays settleable.
+  assert.equal(canSettleOrder(order({ status: "sent_to_kitchen", payment_status: "unpaid" })), true);
 });
 
 test("no screen invents a collection lifecycle", () => {
@@ -416,3 +428,4 @@ test("every surface reads the one shift-order store", () => {
     assert.equal(src.includes("loadShiftOrders"), false, `${name} renders, it does not query the shift`);
   }
 });
+

@@ -1,4 +1,4 @@
-// Delivery order management: the queue, the edit, and the two void actions.
+﻿// Delivery order management: the queue, the edit, and the two void actions.
 //
 // The financial weight in this file is all on one distinction. `pos_void_order`
 // takes a `p_refund` boolean, and getting it wrong is not a cosmetic error: on a
@@ -542,14 +542,19 @@ test("submit is called at most once on every void path", async () => {
 
 // --- the allow-list ----------------------------------------------------------
 
-test("the RPC allow-list grows 13 -> 16, and remove-item stays out", () => {
+test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
-  // Level 3D took it to 15; Desktop 1.0.4's `pos_configure_tables` is the 16th.
-  assert.equal(names.length, 16);
+  // Level 3D took it to 15; Desktop 1.0.4's `pos_configure_tables` is the 16th;
+  // Wave 2C adds the two receivables settlement RPCs (17th, 18th); Wave 3C adds
+  // the Customer Accounts surface's two reads and one money write (19th-21st).
+  assert.equal(names.length, 21);
+  assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
+  assert.ok(names.includes("pos_complete_on_account"));
+  assert.ok(names.includes("pos_complete_table_on_account"));
   assert.equal(names.includes("pos_remove_order_item"), false, "line removal is deferred");
   assert.equal(new Set(names).size, names.length);
 });
@@ -566,3 +571,4 @@ test("order management touches no printer, no offline queue and no line removal"
     assert.equal(code.includes(token), false, `${token} must not appear in Level 3D`);
   }
 });
+
