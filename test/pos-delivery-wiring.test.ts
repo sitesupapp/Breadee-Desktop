@@ -56,9 +56,13 @@ test("an owner cannot enter Delivery, same as every other POS workspace", () => 
   assert.equal(canViewDelivery(ctx({ role: "owner" })).allowed, false);
 });
 
-test("there is no pos.delivery.* permission invented for this level", () => {
+test("the only pos.delivery.* permission is the ops-management key", () => {
   const keys = Object.values(POS_PERMISSIONS);
-  assert.equal(keys.some((k) => k.startsWith("pos.delivery")), false);
+  // Delivery ORDER-TAKING still has no key of its own - POS access plus the
+  // `pos.delivery` sub-feature gate it. Delivery Management added exactly ONE
+  // delivery key: `pos.delivery.manage`, which `pos_set_delivery_ops` checks
+  // before writing the internal Delivered-By / Delivery-Cost fields.
+  assert.deepEqual(keys.filter((k) => k.startsWith("pos.delivery")), ["pos.delivery.manage"]);
   assert.ok(keys.includes("pos.customers.view"));
   assert.ok(keys.includes("pos.customers.manage"));
 });

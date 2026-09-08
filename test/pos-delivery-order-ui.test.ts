@@ -145,14 +145,20 @@ test("the chips use only states the server produces", () => {
   assert.equal(paymentStateLabel("partial"), "partial");
 });
 
-test("no collection lifecycle is invented anywhere on the delivery surface", () => {
-  // The web calls settlement "Mark collected". The desktop has no collection
-  // step to mark: `pos_pay_order` sets paid AND completed in one statement.
+test("no collection lifecycle is invented - collection is a read-only view of payment", () => {
+  // There is still NO delivery motion/lifecycle and NO separate collection STEP to
+  // perform: `pos_pay_order` sets paid AND completed in one statement, so there is
+  // nothing to "mark collected". Delivery Management surfaces a read-only
+  // Collected / Not collected STATUS, but it is purely a projection of the payment
+  // status (`isCollected`), not an invented state machine or action.
   for (const src of [workspace, queue, detail, dialogs]) {
-    for (const phrase of ["Mark collected", "Collected", "Awaiting collection", "Out for delivery", "Dispatch"]) {
-      assert.equal(src.includes(phrase), false, `"${phrase}" is not a state this system has`);
+    for (const phrase of ["Mark collected", "Awaiting collection", "Out for delivery", "Dispatch"]) {
+      assert.equal(src.includes(phrase), false, `"${phrase}" is not a state or action this system has`);
     }
   }
+  // Where the status IS shown (the detail panel), it is driven by payment, never a
+  // second lifecycle field.
+  assert.ok(detail.includes("isCollected"), "the collection status must be derived from payment, via isCollected");
 });
 
 test("the tones separate money from motion", () => {
