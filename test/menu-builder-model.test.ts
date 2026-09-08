@@ -1,11 +1,12 @@
-// MODEL PARITY: the desktop Menu Builder is a second CLIENT of the web app's
+﻿// MODEL PARITY: the desktop Menu Builder is a second CLIENT of the web app's
 // menu, not a second menu.
 //
 // These tests exist because "we use the same backend" is the kind of claim that
 // is true on the day it is written and quietly false three commits later. Each
 // one pins a property that would have to be broken deliberately:
 //
-//   1. There is exactly ONE module in this feature that can talk to Supabase.
+//   1. Only the two repository modules in this feature can talk to Supabase:
+//      the tenant-wide `repository.ts` and the per-Operating-Unit `ouRepository.ts`.
 //   2. That module touches only the tables and RPCs the web Menu Builder uses,
 //      and no table of its own.
 //   3. Nothing hard-deletes what the web app archives.
@@ -45,13 +46,20 @@ function featureFiles(): string[] {
 
 // --- 1. one backend door ------------------------------------------------------
 
-test("only the repository can reach Supabase", () => {
+// The two sanctioned backend doors. `ouRepository.ts` is the per-Operating-Unit
+// Menu Builder backend added when authoring became OU-scoped (the `pos_menu` /
+// per-OU projection architecture): it is a thin, typed client of the SAME secured
+// per-OU RPCs the web WorkspaceClient uses. Both doors - and ONLY these two - may
+// reach Supabase; every other feature file must go through them.
+const BACKEND_DOORS = ["src/lib/menu/repository.ts", "src/lib/menu/ouRepository.ts"];
+
+test("only the two menu repositories can reach Supabase", () => {
   for (const file of featureFiles()) {
-    if (file === "src/lib/menu/repository.ts") continue;
+    if (BACKEND_DOORS.includes(file)) continue;
     const source = stripJsxComments(read(file));
     assert.ok(
       !/from "@\/lib\/supabase"/.test(source),
-      `${file} must not import the Supabase client - all backend access goes through lib/menu/repository.ts`,
+      `${file} must not import the Supabase client - all backend access goes through the menu repositories`,
     );
     assert.ok(!/\.rpc\(/.test(source), `${file} must not call an RPC directly`);
   }
@@ -64,6 +72,16 @@ test("the repository imports the app's ONE Supabase client", () => {
   assert.ok(!/createClient\(/.test(repository));
   assert.ok(!/service_role/i.test(repository));
   assert.ok(!/SERVICE_ROLE/.test(repository));
+});
+
+test("the OU repository also uses the app's ONE Supabase client, and no admin path", () => {
+  const ouRepository = stripComments(read("src/lib/menu/ouRepository.ts"));
+  assert.match(ouRepository, /import \{ supabase \} from "@\/lib\/supabase"/);
+  // Same secured posture as the tenant-wide repository: the authenticated user's
+  // session only - no second client, no service key, no admin bypass.
+  assert.ok(!/createClient\(/.test(ouRepository));
+  assert.ok(!/service_role/i.test(ouRepository));
+  assert.ok(!/SERVICE_ROLE/.test(ouRepository));
 });
 
 // --- 2. exactly the web app's tables and RPCs ---------------------------------
@@ -214,3 +232,4 @@ test("an empty payload is empty, not a fabricated menu", () => {
   assert.deepEqual(EMPTY_MENU_BUILDER_DATA.categories, []);
   assert.equal(EMPTY_MENU_BUILDER_DATA.qr, null);
 });
+

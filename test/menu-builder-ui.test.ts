@@ -1,4 +1,4 @@
-// THE DESKTOP SURFACE, AND WHAT IT MUST NOT DISTURB.
+﻿// THE DESKTOP SURFACE, AND WHAT IT MUST NOT DISTURB.
 //
 // Four properties:
 //
@@ -44,13 +44,14 @@ function featureFiles(): string[] {
 // --- 1. one honest mutation path ---------------------------------------------
 
 test("every write goes through the store's single mutate()", () => {
-  // The screen is the only place repository writes are invoked, and each one is
-  // wrapped in `run(...)`, which is `store.mutate` plus a toast.
-  const calls = [...screen.matchAll(/repo\.(\w+)\(/g)].map((m) => m[1]);
+  // The screen is the only place backend writes are invoked, each through the OU
+  // repository namespace (`ou.*OU(...)` from `import * as ou`), and each one is
+  // wrapped in `run(...)`, which is `store.mutate` plus a toast. Reads load through
+  // the store, not the screen, so every `ou.` call on the screen is a mutation.
+  const calls = [...screen.matchAll(/ou\.(\w+)\(/g)].map((m) => m[1]);
   assert.ok(calls.length > 0);
   for (const call of calls) {
-    if (call === "ensureQrSettings" || call === "loadMenuBuilderData") continue;
-    assert.match(screen, new RegExp(`run\\([\\s\\S]{0,240}repo\\.${call}\\(`), `repo.${call} must run through run()/mutate`);
+    assert.match(screen, new RegExp(`run\\([\\s\\S]{0,240}ou\\.${call}\\(`), `ou.${call} must run through run()/mutate`);
   }
   assert.match(screen, /const outcome = await store\.mutate\(key, tenantId, action, work\)/);
 });
@@ -133,7 +134,9 @@ test("the POS picks up menu changes through its EXISTING loader", () => {
   assert.match(app, /<Route\s+path="\/pos"/);
   assert.match(app, /<Route path="\/menu-builder" element=\{<MenuBuilder \/>\} \/>/);
   const workspace = stripJsxComments(read("src/screens/pos/PosWorkspace.tsx"));
-  assert.match(workspace, /const data = await loadMenu\(tenantId\)/);
+  // The sell surface reads the OU-scoped `pos_menu` projection via `loadPosMenu`
+  // (not the tenant-wide `loadMenu`), so an OU never offers an item it cannot sell.
+  assert.match(workspace, /const data = await loadPosMenu\(pos\.branch\.id\)/);
   assert.match(workspace, /if \(pos\.allowed && tenantId\) void fetchMenu\(\)/);
 });
 
@@ -297,3 +300,4 @@ test("the workspace scrolls INSIDE its panes, so Save is never pushed off-screen
   const drawer = stripJsxComments(read("src/components/menu/ItemDrawer.tsx"));
   assert.match(drawer, /min-h-0 flex-1 space-y-5 overflow-y-auto/);
 });
+
