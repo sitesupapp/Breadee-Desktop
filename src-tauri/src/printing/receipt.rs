@@ -500,7 +500,7 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
         if fee > 0.0 {
             out.push(PageLine::pair(
                 "Delivery Fee",
-                format_money(fee, &doc.currency),
+                format_money(fee, &doc.currency, digits),
                 LineStyle::Body,
                 Direction::Auto,
             ));
