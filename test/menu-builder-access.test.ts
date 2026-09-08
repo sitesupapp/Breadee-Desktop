@@ -1,4 +1,4 @@
-// PERMISSIONS: the desktop must refuse exactly what the database refuses.
+﻿// PERMISSIONS: the desktop must refuse exactly what the database refuses.
 //
 // The keys are not invented here. `m138_menu_write_authz` requires
 // `menu.create` to insert an item, `menu.edit` OR `menu.delete_or_archive` to
@@ -115,10 +115,13 @@ test("the modifiers and QR surfaces follow their sub-features", () => {
 
 // --- navigation ---------------------------------------------------------------
 
-test("the sidebar order is Dashboard, Menu Builder, POS, Profile, Settings", () => {
+test("the sidebar order is Dashboard, Menu Builder, POS, Customer Accounts, Profile, Settings", () => {
+  // Wave 3C inserted Customer Accounts between POS and Profile - a receivables
+  // surface that belongs with the operational tools, above the personal/local
+  // ones. Menu Builder stays second, so its index assertion is unchanged.
   assert.deepEqual(
     NAV_ITEMS.map((n) => n.label),
-    ["Dashboard", "Menu Builder", "POS", "Profile", "Settings"],
+    ["Dashboard", "Menu Builder", "POS", "Customer Accounts", "Profile", "Settings"],
   );
   assert.equal(NAV_ITEMS[1].to, "/menu-builder");
 });
@@ -192,3 +195,4 @@ test("a typed URL cannot bypass the module gate", () => {
   assert.match(screen, /if \(!canViewMenuBuilder\(accessCtx\)\)/);
   assert.match(screen, /<Navigate to="\/dashboard" replace/);
 });
+

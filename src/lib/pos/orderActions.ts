@@ -1,4 +1,4 @@
-// What may be done to a shift order, and what it is called.
+﻿// What may be done to a shift order, and what it is called.
 //
 // ONE LIFECYCLE, SHARED BY EVERY SURFACE. The Current Order panel, the Orders
 // modal and the Delivery modal all offer actions on the same orders, and the
@@ -93,9 +93,22 @@ export function canEditOrder(order: Pick<ShiftOpenOrder, "status">): boolean {
  * This is the action a screen might be tempted to call "mark collected". It is
  * payment, it is the existing `pos_pay_order` flow, and it is only offered
  * while the order is unpaid and not terminal.
+ *
+ * ON-ACCOUNT IS DELIBERATELY EXCLUDED. Before receivables, `completed` always
+ * meant `paid` - settlement was one atomic statement - so a completed order was
+ * never unpaid. `pos_complete_on_account` is the only thing that now produces a
+ * `completed` order that is still `unpaid`/`partial`, and that order is a
+ * RECEIVABLE: it is collected through the receivables flow, never re-paid here.
+ * Routing it back through `pos_pay_order` would take the full total a second
+ * time on top of any partial already recorded, so this rule withholds Pay from
+ * a completed-but-unpaid order. A genuinely open order awaiting settlement is
+ * `sent_to_kitchen`, not `completed`, and is unaffected.
  */
 export function canSettleOrder(order: Pick<ShiftOpenOrder, "status" | "payment_status">): boolean {
-  return !isTerminalOrder(order) && order.payment_status !== "paid";
+  if (isTerminalOrder(order)) return false;
+  if (order.payment_status === "paid") return false;
+  if (order.status === "completed") return false;
+  return true;
 }
 
 /** Printing is always available: it reads an order and changes nothing. */
@@ -117,3 +130,4 @@ export function typeLabel(order: Pick<ShiftOpenOrder, "order_type">, tableName: 
   const route = order.order_type === "dine_in" ? "dine-in" : order.order_type;
   return order.order_type === "dine_in" && tableName ? `${route} · ${tableName}` : route;
 }
+
