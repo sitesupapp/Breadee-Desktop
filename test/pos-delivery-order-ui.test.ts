@@ -691,12 +691,17 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
   // 16 since Desktop 1.0.4; 18 since Wave 2C added the two receivables
   // settlement RPCs (`pos_complete_on_account`, `pos_complete_table_on_account`);
-  // 21 since Wave 3C added the Customer Accounts surface (two reads + one write).
-  assert.equal(names.length, 21);
+  // 21 since Wave 3C added the Customer Accounts surface (two reads + one write);
+  // 23 since Delivery Management added `pos_set_delivery_ops` and
+  // `pos_delivery_report`. Those two are called through the adapter from the
+  // library layer, not from these screens - the check below still holds.
+  assert.equal(names.length, 23);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
+  assert.ok(names.includes("pos_set_delivery_ops"));
+  assert.ok(names.includes("pos_delivery_report"));
   assert.equal(names.includes("pos_remove_order_item"), false);
   // And no component reaches an RPC directly - they all go through the adapter.
   for (const src of [queue, detail, dialogs]) {

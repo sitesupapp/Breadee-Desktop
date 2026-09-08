@@ -11,11 +11,13 @@ import {
   canCollectReceivables,
   canCreateOrders,
   canEndShift,
+  canManageDelivery,
   canOpenShift,
   canOperatePOS,
   canTakeOnAccount,
   canTakePayments,
   canUseOrderType,
+  canViewDeliveryReport,
   canViewReceivables,
   posAccessDenialReason,
   type PosAccessContext,
@@ -43,6 +45,8 @@ export type PosContext = {
     endOwnShift: Gate;
     viewReceivables: Gate;
     collectReceivables: Gate;
+    manageDelivery: Gate;
+    viewDeliveryReport: Gate;
   };
   routes: {
     takeaway: boolean;
@@ -111,6 +115,8 @@ export function usePosContext(): PosContext {
         endOwnShift: canEndShift(access, true),
         viewReceivables: canViewReceivables(access),
         collectReceivables: canCollectReceivables(access),
+        manageDelivery: canManageDelivery(access),
+        viewDeliveryReport: canViewDeliveryReport(access),
       },
       routes: {
         takeaway: canUseOrderType(access, FEATURES.POS_TAKEAWAY),
