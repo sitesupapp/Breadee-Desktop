@@ -644,8 +644,10 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
-  // 16 since Desktop 1.0.4, whose one addition is `pos_configure_tables`.
-  assert.equal(names.length, 16);
+  // 16 since Desktop 1.0.4 (`pos_configure_tables`); 21 with Customer Receivables -
+  // Wave 2C's two settlement RPCs and Wave 3C's three Customer-Accounts RPCs, all
+  // `pos_`-prefixed. Level 3D's own screens still add none of their own.
+  assert.equal(names.length, 21);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.equal(names.includes("pos_remove_order_item"), false);
