@@ -14,6 +14,7 @@
 import { create } from "zustand";
 import type { CartLine, SelectedModifier, SubmitOrderResult } from "@/types/pos";
 import { lineTotals } from "@/lib/pos/modifiers";
+import { sameRemovals } from "@/lib/pos/itemOptions";
 import { newClientOpId } from "@/lib/pos/orders";
 
 export type RemovedLine = { line: CartLine; index: number };
@@ -84,7 +85,16 @@ type CartState = {
   /** Null while the buffer is empty and unclaimed. */
   owner: CartOwner | null;
 
-  addLine: (input: { menuItemId: string; name: string; basePrice: number; quantity?: number; modifiers?: SelectedModifier[]; note?: string | null }) => string;
+  addLine: (input: {
+    menuItemId: string;
+    name: string;
+    basePrice: number;
+    quantity?: number;
+    modifiers?: SelectedModifier[];
+    note?: string | null;
+    /** Menu Builder ingredient names the cashier switched off for this line. */
+    removedIngredients?: string[];
+  }) => string;
   setQuantity: (key: string, quantity: number) => void;
   adjustQuantity: (key: string, delta: number) => void;
   setNote: (key: string, note: string | null) => void;
@@ -155,10 +165,24 @@ export const EMPTY_CART_SNAPSHOT: CartSnapshot = {
 let keySeq = 0;
 const nextKey = () => `line-${++keySeq}`;
 
-/** Two lines merge only when the item AND its modifier selection are identical. */
-function sameConfiguration(a: CartLine, menuItemId: string, modifiers: SelectedModifier[], note: string | null): boolean {
+/**
+ * Two lines merge only when the item, its modifiers, its note AND its removed
+ * ingredients are all identical.
+ *
+ * The removals clause is load-bearing: without it a plain burger and a
+ * no-tomato burger stack into one line of two, and the kitchen makes two of
+ * whichever the first one was.
+ */
+function sameConfiguration(
+  a: CartLine,
+  menuItemId: string,
+  modifiers: SelectedModifier[],
+  note: string | null,
+  removed: string[],
+): boolean {
   if (a.menu_item_id !== menuItemId) return false;
   if ((a.kitchen_note ?? "") !== (note ?? "")) return false;
+  if (!sameRemovals(a.removed_ingredients, removed)) return false;
   if (a.modifiers.length !== modifiers.length) return false;
   const mine = a.modifiers.map((m) => m.option_id).sort();
   const theirs = modifiers.map((m) => m.option_id).sort();
@@ -182,9 +206,9 @@ export const useCart = create<CartState>((set, get) => ({
     return sameOwner(state.owner, owner);
   },
 
-  addLine: ({ menuItemId, name, basePrice, quantity = 1, modifiers = [], note = null }) => {
+  addLine: ({ menuItemId, name, basePrice, quantity = 1, modifiers = [], note = null, removedIngredients = [] }) => {
     const state = get();
-    const existing = state.lines.find((l) => sameConfiguration(l, menuItemId, modifiers, note));
+    const existing = state.lines.find((l) => sameConfiguration(l, menuItemId, modifiers, note, removedIngredients));
     if (existing) {
       set({
         lines: state.lines.map((l) => (l.key === existing.key ? { ...l, quantity: l.quantity + quantity } : l)),
@@ -202,6 +226,9 @@ export const useCart = create<CartState>((set, get) => ({
       quantity,
       kitchen_note: note,
       modifiers,
+      // Absent rather than an empty array when nothing was removed, so a line
+      // built the old way is shaped exactly as it was.
+      ...(removedIngredients.length > 0 ? { removed_ingredients: removedIngredients } : {}),
     };
     set({
       lines: [...state.lines, line],

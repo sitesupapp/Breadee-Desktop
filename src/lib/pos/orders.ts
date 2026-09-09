@@ -20,6 +20,7 @@
 
 import { asRecord, bool, callPosRpc, num, requireId, str } from "@/lib/pos/rpc";
 import { lineTotals } from "@/lib/pos/modifiers";
+import { buildCustomization, type LineCustomization } from "@/lib/pos/itemOptions";
 import type { CartLine, OrderType, SubmitOrderResult } from "@/types/pos";
 
 /** Exactly the item shape `pos_save_order` iterates over. */
@@ -29,6 +30,15 @@ export type SubmitOrderItem = {
   base_price: number;
   quantity: number;
   kitchen_note: string | null;
+  /**
+   * Line customization, stored verbatim by `pos_save_order`
+   * (`coalesce(it->'customization_json','{}'::jsonb)`).
+   *
+   * Omitted entirely when there is nothing to say, so an order with no
+   * customization produces byte-for-byte the payload it did before this
+   * existed.
+   */
+  customization_json?: LineCustomization;
   modifiers: {
     group_id: string | null;
     option_id: string | null;
@@ -154,20 +164,26 @@ export function buildSubmitPayload(input: {
     ...(input.orderType === "delivery" && input.customerId && input.addressId
       ? { customer_id: input.customerId, address_id: input.addressId }
       : {}),
-    items: input.lines.map((l) => ({
-      menu_item_id: l.menu_item_id,
-      name: l.name,
-      base_price: l.base_price,
-      quantity: l.quantity,
-      kitchen_note: l.kitchen_note && l.kitchen_note.trim() !== "" ? l.kitchen_note.trim() : null,
-      modifiers: l.modifiers.map((m) => ({
-        group_id: m.group_id,
-        option_id: m.option_id,
-        name: m.name,
-        price_delta: m.price_delta,
-        quantity: m.quantity,
-      })),
-    })),
+    items: input.lines.map((l) => {
+      const customization = buildCustomization(l.removed_ingredients ?? []);
+      return {
+        menu_item_id: l.menu_item_id,
+        name: l.name,
+        base_price: l.base_price,
+        quantity: l.quantity,
+        kitchen_note: l.kitchen_note && l.kitchen_note.trim() !== "" ? l.kitchen_note.trim() : null,
+        // Present only when the cashier removed something, so an ordinary order
+        // produces byte-for-byte the payload it did before this feature.
+        ...(customization ? { customization_json: customization } : {}),
+        modifiers: l.modifiers.map((m) => ({
+          group_id: m.group_id,
+          option_id: m.option_id,
+          name: m.name,
+          price_delta: m.price_delta,
+          quantity: m.quantity,
+        })),
+      };
+    }),
   };
 }
 

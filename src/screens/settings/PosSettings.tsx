@@ -47,6 +47,7 @@ import {
   type CollectionTicketSettings,
 } from "@/lib/pos/collectionTicket";
 import { MAX_COPIES, MIN_COPIES } from "@/lib/nativePrinting";
+import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 
 const ROLE_LABEL: Record<ServerPrinter["printer_type"], string> = {
   cashier: "Cashier",
@@ -144,6 +145,17 @@ export function PosSettings() {
 
   const togglePrinter = useCallback((printer: ServerPrinter, next: boolean) => {
     setOverrides(writePrinterAutoPrint(printer.id, next));
+  }, []);
+
+  // --- cashier behaviour (this terminal) --------------------------------------
+  //
+  // TERMINAL-LOCAL, like the per-printer switches above. Whether a cashier is
+  // offered a menu item's ingredients to edit is a per-till choice, stored in
+  // `breadee.desktop.posFeatures` and never in the branch's shared settings.
+  const [features, setFeatures] = useState<PosFeatures>(() => readPosFeatures());
+
+  const setFeature = useCallback((key: keyof PosFeatures, next: boolean) => {
+    setFeatures((current) => writePosFeatures({ ...current, [key]: next }));
   }, []);
 
   // --- collection ticket (this terminal) --------------------------------------
@@ -443,6 +455,28 @@ export function PosSettings() {
             ))}
           </div>
         )}
+      </Card>
+
+      {/* --- cashier behaviour (this terminal) ---------------------------- */}
+      <Card className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-sm font-extrabold text-ink">Cashier screen</p>
+            <p className="mt-0.5 text-xs text-sub">
+              How the ordering screen behaves on <strong className="text-ink">this terminal</strong>.
+            </p>
+          </div>
+          <Badge tone="slate">This terminal</Badge>
+        </div>
+
+        <div className="mt-2 divide-y divide-line">
+          <Switch
+            checked={features.ingredientCustomization}
+            onChange={(next) => setFeature("ingredientCustomization", next)}
+            label="Ingredient customization"
+            hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Onion”. It changes only that line: the menu item, its recipe and its cost are untouched."
+          />
+        </div>
       </Card>
 
       {/* --- collection ticket (this terminal) ---------------------------- */}
