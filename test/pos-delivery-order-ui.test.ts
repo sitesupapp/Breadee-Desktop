@@ -1,4 +1,4 @@
-// The Level 3D operational surface: queue, detail, edit, cancel/refund, receipt.
+﻿// The Level 3D operational surface: queue, detail, edit, cancel/refund, receipt.
 //
 // The adapter's own contract is proved in `pos-delivery-order-management`. What
 // is proved HERE is that the screens reach it correctly, because every safety
@@ -214,9 +214,15 @@ test("a terminal order keeps its detail readable and loses every mutation contro
 test("paying from the queue reuses Level 3C - there is no second payment path", () => {
   // Counted in the BODY, so the import list does not inflate the figures.
   const body = workspace.slice(workspace.indexOf("export function useDeliveryWorkspace"));
+  // The FULL-pay path is still single: one settlement primitive, one pay RPC.
   assert.equal((body.match(/performDeliverySettlement\(/g) ?? []).length, 1);
   assert.equal((body.match(/submit: payDeliveryOrder/g) ?? []).length, 1);
-  assert.equal((body.match(/checkSettlementTarget\(/g) ?? []).length, 1);
+  // Wave 2C's on-account settlement is an additive path (performOnAccount +
+  // completeOnAccount, NOT a second pos_pay_order), and it reuses the SAME
+  // stale-guard before submitting - so checkSettlementTarget is now called from
+  // both the full-pay and the on-account paths.
+  assert.equal((body.match(/checkSettlementTarget\(/g) ?? []).length, 2);
+  assert.equal((body.match(/submit: payDeliveryOrder|performDeliverySettlement\(/g) ?? []).length, 2, "no second full-pay path");
   // The queue's Pay button is the same entry point the customer half uses.
   assert.match(detail, /onPay: \(\) => void;/);
   assert.match(workspace, /onPay=\{requestPay\}/);
@@ -638,8 +644,10 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
-  // 16 since Desktop 1.0.4, whose one addition is `pos_configure_tables`.
-  assert.equal(names.length, 16);
+  // 16 since Desktop 1.0.4 (`pos_configure_tables`); 21 with Customer Receivables -
+  // Wave 2C's two settlement RPCs and Wave 3C's three Customer-Accounts RPCs, all
+  // `pos_`-prefixed. Level 3D's own screens still add none of their own.
+  assert.equal(names.length, 21);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.equal(names.includes("pos_remove_order_item"), false);
@@ -708,3 +716,4 @@ test("the dashboard copy still promises only what the desktop has", () => {
   assert.ok(desc.includes("customers and addresses"));
   assert.equal(/delivery customers only|customers only/i.test(desc), false);
 });
+

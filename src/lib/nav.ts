@@ -8,7 +8,7 @@
 // tenant owners, whom `pos_assert_operator` rejects server-side.
 
 import { FEATURES, hasFeature, type FeatureMap } from "@/lib/features";
-import { canOperatePOS } from "@/lib/pos/access";
+import { canOperatePOS, canViewReceivables } from "@/lib/pos/access";
 import { canViewMenuBuilder } from "@/lib/menu/access";
 import type { GlyphName } from "@/components/Glyph";
 import type { TenantRole, UserStatus } from "@/lib/types";
@@ -59,6 +59,22 @@ export const NAV_ITEMS: NavItem[] = [
         permissions: ctx.permissions,
         features: ctx.features,
       }),
+  },
+  {
+    to: "/receivables",
+    label: "Customer Accounts",
+    glyph: "drawer",
+    // Wave 3C. Same discipline as the POS gate: fails CLOSED, and hidden unless
+    // the tenant has the `pos.receivables` feature AND the user holds
+    // `pos.receivables.view` (plus POS access and the owner exclusion). The RPCs
+    // and RLS re-enforce it; this just keeps an un-entitled operator from seeing a
+    // door that would only refuse them.
+    show: (ctx) =>
+      canViewReceivables({
+        membership: { role: ctx.role, status: ctx.status },
+        permissions: ctx.permissions,
+        features: ctx.features,
+      }).allowed,
   },
   {
     to: "/profile",
