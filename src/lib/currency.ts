@@ -1,9 +1,17 @@
-// Dual USD/LBP currency for the desktop app. Mirrors the web app's rules exactly:
-// USD renders as "$X.XX"; LBP renders as "X LBP" (never a "$" sign).
+// Currency for the desktop app.
 //
-// Conversion helpers exist here so the POS can validate input and show tendered /
-// change BEFORE calling the server. They are never the financial authority: order
-// and payment totals are always the values returned by the Supabase RPCs.
+// TWO concepts live here, kept deliberately apart (i18n 5E-1A-D):
+//   * the LEGACY USD/LBP dual-tender + cash contract (`CurrencyCode`, USD "$X.XX" /
+//     LBP "X LBP", the USD↔LBP conversion helpers, `CASH_CONTRACT_CURRENCY`), and
+//   * the GENERAL operational currency (`OperationalCurrencyCode`) a tenant actually
+//     runs in — USD, LBP, or a third currency (AED/JOD/…) — rendered at its
+//     SERVER-PROVIDED precision, with no "$" leakage and no hard-coded catalog.
+// USD/LBP output is byte-identical to before; the generalization only adds a path
+// for a third operational currency.
+//
+// Conversion helpers exist so the POS can validate input and show tendered / change
+// BEFORE calling the server. They are never the financial authority: order and
+// payment totals are always the values returned by the Supabase RPCs.
 
 // LEGACY DUAL-TENDER / CASH type. The two currencies the POS can settle a bill in
 // and the unit the cash drawer is denominated in. NOT the general operational
