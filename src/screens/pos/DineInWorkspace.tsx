@@ -78,7 +78,7 @@ import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/ta
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
-import { formatMoney, receiptFallbackCurrency, type OperationalCurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import type { ReceiptData } from "@/lib/receipt";
 import type { CartLine } from "@/types/pos";
@@ -641,7 +641,7 @@ export function useDineInWorkspace(input: {
       //    representative order of the table (all orders on a table share the
       //    operational currency). A third-currency table with no valid server precision
       //    refuses rather than printing at a guessed 2 decimals.
-      const receiptMeta = await fetchReceiptCurrency(snapshot.bill.orders[0]?.id, receiptFallbackCurrency(snapshot.primaryCurrency));
+      const receiptMeta = await fetchReceiptCurrency(snapshot.bill.orders[0]?.id, snapshot.primaryCurrency);
       input.onPresentReceipt(
         buildTablePaymentReceipt({
           bill: snapshot.bill,
@@ -880,7 +880,7 @@ export function useDineInWorkspace(input: {
         await input.refreshCashBox();
 
         // 6B-2: the bill's historical currency + server precision (representative order).
-        const receiptMeta = await fetchReceiptCurrency(shownBill.orders[0]?.id, receiptFallbackCurrency(primaryCurrency));
+        const receiptMeta = await fetchReceiptCurrency(shownBill.orders[0]?.id, primaryCurrency);
         input.onPresentReceipt(
           buildTableOnAccountReceipt({
             bill: shownBill,

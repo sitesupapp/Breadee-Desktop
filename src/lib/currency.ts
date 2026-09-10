@@ -75,18 +75,6 @@ export function isLegacyDualCurrency(code: OperationalCurrencyCode | null | unde
 }
 
 /**
- * The USD/LBP client fallback for the Slice-6B receipt resolver. A receipt's real currency
- * comes from the server (`finance_order_financials`); this fallback is used only when that
- * metadata is unavailable, and the resolver's fallback contract is USD/LBP. A third
- * operational currency has NO client-side fallback — its receipt relies on server metadata —
- * so it maps to USD here (the documented Phase-1 compatibility path), never silently
- * printing a third currency at a guessed precision.
- */
-export function receiptFallbackCurrency(code: OperationalCurrencyCode | null | undefined): CurrencyCode {
-  return isLegacyDualCurrency(code) ? code : "USD";
-}
-
-/**
  * The currency the POS **cash / drawer** contract is denominated in: USD, always,
  * whatever the tenant's primary currency is.
  *

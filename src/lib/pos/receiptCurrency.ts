@@ -10,7 +10,7 @@
 // is the thin async boundary that calls the server and hands the DTO to the resolver.
 
 import { asRecord, callPosRpc } from "@/lib/pos/rpc";
-import type { CurrencyCode } from "@/lib/currency";
+import { isLegacyDualCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 
 export type ReceiptCurrency = { currency: string; decimalDigits: number };
 
@@ -39,12 +39,17 @@ function validDigits(value: unknown): value is number {
 /**
  * Resolve the receipt currency + precision from the server's receipt-financial DTO.
  *
+ * `operational` is the ORDER/tenant operational currency (5E-1A-D). It is consulted ONLY
+ * when the server metadata is absent, to decide the fallback:
+ *
  *  - No server metadata (`meta == null`, i.e. the read was unavailable or returned no
- *    order): fall back to the client's USD/LBP currency. Justified ONLY for USD/LBP —
- *    their precision is intrinsic (and the formatter renders them by code, ignoring the
- *    digit count) and the client currency IS the order currency for a USD/LBP tenant. A
- *    third-currency tenant cannot reach this path in Phase 1 (its client currency is
- *    still USD/LBP-typed), and its activation must supply the server metadata.
+ *    order) AND `operational` is USD/LBP: fall back to it at 2dp. Justified ONLY for
+ *    USD/LBP — their precision is intrinsic (the formatter renders them by code, ignoring
+ *    the digit count) and the client currency IS the order currency for a USD/LBP tenant.
+ *  - No server metadata AND `operational` is a THIRD currency (AED/JOD/…): there is NO
+ *    client-side fallback. The receipt is REFUSED (fail closed) — never rendered as USD,
+ *    never at a guessed 2dp. A third-currency receipt's currency + precision must come
+ *    from the server (`finance_order_financials`).
  *  - A malformed server currency (not a 3-letter code) is REFUSED — never coerced to USD.
  *  - USD/LBP from the server: use the server digits when valid, else 2 (unused — the
  *    formatter renders USD/LBP by code).
@@ -54,10 +59,16 @@ function validDigits(value: unknown): value is number {
  */
 export function resolveReceiptCurrency(
   meta: { currency: unknown; decimal_digits: unknown } | null | undefined,
-  fallback: CurrencyCode,
+  operational: OperationalCurrencyCode,
 ): ReceiptCurrency {
   if (meta == null) {
-    return { currency: fallback, decimalDigits: 2 };
+    if (isLegacyDualCurrency(operational)) {
+      return { currency: operational, decimalDigits: 2 };
+    }
+    throw new ReceiptCurrencyError(
+      `Refusing ${operational} receipt: the server supplied no historical currency/precision, ` +
+        `and a third operational currency has no client-side fallback — it must not be printed as USD.`,
+    );
   }
   const currency = String(meta.currency ?? "").trim().toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) {
@@ -85,28 +96,29 @@ export function resolveReceiptCurrency(
 /**
  * Fetch the order's historical currency + precision from `finance_order_financials`.
  *
- * A transport failure (or an order the reader cannot see) falls back to the USD/LBP
- * client currency — the documented compatibility path. A third-currency order whose
- * server precision is missing/invalid throws `ReceiptCurrencyError`, which the caller
- * surfaces as a refusal. `orderId` may be null/empty (e.g. a recovered table payment
- * with no order in the snapshot), which is treated the same as "no metadata".
+ * `operational` is the ORDER/tenant operational currency. On any no-metadata path — a
+ * transport failure, an order the reader cannot see, or a null/empty `orderId` (e.g. a
+ * recovered table payment with no order in the snapshot) — resolution falls back to it ONLY
+ * when it is USD/LBP; a THIRD operational currency has no client-side fallback and throws
+ * `ReceiptCurrencyError` (fail closed, never USD). A third-currency order whose SERVER
+ * precision is missing/invalid likewise throws. The caller surfaces the throw as a refusal.
  */
 export async function fetchReceiptCurrency(
   orderId: string | null | undefined,
-  fallback: CurrencyCode,
+  operational: OperationalCurrencyCode,
 ): Promise<ReceiptCurrency> {
-  if (!orderId) return resolveReceiptCurrency(null, fallback);
+  if (!orderId) return resolveReceiptCurrency(null, operational);
   let data: unknown;
   try {
     data = await callPosRpc("finance_order_financials", { p_order: orderId });
   } catch {
-    // Transport/authorization failure: fall back to USD/LBP. (A third-currency tenant
-    // is not reachable in Phase 1; its activation would surface this as its own gate.)
-    return resolveReceiptCurrency(null, fallback);
+    // Transport/authorization failure: USD/LBP fall back to themselves; a third currency
+    // fails closed rather than printing the wrong currency.
+    return resolveReceiptCurrency(null, operational);
   }
   const rec = asRecord(data);
-  if (!("currency" in rec)) return resolveReceiptCurrency(null, fallback);
-  // resolveReceiptCurrency decides refusal only when a currency IS present and is a
-  // third currency without valid precision — that throw is intentional and propagates.
-  return resolveReceiptCurrency({ currency: rec.currency, decimal_digits: rec.decimal_digits }, fallback);
+  if (!("currency" in rec)) return resolveReceiptCurrency(null, operational);
+  // resolveReceiptCurrency refuses when a currency IS present and is a third currency
+  // without valid precision — that throw is intentional and propagates.
+  return resolveReceiptCurrency({ currency: rec.currency, decimal_digits: rec.decimal_digits }, operational);
 }

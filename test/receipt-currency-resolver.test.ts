@@ -28,6 +28,17 @@ test("an absent DTO falls back to the client USD/LBP currency (the documented de
   assert.deepEqual(resolveReceiptCurrency(undefined, "LBP"), { currency: "LBP", decimalDigits: 2 });
 });
 
+test("an absent DTO for a THIRD operational currency is REFUSED - never USD, never 2dp (5E-1A-D)", () => {
+  // The regression this guards: with no server metadata, a third-currency order must NOT be
+  // printed as USD (or at a guessed 2dp). It has no client-side fallback and must fail closed.
+  assert.throws(() => resolveReceiptCurrency(null, "AED"), ReceiptCurrencyError);
+  assert.throws(() => resolveReceiptCurrency(undefined, "JOD"), ReceiptCurrencyError);
+  assert.throws(() => resolveReceiptCurrency(null, "KWD"), ReceiptCurrencyError);
+  // The refusal names the operational currency, never silently substitutes USD.
+  assert.throws(() => resolveReceiptCurrency(null, "AED"), /AED/);
+  assert.throws(() => resolveReceiptCurrency(null, "AED"), /not be printed as USD/);
+});
+
 test("USD/LBP with an absent server precision still resolve (the formatter renders them by code)", () => {
   assert.deepEqual(resolveReceiptCurrency({ currency: "USD", decimal_digits: null }, "LBP"), {
     currency: "USD",
