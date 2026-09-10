@@ -271,6 +271,20 @@ function PosWorkspaceInner() {
   const [pickerItem, setPickerItem] = useState<{ item: SearchableItem; price: number; groups: ModifierGroup[] } | null>(null);
   const [noteKey, setNoteKey] = useState<string | null>(null);
   /**
+   * The ORDER-level note for the takeaway order - a whole-order instruction
+   * ("Customer picking up at 7", "Call when ready"), DISTINCT from an item's
+   * `kitchen_note`. It rides the EXISTING `orderNote -> buildSubmitPayload ->
+   * pos_orders.notes` plumbing; delivery already has its own. The ref lets the
+   * latched async submit read the current value without a stale closure, exactly
+   * as the cart lines are read live via `useCart.getState()`.
+   */
+  const [orderNote, setOrderNote] = useState("");
+  const orderNoteRef = useRef("");
+  const editOrderNote = useCallback((value: string) => {
+    orderNoteRef.current = value;
+    setOrderNote(value);
+  }, []);
+  /**
    * What a confirmed payment will settle. Null while the dialog is closed.
    *
    * ONE dialog, ONE handler, ONE `pos_pay_order` call - the intent only says
@@ -874,6 +888,9 @@ function PosWorkspaceInner() {
     cart.reset();
     setPayIntent(null);
     setPayError(null);
+    // The order note belongs to the order just cleared, not the next one.
+    orderNoteRef.current = "";
+    setOrderNote("");
     // Back to the draft panel: "new order" means the thing being built now.
     setViewingSavedOrder(false);
   }, [cart]);
@@ -896,6 +913,10 @@ function PosWorkspaceInner() {
       orderType: "takeaway",
       clientOpId: opId,
       lines: useCart.getState().lines,
+      // The order-level note, read live so a latched retry is never stale.
+      // buildSubmitPayload trims/normalises it into `notes` (pos_orders.notes);
+      // an empty note is sent as null and produces the pre-existing payload.
+      orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
     });
     const saved = await submitOrder(payload);
     useCart.getState().setSavedOrder(saved);
@@ -917,6 +938,9 @@ function PosWorkspaceInner() {
         orderId: saved.order_id,
         orderNumber: saved.order_number,
         batchNo: saved.batch_no ?? 1,
+        // The order-level note prints once for the whole ticket (existing
+        // plumbing), never per line - item notes ride `l.kitchen_note` below.
+        orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
         lines: lines.map((l) => ({
           name: l.name,
           qty: l.quantity,
@@ -1847,6 +1871,20 @@ function PosWorkspaceInner() {
                 />
               </section>
             ) : (
+              <>
+              {/* Fast ORDER-level note for the whole takeaway order - distinct
+                  from an item's kitchen note (the per-line "Note" button below).
+                  Wired to the existing orderNote -> pos_orders.notes plumbing. */}
+              <label className="mb-2 block">
+                <span className="mb-1 block text-xs font-bold text-ink">Order note</span>
+                <input
+                  type="text"
+                  value={orderNote}
+                  onChange={(e) => editOrderNote(e.target.value)}
+                  placeholder="Whole-order note - e.g. Call customer when ready"
+                  className="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-sub"
+                />
+              </label>
               <CartPanel
                 lines={cart.lines}
                 selectedKey={cart.selectedKey}
@@ -1882,6 +1920,7 @@ function PosWorkspaceInner() {
                 onPrint={() => void printCurrentOrder()}
                 printBusy={printingOrder}
               />
+              </>
             )
           )
         }
