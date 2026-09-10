@@ -585,6 +585,7 @@ mod tests {
             paid: true,
             method: Some("cash".into()),
             currency: "USD".into(),
+            decimal_digits: 2,
             lines: vec![ReceiptLine {
                 name: "Margherita".into(),
                 qty: 1.0,

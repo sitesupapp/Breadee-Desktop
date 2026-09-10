@@ -330,16 +330,18 @@ test("a historical receipt is still printable", () => {
 
 test("the receipt document carries exactly the fields the renderer needs", () => {
   const doc = toReceiptDoc(receipt());
-  // The set grew by six when the receipt designer landed, and each addition is
-  // deliberate: `address`/`phone`/`welcome`/`footer` are the branding the
-  // native renderer can now draw, `sections` is the tenant's block list, and
-  // `qr` is a pre-encoded matrix. Nothing else may appear - the point of
-  // listing them exhaustively is that a seventh has to be argued for here.
+  // The set grew by six when the receipt designer landed, and by one more
+  // (`decimalDigits`) in i18n Slice 6B-1 so a third-currency amount can print at
+  // its own precision. Each addition is deliberate: `address`/`phone`/`welcome`/
+  // `footer` are branding the native renderer can draw, `sections` is the tenant's
+  // block list, `qr` is a pre-encoded matrix, and `decimalDigits` is the server's
+  // display precision. Nothing else may appear - the point of listing them
+  // exhaustively is that the next addition has to be argued for here.
   assert.deepEqual(Object.keys(doc).sort(), [
     "address", "at", "branchName", "businessName", "change", "currency", "customerName",
-    "customerPhone", "deliveryAddress", "discount", "footer", "lines", "method", "orderNumber",
-    "orderType", "paid", "phone", "qr", "seats", "sections", "shiftRef", "staffName", "subtotal",
-    "tableName", "tenderCurrency", "tenderTotal", "tendered", "total", "welcome",
+    "customerPhone", "decimalDigits", "deliveryAddress", "discount", "footer", "lines", "method",
+    "orderNumber", "orderType", "paid", "phone", "qr", "seats", "sections", "shiftRef", "staffName",
+    "subtotal", "tableName", "tenderCurrency", "tenderTotal", "tendered", "total", "welcome",
   ]);
   // The six default to null/absent, so a caller written before the designer
   // existed produces exactly the document it always did.

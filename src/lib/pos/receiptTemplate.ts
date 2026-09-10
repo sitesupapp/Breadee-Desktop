@@ -86,8 +86,14 @@ export const BLOCK_CATALOG: BlockSpec[] = [
   { key: "subtotal", label: "Subtotal", kinds: ["customer"], support: "printed" },
   { key: "discount", label: "Discount", kinds: ["customer"], support: "printed" },
   { key: "total", label: "Total", kinds: ["customer"], support: "printed" },
-  { key: "paid", label: "Paid amount", kinds: ["customer"], support: "not_printed", note: "The desktop receipt prints one settled total plus tendered and change." },
-  { key: "balance", label: "Balance / unpaid", kinds: ["customer"], support: "not_printed", note: "A desktop receipt is produced after settlement, so there is no outstanding balance to print." },
+  // On-account paid/balance appear on the ON-SCREEN receipt (ReceiptPreview reads
+  // the ReceiptData figures directly), but the NATIVE thermal renderer has no
+  // field for them yet, so the catalog stays honest: these are not_printed until
+  // the Rust receipt gains a paid/balance section (a separate, signed-build
+  // change). Marking them "printed" here would (correctly) fail the "native
+  // receipt honours every block" contract test, which cross-checks receipt.rs.
+  { key: "paid", label: "Paid amount", kinds: ["customer"], support: "not_printed", note: "Shown on the on-screen on-account receipt; the native thermal receipt has no paid-now field yet (a future signed build)." },
+  { key: "balance", label: "Balance / unpaid", kinds: ["customer"], support: "not_printed", note: "Shown on the on-screen on-account receipt; the native thermal receipt has no balance field yet (a future signed build)." },
   { key: "payment_method", label: "Payment method", kinds: ["customer"], support: "printed" },
   { key: "loyalty", label: "Loyalty summary", kinds: ["customer"], support: "not_printed", note: "Loyalty is not part of the desktop POS yet." },
   { key: "footer", label: "Footer message", kinds: ["kitchen", "customer"], support: "printed" },

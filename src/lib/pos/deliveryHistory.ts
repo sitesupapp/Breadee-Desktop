@@ -26,6 +26,7 @@ import { buildReceipt, type ReceiptData, type ReceiptLine } from "@/lib/receipt"
 import type { OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
 import type { DeliveryQueueOrder } from "@/lib/pos/deliveryOrderManagement";
 import type { CurrencyCode } from "@/lib/currency";
+import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 
 // --- addresses ---------------------------------------------------------------
 
@@ -325,11 +326,17 @@ export function buildHistoricalReceipt(input: {
   party: OrderParty;
   /** Used only when neither the order nor the payment recorded one. */
   fallbackCurrency: CurrencyCode;
+  /**
+   * The order's HISTORICAL currency + precision from the server contract
+   * `finance_order_financials` (Slice 6B-2). Authoritative for a reprint — the caller
+   * reads it from the persisted order snapshot, never from today's tenant currency.
+   */
+  receiptCurrency: string;
+  decimalDigits: number;
   at: string;
 }): ReceiptData {
   const o = input.order;
   const total = o.total_amount ?? 0;
-  const orderCurrency = o.currency === "LBP" || o.currency === "USD" ? (o.currency as CurrencyCode) : null;
   return buildReceipt({
     businessName: input.tenantName,
     branchName: input.branchName,
@@ -340,7 +347,8 @@ export function buildHistoricalReceipt(input: {
     at: input.at,
     paid: o.payment_status === "paid",
     method: input.payment?.method ?? o.payment_method ?? null,
-    currency: orderCurrency ?? input.payment?.currency ?? input.fallbackCurrency,
+    currency: input.receiptCurrency,
+    decimalDigits: input.decimalDigits,
     lines: input.lines,
     // Server figures, all three. Nothing on a reprint is recomputed here.
     subtotal: o.subtotal ?? total,
@@ -373,9 +381,19 @@ export async function readHistoricalReceipt(input: {
   fallbackCurrency: CurrencyCode;
   at: string;
 }): Promise<ReceiptData> {
-  const [lines, payment] = await Promise.all([
+  const [lines, payment, receiptMeta] = await Promise.all([
     readOrderReceiptLines(input.order.id),
     readOrderPayment(input.order.id).catch(() => null),
+    // 6B-2: the order's own historical currency + server precision. A third-currency
+    // order with no valid server precision refuses (propagated to the caller) rather
+    // than reprinting at a guessed 2 decimals.
+    fetchReceiptCurrency(input.order.id, input.fallbackCurrency),
   ]);
-  return buildHistoricalReceipt({ ...input, lines, payment });
+  return buildHistoricalReceipt({
+    ...input,
+    lines,
+    payment,
+    receiptCurrency: receiptMeta.currency,
+    decimalDigits: receiptMeta.decimalDigits,
+  });
 }

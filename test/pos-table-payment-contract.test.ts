@@ -115,7 +115,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // new RPC cannot slip in under an unchanged total.
 // RETARGETED AGAIN BY DESKTOP 1.0.4: `pos_configure_tables` was added, so the
 // expected set grows by exactly one more reviewed name.
-test("the RPC allow-list contains exactly the sixteen expected names", () => {
+test("the RPC allow-list contains exactly the twenty-two expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -124,9 +124,15 @@ test("the RPC allow-list contains exactly the sixteen expected names", () => {
   assert.deepEqual(
     [...members].sort(),
     [
+      // i18n Slice 6B-2: the authoritative receipt-financial READ (order historical
+      // currency + decimal_digits). Sorts first as it does not start with "pos_".
+      "finance_order_financials",
       "pos_cash_box_shift",
       "pos_clear_table",
       "pos_close_table",
+      // Wave 2C: the two receivables settlement RPCs (shared with the web app).
+      "pos_complete_on_account",
+      "pos_complete_table_on_account",
       "pos_configure_tables",
       "pos_edit_order",
       "pos_end_shift",
@@ -135,6 +141,10 @@ test("the RPC allow-list contains exactly the sixteen expected names", () => {
       "pos_open_table",
       "pos_pay_order",
       "pos_pay_table",
+      // Wave 3C: the Customer Accounts surface - two reads and one money write.
+      "pos_receivable_collect",
+      "pos_receivables_customer",
+      "pos_receivables_search",
       "pos_shift_expected",
       "pos_submit_order",
       "pos_table_map",
@@ -143,7 +153,7 @@ test("the RPC allow-list contains exactly the sixteen expected names", () => {
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 16);
+  assert.equal(members.length, 22);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

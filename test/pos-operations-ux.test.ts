@@ -106,6 +106,18 @@ test("settlement is offered once, and never to a paid order", () => {
   assert.equal(canSettleOrder(order({ payment_status: "paid" })), false);
 });
 
+test("a completed on-account order is a receivable, never re-paid via pos_pay_order", () => {
+  // `pos_complete_on_account` is the only producer of a completed-but-unpaid
+  // order. It must NOT show the plain Pay control, which routes to
+  // `pos_pay_order` and would take the full total a second time. Collection is
+  // the receivables flow, not this one.
+  assert.equal(canSettleOrder(order({ status: "completed", payment_status: "unpaid" })), false);
+  assert.equal(canSettleOrder(order({ status: "completed", payment_status: "partial" })), false);
+  // A genuinely open order awaiting settlement is sent_to_kitchen, not
+  // completed, and stays settleable.
+  assert.equal(canSettleOrder(order({ status: "sent_to_kitchen", payment_status: "unpaid" })), true);
+});
+
 test("no screen invents a collection lifecycle", () => {
   // Level 3C: `pos_pay_order` sets paid AND completed in one statement, and the
   // schema has no `collected` state - so payment IS the completion. A button

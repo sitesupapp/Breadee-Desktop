@@ -73,7 +73,41 @@ export type PosRpcName =
   // paid order re-settles it, and that belongs with its own verification rather
   // than riding along here.
   | "pos_edit_order"
-  | "pos_void_order";
+  | "pos_void_order"
+  // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
+  // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
+  // once and recovers a lost response by an authoritative re-read rather than by
+  // retrying blindly. The SERVER owns every figure (outstanding / paid / discount
+  // / payment status); the desktop shows previews and prints what the RPC returns.
+  // Never enqueued to the offline outbox - on-account is online-only.
+  // See `lib/pos/onAccount.ts`.
+  | "pos_complete_on_account"
+  | "pos_complete_table_on_account"
+  // Customer Receivables / On Account — Wave 3C operational surface.
+  //
+  // TWO READS and ONE WRITE, shared with the web app.
+  //
+  // `pos_receivables_search` and `pos_receivables_customer` are READS: they gate
+  // on `pos.receivables.view`, are scoped to the operator's accessible OUs, and
+  // move no money. The desktop shows what they return as a PROJECTION - never as
+  // authority - and re-reads after any collection so the server figure wins.
+  //
+  // `pos_receivable_collect` is the ONLY money mover here, and the ONLY new RPC
+  // that does: it books a payment against an existing receivable order, attaches
+  // it to the collector's OWN open shift, and gates on `pos.receivables.collect`
+  // + OU + owner-block. UNLIKE `pos_complete_on_account`, it is IDEMPOTENT on a
+  // client-supplied `client_op_id`, so a repeat of the SAME id replays the first
+  // result rather than collecting twice; the client mints exactly one id per
+  // collection and reuses it on retry. Online-only: never enqueued to the offline
+  // outbox. See `lib/pos/receivables.ts`.
+  | "pos_receivables_search"
+  | "pos_receivables_customer"
+  | "pos_receivable_collect"
+  // i18n Slice 6B-2 — the authoritative RECEIPT-financial read. Returns the order's
+  // historical currency and decimal_digits (from finance_currencies, the sole catalog),
+  // so a receipt prints in the order's own currency at the server's precision. A READ:
+  // it moves no money and gates on tenant + can_access_branch server-side.
+  | "finance_order_financials";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

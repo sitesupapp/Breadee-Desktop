@@ -42,7 +42,7 @@ import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { buildReceipt } from "@/lib/receipt";
-import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
+import { readOrderReceiptLines, readSettledOrder } from "@/lib/pos/deliverySettlement";
 import { isNativeAvailable, listPrinters, printReport } from "@/lib/nativePrinting";
 import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
 import { resolveRouteTarget } from "@/lib/pos/printTarget";
@@ -61,7 +61,11 @@ import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/po
 import { readPosFeatures } from "@/lib/pos/posFeatures";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
-import { completePayment } from "@/lib/pos/paymentCompletion";
+import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
+import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
+import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
+import { useCustomerPicker } from "@/state/customerPicker";
+import type { DiscountType } from "@/lib/pos/discounts";
 import { getShiftExpected } from "@/lib/pos/shifts";
 import { classifyError } from "@/lib/pos/errors";
 import type { ReceiptData } from "@/lib/receipt";
@@ -277,6 +281,17 @@ function PosWorkspaceInner() {
    */
   const [payIntent, setPayIntent] = useState<{ kind: "draft" } | { kind: "order"; order: ShiftOpenOrder } | null>(null);
   const [payError, setPayError] = useState<string | null>(null);
+  // Customer Receivables / On Account. The latch stops a double-tap becoming a
+  // second receivable; the picker chooses the customer while the dialog is open.
+  const onAccountLatch = useRef(createOnAccountLatch());
+  const onAccountReachable = payIntent !== null && pos.gates.takeOnAccount.allowed && online;
+  const customerPicker = useCustomerPicker({
+    access: pos.access,
+    branchId: pos.branch.id,
+    online,
+    enabled: onAccountReachable,
+    onError: (message) => setPayError(message),
+  });
   const [openShiftOpen, setOpenShiftOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [shiftError, setShiftError] = useState<string | null>(null);
@@ -342,6 +357,10 @@ function PosWorkspaceInner() {
         const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
           ? order.order_type
           : "takeaway") as "takeaway" | "dine_in" | "delivery";
+        // 6B-2: the order's OWN historical currency + precision, from the server. A
+        // third-currency order with no valid server precision refuses here (caught below)
+        // rather than reprinting at a guessed 2 decimals.
+        const receiptMeta = await fetchReceiptCurrency(order.id, currency);
         receiptStore.present(
           buildReceipt({
             businessName: pos.tenantName,
@@ -353,7 +372,8 @@ function PosWorkspaceInner() {
             at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
             paid: order.payment_status === "paid",
             method: null,
-            currency: (order.currency ?? currency) as CurrencyCode,
+            currency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
             lines,
             subtotal: order.subtotal ?? order.total_amount ?? 0,
             discount: order.discount_amount,
@@ -1173,6 +1193,10 @@ function PosWorkspaceInner() {
         // The completion sequence is deterministic and lives in one pure module:
         // present the receipt (data + visibility atomically) BEFORE the dialog
         // closes and the cart resets, so neither can race the receipt.
+        // 6B-2: the order's own historical currency + server precision. Best-effort for
+        // USD/LBP (falls back to the client currency if the read is unavailable); a
+        // third-currency order with no valid server precision refuses (caught below).
+        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
         const completion = completePayment({
           result,
           lines,
@@ -1183,6 +1207,8 @@ function PosWorkspaceInner() {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: currency,
+          receiptCurrency: receiptMeta.currency,
+          decimalDigits: receiptMeta.decimalDigits,
           tenderCurrency: input.currency,
           rate,
           tenderedInput: input.tendered,
@@ -1233,6 +1259,158 @@ function PosWorkspaceInner() {
       pos.userName,
       presentReceipt,
       rate,
+      shiftId,
+      shiftStore,
+      ticketForOrder,
+      toast,
+    ],
+  );
+
+  /**
+   * Put the DRAFT or an existing order ON ACCOUNT.
+   *
+   * The same spine as `confirmPayment` - ensureOrder for a draft, then a
+   * single state-guarded RPC, then the deterministic completion - but the money
+   * call is `pos_complete_on_account` and the receipt is a receivable. ONLINE
+   * ONLY: a receivable is never enqueued to the offline outbox, so this refuses
+   * with a message rather than queueing when offline. A customer is REQUIRED.
+   */
+  const confirmOnAccount = useCallback(
+    async (input: {
+      mode: "account" | "partial";
+      amountNow: number;
+      customerId: string;
+      method: PaymentMethod;
+      discountType: DiscountType;
+      discountValue: string;
+    }) => {
+      const intent = payIntent;
+      if (!intent) return;
+      if (!online) {
+        setPayError("On-account sales need a connection. Reconnect before putting a sale on account.");
+        return;
+      }
+      if (!input.customerId) {
+        setPayError("Choose a customer before putting a sale on account.");
+        return;
+      }
+      if (inFlight.current) return;
+      inFlight.current = true;
+      setBusy(true);
+      setPayError(null);
+      const lines = useCart.getState().lines;
+      const existing = intent.kind === "order";
+      const discountFields =
+        input.discountType !== "none" && input.discountValue.trim() !== ""
+          ? { discountType: input.discountType as "percent" | "amount", discountValue: Number(input.discountValue) }
+          : {};
+      try {
+        const draft = intent.kind === "draft" ? await ensureOrder() : null;
+        if (intent.kind === "draft" && !draft) return;
+        const orderId = intent.kind === "order" ? intent.order.id : (draft as SubmitOrderResult).order_id;
+        const orderNumber =
+          intent.kind === "order"
+            ? (intent.order.order_number ?? intent.order.id.slice(0, 8))
+            : (draft as SubmitOrderResult).order_number;
+
+        const outcome = await performOnAccount({
+          latch: onAccountLatch.current,
+          submit: () =>
+            completeOnAccount({
+              orderId,
+              customerId: input.customerId,
+              amount: input.amountNow,
+              method: input.method,
+              ...discountFields,
+            }),
+          // Authoritative re-read used ONLY on a lost response: an on-account
+          // completion moves the order to `completed`, so status decides it.
+          reread: async (): Promise<OnAccountVerdict> => {
+            const o = await readSettledOrder(orderId);
+            if (!o) return "ambiguous";
+            return o.status === "completed" ? "committed" : "open";
+          },
+        });
+
+        if (!outcome.ok) throw outcome.error;
+
+        let result = outcome.result;
+        if (!result) {
+          // Recovered: the server booked it but the response was lost. Best-effort
+          // provisional figures for the receipt; the ledger on the server is truth.
+          const o = await readSettledOrder(orderId).catch(() => null);
+          const total = o?.total_amount ?? input.amountNow;
+          const paidNow = input.mode === "partial" ? input.amountNow : 0;
+          result = {
+            payment_status: input.mode === "partial" ? "partial" : "unpaid",
+            paid_usd: paidNow,
+            outstanding_usd: Math.max(0, total - paidNow),
+            order_number: o?.order_number ?? orderNumber,
+            subtotal: total,
+            discount: 0,
+          };
+        }
+
+        const receiptLines = existing ? await readOrderReceiptLines(orderId).catch(() => []) : null;
+
+        // 6B-2: the order's own historical currency + server precision for the receivable.
+        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
+        const completion = completeOnAccountReceipt({
+          result,
+          lines,
+          receiptLines,
+          existingOrder: existing,
+          fallbackOrderNumber: orderNumber,
+          method: input.method,
+          tenantName: pos.tenantName,
+          branchName: pos.branch.name,
+          operatorName: pos.userName,
+          primaryCurrency: currency,
+          receiptCurrency: receiptMeta.currency,
+          decimalDigits: receiptMeta.decimalDigits,
+          shiftId,
+          at: new Date().toLocaleString(),
+        });
+
+        for (const step of completion.steps) {
+          if (step === "present-receipt") presentReceipt(completion.receipt);
+          else if (step === "close-payment-dialog") setPayIntent(null);
+          else if (step === "reset-cart") newOrder();
+        }
+
+        void shiftStore.refreshCashBox();
+        toast.push({
+          tone: "success",
+          message: outcome.recovered
+            ? `Order ${result.order_number} was already on account`
+            : result.payment_status === "partial"
+              ? `Partly paid - order ${result.order_number} on account`
+              : `On account - order ${result.order_number}`,
+        });
+
+        // A new draft still owes the kitchen its ticket; an existing order was
+        // ticketed when it was created. Same rule as a full payment.
+        if (draft) void ticketForOrder(draft, lines);
+        await adoptCreatedOrder(orderId);
+      } catch (e) {
+        const c = classifyError(e);
+        setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+      } finally {
+        inFlight.current = false;
+        setBusy(false);
+      }
+    },
+    [
+      adoptCreatedOrder,
+      currency,
+      ensureOrder,
+      newOrder,
+      online,
+      payIntent,
+      pos.branch.name,
+      pos.tenantName,
+      pos.userName,
+      presentReceipt,
       shiftId,
       shiftStore,
       ticketForOrder,
@@ -1867,6 +2045,17 @@ function PosWorkspaceInner() {
             : (cart.savedOrder?.order_number ?? null)
         }
         error={payError}
+        onAccount={
+          pos.gates.takeOnAccount.allowed && online
+            ? {
+                enabled: true,
+                customer: customerPicker.selected,
+                search: customerPicker.searchProps,
+                onClearCustomer: customerPicker.clearSelection,
+                onConfirmAccount: (v) => void confirmOnAccount(v),
+              }
+            : undefined
+        }
         onCancel={() => setPayIntent(null)}
         onConfirm={(input) => void confirmPayment(input)}
       />

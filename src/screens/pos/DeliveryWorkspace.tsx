@@ -86,6 +86,12 @@ import {
   validateDeliveryDiscount,
 } from "@/lib/pos/deliverySettlement";
 import {
+  completeOnAccount,
+  createOnAccountLatch,
+  performOnAccount,
+  type OnAccountVerdict,
+} from "@/lib/pos/onAccount";
+import {
   buildEditPayload as buildOrderEditPayload,
   checkOrderContext,
   createMutationLatch,
@@ -121,6 +127,7 @@ import { computeDiscount } from "@/lib/pos/discounts";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
+import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import { submitOrder } from "@/lib/pos/orders";
 import type { KitchenSourceLine } from "@/lib/pos/kitchenPrinter";
@@ -271,6 +278,9 @@ export function useDeliveryWorkspace(input: {
   const payLatch = useRef(createSettlementLatch());
   /** Ensures the completion sequence - receipt included - runs once per payment. */
   const settleDone = useRef(false);
+  // Customer Receivables / On Account. Its own latch; the customer is fixed (the
+  // order's own), so there is no picker here - unlike takeaway and dine-in.
+  const onAccountLatch = useRef(createOnAccountLatch());
   const [openOrders, setOpenOrders] = useState<OpenDeliveryOrder[]>([]);
   /** Customer the operator wants to switch to while a Delivery cart is loaded. */
   const [switchTo, setSwitchTo] = useState<string | null>(null);
@@ -1042,6 +1052,8 @@ export function useDeliveryWorkspace(input: {
 
         const money = outcome.result;
         const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
+        // 6B-2: the order's own historical currency + server precision.
+        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1065,7 +1077,8 @@ export function useDeliveryWorkspace(input: {
             // the reopen must be financially identical, so both now read the
             // same stored snapshot. The tender currency has its own field two
             // lines down, where "Charged in LBP" belongs.
-            currency: (settled!.currency ?? input.currency) as CurrencyCode,
+            currency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
             lines,
             // Server figures win over anything computed here.
             subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
@@ -1116,6 +1129,150 @@ export function useDeliveryWorkspace(input: {
       }
     },
     [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
+  );
+
+  /**
+   * Put a delivery order ON ACCOUNT. Exactly one submit, ever.
+   *
+   * The sibling of `settle`: the same re-read-then-once shape and the same
+   * post-completion refresh, but the money call is `pos_complete_on_account` and
+   * the receipt is a receivable. The customer is the ORDER's own (never whoever
+   * is selected on the customer half), which is why delivery needs no picker.
+   * ONLINE ONLY.
+   */
+  const settleOnAccount = useCallback(
+    async (confirm: {
+      mode: "account" | "partial";
+      amountNow: number;
+      customerId: string;
+      method: PaymentMethod;
+      discountType: DiscountType;
+      discountValue: string;
+    }) => {
+      const order = payTarget.order;
+      if (!order || !payGate.allowed) return;
+      if (!online) {
+        setPayError("On-account sales need a connection. Reconnect before putting an order on account.");
+        return;
+      }
+      // The order's own customer is authority - not the dialog, not the selection.
+      const customerId = order.customer_id;
+      if (!customerId) {
+        setPayError("This delivery order has no customer, so it cannot be put on account.");
+        return;
+      }
+      const fromQueue = payTarget.fromQueue;
+      const intended = {
+        orderId: order.id,
+        customerId: order.customer_id,
+        addressId: order.address_id,
+        total: order.total_amount ?? 0,
+      };
+      setPayError(null);
+      setPaying(true);
+      settleDone.current = false;
+      const discountFields =
+        confirm.discountType !== "none" && confirm.discountValue.trim() !== ""
+          ? { discountType: confirm.discountType as "percent" | "amount", discountValue: Number(confirm.discountValue) }
+          : {};
+      try {
+        // The amount on screen is not authority. Re-read and refuse on any change.
+        const fresh = await readSettledOrder(intended.orderId);
+        checkSettlementTarget(intended, fresh);
+
+        const outcome = await performOnAccount({
+          latch: onAccountLatch.current,
+          submit: () =>
+            completeOnAccount({
+              orderId: intended.orderId,
+              customerId,
+              amount: confirm.amountNow,
+              method: confirm.method,
+              ...discountFields,
+            }),
+          reread: async (): Promise<OnAccountVerdict> => {
+            const o = await readSettledOrder(intended.orderId);
+            if (!o) return "ambiguous";
+            return o.status === "completed" ? "committed" : "open";
+          },
+        });
+
+        if (!outcome.ok) {
+          const c = classifyError(outcome.error);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+          return;
+        }
+        if (settleDone.current) return;
+        settleDone.current = true;
+
+        const settled = await readSettledOrder(intended.orderId);
+        if (!settled || settled.status !== "completed") {
+          setPayError("The sale was accepted but the order does not show completed yet. Refresh before trying again.");
+          return;
+        }
+        await input.refreshCashBox().catch(() => {});
+        await useCustomers.getState().refresh();
+
+        const money = outcome.result;
+        const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
+        const total = money ? Math.max(0, money.subtotal - money.discount) : (settled.total_amount ?? 0);
+        const paidNow = money ? money.paid_usd : confirm.mode === "partial" ? confirm.amountNow : 0;
+        const balance = money ? money.outstanding_usd : Math.max(0, total - paidNow);
+        const who = receiptIdentity(order);
+        // 6B-2: the order's own historical currency + server precision.
+        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
+        input.onPresentReceipt(
+          buildReceipt({
+            businessName: pos.tenantName,
+            branchName: pos.branch.name,
+            orderType: "Delivery",
+            orderSource: "delivery",
+            staffName: pos.userName,
+            orderNumber: settled.order_number ?? "",
+            at: new Date().toLocaleString(),
+            paid: false,
+            paymentStatus: money ? money.payment_status : paidNow > 0 ? "partial" : "unpaid",
+            paidAmount: paidNow,
+            balanceDue: balance,
+            method: confirm.method,
+            currency: receiptMeta.currency,
+            decimalDigits: receiptMeta.decimalDigits,
+            lines,
+            subtotal: money?.subtotal ?? settled.total_amount ?? 0,
+            discount: money?.discount ?? 0,
+            total,
+            // A receivable takes no cash tender at the drawer.
+            tenderCurrency: null,
+            shiftRef: input.shiftId,
+            customerName: who.customerName,
+            customerPhone: who.customerPhone,
+            deliveryAddress: who.addressText,
+          }),
+        );
+
+        if (fromQueue) {
+          await refreshDetail(intended.orderId);
+          void refreshQueue();
+        } else {
+          setSubmitted({ order: settled, recovered: outcome.recovered });
+        }
+        setPayOpen(false);
+        toast.push({
+          tone: "success",
+          message: outcome.recovered
+            ? `Order #${settled.order_number ?? ""} was already on account`
+            : paidNow > 0
+              ? `Order #${settled.order_number ?? ""} partly paid - balance on account`
+              : `Order #${settled.order_number ?? ""} put on account`,
+        });
+      } catch (e) {
+        const c = classifyError(e);
+        setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+      } finally {
+        setPaying(false);
+      }
+    },
+    [payTarget, payGate.allowed, online, input, pos.branch.name, pos.tenantName, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
   );
 
   // --- Level 3D: edit ---------------------------------------------------------
@@ -1726,6 +1883,17 @@ export function useDeliveryWorkspace(input: {
           customerName: payTarget.order ? (receiptIdentity(payTarget.order).customerName ?? "Customer") : "Customer",
           address: payTarget.order ? receiptIdentity(payTarget.order).addressText : null,
         }}
+        onAccount={(() => {
+          const o = payTarget.order;
+          if (!pos.gates.takeOnAccount.allowed || !online || !o || !o.customer_id) return undefined;
+          // The customer is the ORDER's own, read-only - no picker on delivery.
+          const who = receiptIdentity(o);
+          return {
+            enabled: true,
+            customer: { id: o.customer_id, name: who.customerName, phone: who.customerPhone },
+            onConfirmAccount: (v) => void settleOnAccount(v),
+          };
+        })()}
         error={payError}
         onCancel={() => {
           setPayOpen(false);

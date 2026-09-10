@@ -418,18 +418,25 @@ const queueOrder = (over: Record<string, unknown> = {}) =>
     ...over,
   }) as Parameters<typeof buildHistoricalReceipt>[0]["order"];
 
-const historicalInput = (over: Partial<Parameters<typeof buildHistoricalReceipt>[0]> = {}) => ({
-  tenantName: "Dominos Pizza",
-  branchName: "Main Branch",
-  staffName: "Cashier",
-  order: queueOrder(),
-  payment: null,
-  lines: [],
-  party: { customerName: null, customerPhone: null, addressText: null },
-  fallbackCurrency: "USD" as CurrencyCode,
-  at: "now",
-  ...over,
-});
+const historicalInput = (over: Partial<Parameters<typeof buildHistoricalReceipt>[0]> = {}) => {
+  const order = over.order ?? queueOrder();
+  return {
+    tenantName: "Dominos Pizza",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order,
+    payment: null,
+    lines: [],
+    party: { customerName: null, customerPhone: null, addressText: null },
+    fallbackCurrency: "USD" as CurrencyCode,
+    // 6B-2: finance_order_financials returns the order's own currency; mirror it here (a
+    // matching precision — the formatter renders USD/LBP by code, so 2 is inert for them).
+    receiptCurrency: order.currency ?? "USD",
+    decimalDigits: 2,
+    at: "now",
+    ...over,
+  };
+};
 
 test("a USD order stays USD even when it was charged in LBP", () => {
   // The 260814-0009 shape: $43.00 order, payment recorded in LBP. The receipt's
@@ -479,7 +486,10 @@ test("the settlement receipt build reads the order snapshot, not the charge curr
   // THE FIX ITSELF. `money.currency_code` is what the customer was charged in;
   // labelling the order's figures with it produced "43 LBP" on first open.
   const build = deliveryWs.slice(deliveryWs.indexOf("const money = outcome.result"), deliveryWs.indexOf("if (fromQueue)"));
-  assert.match(build, /currency: \(settled!\.currency \?\? input\.currency\)/);
+  // 6B-2: the receipt currency is the ORDER's own, read from the server contract
+  // finance_order_financials(intended.orderId) — the historical snapshot, not the charge.
+  assert.match(build, /const receiptMeta = await fetchReceiptCurrency\(intended\.orderId/);
+  assert.match(build, /currency: receiptMeta\.currency/);
   assert.equal(/currency: \(money\?\.currency_code/.test(build), false, "the charge currency must not denominate the receipt");
   // The charge currency lands where it belongs: the tender fields.
   assert.match(build, /tenderCurrency: \(money\?\.currency_code \?\? confirm\.currency\)/);
