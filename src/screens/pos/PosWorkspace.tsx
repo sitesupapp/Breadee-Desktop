@@ -57,6 +57,8 @@ import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/stat
 import { OrderCarousel } from "@/components/pos/OrderCarousel";
 import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
+import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
+import { readPosFeatures } from "@/lib/pos/posFeatures";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
@@ -808,21 +810,30 @@ function PosWorkspaceInner() {
     return false;
   }, [addingToDelivery, delivery.cartOwner, addingToTable, dineIn.selected, toast]);
 
+  // The behaviour switch for THIS terminal. Read once per mount - leaving for
+  // Settings and coming back remounts this component and re-reads, which is the
+  // right cadence for a decision nobody makes mid-service.
+  const features = useMemo(() => readPosFeatures(), []);
+
   const addItem = useCallback(
     (item: SearchableItem, price: number) => {
       const groups = groupsForItem(item.id, menu.groupsByItem, menu.groups);
-      if (groups.length > 0) {
+      // The dialog opens when there is a QUESTION TO ASK - a modifier group or,
+      // when this terminal enables it, an ingredient list to edit. With the
+      // switch off and no groups, a plain tap still goes straight into the cart.
+      const offersIngredients = features.ingredientCustomization && hasIngredients(item);
+      if (groups.length > 0 || offersIngredients) {
         setPickerItem({ item, price, groups });
         return;
       }
       if (!claimBuffer()) return;
       cart.addLine({ menuItemId: item.id, name: item.name, basePrice: price });
     },
-    [cart, claimBuffer, menu.groupsByItem, menu.groups],
+    [cart, claimBuffer, features.ingredientCustomization, menu.groupsByItem, menu.groups],
   );
 
   const confirmPicker = useCallback(
-    (input: { modifiers: SelectedModifier[]; quantity: number; note: string | null }) => {
+    (input: ItemOptionsResult) => {
       if (!pickerItem) return;
       if (!claimBuffer()) return;
       cart.addLine({
@@ -831,7 +842,13 @@ function PosWorkspaceInner() {
         basePrice: pickerItem.price,
         quantity: input.quantity,
         modifiers: input.modifiers,
-        note: input.note,
+        // Removals lead the kitchen note so "NO TOMATO" cannot be pushed off the
+        // end of a thermal line by a longer free-text note - and they are ALSO
+        // carried structurally on the line, which is what reaches the order
+        // payload. The note is what a cook reads; the array is what the system
+        // stores.
+        note: kitchenNoteFor({ removed: input.removedIngredients, note: input.note }),
+        removedIngredients: input.removedIngredients,
       });
       setPickerItem(null);
     },
@@ -1990,6 +2007,7 @@ function PosWorkspaceInner() {
         optionsByGroup={optionsByGroup}
         currency={currency}
         rate={rate}
+        ingredientCustomization={features.ingredientCustomization}
         onCancel={() => setPickerItem(null)}
         onConfirm={confirmPicker}
       />

@@ -36,8 +36,11 @@ export async function loadMenu(tenantId: string): Promise<MenuData> {
       .eq("status", "active")
       .order("sort_order"),
     supabase
+      // `ingredients` is the customer-facing Menu Builder array (a `text[]` on
+      // `menu_items`), read so the cashier-facing ingredient customization can
+      // offer it. It is NOT a recipe or costing table - see `itemOptions.ts`.
       .from("menu_items")
-      .select(`id, name, price, category_id, image_url, ${PRICE_METADATA_COLUMNS}`)
+      .select(`id, name, price, category_id, image_url, ingredients, ${PRICE_METADATA_COLUMNS}`)
       .eq("tenant_id", tenantId)
       .eq("status", "published")
       .eq("is_available", true)
