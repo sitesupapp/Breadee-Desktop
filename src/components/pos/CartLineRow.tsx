@@ -5,7 +5,7 @@
 // costs one only when a mistake actually happens.
 
 import { Button, cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { lineTotals } from "@/lib/pos/modifiers";
 import type { CartLine } from "@/types/pos";
 
@@ -20,7 +20,7 @@ export function CartLineRow({
 }: {
   line: CartLine;
   selected: boolean;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   onSelect: () => void;
   onAdjust: (delta: number) => void;
   onRemove: () => void;

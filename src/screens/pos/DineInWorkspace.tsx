@@ -78,7 +78,7 @@ import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/ta
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, receiptFallbackCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import type { ReceiptData } from "@/lib/receipt";
 import type { CartLine } from "@/types/pos";
@@ -118,7 +118,7 @@ export function useDineInWorkspace(input: {
   online: boolean;
   menu: RoundMenu;
   createOrders: Gate;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   cartLines: CartLine[];
   cartSelectedKey: string | null;
   onSelectLine: (key: string) => void;
@@ -617,8 +617,8 @@ export function useDineInWorkspace(input: {
         bill: TableBill;
         table: TableSummary;
         method: PaymentMethod;
-        primaryCurrency: CurrencyCode;
-        tenderCurrency: CurrencyCode;
+        primaryCurrency: OperationalCurrencyCode;
+        tenderCurrency: OperationalCurrencyCode;
         tendered: number | null;
         requestedDiscount: number;
       },
@@ -641,7 +641,7 @@ export function useDineInWorkspace(input: {
       //    representative order of the table (all orders on a table share the
       //    operational currency). A third-currency table with no valid server precision
       //    refuses rather than printing at a guessed 2 decimals.
-      const receiptMeta = await fetchReceiptCurrency(snapshot.bill.orders[0]?.id, snapshot.primaryCurrency);
+      const receiptMeta = await fetchReceiptCurrency(snapshot.bill.orders[0]?.id, receiptFallbackCurrency(snapshot.primaryCurrency));
       input.onPresentReceipt(
         buildTablePaymentReceipt({
           bill: snapshot.bill,
@@ -693,7 +693,7 @@ export function useDineInWorkspace(input: {
   const confirmPay = useCallback(
     async (dialog: {
       method: PaymentMethod;
-      currency: CurrencyCode;
+      currency: OperationalCurrencyCode;
       discountType: DiscountType;
       discountValue: string;
       tendered: number | null;
@@ -704,7 +704,7 @@ export function useDineInWorkspace(input: {
 
       // The bill's OWN currency is what the server settles in. The dialog's
       // currency is the TENDER currency at the drawer - a different thing.
-      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
+      const primaryCurrency: OperationalCurrencyCode = shownBill.currency ?? input.currency;
       const subtotal = shownBill.subtotal ?? 0;
 
       let discount: ReturnType<typeof validateTableDiscount>;
@@ -832,7 +832,7 @@ export function useDineInWorkspace(input: {
         return;
       }
 
-      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
+      const primaryCurrency: OperationalCurrencyCode = shownBill.currency ?? input.currency;
       const discountFields =
         dialog.discountType !== "none" && dialog.discountValue.trim() !== ""
           ? { discountType: dialog.discountType as "percent" | "amount", discountValue: Number(dialog.discountValue) }
@@ -880,7 +880,7 @@ export function useDineInWorkspace(input: {
         await input.refreshCashBox();
 
         // 6B-2: the bill's historical currency + server precision (representative order).
-        const receiptMeta = await fetchReceiptCurrency(shownBill.orders[0]?.id, primaryCurrency);
+        const receiptMeta = await fetchReceiptCurrency(shownBill.orders[0]?.id, receiptFallbackCurrency(primaryCurrency));
         input.onPresentReceipt(
           buildTableOnAccountReceipt({
             bill: shownBill,

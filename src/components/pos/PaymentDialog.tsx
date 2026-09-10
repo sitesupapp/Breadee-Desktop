@@ -15,7 +15,15 @@ import { Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { CustomerSearch, type CustomerSearchProps } from "@/components/pos/CustomerSearch";
 import { useShortcuts } from "@/lib/keyboard/provider";
-import { convertCurrency, formatMoney, hasValidRate, parseAmount, type CurrencyCode } from "@/lib/currency";
+import {
+  convertCurrency,
+  formatMoney,
+  hasValidRate,
+  isLegacyDualCurrency,
+  operationalDigitsFor,
+  parseAmount,
+  type OperationalCurrencyCode,
+} from "@/lib/currency";
 import { computeDiscount, discountPayload, fixedDiscountToPrimary, type DiscountType } from "@/lib/pos/discounts";
 import { computeChange, paymentBlockedReason, PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
 
@@ -72,7 +80,7 @@ export type PaymentDialogProps = {
   open: boolean;
   busy: boolean;
   subtotal: number;
-  primaryCurrency: CurrencyCode;
+  primaryCurrency: OperationalCurrencyCode;
   rate: number | null;
   discountGate: Gate;
   payGate: Gate;
@@ -104,7 +112,7 @@ export type PaymentDialogProps = {
   onCancel: () => void;
   onConfirm: (input: {
     method: PaymentMethod;
-    currency: CurrencyCode;
+    currency: OperationalCurrencyCode;
     discount: Record<string, unknown>;
     /**
      * The same discount, unpacked. Dine-In re-validates it through
@@ -121,7 +129,7 @@ export type PaymentDialogProps = {
 
 export function PaymentDialog(props: PaymentDialogProps) {
   const [method, setMethod] = useState<PaymentMethod>("cash");
-  const [currency, setCurrency] = useState<CurrencyCode>(props.primaryCurrency);
+  const [currency, setCurrency] = useState<OperationalCurrencyCode>(props.primaryCurrency);
   const [discountType, setDiscountType] = useState<DiscountType>("none");
   const [discountValue, setDiscountValue] = useState("");
   const [tendered, setTendered] = useState("");
@@ -364,24 +372,31 @@ export function PaymentDialog(props: PaymentDialogProps) {
               </div>
             </Field>
 
-            <Field label="Currency">
-              <div className="flex gap-2">
-                {(["USD", "LBP"] as CurrencyCode[]).map((c) => {
-                  const blocked = Boolean(paymentBlockedReason(c, props.rate));
-                  return (
-                    <Choice
-                      key={c}
-                      active={currency === c}
-                      disabled={blocked}
-                      title={blocked ? "No USD/LBP exchange rate is set." : undefined}
-                      onClick={() => setCurrency(c)}
-                    >
-                      {c}
-                    </Choice>
-                  );
-                })}
-              </div>
-            </Field>
+            {/* Tender currency. The USD/LBP chooser is the legacy DUAL-TENDER control and
+                is shown ONLY for a USD/LBP tenant. A third-currency (AED/JOD) tenant settles
+                in its single operational currency — the server enforces this
+                (`_pos_assert_tender_currency`) — so there is no chooser and no way to pick
+                USD; the tender stays fixed at `primaryCurrency` (set on open/reset). */}
+            {isLegacyDualCurrency(props.primaryCurrency) && (
+              <Field label="Currency">
+                <div className="flex gap-2">
+                  {(["USD", "LBP"] as OperationalCurrencyCode[]).map((c) => {
+                    const blocked = Boolean(paymentBlockedReason(c, props.rate));
+                    return (
+                      <Choice
+                        key={c}
+                        active={currency === c}
+                        disabled={blocked}
+                        title={blocked ? "No USD/LBP exchange rate is set." : undefined}
+                        onClick={() => setCurrency(c)}
+                      >
+                        {c}
+                      </Choice>
+                    );
+                  })}
+                </div>
+              </Field>
+            )}
           </div>
           {currencyBlock && <p className="text-xs font-semibold text-amber-800">{currencyBlock}</p>}
 
@@ -470,7 +485,8 @@ export function PaymentDialog(props: PaymentDialogProps) {
             </div>
             {/* `compact` trims the key height to 44px - still above the 44px touch
                 target this app holds itself to, and 12px x 5 rows shorter. */}
-            <NumericKeypad compact value={tendered} onChange={setTendered} allowDecimal={currency === "USD"} />
+            {/* Precision follows the TENDER currency: USD/AED 2dp, LBP 0dp, JOD/KWD 3dp. */}
+            <NumericKeypad compact value={tendered} onChange={setTendered} decimalDigits={operationalDigitsFor(currency)} />
           </div>
         ) : (
           /* On-account handling. The amount is always in the PRIMARY currency -

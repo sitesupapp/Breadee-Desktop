@@ -17,7 +17,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Badge, Button, Input, cn } from "@/components/ui";
 import { Modal } from "@/components/overlays";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import {
   loadOrdersForDay,
   orderLifecycleLabel,
@@ -52,7 +52,7 @@ export function OrdersModal(props: {
   tenantId: string | null;
   branchId: string | null;
   shiftId: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   tableNameFor: (tableId: string | null) => string | null;
   /** Current-shift orders, already loaded by the shared store. */
   shiftOrders: ShiftOpenOrder[];
@@ -237,7 +237,7 @@ export function OrdersModal(props: {
                       <td className="px-2 py-2">{typeLabel(o, props.tableNameFor(o.table_id))}</td>
                       <td className="px-2 py-2 text-sub">{o.staff_name ?? "—"}</td>
                       <td className="px-2 py-2 text-right font-semibold">
-                        {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as CurrencyCode)}
+                        {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as OperationalCurrencyCode)}
                       </td>
                       <td className="px-2 py-2">
                         <Badge tone={o.payment_status === "paid" ? "green" : o.payment_status === "refunded" ? "red" : "amber"}>

@@ -10,7 +10,7 @@
 // have been sent - never by a local counter.
 
 import { Badge, Button, EmptyState, GatedButton, PanelTitle, StatusDot, cn, type Gate } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { CartLineRow } from "@/components/pos/CartLineRow";
 import { billItemCount, linesByBatch } from "@/lib/pos/tableBill";
 import { preparingRoundLabel, sentRoundLabel } from "@/lib/pos/tableRounds";
@@ -29,7 +29,7 @@ export type DineInRoundPanelProps = {
   lines: CartLine[];
   selectedKey: string | null;
   subtotal: number;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   busy: boolean;
   submitGate: Gate;
   onSelect: (key: string) => void;

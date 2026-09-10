@@ -4,7 +4,7 @@
 // Nothing here invents a field: every property maps to a column the web POS
 // already selects, or to a key `pos_submit_order` / `pos_pay_order` already parse.
 
-import type { CurrencyCode } from "@/lib/currency";
+import type { OperationalCurrencyCode } from "@/lib/currency";
 
 export type OrderType = "takeaway" | "dine_in" | "delivery";
 
@@ -162,7 +162,7 @@ export type PayOrderResult = {
   discount: number;
   amount: number;
   order_number: string;
-  currency_code: CurrencyCode;
+  currency_code: OperationalCurrencyCode;
   original_amount: number;
   exchange_rate: number | null;
 };

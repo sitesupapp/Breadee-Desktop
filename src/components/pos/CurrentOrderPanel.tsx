@@ -26,7 +26,7 @@ import { useEffect, useState } from "react";
 import { Badge, Button, GatedButton, type Gate } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { OrderCarousel } from "@/components/pos/OrderCarousel";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { buildReceipt, type ReceiptData, type ReceiptOrderSource } from "@/lib/receipt";
 import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
 import {
@@ -54,7 +54,7 @@ export function CurrentOrderPanel(props: {
   branchName: string;
   staffName: string;
   shiftId: string | null;
-  fallbackCurrency: CurrencyCode;
+  fallbackCurrency: OperationalCurrencyCode;
   tableName?: string | null;
   onStep: (direction: 1 | -1) => void;
   onPresentReceipt: (receipt: ReceiptData) => void;
@@ -99,7 +99,7 @@ export function CurrentOrderPanel(props: {
     );
   }
 
-  const currency = (order?.currency ?? props.fallbackCurrency) as CurrencyCode;
+  const currency = (order?.currency ?? props.fallbackCurrency) as OperationalCurrencyCode;
   // Null for a terminal order - nothing further can be done to it.
   const reversal = order ? reversalActionFor(order) : null;
   // The lifecycle's own answer, not this screen's. A paid order offers no Pay.
@@ -278,7 +278,7 @@ export function CurrentOrderPanel(props: {
 }
 
 /** The selected order's lines, re-read per selection rather than cached. */
-function OrderLines(props: { orderId: string; currency: CurrencyCode }) {
+function OrderLines(props: { orderId: string; currency: OperationalCurrencyCode }) {
   const [lines, setLines] = useState<Awaited<ReturnType<typeof readOrderReceiptLines>> | null>(null);
   useEffect(() => {
     let live = true;

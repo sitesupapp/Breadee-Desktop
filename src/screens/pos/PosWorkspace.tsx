@@ -78,7 +78,7 @@ import { canViewDelivery, canViewTables } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
-import { type CurrencyCode } from "@/lib/currency";
+import { receiptFallbackCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
@@ -113,7 +113,7 @@ function PosWorkspaceInner() {
   const shiftStore = useShift();
   const cart = useCart();
 
-  const currency: CurrencyCode = session.currency.primary;
+  const currency: OperationalCurrencyCode = session.currency.primary;
   const rate = session.currency.rate;
   const online = session.online && !session.offlineMode;
 
@@ -358,7 +358,7 @@ function PosWorkspaceInner() {
         // 6B-2: the order's OWN historical currency + precision, from the server. A
         // third-currency order with no valid server precision refuses here (caught below)
         // rather than reprinting at a guessed 2 decimals.
-        const receiptMeta = await fetchReceiptCurrency(order.id, currency);
+        const receiptMeta = await fetchReceiptCurrency(order.id, receiptFallbackCurrency(currency));
         receiptStore.present(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1138,7 +1138,7 @@ function PosWorkspaceInner() {
   const confirmPayment = useCallback(
     async (input: {
       method: PaymentMethod;
-      currency: CurrencyCode;
+      currency: OperationalCurrencyCode;
       discount: Record<string, unknown>;
       tendered: number | null;
     }) => {
@@ -1179,7 +1179,7 @@ function PosWorkspaceInner() {
         // 6B-2: the order's own historical currency + server precision. Best-effort for
         // USD/LBP (falls back to the client currency if the read is unavailable); a
         // third-currency order with no valid server precision refuses (caught below).
-        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
+        const receiptMeta = await fetchReceiptCurrency(orderId, receiptFallbackCurrency(currency));
         const completion = completePayment({
           result,
           lines,
@@ -1337,7 +1337,7 @@ function PosWorkspaceInner() {
         const receiptLines = existing ? await readOrderReceiptLines(orderId).catch(() => []) : null;
 
         // 6B-2: the order's own historical currency + server precision for the receivable.
-        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
+        const receiptMeta = await fetchReceiptCurrency(orderId, receiptFallbackCurrency(currency));
         const completion = completeOnAccountReceipt({
           result,
           lines,

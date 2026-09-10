@@ -19,7 +19,7 @@
 // Reversed orders are excluded from sold quantities and reported separately,
 // because a voided item was never sold.
 
-import { CASH_CONTRACT_CURRENCY, type CurrencyCode } from "@/lib/currency";
+import { CASH_CONTRACT_CURRENCY, type OperationalCurrencyCode } from "@/lib/currency";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 /** Statuses whose money never counted as a sale. */
@@ -58,7 +58,7 @@ export type ShiftReportDetail = {
   /** Orders whose money counted. */
   successfulOrders: number;
   successfulTotal: number;
-  currency: CurrencyCode | null;
+  currency: OperationalCurrencyCode | null;
 };
 
 /**
@@ -151,7 +151,7 @@ export function buildShiftReportLines(input: {
   shiftRef: string | null;
   openedAt: string | null;
   closedAt: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   money: {
     orders: number;
     grossSales: number;
@@ -167,7 +167,7 @@ export function buildShiftReportLines(input: {
   };
   detail: ShiftReportDetail;
   note: string | null;
-  fmt: (amount: number, currency: CurrencyCode) => string;
+  fmt: (amount: number, currency: OperationalCurrencyCode) => string;
 }): ReportLine[] {
   const { fmt, currency, money, detail } = input;
   const lines: ReportLine[] = [

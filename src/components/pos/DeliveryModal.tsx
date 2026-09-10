@@ -19,7 +19,7 @@
 import { useMemo } from "react";
 import { Badge, Button } from "@/components/ui";
 import { Modal } from "@/components/overlays";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { orderLifecycleLabel, orderLifecycleTone, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { canEditOrder, canSettleOrder, paymentLabel, reversalActionFor } from "@/lib/pos/orderActions";
 
@@ -27,7 +27,7 @@ export function DeliveryModal(props: {
   open: boolean;
   onClose: () => void;
   shiftId: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** Current-shift orders from the shared store; filtered to delivery here. */
   shiftOrders: ShiftOpenOrder[];
   onSelectOrder: (orderId: string) => void;
@@ -91,7 +91,7 @@ export function DeliveryModal(props: {
                       <Badge tone={orderLifecycleTone(o)}>{orderLifecycleLabel(o)}</Badge>
                     </div>
                     <span className="text-sm font-extrabold text-ink">
-                      {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as CurrencyCode)}
+                      {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as OperationalCurrencyCode)}
                     </span>
                   </div>
 

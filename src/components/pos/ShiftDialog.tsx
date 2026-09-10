@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { Modal } from "@/components/overlays";
 import { Badge, Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
-import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
+import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type OperationalCurrencyCode } from "@/lib/currency";
 import { differenceLabel } from "@/lib/pos/shifts";
 import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -28,7 +28,7 @@ export function OpenShiftDialog({
   open: boolean;
   busy: boolean;
   branchName: string;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   gate: Gate;
   error: string | null;
   onCancel: () => void;
@@ -104,7 +104,7 @@ export function EndShiftDialog({
   open: boolean;
   busy: boolean;
   expected: ShiftExpected | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   gate: Gate;
   error: string | null;
   onCancel: () => void;
@@ -241,7 +241,7 @@ export function ShiftReportDialog({
   onClose,
 }: {
   report: ShiftReport | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** The shift's orders, for the route and reversal detail. */
   shiftOrders?: ShiftOpenOrder[];
   /** Print the whole report as ONE document. Absent outside the packaged app. */

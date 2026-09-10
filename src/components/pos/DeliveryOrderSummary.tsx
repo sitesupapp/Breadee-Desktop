@@ -12,7 +12,7 @@
 // the customer owes.
 
 import { Badge, Button, GatedButton, PanelTitle, type Gate } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { addressLine } from "@/components/pos/CustomerCard";
 import type { CustomerAddress, CustomerProfile } from "@/lib/pos/customers";
 import { kitchenStateLabel, type OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
@@ -21,7 +21,7 @@ export type DeliveryOrderSummaryProps = {
   order: OpenDeliveryOrder;
   customer: CustomerProfile | null;
   address: CustomerAddress | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** True when this order was found by a re-read rather than a direct response. */
   recovered?: boolean;
   onStartNewOrder: () => void;
@@ -68,7 +68,7 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
       <div className="mt-3 flex items-baseline justify-between border-t border-line pt-2">
         <span className="text-sm font-semibold text-sub">Total</span>
         <span className="text-2xl font-extrabold tabular-nums text-ink">
-          {formatMoney(o.total_amount ?? 0, (o.currency as CurrencyCode) ?? props.currency)}
+          {formatMoney(o.total_amount ?? 0, (o.currency as OperationalCurrencyCode) ?? props.currency)}
         </span>
       </div>
 

@@ -8,7 +8,7 @@
 // No printing here, no side effects. Every monetary figure is passed IN from the
 // server response - nothing on a receipt is calculated by this module.
 
-import type { CurrencyCode } from "@/lib/currency";
+import { operationalDigitsFor, type OperationalCurrencyCode } from "@/lib/currency";
 
 /**
  * The order sources a receipt can be routed for.
@@ -141,8 +141,10 @@ export function buildReceipt(input: BuildReceiptInput): ReceiptData {
   };
 }
 
-/** A deterministic sample used by Settings -> Receipt design (no real data). */
-export function sampleReceipt(businessName: string | null | undefined, currency: CurrencyCode): ReceiptData {
+/** A deterministic sample used by Settings -> Receipt design (no real data). The sample
+ *  renders in the tenant's operational currency at its server-provided precision, so a
+ *  third-currency (AED/JOD) tenant previews its own layout, not a USD one. */
+export function sampleReceipt(businessName: string | null | undefined, currency: OperationalCurrencyCode): ReceiptData {
   const lines: ReceiptLine[] = [
     {
       name: "Chicken Sandwich",
@@ -165,6 +167,7 @@ export function sampleReceipt(businessName: string | null | undefined, currency:
     paid: true,
     method: "cash",
     currency,
+    decimalDigits: operationalDigitsFor(currency),
     lines,
     subtotal,
     discount: 0,

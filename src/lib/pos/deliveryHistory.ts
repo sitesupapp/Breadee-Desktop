@@ -25,7 +25,7 @@ import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
 import { buildReceipt, type ReceiptData, type ReceiptLine } from "@/lib/receipt";
 import type { OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
 import type { DeliveryQueueOrder } from "@/lib/pos/deliveryOrderManagement";
-import type { CurrencyCode } from "@/lib/currency";
+import { normalizeCurrencyCode, receiptFallbackCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 
 // --- addresses ---------------------------------------------------------------
@@ -267,7 +267,7 @@ export function orderShiftOpen(order: DeliveryQueueOrder | null, shifts: Map<str
 
 export type OrderPayment = {
   method: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   amount: number;
   originalAmount: number | null;
   exchangeRate: number | null;
@@ -296,7 +296,7 @@ export async function readOrderPayment(orderId: string): Promise<OrderPayment | 
   const currency = str(r.currency_code, "USD");
   return {
     method: strOrNull(r.method),
-    currency: currency === "LBP" ? "LBP" : "USD",
+    currency: normalizeCurrencyCode(currency),
     amount: num(r.amount),
     originalAmount: numOrNull(r.original_amount),
     exchangeRate: numOrNull(r.exchange_rate_usd_to_lbp),
@@ -325,7 +325,7 @@ export function buildHistoricalReceipt(input: {
   lines: ReceiptLine[];
   party: OrderParty;
   /** Used only when neither the order nor the payment recorded one. */
-  fallbackCurrency: CurrencyCode;
+  fallbackCurrency: OperationalCurrencyCode;
   /**
    * The order's HISTORICAL currency + precision from the server contract
    * `finance_order_financials` (Slice 6B-2). Authoritative for a reprint — the caller
@@ -378,7 +378,7 @@ export async function readHistoricalReceipt(input: {
   tenantName: string | null | undefined;
   branchName: string;
   staffName: string | null;
-  fallbackCurrency: CurrencyCode;
+  fallbackCurrency: OperationalCurrencyCode;
   at: string;
 }): Promise<ReceiptData> {
   const [lines, payment, receiptMeta] = await Promise.all([
@@ -387,7 +387,7 @@ export async function readHistoricalReceipt(input: {
     // 6B-2: the order's own historical currency + server precision. A third-currency
     // order with no valid server precision refuses (propagated to the caller) rather
     // than reprinting at a guessed 2 decimals.
-    fetchReceiptCurrency(input.order.id, input.fallbackCurrency),
+    fetchReceiptCurrency(input.order.id, receiptFallbackCurrency(input.fallbackCurrency)),
   ]);
   return buildHistoricalReceipt({
     ...input,

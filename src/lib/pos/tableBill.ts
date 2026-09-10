@@ -8,7 +8,7 @@
 // Level 2A performs no mutation here at all - no round submission, no payment.
 
 import { asRecord, num, numOrNull, str, strOrNull } from "@/lib/pos/rpc";
-import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
+import { isKnownOperationalCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import { EMPTY_BILL, type BillLine, type BillOrder, type TableBill } from "@/types/tables";
 import type { SelectedModifier } from "@/types/pos";
 
@@ -68,7 +68,7 @@ function toOrder(raw: unknown): BillOrder | null {
     subtotal: num(r.subtotal),
     discount_amount: num(r.discount_amount),
     total_amount: num(r.total_amount),
-    currency: isCurrencyCode(ccy) ? (ccy as CurrencyCode) : "USD",
+    currency: isKnownOperationalCurrency(ccy) ? ccy : "USD",
     exchange_rate: numOrNull(r.usd_to_lbp_rate_snapshot),
     created_at: strOrNull(r.created_at),
     lines,

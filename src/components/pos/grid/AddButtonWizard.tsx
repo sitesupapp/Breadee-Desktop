@@ -20,7 +20,7 @@
 import { useMemo, useState } from "react";
 import { Button, Input, cn } from "@/components/ui";
 import { Modal } from "@/components/overlays";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import type { SearchableItem } from "@/lib/pos/menu";
 import { HUES, SHADES, resolveColor } from "@/lib/pos/grid/colors";
@@ -86,7 +86,7 @@ export function AddButtonWizard({
   editing: boolean;
   initial: WizardDraft;
   items: SearchableItem[];
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   allowCategory: boolean;
   onCancel: () => void;
@@ -466,7 +466,7 @@ function Preview({
   item,
 }: {
   draft: WizardDraft;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   item: SearchableItem | null;
 }) {

@@ -28,7 +28,7 @@
 // type/value and never prorates.
 
 import { callPosRpc, asRecord, bool, num, numOrNull, str } from "@/lib/pos/rpc";
-import { hasValidRate, type CurrencyCode } from "@/lib/currency";
+import { hasValidRate, normalizeCurrencyCode, type OperationalCurrencyCode } from "@/lib/currency";
 import { computeDiscount, type DiscountType } from "@/lib/pos/discounts";
 import type { TableBill, TableSummary } from "@/types/tables";
 import type { Gate } from "@/components/ui";
@@ -38,7 +38,7 @@ import type { PaymentMethod } from "@/lib/pos/payments";
 export type TablePaymentPayload = {
   table_id: string;
   method: PaymentMethod;
-  currency_code: CurrencyCode;
+  currency_code: OperationalCurrencyCode;
   discount_type?: "percent" | "amount";
   discount_value?: number;
 };
@@ -50,7 +50,7 @@ export type TablePaymentResult = {
   subtotal: number;
   discount: number;
   amount: number;
-  currency_code: CurrencyCode;
+  currency_code: OperationalCurrencyCode;
   original_amount: number;
   exchange_rate: number | null;
 };
@@ -228,7 +228,7 @@ export function validateTableDiscount(input: {
 }
 
 /** The one refusal worth catching before the request, mirroring Level 1. */
-export function paymentCurrencyBlock(currency: CurrencyCode, rate: number | null | undefined): string | null {
+export function paymentCurrencyBlock(currency: OperationalCurrencyCode, rate: number | null | undefined): string | null {
   if (currency === "LBP" && !hasValidRate(rate)) {
     return "Set the USD to LBP exchange rate on the dashboard before accepting LBP payments";
   }
@@ -281,7 +281,7 @@ export function billChangedSincePreview(
 export function buildTablePaymentPayload(input: {
   tableId: string;
   method: PaymentMethod;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** Only ever the two discount fields, from `validateTableDiscount`. */
   discount?: Pick<TablePaymentPayload, "discount_type" | "discount_value">;
 }): TablePaymentPayload {
@@ -332,7 +332,7 @@ export async function payTable(payload: TablePaymentPayload): Promise<TablePayme
     subtotal: num(row.subtotal),
     discount: num(row.discount),
     amount: num(row.amount),
-    currency_code: ccy === "LBP" ? "LBP" : "USD",
+    currency_code: normalizeCurrencyCode(ccy),
     original_amount: num(row.original_amount),
     exchange_rate: numOrNull(row.exchange_rate),
   };

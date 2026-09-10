@@ -26,7 +26,7 @@
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
 import { computeChange } from "@/lib/pos/payments";
 import { tenderTotalFor } from "@/lib/pos/paymentCompletion";
-import type { CurrencyCode } from "@/lib/currency";
+import type { OperationalCurrencyCode } from "@/lib/currency";
 import type { PaymentMethod } from "@/lib/pos/payments";
 import type { TablePaymentResult } from "@/lib/pos/tablePayment";
 import type { TableBill, TableSummary } from "@/types/tables";
@@ -106,7 +106,7 @@ export type TableReceiptInput = {
   branchName: string;
   operatorName: string;
   /** The bill's selling currency — kept for the tender math below. */
-  primaryCurrency: CurrencyCode;
+  primaryCurrency: OperationalCurrencyCode;
   /**
    * The bill's HISTORICAL currency + precision from the server (Slice 6B-2), read from a
    * representative order of the table (all orders on a table share the operational
@@ -116,7 +116,7 @@ export type TableReceiptInput = {
   receiptCurrency: string;
   decimalDigits: number;
   /** The currency actually tendered at the drawer. */
-  tenderCurrency: CurrencyCode;
+  tenderCurrency: OperationalCurrencyCode;
   rate: number | null;
   tenderedInput: number | null;
   shiftId: string | null;
@@ -230,7 +230,7 @@ export type TableOnAccountReceiptInput = {
   branchName: string;
   operatorName: string;
   /** The bill's selling currency. */
-  primaryCurrency: CurrencyCode;
+  primaryCurrency: OperationalCurrencyCode;
   /** The bill's HISTORICAL currency + precision from the server (Slice 6B-2). */
   receiptCurrency: string;
   decimalDigits: number;

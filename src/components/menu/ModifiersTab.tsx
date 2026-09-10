@@ -20,7 +20,7 @@ import { canonSelectionType, canonicalizeGroup, describeGroup, groupConfigError 
 import { optionErrors, isSaveable } from "@/lib/menu/validation";
 import { optionsForGroup } from "@/lib/menu/filters";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import type { BuilderGroup, BuilderOption, GroupDraft } from "@/lib/menu/types";
 import type { Gate } from "@/components/ui";
 
@@ -39,12 +39,12 @@ export function ModifiersTab({
   groups: BuilderGroup[];
   options: BuilderOption[];
   gate: Gate;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   busyId: string | null;
   onSaveGroup: (draft: GroupDraft) => void;
   onArchiveGroup: (group: BuilderGroup) => void;
-  onAddOption: (group: BuilderGroup, name: string, extra: number, entered: CurrencyCode) => void;
+  onAddOption: (group: BuilderGroup, name: string, extra: number, entered: OperationalCurrencyCode) => void;
   onArchiveOption: (option: BuilderOption) => void;
 }) {
   const [draft, setDraft] = useState<GroupDraft | null>(null);
@@ -285,14 +285,14 @@ function OptionAdder({
   busy,
   onAdd,
 }: {
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   busy: boolean;
-  onAdd: (name: string, extra: number, entered: CurrencyCode) => void;
+  onAdd: (name: string, extra: number, entered: OperationalCurrencyCode) => void;
 }) {
   const [name, setName] = useState("");
   const [extra, setExtra] = useState("0");
-  const [entered, setEntered] = useState<CurrencyCode>(currency);
+  const [entered, setEntered] = useState<OperationalCurrencyCode>(currency);
   const amount = extra.trim() === "" ? 0 : Number(extra);
   const errors = optionErrors(name, amount, entered, currency, rate);
   const canAdd = isSaveable(errors) && !busy;

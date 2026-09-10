@@ -25,7 +25,7 @@
 // nobody. The client refuses to submit one; the server refuses too.
 
 import { asRecord, callPosRpc, num, str } from "@/lib/pos/rpc";
-import type { CurrencyCode } from "@/lib/currency";
+import { normalizeCurrencyCode, type OperationalCurrencyCode } from "@/lib/currency";
 import type { PaymentMethod } from "@/lib/pos/payments";
 
 // --- errors ------------------------------------------------------------------
@@ -181,7 +181,7 @@ export type TableOnAccountResult = {
   orders: number;
   subtotal: number;
   discount: number;
-  currency_code: CurrencyCode;
+  currency_code: OperationalCurrencyCode;
 };
 
 function asPaymentStatus(value: unknown): OnAccountPaymentStatus {
@@ -254,7 +254,7 @@ export async function completeTableOnAccount(input: {
     orders: num(row.orders),
     subtotal: num(row.subtotal),
     discount: num(row.discount),
-    currency_code: ccy === "LBP" ? "LBP" : "USD",
+    currency_code: normalizeCurrencyCode(ccy),
   };
 }
 

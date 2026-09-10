@@ -4,7 +4,7 @@
 // never the security boundary. Keeping the arithmetic identical means the amount
 // the cashier is shown is the amount the server will charge.
 
-import { convertCurrency, type CurrencyCode } from "@/lib/currency";
+import { convertCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 
 export type DiscountType = "none" | "percent" | "amount";
 export type DiscountResult = { amount: number; finalTotal: number; valid: boolean; error: string | null };
@@ -56,8 +56,8 @@ export function discountPayload(
 export function fixedDiscountToPrimary(
   type: DiscountType,
   valueStr: string,
-  payCurrency: CurrencyCode,
-  primaryCurrency: CurrencyCode,
+  payCurrency: OperationalCurrencyCode,
+  primaryCurrency: OperationalCurrencyCode,
   rate: number | null | undefined,
 ): string {
   if (type !== "amount" || payCurrency === primaryCurrency) return valueStr;

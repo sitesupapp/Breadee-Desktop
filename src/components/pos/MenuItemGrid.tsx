@@ -7,7 +7,7 @@
 // before they tap.
 
 import { useMemo, useRef, useState } from "react";
-import { type CurrencyCode } from "@/lib/currency";
+import { type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { useElementSize } from "@/lib/useElementSize";
 import type { SearchableItem } from "@/lib/pos/menu";
@@ -23,7 +23,7 @@ const OVERSCAN_ROWS = 3;
 export type MenuItemGridProps = {
   items: SearchableItem[];
   columns: number;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   itemsNeedingChoice: ReadonlySet<string>;
   onPick: (item: SearchableItem, price: number) => void;

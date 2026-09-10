@@ -142,7 +142,7 @@ import { useCart, type CartOwner } from "@/state/cart";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
-import type { CurrencyCode } from "@/lib/currency";
+import { receiptFallbackCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import type { CartLine } from "@/types/pos";
 import type { Gate } from "@/components/ui";
 
@@ -209,7 +209,7 @@ export function useDeliveryWorkspace(input: {
   /** The open shift's id. Required on the payload - never inferred. */
   shiftId: string | null;
   createOrders: Gate;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   cartLines: CartLine[];
   cartSelectedKey: string | null;
   onSelectLine: (key: string) => void;
@@ -980,7 +980,7 @@ export function useDeliveryWorkspace(input: {
   const settle = useCallback(
     async (confirm: {
       method: PaymentMethod;
-      currency: CurrencyCode;
+      currency: OperationalCurrencyCode;
       discountType: DiscountType;
       discountValue: string;
       tendered: number | null;
@@ -1053,7 +1053,7 @@ export function useDeliveryWorkspace(input: {
         const money = outcome.result;
         const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
         // 6B-2: the order's own historical currency + server precision.
-        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
+        const receiptMeta = await fetchReceiptCurrency(intended.orderId, receiptFallbackCurrency(input.currency));
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1084,7 +1084,7 @@ export function useDeliveryWorkspace(input: {
             subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
             discount: money?.discount ?? 0,
             total: money?.amount ?? settled!.total_amount ?? 0,
-            tenderCurrency: (money?.currency_code ?? confirm.currency) as CurrencyCode,
+            tenderCurrency: (money?.currency_code ?? confirm.currency) as OperationalCurrencyCode,
             tenderTotal: money?.original_amount ?? null,
             tendered: confirm.tendered,
             change:
@@ -1220,7 +1220,7 @@ export function useDeliveryWorkspace(input: {
         const balance = money ? money.outstanding_usd : Math.max(0, total - paidNow);
         const who = receiptIdentity(order);
         // 6B-2: the order's own historical currency + server precision.
-        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
+        const receiptMeta = await fetchReceiptCurrency(intended.orderId, receiptFallbackCurrency(input.currency));
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,

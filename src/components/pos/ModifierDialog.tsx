@@ -8,7 +8,7 @@
 import { useMemo, useState } from "react";
 import { Modal } from "@/components/overlays";
 import { Button, Textarea, cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { allowedMax, isSingleSelect, lineTotals, modifierViolations, requiredMin, toggleModifier } from "@/lib/pos/modifiers";
 import type { MenuItem, ModifierGroup, ModifierOption, SelectedModifier } from "@/types/pos";
@@ -19,7 +19,7 @@ export type ModifierDialogProps = {
   basePrice: number;
   groups: ModifierGroup[];
   optionsByGroup: Record<string, ModifierOption[]>;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   onCancel: () => void;
   onConfirm: (input: { modifiers: SelectedModifier[]; quantity: number; note: string | null }) => void;

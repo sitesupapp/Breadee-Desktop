@@ -15,7 +15,7 @@
 import { buildReceipt, type ReceiptData, type ReceiptLine } from "@/lib/receipt";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { computeChange } from "@/lib/pos/payments";
-import { convertCurrency, hasValidRate, type CurrencyCode } from "@/lib/currency";
+import { convertCurrency, hasValidRate, type OperationalCurrencyCode } from "@/lib/currency";
 import type { CartLine, PayOrderResult } from "@/types/pos";
 
 export type PaymentCompletionInput = {
@@ -48,7 +48,7 @@ export type PaymentCompletionInput = {
   branchName: string;
   operatorName: string;
   /** The tenant's primary (selling) currency — kept for the tender math below. */
-  primaryCurrency: CurrencyCode;
+  primaryCurrency: OperationalCurrencyCode;
   /**
    * The order's HISTORICAL currency and display precision, from the server contract
    * `finance_order_financials` (Slice 6B-2). Authoritative for what the receipt shows —
@@ -59,7 +59,7 @@ export type PaymentCompletionInput = {
   receiptCurrency: string;
   decimalDigits: number;
   /** The currency actually tendered. */
-  tenderCurrency: CurrencyCode;
+  tenderCurrency: OperationalCurrencyCode;
   rate: number | null;
   tenderedInput: number | null;
   shiftId: string | null;
@@ -97,8 +97,8 @@ export type PaymentCompletion = {
  */
 export function tenderTotalFor(
   amount: number,
-  primaryCurrency: CurrencyCode,
-  tenderCurrency: CurrencyCode,
+  primaryCurrency: OperationalCurrencyCode,
+  tenderCurrency: OperationalCurrencyCode,
   rate: number | null,
 ): number | null {
   if (tenderCurrency === primaryCurrency) return amount;
@@ -195,7 +195,7 @@ export type OnAccountCompletionInput = {
   branchName: string;
   operatorName: string;
   /** The order's primary (selling) currency - the currency every figure is in. */
-  primaryCurrency: CurrencyCode;
+  primaryCurrency: OperationalCurrencyCode;
   /** The order's HISTORICAL currency + precision from finance_order_financials (6B-2). */
   receiptCurrency: string;
   decimalDigits: number;

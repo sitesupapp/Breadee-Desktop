@@ -16,7 +16,7 @@
 // desktop check would refuse a save the web app accepts - which is divergence,
 // not safety. Two "Espresso" rows are legal in this schema and stay legal here.
 
-import { hasValidRate, type CurrencyCode } from "@/lib/currency";
+import { hasValidRate, type OperationalCurrencyCode } from "@/lib/currency";
 
 /** The largest magnitude the legacy numeric(18,4) price columns can hold. */
 export const PRICE_MAX_SAFE = 1e14;
@@ -37,8 +37,8 @@ export function exceedsPriceLimit(amount: number | null | undefined): boolean {
  */
 export function priceError(
   amount: number | null,
-  entered: CurrencyCode,
-  primary: CurrencyCode,
+  entered: OperationalCurrencyCode,
+  primary: OperationalCurrencyCode,
   rate: number | null | undefined,
 ): string | null {
   if (amount === null) return null;
@@ -61,8 +61,8 @@ export type ItemDraftInput = {
 /** Field-keyed errors for the item drawer. Empty object means "saveable". */
 export function itemDraftErrors(
   draft: ItemDraftInput,
-  entered: CurrencyCode,
-  primary: CurrencyCode,
+  entered: OperationalCurrencyCode,
+  primary: OperationalCurrencyCode,
   rate: number | null | undefined,
 ): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -81,8 +81,8 @@ export function categoryNameError(name: string | null | undefined): string | nul
 export function optionErrors(
   name: string | null | undefined,
   extra: number | null,
-  entered: CurrencyCode,
-  primary: CurrencyCode,
+  entered: OperationalCurrencyCode,
+  primary: OperationalCurrencyCode,
   rate: number | null | undefined,
 ): Record<string, string> {
   const errors: Record<string, string> = {};

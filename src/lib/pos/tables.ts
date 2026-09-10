@@ -15,7 +15,7 @@
 // total the server declined to sum (mixed currency) stays null.
 
 import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull } from "@/lib/pos/rpc";
-import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
+import { isKnownOperationalCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import {
   type OpenTableResult,
   type TableCardState,
@@ -31,8 +31,10 @@ function toStatus(value: unknown): TableStatus {
   return (TABLE_STATUSES as string[]).includes(s) ? (s as TableStatus) : "available";
 }
 
-function toCurrency(value: unknown): CurrencyCode | null {
-  return isCurrencyCode(value) ? value : null;
+function toCurrency(value: unknown): OperationalCurrencyCode | null {
+  // A known operational currency (USD/LBP or a server-catalog code) is kept; anything else
+  // — including a well-formed but unknown code — is dropped, and a mixed/omitted total stays null.
+  return isKnownOperationalCurrency(value) ? value : null;
 }
 
 /** Parse one map row defensively - a malformed row must not break the whole map. */

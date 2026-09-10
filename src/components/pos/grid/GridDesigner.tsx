@@ -18,7 +18,7 @@
 import { useMemo, useRef, useState } from "react";
 import { Button, cn } from "@/components/ui";
 import { useElementSize } from "@/lib/useElementSize";
-import { type CurrencyCode } from "@/lib/currency";
+import { type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import type { SearchableItem } from "@/lib/pos/menu";
 import { fitGrid } from "@/lib/pos/grid/fit";
@@ -44,7 +44,7 @@ export function GridDesigner({
 }: {
   page: GridPage;
   itemsById: Map<string, SearchableItem>;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   movingId: string | null;
   onAction: (action: CellAction) => void;
