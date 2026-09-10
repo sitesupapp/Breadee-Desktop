@@ -13,7 +13,7 @@
 import { Badge, Button, EmptyState, GatedButton, Input, StatusDot, cn } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { PosIconGlyph } from "@/components/PosIconGlyph";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { ALL_CATEGORIES, ANY_STATUS, NO_CATEGORY, groupCountForItem, type ItemFilter } from "@/lib/menu/filters";
 import { ITEM_STATUSES, ITEM_STATUS_LABELS, type BuilderCategory, type BuilderItem } from "@/lib/menu/types";
@@ -48,7 +48,7 @@ export function ItemsTab({
   groupsByItem: Record<string, string[]>;
   icons: IconAssignments;
   filter: ItemFilter;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   createGate: Gate;
   editGate: Gate;

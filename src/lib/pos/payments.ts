@@ -13,7 +13,7 @@
 // amount. They are never sent and never posted.
 
 import { callPosRpc, asRecord, bool, num, numOrNull, requireId, str } from "@/lib/pos/rpc";
-import { hasValidRate, roundForCurrency, type CurrencyCode } from "@/lib/currency";
+import { hasValidRate, normalizeCurrencyCode, roundForCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 import type { PayOrderResult } from "@/types/pos";
 
 /** The only method the current POS contract exercises; kept as a field, not a literal. */
@@ -24,7 +24,9 @@ export const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [{ val
 export type PayOrderInput = {
   orderId: string;
   method: PaymentMethod;
-  currency: CurrencyCode;
+  /** The tender currency. For USD/LBP tenants this is USD or LBP; for a third-currency
+   *  tenant it is the single operational currency (the server rejects anything else). */
+  currency: OperationalCurrencyCode;
   /** Already converted to the order's PRIMARY currency by the caller. */
   discount?: Record<string, unknown>;
 };
@@ -34,7 +36,9 @@ export type PayOrderInput = {
  * request: LBP with no usable rate. Everything else is left to the server so the
  * desktop can never be more permissive than the database.
  */
-export function paymentBlockedReason(currency: CurrencyCode, rate: number | null | undefined): string | null {
+export function paymentBlockedReason(currency: OperationalCurrencyCode, rate: number | null | undefined): string | null {
+  // Only LBP tender needs the USD↔LBP rate. USD and any third operational currency
+  // (settled 1:1 in itself) never do — so a third-currency payment is never rate-blocked.
   if (currency === "LBP" && !hasValidRate(rate)) {
     return "Set the USD to LBP exchange rate on the dashboard before accepting LBP payments";
   }
@@ -61,7 +65,11 @@ export async function payOrder(input: PayOrderInput): Promise<PayOrderResult> {
     discount: num(row.discount),
     amount: num(row.amount),
     order_number: str(row.order_number),
-    currency_code: currency === "LBP" ? "LBP" : "USD",
+    // Preserve the currency the SERVER settled in. A third-currency order comes back
+    // in its own code (e.g. "AED"); coercing to USD/LBP here would mislabel the receipt.
+    // `normalizeCurrencyCode` validates the ISO shape and only falls back to USD when the
+    // server returned nothing usable — never for a valid third currency.
+    currency_code: normalizeCurrencyCode(currency),
     original_amount: num(row.original_amount),
     exchange_rate: numOrNull(row.exchange_rate),
   };
@@ -74,7 +82,7 @@ export async function payOrder(input: PayOrderInput): Promise<PayOrderResult> {
 export function computeChange(
   amountDue: number,
   tendered: number,
-  currency: CurrencyCode,
+  currency: OperationalCurrencyCode,
 ): { change: number; short: boolean } {
   const due = roundForCurrency(amountDue, currency);
   const paid = roundForCurrency(tendered, currency);

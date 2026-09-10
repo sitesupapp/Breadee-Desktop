@@ -22,7 +22,7 @@ import { usePosContext } from "@/state/pos";
 import { Badge, Button, Card, EmptyState, GatedButton, Input, PanelTitle, Skeleton } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { Glyph } from "@/components/Glyph";
-import { formatMoney, parseAmount, roundUsd, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, parseAmount, roundUsd, type OperationalCurrencyCode } from "@/lib/currency";
 import { PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
 import {
   assertCollectionAmount,

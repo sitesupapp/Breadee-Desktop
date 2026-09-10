@@ -17,7 +17,7 @@
 // two are never one control with a flag - see `voidActionFor`.
 
 import { Badge, Button, GatedButton, Skeleton, type Gate } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import {
   orderStateLabel,
   orderStateTone,
@@ -34,7 +34,7 @@ export type DeliveryOrderDetailProps = {
   lines: DeliveryOrderLine[];
   linesLoading: boolean;
   linesError: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** "cancel" on an unpaid order, "refund" on a paid one. Derived, never chosen. */
   voidAction: VoidAction;
   editGate: Gate;
@@ -61,7 +61,7 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
   const o = props.order;
   const party = props.party ?? UNKNOWN_PARTY;
   const terminal = isTerminal(o.status);
-  const currency = (o.currency as CurrencyCode) ?? props.currency;
+  const currency = (o.currency as OperationalCurrencyCode) ?? props.currency;
   const total = o.total_amount ?? 0;
   const subtotal = o.subtotal ?? total;
   const discount = o.discount_amount ?? 0;

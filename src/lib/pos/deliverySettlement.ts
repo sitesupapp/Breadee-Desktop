@@ -23,7 +23,7 @@
 import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull } from "@/lib/pos/rpc";
 import { computeDiscount, type DiscountType } from "@/lib/pos/discounts";
 import { OPEN_DELIVERY_STATUSES, type OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
-import type { CurrencyCode } from "@/lib/currency";
+import { normalizeCurrencyCode, type OperationalCurrencyCode } from "@/lib/currency";
 import type { ReceiptLine, ReceiptModifier } from "@/lib/receipt";
 import type { PaymentMethod } from "@/lib/pos/payments";
 import type { Gate } from "@/components/ui";
@@ -123,7 +123,7 @@ export function deliveryPaymentGate(input: {
 export type DeliveryPaymentPayload = {
   order_id: string;
   method: PaymentMethod;
-  currency_code: CurrencyCode;
+  currency_code: OperationalCurrencyCode;
   discount_type?: "percent" | "amount";
   discount_value?: number;
 };
@@ -168,7 +168,7 @@ export const FORBIDDEN_DELIVERY_PAYMENT_FIELDS = [
 export function buildDeliveryPaymentPayload(input: {
   orderId: string;
   method: PaymentMethod;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   discount: { discount_type?: "percent" | "amount"; discount_value?: number };
 }): DeliveryPaymentPayload {
   const payload: DeliveryPaymentPayload = {
@@ -211,7 +211,7 @@ export type DeliveryPaymentResult = {
   discount: number;
   amount: number;
   order_number: string;
-  currency_code: CurrencyCode;
+  currency_code: OperationalCurrencyCode;
   original_amount: number;
   exchange_rate: number | null;
 };
@@ -227,7 +227,7 @@ export async function payDeliveryOrder(payload: DeliveryPaymentPayload): Promise
     discount: num(row.discount),
     amount: num(row.amount),
     order_number: str(row.order_number),
-    currency_code: currency === "LBP" ? "LBP" : "USD",
+    currency_code: normalizeCurrencyCode(currency),
     original_amount: num(row.original_amount),
     exchange_rate: numOrNull(row.exchange_rate),
   };

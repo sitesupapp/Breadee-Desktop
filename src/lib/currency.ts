@@ -1,11 +1,90 @@
-// Dual USD/LBP currency for the desktop app. Mirrors the web app's rules exactly:
-// USD renders as "$X.XX"; LBP renders as "X LBP" (never a "$" sign).
+// Currency for the desktop app.
 //
-// Conversion helpers exist here so the POS can validate input and show tendered /
-// change BEFORE calling the server. They are never the financial authority: order
-// and payment totals are always the values returned by the Supabase RPCs.
+// TWO concepts live here, kept deliberately apart (i18n 5E-1A-D):
+//   * the LEGACY USD/LBP dual-tender + cash contract (`CurrencyCode`, USD "$X.XX" /
+//     LBP "X LBP", the USD↔LBP conversion helpers, `CASH_CONTRACT_CURRENCY`), and
+//   * the GENERAL operational currency (`OperationalCurrencyCode`) a tenant actually
+//     runs in — USD, LBP, or a third currency (AED/JOD/…) — rendered at its
+//     SERVER-PROVIDED precision, with no "$" leakage and no hard-coded catalog.
+// USD/LBP output is byte-identical to before; the generalization only adds a path
+// for a third operational currency.
+//
+// Conversion helpers exist so the POS can validate input and show tendered / change
+// BEFORE calling the server. They are never the financial authority: order and
+// payment totals are always the values returned by the Supabase RPCs.
 
+// LEGACY DUAL-TENDER / CASH type. The two currencies the POS can settle a bill in
+// and the unit the cash drawer is denominated in. NOT the general operational
+// currency — a third-currency (e.g. AED/JOD) tenant is `OperationalCurrencyCode`,
+// never one of these. Keep this narrow: it exists so the USD/LBP dual-tender and
+// the USD cash-drawer contract stay exactly what they were. See `OperationalCurrencyCode`.
 export type CurrencyCode = "USD" | "LBP";
+
+// The GENERAL operational currency a tenant runs in: the actual server-provided
+// `primary_currency` string (USD, LBP, AED, JOD, …). It is deliberately a plain,
+// server-sourced string and NOT widened from `CurrencyCode`: widening the bilateral
+// tender type to make a third currency compile is the exact mistake this split avoids.
+// A third-currency tenant operates in ONE such currency; USD/LBP tenants keep their
+// bilateral behaviour. Digits for a code come from the server (`operationalDigitsFor`),
+// never a hard-coded local catalog.
+export type OperationalCurrencyCode = string;
+
+// Server-provided minor-unit precision for operational currencies, keyed by ISO code.
+// Populated ONCE from `get_tenant_currency_and_regional_settings().selectable_currencies`
+// at session load (`setOperationalCurrencyDigits`) — it is cached server metadata, not a
+// local catalog, and it is consulted ONLY for codes outside USD/LBP (whose precision is
+// intrinsic). Empty until a session loads; a third-currency render cannot occur before then.
+let operationalDigitsRegistry: Record<string, number> = {};
+
+/**
+ * Record the server's per-currency decimal precision for the current session.
+ * `entries` is the server's `selectable_currencies` list. Invalid rows are ignored;
+ * USD/LBP are never needed here (their precision is intrinsic) but are harmless if present.
+ */
+export function setOperationalCurrencyDigits(
+  entries: ReadonlyArray<{ code?: unknown; decimal_digits?: unknown }> | null | undefined,
+): void {
+  const next: Record<string, number> = {};
+  for (const e of entries ?? []) {
+    const code = String(e?.code ?? "").trim().toUpperCase();
+    const d = e?.decimal_digits;
+    if (/^[A-Z]{3}$/.test(code) && typeof d === "number" && Number.isInteger(d) && d >= 0 && d <= 4) {
+      next[code] = d;
+    }
+  }
+  operationalDigitsRegistry = next;
+}
+
+/**
+ * The decimal precision for an operational currency code. USD/LBP are intrinsic (2/0);
+ * every other code is resolved from the server-loaded registry, falling back to 2 when
+ * the registry has no entry yet (fail-safe — a wrong precision never becomes a "$" leak,
+ * and the operational currency's identity is preserved). Never guesses by locale/country.
+ */
+export function operationalDigitsFor(code: OperationalCurrencyCode | null | undefined): number {
+  const c = String(code ?? "").trim().toUpperCase();
+  if (c === "USD") return 2;
+  if (c === "LBP") return 0;
+  const d = operationalDigitsRegistry[c];
+  return typeof d === "number" ? d : 2;
+}
+
+/** True for the two legacy dual-tender currencies. Gates USD/LBP-only UI (tender/price choosers). */
+export function isLegacyDualCurrency(code: OperationalCurrencyCode | null | undefined): code is CurrencyCode {
+  return code === "USD" || code === "LBP";
+}
+
+/**
+ * The USD/LBP client fallback for the Slice-6B receipt resolver. A receipt's real currency
+ * comes from the server (`finance_order_financials`); this fallback is used only when that
+ * metadata is unavailable, and the resolver's fallback contract is USD/LBP. A third
+ * operational currency has NO client-side fallback — its receipt relies on server metadata —
+ * so it maps to USD here (the documented Phase-1 compatibility path), never silently
+ * printing a third currency at a guessed precision.
+ */
+export function receiptFallbackCurrency(code: OperationalCurrencyCode | null | undefined): CurrencyCode {
+  return isLegacyDualCurrency(code) ? code : "USD";
+}
 
 /**
  * The currency the POS **cash / drawer** contract is denominated in: USD, always,
@@ -47,6 +126,28 @@ export function isCurrencyCode(v: unknown): v is CurrencyCode {
   return v === "USD" || v === "LBP";
 }
 
+/**
+ * Runtime shape validator for an operational currency code: a 3-letter upper-case
+ * string (ISO-4217 shape). This is the ONLY local "catalog" allowed — a shape check,
+ * not a hard-coded list of currencies or their digits. Use it to narrow an untrusted
+ * server value (e.g. an order's stored currency) so a third currency (AED/JOD) is
+ * accepted rather than dropped, without pretending every 3-letter string is real money.
+ */
+export function isOperationalCurrencyCode(v: unknown): v is OperationalCurrencyCode {
+  return typeof v === "string" && /^[A-Z]{3}$/.test(v);
+}
+
+/**
+ * True only for a currency the app actually KNOWS: USD/LBP, or a code the server catalog
+ * declared this session (`setOperationalCurrencyDigits`). Use it to parse a currency out of
+ * stored data — it accepts a real third currency (AED/JOD) once the catalog is loaded, but
+ * drops a well-formed-but-unknown code (e.g. "XXX") rather than displaying money in a
+ * currency whose precision the server never vouched for.
+ */
+export function isKnownOperationalCurrency(v: unknown): v is OperationalCurrencyCode {
+  return isOperationalCurrencyCode(v) && (v === "USD" || v === "LBP" || v in operationalDigitsRegistry);
+}
+
 export function hasValidRate(rate: number | null | undefined): rate is number {
   return typeof rate === "number" && Number.isFinite(rate) && rate > 0;
 }
@@ -58,16 +159,29 @@ export function roundTo(value: number, dp: number): number {
 
 export const roundUsd = (value: number | null | undefined): number => roundTo(Number(value) || 0, 2);
 
-/** The other side of the pair - what an amount is also worth. */
+/**
+ * The other side of the USD/LBP pair — what a USD/LBP amount is ALSO worth. Only
+ * meaningful for the two legacy dual-tender currencies; a third operational currency has
+ * no second side, so callers must gate on `isLegacyDualCurrency` before showing an
+ * equivalent. Kept typed `CurrencyCode` in/out precisely because it is a USD/LBP concept.
+ */
 export function getEquivalentCurrency(primary: CurrencyCode): CurrencyCode {
   return primary === "USD" ? "LBP" : "USD";
 }
 
-// Primary formatter. LBP is whole-number with a trailing " LBP"; USD is "$" + 2dp.
-export function formatMoney(amount: number | null | undefined, code: CurrencyCode = "USD"): string {
+// Primary display formatter, generalized to the tenant's operational currency.
+//
+// USD is "$" + 2dp and LBP is a whole number + " LBP" — BYTE-IDENTICAL to before, so
+// every USD/LBP surface and its tests are unchanged. Any OTHER operational currency
+// (AED/JOD/…) renders as "<amount> <CODE>" at its SERVER-PROVIDED precision
+// (`operationalDigitsFor`): no "$" leakage, no hard-coded 2-decimal assumption, and the
+// currency's own identity preserved. This mirrors the receipt formatter’s non-USD/LBP
+// branch so screen and paper agree.
+export function formatMoney(amount: number | null | undefined, code: OperationalCurrencyCode = "USD"): string {
   const n = Number(amount ?? 0);
   if (code === "LBP") return `${Math.round(n).toLocaleString()} LBP`;
-  return `$${n.toFixed(2)}`;
+  if (code === "USD") return `$${n.toFixed(2)}`;
+  return `${n.toFixed(operationalDigitsFor(code))} ${String(code).trim().toUpperCase()}`;
 }
 
 /**
@@ -124,11 +238,13 @@ export function convertLbpToUsd(lbp: number | null | undefined, rate: number | n
  */
 export function convertCurrency(
   amount: number,
-  from: CurrencyCode,
-  to: CurrencyCode,
+  from: OperationalCurrencyCode,
+  to: OperationalCurrencyCode,
   rate: number | null | undefined,
 ): number {
   const n = Number(amount) || 0;
+  // Same currency passes straight through — the ONLY path a third-currency tenant
+  // ever takes here, since its tender is always its single operational currency.
   if (from === to) return n;
   if (!hasValidRate(rate)) {
     throw new Error("Set the USD to LBP exchange rate on the dashboard before using this currency.");
@@ -150,7 +266,14 @@ export function parseAmount(input: string | null | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Smallest meaningful unit for a currency - used to round tendered/change. */
-export function roundForCurrency(amount: number, code: CurrencyCode): number {
-  return code === "LBP" ? Math.round(Number(amount) || 0) : roundUsd(amount);
+/**
+ * Round a tendered/change amount to the currency's smallest meaningful unit.
+ * LBP is whole-number and USD is 2dp — unchanged. Any other operational currency
+ * rounds to its SERVER-PROVIDED precision (JOD/KWD = 3dp), so change for a
+ * third-currency cash sale lands on a real minor unit rather than a coerced 2dp.
+ */
+export function roundForCurrency(amount: number, code: OperationalCurrencyCode): number {
+  if (code === "LBP") return Math.round(Number(amount) || 0);
+  if (code === "USD") return roundUsd(amount);
+  return roundTo(Number(amount) || 0, operationalDigitsFor(code));
 }

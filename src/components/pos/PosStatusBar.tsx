@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import { Badge, Button, StatusDot, cn } from "@/components/ui";
-import { CASH_CONTRACT_CURRENCY, formatMoney, type CurrencyCode } from "@/lib/currency";
+import { CASH_CONTRACT_CURRENCY, formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { elapsedSince } from "@/lib/pos/shifts";
 import { TopBarPopover } from "@/components/pos/TopBarPopover";
 import { orderLifecycleLabel, orderLifecycleTone, orderRouteLabel, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -28,7 +28,7 @@ export type PosStatusBarProps = {
   roleLabel: string;
   shift: ActiveShift | null;
   cashBox: CashBox | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   online: boolean;
   offlineMode: boolean;
   pendingSync: number;
@@ -193,7 +193,7 @@ export function PosStatusBar(props: PosStatusBarProps) {
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[12px] font-bold text-ink">#{o.order_number ?? o.id.slice(0, 8)}</span>
                           <span className="text-[12px] font-bold text-ink">
-                            {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as CurrencyCode)}
+                            {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as OperationalCurrencyCode)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-2">

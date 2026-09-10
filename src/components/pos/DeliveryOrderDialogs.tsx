@@ -19,7 +19,7 @@
 import { useEffect, useState } from "react";
 import { Modal } from "@/components/overlays";
 import { Button, GatedButton, Input, Textarea, type Gate } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { computeDiscount, type DiscountType } from "@/lib/pos/discounts";
 import type { DeliveryQueueOrder, VoidAction } from "@/lib/pos/deliveryOrderManagement";
 
@@ -34,7 +34,7 @@ export type EditOrderIntent = {
 export type EditOrderDialogProps = {
   open: boolean;
   order: DeliveryQueueOrder | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   discountGate: Gate;
   saveGate: Gate;
   busy: boolean;
@@ -197,7 +197,7 @@ export type VoidOrderDialogProps = {
   action: VoidAction;
   order: DeliveryQueueOrder | null;
   customerName: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   gate: Gate;
   busy: boolean;
   error: string | null;
@@ -219,7 +219,7 @@ export function VoidOrderDialog(props: VoidOrderDialogProps) {
 
   if (!order) return null;
 
-  const currency = (order.currency as CurrencyCode) ?? props.currency;
+  const currency = (order.currency as OperationalCurrencyCode) ?? props.currency;
   // DESKTOP POLICY: a reason is mandatory even though the server accepts an
   // empty one. It is recorded against the operator's account, and "no reason
   // given" is not an acceptable entry against a reversed payment.

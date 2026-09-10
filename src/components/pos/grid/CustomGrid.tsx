@@ -22,7 +22,7 @@
 import { useMemo, useRef, useState } from "react";
 import { Button, cn } from "@/components/ui";
 import { useElementSize } from "@/lib/useElementSize";
-import { type CurrencyCode } from "@/lib/currency";
+import { type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import type { SearchableItem } from "@/lib/pos/menu";
 import { fitGrid } from "@/lib/pos/grid/fit";
@@ -33,7 +33,7 @@ export type CustomGridProps = {
   layout: PosGridLayout;
   /** The canonical menu, by id. The ONLY source of price and availability. */
   itemsById: Map<string, SearchableItem>;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   itemsNeedingChoice: ReadonlySet<string>;
   /** The workspace's own `addItem`. Identical to the default grid's. */

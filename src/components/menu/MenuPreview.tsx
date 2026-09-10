@@ -11,7 +11,7 @@
 // shown here is the price the cashier will ring up.
 
 import { EmptyState, cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { previewSections, previewUncategorized } from "@/lib/menu/filters";
 import type { BuilderCategory, BuilderItem, QrSettings } from "@/lib/menu/types";
@@ -28,7 +28,7 @@ export function MenuPreview({
   categories: BuilderCategory[];
   items: BuilderItem[];
   qr: QrSettings | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   language: "en" | "ar";
   onLanguageChange: (next: "en" | "ar") => void;
@@ -108,7 +108,7 @@ function PreviewSection({
 }: {
   title: string;
   items: BuilderItem[];
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   showPrices: boolean;
   arabic: boolean;

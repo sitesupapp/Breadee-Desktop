@@ -18,19 +18,35 @@ export function NumericKeypad({
   value,
   onChange,
   allowDecimal = true,
+  decimalDigits,
   compact = false,
   className,
 }: {
   value: string;
   onChange: (next: string) => void;
   allowDecimal?: boolean;
+  /**
+   * Operational-money precision. When provided it OVERRIDES `allowDecimal`: the decimal
+   * key is enabled only when `decimalDigits > 0` (so LBP 0dp blocks it, JOD 3dp allows it),
+   * and no more than `decimalDigits` fractional places can be entered. Omit it for a plain
+   * numeric field (e.g. the USD cash drawer), which keeps the legacy `allowDecimal` behaviour.
+   */
+  decimalDigits?: number;
   compact?: boolean;
   className?: string;
 }) {
   const key = compact ? "min-h-[44px]" : "min-h-[56px]";
+  const digitsMode = typeof decimalDigits === "number" && Number.isFinite(decimalDigits);
+  const decimalsAllowed = digitsMode ? (decimalDigits as number) > 0 : allowDecimal;
+  const maxDecimals = digitsMode ? Math.max(0, Math.trunc(decimalDigits as number)) : null;
   function press(key: string) {
-    if (key === "." && (!allowDecimal || value.includes("."))) return;
+    if (key === "." && (!decimalsAllowed || value.includes("."))) return;
     if (key === "." && value === "") return onChange("0.");
+    // Honour the currency's precision: never let a digit push past `decimalDigits` places.
+    if (key !== "." && maxDecimals != null && value.includes(".")) {
+      const decimals = value.split(".")[1] ?? "";
+      if (decimals.length + key.length > maxDecimals) return;
+    }
     onChange(value + key);
   }
 
@@ -41,7 +57,7 @@ export function NumericKeypad({
           key={k}
           type="button"
           onClick={() => press(k)}
-          disabled={k === "." && !allowDecimal}
+          disabled={k === "." && !decimalsAllowed}
           className={cn(
             key,
             "rounded-xl border border-line bg-white text-lg font-bold text-ink transition hover:bg-slate-50 active:scale-[0.98] disabled:opacity-30",

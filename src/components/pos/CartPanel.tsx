@@ -23,14 +23,14 @@
 import type { ReactNode } from "react";
 import { Button, EmptyState, GatedButton, PanelTitle, type Gate } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { CartLineRow } from "@/components/pos/CartLineRow";
 import type { CartLine } from "@/types/pos";
 
 export type CartPanelProps = {
   lines: CartLine[];
   selectedKey: string | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   subtotal: number;
   shiftOpen: boolean;
   busy: boolean;

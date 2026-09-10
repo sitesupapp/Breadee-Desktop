@@ -24,7 +24,7 @@ import { Button, cn } from "@/components/ui";
 import { Drawer } from "@/components/overlays";
 import { Glyph, type GlyphName } from "@/components/Glyph";
 import { PosFooterBar } from "@/components/pos/PosFooterBar";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import {
   isTooSmall,
   MIN_SUPPORTED_HEIGHT,
@@ -72,7 +72,7 @@ export type PosShellProps = {
   cartSummary?: {
     itemCount: number;
     subtotal: number;
-    currency: CurrencyCode;
+    currency: OperationalCurrencyCode;
     onPay: () => void;
     payDisabled: boolean;
     payLabel?: string;

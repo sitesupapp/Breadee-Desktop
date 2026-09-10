@@ -15,7 +15,7 @@
 
 import { cn } from "@/components/ui";
 import { PosIconMark } from "@/components/PosIconGlyph";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { DEFAULT_ICON_DISPLAY, type IconDisplay } from "@/lib/icons/display";
 
 export const MENU_CARD_HEIGHT = 96;
@@ -37,7 +37,7 @@ export function MenuCard({
   name: string;
   /** Null renders "No price" rather than a zero, which would be a lie. */
   price: number | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   iconKey?: string | null;
   display?: IconDisplay;
   needsChoice?: boolean;

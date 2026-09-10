@@ -54,7 +54,7 @@ import { ModifiersTab } from "@/components/menu/ModifiersTab";
 import { AvailabilityTab } from "@/components/menu/AvailabilityTab";
 import { QrMenuTab } from "@/components/menu/QrMenuTab";
 import { MenuPreview } from "@/components/menu/MenuPreview";
-import type { CurrencyCode } from "@/lib/currency";
+import type { OperationalCurrencyCode } from "@/lib/currency";
 import { ITEM_STATUS_LABELS } from "@/lib/menu/types";
 import type { BuilderCategory, BuilderGroup, BuilderItem, BuilderOption, CategoryDraft, GroupDraft, ItemDraft, ItemStatus, QrSettings } from "@/lib/menu/types";
 
@@ -78,7 +78,7 @@ function MenuBuilderInner() {
 
   const tenantId = session.tenant?.id ?? null;
   const mainBranchId = session.tenant?.main_branch_id ?? null;
-  const currency: CurrencyCode = session.currency.primary;
+  const currency: OperationalCurrencyCode = session.currency.primary;
   const rate = session.currency.rate;
 
   const accessCtx = useMemo(
@@ -94,7 +94,7 @@ function MenuBuilderInner() {
   const [filter, setFilter] = useState<ItemFilter>(DEFAULT_ITEM_FILTER);
   const [language, setLanguage] = useState<"en" | "ar">("en");
   const [draft, setDraft] = useState<ItemDraft | null>(null);
-  const [priceCurrency, setPriceCurrency] = useState<CurrencyCode>(currency);
+  const [priceCurrency, setPriceCurrency] = useState<OperationalCurrencyCode>(currency);
   // Icon assignments are TERMINAL-LOCAL and keyed by `menu_items.id`. Read once
   // for display; nothing on this screen writes them - renaming or re-pricing an
   // item cannot disturb its icon, because the key is the id and the id is stable.
@@ -226,7 +226,7 @@ function MenuBuilderInner() {
     await run(`modifier:${group.id}`, "Archiving the group", () => repo.archiveGroup(group.id), "Modifier group archived");
   }
 
-  async function addOption(group: BuilderGroup, name: string, extra: number, entered: CurrencyCode) {
+  async function addOption(group: BuilderGroup, name: string, extra: number, entered: OperationalCurrencyCode) {
     if (!tenantId) return;
     const nextSort = data.options.filter((o) => o.modifier_group_id === group.id).length;
     await run(`modifier:${group.id}`, "Adding the option", () => repo.addOption(tenantId, group.id, name, extra, entered, nextSort));

@@ -17,7 +17,7 @@
 
 import { PosIconGlyph } from "@/components/PosIconGlyph";
 import { cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { resolveColor, SECONDARY_INK_OPACITY } from "@/lib/pos/grid/colors";
 import type { GridMetrics } from "@/lib/pos/grid/fit";
 import { spanSize } from "@/lib/pos/grid/fit";
@@ -28,7 +28,7 @@ export type GridButtonTileProps = {
   metrics: GridMetrics;
   /** Resolved from the canonical item. Null renders "No price", never a zero. */
   price: number | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** Why this button cannot be pressed. Renders it dimmed with the reason. */
   unavailableReason?: string | null;
   /** True for a required-choice item, so the cashier knows a dialog is coming. */

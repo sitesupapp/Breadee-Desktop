@@ -12,7 +12,15 @@
 // amount - never a stored row.
 
 import { Input, cn } from "@/components/ui";
-import { convertLbpToUsd, convertUsdToLbp, formatMoney, hasValidRate, type CurrencyCode } from "@/lib/currency";
+import {
+  convertLbpToUsd,
+  convertUsdToLbp,
+  formatMoney,
+  hasValidRate,
+  isLegacyDualCurrency,
+  operationalDigitsFor,
+  type OperationalCurrencyCode,
+} from "@/lib/currency";
 
 export function CurrencyToggle({
   value,
@@ -20,23 +28,30 @@ export function CurrencyToggle({
   disabled,
   className,
 }: {
-  value: CurrencyCode;
-  onChange: (next: CurrencyCode) => void;
+  value: OperationalCurrencyCode;
+  onChange: (next: OperationalCurrencyCode) => void;
   disabled?: boolean;
   className?: string;
 }) {
+  // The USD/LBP choice is the LEGACY dual-currency control. A third-currency (AED/JOD)
+  // tenant prices in its single operational currency — the server refuses any other code
+  // (`_price_write_prepare_op`) — so the toggle collapses to one inert code rather than
+  // offering a USD/LBP choice that could never be saved.
+  const codes: OperationalCurrencyCode[] = isLegacyDualCurrency(value) ? ["USD", "LBP"] : [value];
+  const single = codes.length === 1;
   return (
     <div className={cn("inline-flex shrink-0 overflow-hidden rounded-xl border border-line", className)} role="group" aria-label="Price currency">
-      {(["USD", "LBP"] as CurrencyCode[]).map((code) => (
+      {codes.map((code) => (
         <button
           key={code}
           type="button"
-          disabled={disabled}
+          disabled={disabled || single}
           aria-pressed={value === code}
           onClick={() => onChange(code)}
           className={cn(
-            "min-h-[44px] px-3 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-50",
-            value === code ? "bg-brand text-onbrand" : "bg-white text-sub hover:bg-slate-50",
+            "min-h-[44px] px-3 text-xs font-bold transition disabled:cursor-not-allowed",
+            single && "disabled:opacity-100",
+            value === code ? "bg-brand text-onbrand" : "bg-white text-sub hover:bg-slate-50 disabled:opacity-50",
           )}
         >
           {code}
@@ -54,13 +69,15 @@ export function EquivalentHint({
   className,
 }: {
   amount: number | null;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   className?: string;
 }) {
   if (amount === null || !Number.isFinite(amount) || amount <= 0) return null;
+  // A third operational currency has no USD/LBP counterpart, so there is no "≈" line.
+  if (!isLegacyDualCurrency(currency)) return null;
   if (!hasValidRate(rate)) return null;
-  const other: CurrencyCode = currency === "USD" ? "LBP" : "USD";
+  const other: OperationalCurrencyCode = currency === "USD" ? "LBP" : "USD";
   const converted = currency === "USD" ? convertUsdToLbp(amount, rate) : convertLbpToUsd(amount, rate);
   return <p className={cn("text-[11px] font-medium text-sub", className)}>= {formatMoney(converted, other)}</p>;
 }
@@ -78,12 +95,12 @@ export function PriceField({
   label: string;
   /** The raw text the operator typed - kept as text so "1." is not eaten mid-edit. */
   amount: string;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   rate: number | null;
   error?: string | null;
   disabled?: boolean;
   onAmountChange: (next: string) => void;
-  onCurrencyChange: (next: CurrencyCode) => void;
+  onCurrencyChange: (next: OperationalCurrencyCode) => void;
 }) {
   const parsed = amount.trim() === "" ? null : Number(amount);
   return (
@@ -95,7 +112,7 @@ export function PriceField({
           inputMode="decimal"
           disabled={disabled}
           value={amount}
-          placeholder={currency === "USD" ? "0.00" : "0"}
+          placeholder={operationalDigitsFor(currency) > 0 ? `0.${"0".repeat(operationalDigitsFor(currency))}` : "0"}
           onChange={(e) => onAmountChange(e.target.value)}
           className={error ? "border-red-300" : undefined}
           aria-invalid={error ? true : undefined}

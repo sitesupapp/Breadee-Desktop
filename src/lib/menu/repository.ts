@@ -32,7 +32,7 @@ import { supabase } from "@/lib/supabase";
 import { PRICE_METADATA_COLUMNS } from "@/lib/pos/menuPrice";
 import { canonicalGroupPayload } from "@/lib/menu/modifierGroupConfig";
 import { MENU_IMAGE_BUCKET, menuImagePath, optimizeMenuImage, validateImageFile } from "@/lib/menu/image";
-import type { CurrencyCode } from "@/lib/currency";
+import type { OperationalCurrencyCode } from "@/lib/currency";
 import type {
   BuilderCategory,
   BuilderGroup,
@@ -164,7 +164,7 @@ export type SaveItemInput = {
   tenantId: string;
   draft: ItemDraft;
   /** The typed selling price and the currency it was typed in, or null for "no price". */
-  price: { amount: number; currency: CurrencyCode } | null;
+  price: { amount: number; currency: OperationalCurrencyCode } | null;
   /** Modifier groups to attach. Undefined leaves the existing assignment untouched. */
   groupIds?: string[];
   /** A newly chosen image file, if any. */
@@ -295,7 +295,7 @@ export async function setItemModifierGroups(tenantId: string, itemId: string, gr
  * reproducible from a client-side column update, which is why one does not exist
  * anywhere in this module.
  */
-export async function setItemPrice(itemId: string, amount: number, currency: CurrencyCode): Promise<void> {
+export async function setItemPrice(itemId: string, amount: number, currency: OperationalCurrencyCode): Promise<void> {
   const { error } = await supabase.rpc(
     "set_menu_item_price" as never,
     { p_menu_item: itemId, p_amount: amount, p_currency: currency } as never,
@@ -373,7 +373,7 @@ export async function addOption(
   groupId: string,
   name: string,
   extra: number,
-  currency: CurrencyCode,
+  currency: OperationalCurrencyCode,
   nextSortOrder: number,
 ): Promise<void> {
   const created = unwrap(
@@ -392,7 +392,7 @@ export async function addOption(
 }
 
 /** Change an existing option's price through the secured RPC. */
-export async function setOptionPrice(optionId: string, amount: number, currency: CurrencyCode): Promise<void> {
+export async function setOptionPrice(optionId: string, amount: number, currency: OperationalCurrencyCode): Promise<void> {
   const { error } = await supabase.rpc(
     "set_modifier_option_price" as never,
     { p_option: optionId, p_amount: amount, p_currency: currency } as never,

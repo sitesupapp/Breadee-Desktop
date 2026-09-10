@@ -13,7 +13,7 @@
 // mis-tap waiting to void the wrong order.
 
 import { Badge, Button, EmptyState, ErrorState, Skeleton, cn } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import {
   orderStateLabel,
   orderStateTone,
@@ -31,7 +31,7 @@ export type DeliveryOrderQueueProps = {
   counts: { unpaid: number; paid: number; cancelled: number };
   /** True while a shift is open - decides which scope sentence is shown. */
   shiftScoped: boolean;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   loading: boolean;
   error: string | null;
   selectedId: string | null;
@@ -108,7 +108,7 @@ export function DeliveryOrderQueue(props: DeliveryOrderQueueProps) {
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
                       <span className="text-sm font-extrabold tabular-nums text-ink">
-                        {formatMoney(o.total_amount ?? 0, (o.currency as CurrencyCode) ?? props.currency)}
+                        {formatMoney(o.total_amount ?? 0, (o.currency as OperationalCurrencyCode) ?? props.currency)}
                       </span>
                       <div className="flex items-center gap-1">
                         <Badge tone={orderStateTone(o.status)}>{orderStateLabel(o.status)}</Badge>

@@ -4,11 +4,23 @@ import { getDeviceIdentity } from "@/lib/device";
 import { purgeForeignSnapshots, clearSnapshotCache } from "@/lib/offline/db";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
-import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
+import {
+  operationalDigitsFor,
+  setOperationalCurrencyDigits,
+  type OperationalCurrencyCode,
+} from "@/lib/currency";
 
-// Read-only tenant currency settings for display (dual USD/LBP). Never used for POS math.
-export type CurrencySettings = { primary: CurrencyCode; rate: number | null };
-const DEFAULT_CURRENCY: CurrencySettings = { primary: "USD", rate: null };
+// Read-only tenant OPERATIONAL currency for display. Never used for POS math (the server
+// owns every figure). `primary` is the tenant's actual operational currency — USD, LBP or
+// a third currency (AED/JOD/…), preserved verbatim, NEVER coerced to USD. `decimalDigits`
+// is that currency's server-provided precision, so keypads and displays honour it.
+// `rate` is the legacy USD→LBP rate, relevant only to USD/LBP dual-tender.
+export type CurrencySettings = {
+  primary: OperationalCurrencyCode;
+  decimalDigits: number;
+  rate: number | null;
+};
+const DEFAULT_CURRENCY: CurrencySettings = { primary: "USD", decimalDigits: 2, rate: null };
 
 // Mirrors the web app's SessionContext + resolvePostLoginPath, plus an offline cache
 // so the app can restore the last valid role/tenant/branch/permissions after a first
@@ -48,6 +60,52 @@ type SessionState = {
   loadContextOnline: () => Promise<void>;
   can: (perm: string) => boolean;
 };
+
+/**
+ * Resolve the operational currency + precision from the server's currency/regional DTO
+ * (`get_tenant_currency_and_regional_settings`). It ALSO loads the per-currency digit
+ * registry so `formatMoney`/keypads can render any operational currency this session.
+ *
+ * Fail-safe: a null/blocked payload, or an `operational_currency` that is not a plausible
+ * 3-letter code, resolves to USD — but a valid third-currency code (AED/JOD/…) is preserved
+ * verbatim and NEVER coerced to USD. Digits come only from the server catalog (or the
+ * intrinsic USD=2 / LBP=0), never from a locale/country guess or a hard-coded table.
+ */
+function resolveCurrencyFromSettings(payload: unknown): CurrencySettings {
+  const p = (payload ?? null) as
+    | { operational_currency?: unknown; usd_to_lbp_rate?: unknown; selectable_currencies?: unknown }
+    | null;
+  if (!p || typeof p !== "object") return DEFAULT_CURRENCY;
+
+  const selectable = Array.isArray(p.selectable_currencies)
+    ? (p.selectable_currencies as ReadonlyArray<{ code?: unknown; decimal_digits?: unknown }>)
+    : [];
+  setOperationalCurrencyDigits(selectable);
+
+  const opRaw = String(p.operational_currency ?? "").trim().toUpperCase();
+  const primary: OperationalCurrencyCode = /^[A-Z]{3}$/.test(opRaw) ? opRaw : "USD";
+  const rate = typeof p.usd_to_lbp_rate === "number" ? p.usd_to_lbp_rate : null;
+  return { primary, decimalDigits: operationalDigitsFor(primary), rate };
+}
+
+/**
+ * Restore the operational currency from the offline cache. The module digit registry is
+ * empty on a fresh app start, so this re-seeds it from the cached operational currency and
+ * its precision — otherwise a JOD tenant would render at the 2dp fallback until it got back
+ * online. Tolerates a cache written before `decimalDigits` existed (derives it).
+ */
+function hydrateCachedCurrency(c: CurrencySettings | undefined | null): CurrencySettings {
+  if (!c || typeof c !== "object") return DEFAULT_CURRENCY;
+  const opRaw = String((c as CurrencySettings).primary ?? "").trim().toUpperCase();
+  const primary: OperationalCurrencyCode = /^[A-Z]{3}$/.test(opRaw) ? opRaw : "USD";
+  const cachedDigits = (c as CurrencySettings).decimalDigits;
+  const decimalDigits =
+    typeof cachedDigits === "number" && Number.isInteger(cachedDigits) && cachedDigits >= 0 && cachedDigits <= 4
+      ? cachedDigits
+      : operationalDigitsFor(primary);
+  setOperationalCurrencyDigits([{ code: primary, decimal_digits: decimalDigits }]);
+  return { primary, decimalDigits, rate: typeof c.rate === "number" ? c.rate : null };
+}
 
 function readCache(): CachedContext | null {
   try {
@@ -101,7 +159,7 @@ export const useSession = create<SessionState>((set, get) => ({
         membership: cache.membership,
         features: cache.features,
         permissions: cache.permissions,
-        currency: cache.currency ?? DEFAULT_CURRENCY,
+        currency: hydrateCachedCurrency(cache.currency),
       });
       return;
     }
@@ -132,21 +190,28 @@ export const useSession = create<SessionState>((set, get) => ({
     let permissions: Record<string, boolean> = {};
     let currency: CurrencySettings = DEFAULT_CURRENCY;
     if (membership?.tenant_id) {
+      // `get_tenant_currency_and_regional_settings` post-dates this app's generated
+      // `database.types.ts`, so it is invoked through a narrow structural cast — the same
+      // one `lib/pos/rpc.ts` documents. It is called as a METHOD on the client object so
+      // Supabase keeps its `this`; a detached `supabase.rpc` throws. Any failure leaves
+      // `cur` null and falls back to USD, so a blocked read never fails sign-in.
+      const rpcAny = supabase as unknown as {
+        rpc(name: string, args?: Record<string, unknown>): PromiseLike<{ data: unknown; error: unknown }>;
+      };
       const [{ data: t }, { data: feat }, { data: perms }, { data: cur }] = await Promise.all([
         supabase.from("tenants").select("id, business_name, tenant_status, verification_status, selected_plan_id, main_branch_id").eq("id", membership.tenant_id).maybeSingle(),
         supabase.rpc("get_tenant_effective_features", { p_tenant: membership.tenant_id }),
         supabase.rpc("current_user_permissions", { p_tenant: membership.tenant_id }),
-        // Read-only display setting (dual USD/LBP). If RLS blocks it, we fall back to USD.
-        supabase.from("tenant_currency_settings").select("primary_currency, usd_to_lbp_rate").eq("tenant_id", membership.tenant_id).maybeSingle(),
+        // The SERVER-AUTHORITATIVE operational currency + per-currency precision. This one
+        // RPC returns `operational_currency`, the `selectable_currencies` digit catalog and
+        // the legacy `usd_to_lbp_rate`. It resolves the tenant from the auth context, so it
+        // takes no argument.
+        rpcAny.rpc("get_tenant_currency_and_regional_settings"),
       ]);
       tenant = (t as Tenant) ?? null;
       features = (feat as unknown as FeatureMap) ?? {};
       permissions = (perms as Record<string, boolean>) ?? {};
-      const curRow = cur as { primary_currency?: unknown; usd_to_lbp_rate?: unknown } | null;
-      currency = {
-        primary: isCurrencyCode(curRow?.primary_currency) ? curRow.primary_currency : "USD",
-        rate: typeof curRow?.usd_to_lbp_rate === "number" ? curRow.usd_to_lbp_rate : null,
-      };
+      currency = resolveCurrencyFromSettings(cur);
     }
 
     // Cache-scope hardening: drop any cached snapshots that don't belong to this

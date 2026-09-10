@@ -5,7 +5,7 @@
 // the bill is read from `pos_orders` + `pos_order_items` because the SERVER owns
 // the bill - the desktop never reconstructs one.
 
-import type { CurrencyCode } from "@/lib/currency";
+import type { OperationalCurrencyCode } from "@/lib/currency";
 import type { SelectedModifier } from "@/types/pos";
 
 /** Raw `pos_tables.status` values the map can emit. */
@@ -38,7 +38,7 @@ export type TableSummary = {
   opened_at: string | null;
   /** Bill total. NULL when the server refuses to sum mixed currencies. */
   total: number | null;
-  currency: CurrencyCode | null;
+  currency: OperationalCurrencyCode | null;
   /** True when the table's open orders span more than one currency snapshot. */
   mixed_currency: boolean;
 };
@@ -97,7 +97,7 @@ export type BillOrder = {
   subtotal: number;
   discount_amount: number;
   total_amount: number;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   exchange_rate: number | null;
   created_at: string | null;
   lines: BillLine[];
@@ -110,7 +110,7 @@ export type TableBill = {
   /** Sum of order subtotals, only when every order shares one currency. */
   subtotal: number | null;
   total: number | null;
-  currency: CurrencyCode | null;
+  currency: OperationalCurrencyCode | null;
   /** Orders span more than one currency snapshot - the server refuses to settle. */
   mixedCurrency: boolean;
   /** Orders span more than one shift - `pos_pay_table` refuses these. */

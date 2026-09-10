@@ -40,7 +40,7 @@ import {
   type ReportDocLine,
 } from "@/lib/nativePrinting";
 import { canPrintReceipts, type PosAccessContext } from "@/lib/pos/access";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
 import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
 import { describeBlock, resolveRouteTarget } from "@/lib/pos/printTarget";
 import type { CollectResult } from "@/lib/pos/receivables";
@@ -61,7 +61,7 @@ export type ReceivableConfirmation = {
   remainingBalanceUsd: number;
   /** What the cashier keyed, in the ORDER's currency - shown, never summed into USD. */
   paidAmount: number;
-  paidCurrency: CurrencyCode;
+  paidCurrency: OperationalCurrencyCode;
   method: string | null;
   paymentStatus: string;
 };
@@ -80,7 +80,7 @@ export function buildReceivableConfirmation(input: {
   customerPhone: string | null;
   previousBalanceUsd: number;
   paidAmount: number;
-  paidCurrency: CurrencyCode;
+  paidCurrency: OperationalCurrencyCode;
   method: string | null;
   at: string;
   result: CollectResult;

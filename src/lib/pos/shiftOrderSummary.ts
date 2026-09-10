@@ -18,7 +18,7 @@
 // when the list refreshes underneath it - are testable without React.
 
 import { asRecord, num, numOrNull, str, strOrNull } from "@/lib/pos/rpc";
-import type { CurrencyCode } from "@/lib/currency";
+import { isKnownOperationalCurrency, type OperationalCurrencyCode } from "@/lib/currency";
 
 /**
  * The status that means "still working on it" in the existing POS lifecycle.
@@ -82,7 +82,7 @@ export type ShiftOpenOrder = {
   subtotal: number | null;
   discount_amount: number;
   total_amount: number | null;
-  currency: CurrencyCode | null;
+  currency: OperationalCurrencyCode | null;
   table_id: string | null;
   customer_id: string | null;
   /** Delivery only, resolved separately: the caller's name, nothing else. */
@@ -162,7 +162,7 @@ function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
     subtotal: numOrNull(r.subtotal),
     discount_amount: num(r.discount_amount),
     total_amount: numOrNull(r.total_amount),
-    currency: currency === "LBP" ? "LBP" : currency === "USD" ? "USD" : null,
+    currency: isKnownOperationalCurrency(currency) ? currency : null,
     table_id: strOrNull(r.table_id),
     customer_id: strOrNull(r.customer_id),
     customer_name: null,
