@@ -19,7 +19,6 @@ import {
   isKnownOperationalCurrency,
   isLegacyDualCurrency,
   operationalDigitsFor,
-  receiptFallbackCurrency,
   roundForCurrency,
   setOperationalCurrencyDigits,
 } from "@/lib/currency";
@@ -127,13 +126,6 @@ test("a third-currency payment is never rate-blocked; LBP still is", () => {
   assert.equal(paymentBlockedReason("LBP", 89500), null);
 });
 
-test("the receipt fallback is USD/LBP only - a third currency relies on server metadata", () => {
-  assert.equal(receiptFallbackCurrency("USD"), "USD");
-  assert.equal(receiptFallbackCurrency("LBP"), "LBP");
-  assert.equal(receiptFallbackCurrency("AED"), "USD");
-  assert.equal(receiptFallbackCurrency("JOD"), "USD");
-});
-
 // --- menu price for a third currency reads the operational amount directly ----
 
 test("a third-currency menu price is read from its own column, with no USD conversion", () => {
@@ -178,6 +170,7 @@ const paymentDialog = stripJsxComments(readSrc("components", "pos", "PaymentDial
 const priceField = stripJsxComments(readSrc("components", "menu", "PriceField.tsx"));
 const keypad = stripComments(readSrc("components", "pos", "NumericKeypad.tsx"));
 const session = stripComments(readSrc("state", "session.ts"));
+const currencySettings = stripComments(readSrc("state", "currencySettings.ts"));
 
 test("the payment tender chooser is shown ONLY for a USD/LBP tenant", () => {
   // The hard-coded USD/LBP chooser must sit behind the legacy-currency gate.
@@ -205,10 +198,13 @@ test("the keypad enforces the currency's decimal precision", () => {
 });
 
 test("the session reads the operational currency from the server, and never coerces it to USD", () => {
-  // The authoritative read-path.
+  // The authoritative read-path is invoked from the session store...
   assert.match(session, /get_tenant_currency_and_regional_settings/);
-  // The old bilateral coercion (isCurrencyCode(...) ? ... : "USD") must be gone.
+  // ...and the old bilateral coercion (isCurrencyCode(...) ? ... : "USD") is gone from both
+  // the store and the pure resolver it now delegates to.
   assert.equal(/isCurrencyCode\([^)]*\)\s*\?\s*[^:]*:\s*"USD"/.test(session), false);
-  // A plausible 3-letter operational code is preserved verbatim.
-  assert.match(session, /\/\^\[A-Z\]\{3\}\$\/\.test\(opRaw\) \? opRaw : "USD"/);
+  assert.equal(/isCurrencyCode\([^)]*\)\s*\?\s*[^:]*:\s*"USD"/.test(currencySettings), false);
+  // The pure resolver preserves a plausible 3-letter operational code verbatim (behaviour is
+  // asserted directly in pos-receipt-fallback-fail-closed.test.ts).
+  assert.match(currencySettings, /\/\^\[A-Z\]\{3\}\$\/\.test\(opRaw\) \? opRaw : "USD"/);
 });

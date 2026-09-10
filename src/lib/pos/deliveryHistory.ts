@@ -25,7 +25,7 @@ import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
 import { buildReceipt, type ReceiptData, type ReceiptLine } from "@/lib/receipt";
 import type { OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
 import type { DeliveryQueueOrder } from "@/lib/pos/deliveryOrderManagement";
-import { normalizeCurrencyCode, receiptFallbackCurrency, type OperationalCurrencyCode } from "@/lib/currency";
+import { normalizeCurrencyCode, type OperationalCurrencyCode } from "@/lib/currency";
 import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 
 // --- addresses ---------------------------------------------------------------
@@ -387,7 +387,7 @@ export async function readHistoricalReceipt(input: {
     // 6B-2: the order's own historical currency + server precision. A third-currency
     // order with no valid server precision refuses (propagated to the caller) rather
     // than reprinting at a guessed 2 decimals.
-    fetchReceiptCurrency(input.order.id, receiptFallbackCurrency(input.fallbackCurrency)),
+    fetchReceiptCurrency(input.order.id, input.fallbackCurrency),
   ]);
   return buildHistoricalReceipt({
     ...input,
