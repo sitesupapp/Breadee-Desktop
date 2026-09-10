@@ -594,6 +594,7 @@ mod tests {
             }],
             subtotal: 7.0,
             discount: 0.0,
+            delivery_fee: None,
             total: 7.0,
             tender_currency: None,
             tender_total: None,

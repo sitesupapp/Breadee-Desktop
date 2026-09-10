@@ -62,6 +62,15 @@ export type SubmitOrderPayload = {
    */
   customer_id?: string;
   address_id?: string;
+  /**
+   * Delivery only. The manual delivery fee entered during the delivery order
+   * flow, BEFORE the order is sent — the fee belongs to the order, not only to
+   * payment. `pos_save_order` persists it to `pos_orders.delivery_fee` and applies
+   * the canonical finance layer, so an unpaid delivery order already carries the
+   * fee, its charge line and a fee-inclusive total for the bill/receipt. Never a
+   * total: the client sends only the fee. Absent for takeaway and dine-in.
+   */
+  delivery_fee?: number;
   items: SubmitOrderItem[];
 };
 
@@ -131,6 +140,13 @@ export function buildSubmitPayload(input: {
   /** Delivery only. Both required for `delivery`, absent for every other type. */
   customerId?: string | null;
   addressId?: string | null;
+  /**
+   * Delivery only. The manual delivery fee (>= 0) entered before the order is
+   * sent. Sent as the ONLY money field — never a total. Absent (or null) leaves
+   * the order with no fee; the server re-validates and ignores it on any other
+   * route.
+   */
+  deliveryFee?: number | null;
 }): SubmitOrderPayload {
   if (!input.shiftId) throw new ShiftRequiredError();
   if (input.orderType === "dine_in" && !input.tableId) throw new TableRequiredError();
@@ -153,6 +169,11 @@ export function buildSubmitPayload(input: {
     // belongs in an order payload.
     ...(input.orderType === "delivery" && input.customerId && input.addressId
       ? { customer_id: input.customerId, address_id: input.addressId }
+      : {}),
+    // Present ONLY for delivery, and only when a fee was entered. The fee belongs
+    // to the order; the server persists it and computes the fee-inclusive total.
+    ...(input.orderType === "delivery" && input.deliveryFee != null
+      ? { delivery_fee: input.deliveryFee }
       : {}),
     items: input.lines.map((l) => ({
       menu_item_id: l.menu_item_id,
