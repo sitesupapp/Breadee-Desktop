@@ -183,6 +183,15 @@ export function useDineInWorkspace(input: {
   const [leaveConfirm, setLeaveConfirm] = useState(false);
   const [roundBusy, setRoundBusy] = useState(false);
   const [billChange, setBillChange] = useState<string | null>(null);
+  /**
+   * The ORDER-level note for the dine-in bill (pos_orders.notes), DISTINCT from
+   * an item's `kitchen_note`. It persists across rounds for the same table (it is
+   * NOT tied to the per-round line buffer) and is sent with each round; it is
+   * cleared when a different table is selected. Read via a ref inside the latched
+   * submit so a double-tap can never send a stale value.
+   */
+  const [orderNote, setOrderNote] = useState("");
+  const orderNoteRef = useRef("");
   // Separate latch from open-table: sending a round and opening a table are
   // different operations and must not block one another.
   const roundInFlight = useRef(false);
@@ -245,6 +254,13 @@ export function useDineInWorkspace(input: {
   }, [active]);
 
   const selected = pickSelected({ map: tables.map, selectedTableId: tables.selectedTableId });
+
+  // A different table starts with a clean order note; within one bill the note
+  // persists across rounds (it is not part of the per-round line buffer).
+  useEffect(() => {
+    orderNoteRef.current = "";
+    setOrderNote("");
+  }, [selected?.id]);
   const visible = useMemo(() => filterTables(tables.map.tables, query), [tables.map.tables, query]);
   const stale = isMapStale(tables.lastLoadedAt, now);
 
@@ -524,6 +540,9 @@ export function useDineInWorkspace(input: {
         lines: useCart.getState().lines,
         clientOpId: opId,
         menu: input.menu,
+        // The bill's order-level note (pos_orders.notes), read live so a latched
+        // retry is never stale. Persists across rounds; not the per-line note.
+        orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
         submit: submitOrder,
         // Accepted. Only now does the buffer go - and with it the operation id,
         // so the NEXT round mints a fresh one.
@@ -553,6 +572,7 @@ export function useDineInWorkspace(input: {
         orderNumber: outcome.result.order_number,
         batchNo: outcome.result.batch_no ?? null,
         tableName: selected.name,
+        orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
         lines: submitted.map((l) => ({
           name: l.name,
           qty: l.quantity,
@@ -1090,6 +1110,23 @@ export function useDineInWorkspace(input: {
   const roundPanel = useCallback(
     () =>
       selected ? (
+        <>
+        {/* Fast ORDER-level note for the whole bill - distinct from an item's
+            kitchen note (the per-line "Note" button). Persists across rounds and
+            rides the existing orderNote -> pos_orders.notes plumbing. */}
+        <label className="mb-2 block">
+          <span className="mb-1 block text-xs font-bold text-ink">Order note</span>
+          <input
+            type="text"
+            value={orderNote}
+            onChange={(e) => {
+              orderNoteRef.current = e.target.value;
+              setOrderNote(e.target.value);
+            }}
+            placeholder="Whole-order note - e.g. Table celebrating a birthday"
+            className="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-sub"
+          />
+        </label>
         <DineInRoundPanel
           table={selected}
           bill={tables.bill}
@@ -1111,10 +1148,12 @@ export function useDineInWorkspace(input: {
           onDiscardRound={discardRound}
           onBackToMap={requestLeaveAddItems}
         />
+        </>
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
+      orderNote,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
     ],
