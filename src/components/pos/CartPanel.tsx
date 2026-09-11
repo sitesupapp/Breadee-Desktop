@@ -114,7 +114,7 @@ export function CartPanel(props: CartPanelProps) {
 
   return (
     <section className="flex h-full min-h-0 flex-col border-l border-line bg-white" aria-label="Current order">
-      <div className="shrink-0 space-y-2 border-b border-line px-4 py-2.5">
+      <div className="shrink-0 space-y-2 border-b border-line px-4 py-2.5 [@media(max-height:800px)]:space-y-1 [@media(max-height:800px)]:py-1.5">
         <PanelTitle>Current order</PanelTitle>
         {props.orderCarousel}
         {props.savedOrderNumber && (
@@ -146,7 +146,7 @@ export function CartPanel(props: CartPanelProps) {
           ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 [@media(max-height:800px)]:p-1.5">
         {empty ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
             <span className="flex h-14 w-14 items-center justify-center rounded-full bg-slate-50 text-sub">
@@ -156,7 +156,7 @@ export function CartPanel(props: CartPanelProps) {
             <p className="max-w-[220px] text-xs text-sub">Add items from the menu to get started.</p>
           </div>
         ) : (
-          <ul className="space-y-1.5">
+          <ul className="space-y-1.5 [@media(max-height:800px)]:space-y-1">
             {props.lines.map((line) => (
               <CartLineRow
                 key={line.key}
@@ -174,7 +174,7 @@ export function CartPanel(props: CartPanelProps) {
       </div>
 
       {/* Pinned action area - never scrolls out of reach. */}
-      <div className="shrink-0 border-t border-line bg-white p-3">
+      <div className="shrink-0 border-t border-line bg-white p-3 [@media(max-height:800px)]:p-2">
         {blocked && (
           <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2">
             <p className="text-xs font-bold text-amber-900">No shift is open</p>
@@ -187,7 +187,7 @@ export function CartPanel(props: CartPanelProps) {
           </div>
         )}
 
-        <div className="mb-2 space-y-0.5">
+        <div className="mb-2 space-y-0.5 [@media(max-height:800px)]:mb-1">
           <div className="flex items-baseline justify-between text-xs">
             <span className="font-semibold text-sub">Subtotal</span>
             <span className="font-semibold tabular-nums text-ink">{formatMoney(props.subtotal, props.currency)}</span>
@@ -200,7 +200,7 @@ export function CartPanel(props: CartPanelProps) {
           </div>
           <div className="flex items-baseline justify-between border-t border-line pt-1">
             <span className="text-sm font-extrabold text-ink">Total</span>
-            <span className="text-xl font-extrabold tabular-nums text-ink">{formatMoney(total, props.currency)}</span>
+            <span className="text-xl font-extrabold tabular-nums text-ink [@media(max-height:800px)]:text-lg">{formatMoney(total, props.currency)}</span>
           </div>
         </div>
 
@@ -208,8 +208,12 @@ export function CartPanel(props: CartPanelProps) {
             is at the top of a panel that can be a screen tall, and the moment
             worth protecting is the one where a cashier reaches the bottom of it
             having forgotten which customer they came back for. */}
+        {/* Non-operational guidance. On short screens (<=800px tall) it is hidden
+            (`[@media(max-height:800px)]:hidden`) to give the item list its rows
+            back - the carousel directly above still names the order these actions
+            apply to, so no operational information is lost. */}
         {props.orderCarousel && (
-          <p className="mb-2 flex items-center justify-center gap-1 text-center text-[11px] text-sub">
+          <p className="mb-2 flex items-center justify-center gap-1 text-center text-[11px] text-sub [@media(max-height:800px)]:hidden">
             <Glyph name="info" size={12} />
             Actions apply to the order shown above
           </p>
@@ -222,7 +226,7 @@ export function CartPanel(props: CartPanelProps) {
             primary by FILL and Clear stays the danger control, both at the 44px
             touch size (`md`). When Pay/Print are omitted (delivery add-items),
             the grid collapses to the remaining controls automatically. */}
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2 [@media(max-height:800px)]:gap-1.5">
           {/* 1 - Pay. The primary action, in the theme's strong primary. */}
           {props.payGate && (
             <GatedButton

@@ -32,7 +32,10 @@ export function CartLineRow({
     <li
       onClick={onSelect}
       className={cn(
-        "rounded-xl border px-2.5 py-2 transition",
+        // On short screens (<=800px tall - 14" laptops, 720p) the vertical
+        // padding tightens so more lines fit before scrolling. Horizontal padding,
+        // the 44px controls and every figure are untouched: density, not shrinkage.
+        "rounded-xl border px-2.5 py-2 transition [@media(max-height:800px)]:py-1",
         selected ? "border-brand bg-brand-soft/40" : "border-line bg-white hover:border-brand/40",
       )}
     >
@@ -59,7 +62,7 @@ export function CartLineRow({
         <p className="shrink-0 text-sm font-extrabold text-ink">{formatMoney(lineTotal, currency)}</p>
       </div>
 
-      <div className="mt-1.5 flex items-center justify-between gap-2">
+      <div className="mt-1.5 flex items-center justify-between gap-2 [@media(max-height:800px)]:mt-1">
         <div className="flex items-center gap-1">
           <button
             type="button"
