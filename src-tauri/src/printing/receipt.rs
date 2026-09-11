@@ -91,6 +91,18 @@ pub struct ReceiptDoc {
     pub delivery_fee: Option<f64>,
     #[serde(default)]
     pub total: f64,
+    // --- Customer Receivables / On Account ----------------------------------
+    // Present only on a receivable (on-account) receipt: the server's payment
+    // status ("partial" | "unpaid"), what was paid now, and what is still owed -
+    // all in `currency`. Absent on a full-pay receipt, so nothing extra prints.
+    // The on-screen preview already renders these; carrying them here keeps the
+    // PAPER identical to the SCREEN instead of printing a bare "Unpaid".
+    #[serde(default)]
+    pub payment_status: Option<String>,
+    #[serde(default)]
+    pub paid_amount: Option<f64>,
+    #[serde(default)]
+    pub balance_due: Option<f64>,
     // --- cash handling: present ONLY during a live payment ------------------
     #[serde(default)]
     pub tender_currency: Option<String>,
@@ -523,10 +535,28 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
 
     // --- payment ------------------------------------------------------------
     if doc.shows("payment_method") {
+        // Customer Receivables / On Account: a receivable receipt is NOT fully
+        // paid (`doc.paid` is false), so without this it printed a bare "Unpaid"
+        // for a real partial sale. Show what was paid now and what is still owed -
+        // the server's exact operational figures, the same lines the on-screen
+        // preview draws (Paid now / Balance due), so paper and screen agree.
+        if let Some(pa) = doc.paid_amount {
+            out.push(PageLine::pair("Paid now", format_money(pa, &doc.currency), LineStyle::Body, Direction::Auto));
+        }
+        if let Some(bd) = doc.balance_due {
+            out.push(PageLine::pair("Balance due", format_money(bd, &doc.currency), LineStyle::Body, Direction::Auto));
+        }
+        // Status label mirrors the preview: full-pay -> "Paid - method"; a partial
+        // receivable -> "Partial - method"; a whole bill on account -> "On account";
+        // anything else -> "Unpaid" (unchanged for every existing full-pay receipt).
         let status = if doc.paid {
             format!("Paid - {}", doc.method.as_deref().unwrap_or("cash"))
         } else {
-            "Unpaid".to_string()
+            match doc.payment_status.as_deref() {
+                Some("partial") => format!("Partial - {}", doc.method.as_deref().unwrap_or("cash")),
+                Some("unpaid") => "On account".to_string(),
+                _ => "Unpaid".to_string(),
+            }
         };
         out.push(PageLine::pair(status, doc.currency.clone(), LineStyle::Body, Direction::Auto));
     }
@@ -583,6 +613,9 @@ mod tests {
             discount: 0.0,
             delivery_fee: None,
             total: 7.0,
+            payment_status: None,
+            paid_amount: None,
+            balance_due: None,
             tender_currency: None,
             tender_total: None,
             tendered: None,
@@ -728,6 +761,51 @@ mod tests {
         unpaid.paid = false;
         unpaid.method = None;
         assert!(texts(&build_receipt_page(&unpaid, PaperWidth::Mm80)).iter().any(|t| t == "Unpaid"));
+    }
+
+    #[test]
+    fn partial_on_account_prints_paid_and_balance_not_bare_unpaid() {
+        // Franks #260911-0001: a real LBP partial on-account sale (total 300,000,
+        // paid 200,000, balance 100,000) printed a bare "Unpaid" with no amounts,
+        // because the PAPER renderer carried no paid/balance fields while the
+        // on-screen preview showed them. Paper must now match the screen.
+        let mut d = doc();
+        d.currency = "LBP".into();
+        d.paid = false;
+        d.method = Some("cash".into());
+        d.payment_status = Some("partial".into());
+        d.subtotal = 300000.0;
+        d.total = 300000.0;
+        d.paid_amount = Some(200000.0);
+        d.balance_due = Some(100000.0);
+        let p = build_receipt_page(&d, PaperWidth::Mm80);
+        let right_of = |label: &str| p.iter().find(|l| l.text == label).and_then(|l| l.right.clone());
+        assert_eq!(right_of("Paid now").as_deref(), Some("200,000 LBP"));
+        assert_eq!(right_of("Balance due").as_deref(), Some("100,000 LBP"));
+        assert_eq!(right_of("TOTAL").as_deref(), Some("300,000 LBP"), "total must never be zero");
+        assert!(texts(&p).iter().any(|t| t == "Partial - cash"), "status must read 'Partial - cash'");
+        assert!(!texts(&p).iter().any(|t| t == "Unpaid"), "must NOT print a bare 'Unpaid' for a partial");
+    }
+
+    #[test]
+    fn full_on_account_prints_on_account_status_and_full_balance() {
+        // Whole bill on account (nothing paid now): status "On account",
+        // Balance due = total, and the total is still printed (never zero).
+        let mut d = doc();
+        d.currency = "LBP".into();
+        d.paid = false;
+        d.method = Some("cash".into());
+        d.payment_status = Some("unpaid".into());
+        d.subtotal = 300000.0;
+        d.total = 300000.0;
+        d.paid_amount = Some(0.0);
+        d.balance_due = Some(300000.0);
+        let p = build_receipt_page(&d, PaperWidth::Mm80);
+        let right_of = |label: &str| p.iter().find(|l| l.text == label).and_then(|l| l.right.clone());
+        assert_eq!(right_of("Balance due").as_deref(), Some("300,000 LBP"));
+        assert_eq!(right_of("TOTAL").as_deref(), Some("300,000 LBP"));
+        assert!(texts(&p).iter().any(|t| t == "On account"));
+        assert!(!texts(&p).iter().any(|t| t == "Unpaid"));
     }
 
     #[test]
