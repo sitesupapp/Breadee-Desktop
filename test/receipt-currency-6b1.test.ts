@@ -121,9 +121,12 @@ test("decimalDigits defaults to 2 when a caller omits it (6B-1 pre-wiring)", () 
   assert.equal(receipt.decimalDigits, 2);
 });
 
-test("the delivery fee cannot be double-counted: it lives inside `total`, not a separate field", () => {
-  // The desktop receipt has no dedicated fee line (the server folds the fee into the
-  // order total), so there is structurally no second place for it to appear.
+test("the delivery fee is display-only and never double-counted: the total stays authoritative", () => {
+  // The server folds the fee into the order total. The receipt CAN now show a
+  // dedicated Delivery Fee line, but it is display-only: the total is the
+  // authoritative figure and is never recomputed as subtotal + fee. A receipt
+  // built without a separate fee carries none (null), so no phantom line appears
+  // and the total is unchanged.
   const doc = toReceiptDoc(
     buildReceipt({
       businessName: "Test",
@@ -142,6 +145,8 @@ test("the delivery fee cannot be double-counted: it lives inside `total`, not a 
     }),
   );
   assert.equal(doc.total, 45);
-  assert.ok(!("deliveryFee" in doc), "no separate delivery-fee field exists to double-count");
+  // No fee was passed to this receipt, so the native document carries none - the
+  // total already contains it and nothing is added a second time.
+  assert.equal(doc.deliveryFee, null);
   assert.equal(formatReceiptMoney(doc.total, doc.currency, doc.decimalDigits), "45.000 JOD");
 });
