@@ -1521,12 +1521,11 @@ function PosWorkspaceInner() {
   // would be editing something invisible.
   useShortcuts(
     {
-      // The menu Search Bar is intentionally hidden on the POS routes, so the
-      // "search" binding (Ctrl+K / "/") no longer has a handler: focusing an
-      // invisible field with no visible query feedback would be worse than no
-      // shortcut. The binding stays declared in the keyboard model (the field is
-      // browsed by category instead); with no handler the key is simply ignored
-      // by the dispatcher rather than focusing the sr-only input.
+      // The menu Search Bar is intentionally hidden on the POS routes, so its
+      // Ctrl+K / "/" shortcut was removed entirely (binding + handler) - there is
+      // no "search" id in the keyboard model any more, so nothing focuses the
+      // sr-only field and nothing advertises a dead shortcut in the F1 help. The
+      // menu is browsed by category instead.
       prevCategory: () => setCategory((c) => stepCategory(categoryIds, c, -1)),
       nextCategory: () => setCategory((c) => stepCategory(categoryIds, c, 1)),
       lineUp: () => cart.moveSelection(-1),
@@ -1751,7 +1750,8 @@ function PosWorkspaceInner() {
                     declutter. The field stays in the DOM but visually hidden
                     (sr-only) so the query state/filtering plumbing is NOT
                     deleted; the Ctrl+K / "/" shortcut that used to focus it has
-                    had its handler removed (see useShortcuts above), so nothing
+                    been removed from the keyboard model entirely (see
+                    useShortcuts above and lib/keyboard/shortcuts.ts), so nothing
                     can focus this invisible field. The menu is browsed by
                     category instead. */}
                 <div className="sr-only">

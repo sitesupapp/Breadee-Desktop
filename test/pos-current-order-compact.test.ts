@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { stripJsxComments } from "./source-helpers.ts";
-import { matchShortcut } from "@/lib/keyboard/shortcuts";
+import { matchShortcut, shortcutHelp } from "@/lib/keyboard/shortcuts";
 import { buildTableBillReceipt } from "@/lib/pos/tablePaymentCompletion";
 import type { BillLine, BillOrder, TableBill, TableSummary } from "@/types/tables";
 
@@ -56,15 +56,20 @@ test("the table Search Bar is visually hidden (sr-only), not deleted", () => {
   assert.match(tableMap, /sr-only[\s\S]{0,240}Search tables \(Ctrl\+F\)/);
 });
 
-test("the hidden search fields cannot be focused - the shortcut handlers are removed", () => {
-  // The bindings stay in the keyboard model (so the model contract is unchanged)
-  // and still RESOLVE, but neither workspace registers a handler for them, so
-  // pressing Ctrl+K / "/" / Ctrl+F focuses nothing: a cashier can never type
-  // into an invisible field with no query feedback.
-  assert.match(shortcuts, /id: "search"/);
-  assert.match(shortcuts, /id: "tableSearch"/);
-  assert.equal(matchShortcut({ key: "k", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false }), "search");
-  assert.equal(matchShortcut({ key: "f", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false }), "tableSearch");
+test("the hidden search has no binding, no handler and no F1 help entry", () => {
+  // The menu/table Search Bars are hidden AND their shortcuts are fully gone: no
+  // id resolves, neither workspace registers a handler, and the F1 help sheet
+  // advertises neither - a cashier is never offered a shortcut for a feature
+  // that is intentionally invisible and does nothing.
+  assert.equal(matchShortcut({ key: "k", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false }), null);
+  assert.equal(matchShortcut({ key: "f", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false }), null);
+  assert.equal(shortcuts.includes('id: "search"'), false, "the menu-search binding must be gone");
+  assert.equal(shortcuts.includes('id: "tableSearch"'), false, "the table-search binding must be gone");
+  const helpLabels = shortcutHelp()
+    .flatMap((g) => g.items.map((i) => i.label))
+    .join(" | ");
+  assert.equal(/Search the menu/.test(helpLabels), false, "the menu search must not be advertised in the F1 help");
+  assert.equal(/Search tables/.test(helpLabels), false, "the table search must not be advertised in the F1 help");
   assert.equal(
     workspace.includes("search: () => searchRef.current?.focus()"),
     false,

@@ -998,10 +998,11 @@ export function useDineInWorkspace(input: {
   // to the menu instead - one binding, one owner, decided by the visible view.
   useShortcuts(
     {
-      // The table Search Bar is intentionally hidden on Dine-in, so "tableSearch"
-      // (Ctrl+F) no longer has a handler - it must not focus an invisible field.
-      // The binding stays in the keyboard model; with no handler the dispatcher
-      // ignores the key. Tables are browsed with the arrows / grid, not search.
+      // The table Search Bar is intentionally hidden on Dine-in, so its Ctrl+F
+      // shortcut was removed entirely (binding + handler): there is no
+      // "tableSearch" id in the keyboard model any more, so nothing focuses the
+      // sr-only field and nothing advertises a dead shortcut. Tables are browsed
+      // with the arrows / grid.
       tableLeft: () => move(-1),
       tableRight: () => move(1),
       // Shared vertical ids - in the map view they walk a grid row.
