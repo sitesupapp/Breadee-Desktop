@@ -91,12 +91,14 @@ pub struct ReceiptDoc {
     pub delivery_fee: Option<f64>,
     #[serde(default)]
     pub total: f64,
-    // --- Customer Receivables / On Account ----------------------------------
-    // Present only on a receivable (on-account) receipt: the server's payment
+    // --- On Account (pay later) ---------------------------------------------
+    // Present only on an on-account (pay-later) receipt: the server's payment
     // status ("partial" | "unpaid"), what was paid now, and what is still owed -
     // all in `currency`. Absent on a full-pay receipt, so nothing extra prints.
     // The on-screen preview already renders these; carrying them here keeps the
-    // PAPER identical to the SCREEN instead of printing a bare "Unpaid".
+    // PAPER identical to the SCREEN instead of printing a bare "Unpaid". These
+    // are payment-state figures, not a customer-account concept - the debt-slip
+    // document stays in the report layer, never here.
     #[serde(default)]
     pub payment_status: Option<String>,
     #[serde(default)]
@@ -535,11 +537,11 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
 
     // --- payment ------------------------------------------------------------
     if doc.shows("payment_method") {
-        // Customer Receivables / On Account: a receivable receipt is NOT fully
-        // paid (`doc.paid` is false), so without this it printed a bare "Unpaid"
-        // for a real partial sale. Show what was paid now and what is still owed -
-        // the server's exact operational figures, the same lines the on-screen
-        // preview draws (Paid now / Balance due), so paper and screen agree.
+        // On Account (pay later): a pay-later sale is NOT fully paid (`doc.paid`
+        // is false), so without this it printed a bare "Unpaid" for a real partial
+        // sale. Show what was paid now and what is still owed - the server's exact
+        // operational figures, the same lines the on-screen preview draws (Paid
+        // now / Balance due), so paper and screen agree.
         if let Some(pa) = doc.paid_amount {
             out.push(PageLine::pair("Paid now", format_money(pa, &doc.currency), LineStyle::Body, Direction::Auto));
         }
@@ -547,8 +549,8 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
             out.push(PageLine::pair("Balance due", format_money(bd, &doc.currency), LineStyle::Body, Direction::Auto));
         }
         // Status label mirrors the preview: full-pay -> "Paid - method"; a partial
-        // receivable -> "Partial - method"; a whole bill on account -> "On account";
-        // anything else -> "Unpaid" (unchanged for every existing full-pay receipt).
+        // pay-later sale -> "Partial - method"; a whole bill on account -> "On
+        // account"; anything else -> "Unpaid" (unchanged for full-pay receipts).
         let status = if doc.paid {
             format!("Paid - {}", doc.method.as_deref().unwrap_or("cash"))
         } else {
