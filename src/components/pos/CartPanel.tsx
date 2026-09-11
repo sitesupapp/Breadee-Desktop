@@ -20,7 +20,7 @@
 // navigator above and the buttons below. A saved order is rendered by
 // `CurrentOrderPanel`, whose actions take that order explicitly.
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Button, EmptyState, GatedButton, PanelTitle, type Gate } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
@@ -81,6 +81,19 @@ export type CartPanelProps = {
   discount?: number;
   /** Label for the destructive action, which differs by route. */
   clearLabel?: string;
+
+  // --- compact Order note (moved in from above the panel) -------------------
+
+  /**
+   * The whole-order note value, owned by the caller. OPTIONAL: only takeaway
+   * carries an order-level note here (delivery has its own delivery-note box,
+   * and a dine-in round uses the round panel). When omitted, no note control is
+   * rendered. Persistence is unchanged - this panel only reads and writes the
+   * caller's value; it creates no state of its own beyond whether the compact
+   * field is expanded.
+   */
+  orderNote?: string;
+  onOrderNoteChange?: (value: string) => void;
 };
 
 export function CartPanel(props: CartPanelProps) {
@@ -88,6 +101,12 @@ export function CartPanel(props: CartPanelProps) {
   const blocked = !props.shiftOpen;
   const discount = props.discount ?? 0;
   const total = Math.max(0, props.subtotal - discount);
+  // Compact Order note: expanded automatically when a note already exists, so a
+  // saved note is never hidden behind a button. Local to the panel because it is
+  // pure presentation; the note VALUE lives with the caller.
+  const hasNote = (props.orderNote ?? "").trim().length > 0;
+  const [noteOpen, setNoteOpen] = useState(false);
+  const noteShown = props.onOrderNoteChange != null && (noteOpen || hasNote);
   // Nothing to print until the server has accepted the order: a receipt for an
   // order that does not exist would carry no number, and the number is the only
   // thing anybody can look the order up by afterwards.
@@ -95,7 +114,7 @@ export function CartPanel(props: CartPanelProps) {
 
   return (
     <section className="flex h-full min-h-0 flex-col border-l border-line bg-white" aria-label="Current order">
-      <div className="shrink-0 space-y-3 border-b border-line px-4 py-3">
+      <div className="shrink-0 space-y-2 border-b border-line px-4 py-2.5">
         <PanelTitle>Current order</PanelTitle>
         {props.orderCarousel}
         {props.savedOrderNumber && (
@@ -103,6 +122,28 @@ export function CartPanel(props: CartPanelProps) {
             Order {props.savedOrderNumber} is saved - paying will settle this order.
           </p>
         )}
+        {/* Compact Order note. Replaces the tall standalone field that used to
+            sit ABOVE this panel and cost ~64px of item-list height. Collapsed to
+            a one-line trigger until needed; the same value/handler as before. */}
+        {props.onOrderNoteChange != null &&
+          (noteShown ? (
+            <input
+              type="text"
+              value={props.orderNote ?? ""}
+              onChange={(e) => props.onOrderNoteChange?.(e.target.value)}
+              placeholder="Order note - e.g. Call customer when ready"
+              className="w-full rounded-lg border border-line bg-white px-3 py-1.5 text-xs text-ink placeholder:text-sub"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setNoteOpen(true)}
+              className="flex items-center gap-1 text-xs font-semibold text-sub hover:text-ink"
+            >
+              <Glyph name="info" size={13} />
+              Add order note
+            </button>
+          ))}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
@@ -115,7 +156,7 @@ export function CartPanel(props: CartPanelProps) {
             <p className="max-w-[220px] text-xs text-sub">Add items from the menu to get started.</p>
           </div>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-1.5">
             {props.lines.map((line) => (
               <CartLineRow
                 key={line.key}
@@ -146,20 +187,20 @@ export function CartPanel(props: CartPanelProps) {
           </div>
         )}
 
-        <div className="mb-3 space-y-1">
-          <div className="flex items-baseline justify-between text-sm">
+        <div className="mb-2 space-y-0.5">
+          <div className="flex items-baseline justify-between text-xs">
             <span className="font-semibold text-sub">Subtotal</span>
             <span className="font-semibold tabular-nums text-ink">{formatMoney(props.subtotal, props.currency)}</span>
           </div>
-          <div className="flex items-baseline justify-between text-sm">
+          <div className="flex items-baseline justify-between text-xs">
             <span className="font-semibold text-sub">Discount</span>
             <span className="font-semibold tabular-nums text-ink">
               {discount > 0 ? `-${formatMoney(discount, props.currency)}` : formatMoney(0, props.currency)}
             </span>
           </div>
-          <div className="flex items-baseline justify-between border-t border-line pt-1.5">
+          <div className="flex items-baseline justify-between border-t border-line pt-1">
             <span className="text-sm font-extrabold text-ink">Total</span>
-            <span className="text-2xl font-extrabold tabular-nums text-ink">{formatMoney(total, props.currency)}</span>
+            <span className="text-xl font-extrabold tabular-nums text-ink">{formatMoney(total, props.currency)}</span>
           </div>
         </div>
 
@@ -174,17 +215,24 @@ export function CartPanel(props: CartPanelProps) {
           </p>
         )}
 
-        <div className="space-y-2">
+        {/* Compact TWO-ROW action grid (replaces four stacked 52px buttons). The
+            source order stays Pay -> Send -> Print -> Clear so the action
+            priority is unchanged; the grid lays them out as Pay | Send on the
+            first row and Print | Clear on the second. Pay stays the strong
+            primary by FILL and Clear stays the danger control, both at the 44px
+            touch size (`md`). When Pay/Print are omitted (delivery add-items),
+            the grid collapses to the remaining controls automatically. */}
+        <div className="grid grid-cols-2 gap-2">
           {/* 1 - Pay. The primary action, in the theme's strong primary. */}
           {props.payGate && (
             <GatedButton
               gate={props.payGate}
-              size="lg"
+              size="md"
               className="w-full"
               disabled={empty || props.busy || blocked}
               onClick={props.onPay}
             >
-              <Glyph name="pay" size={18} />
+              <Glyph name="pay" size={16} />
               {props.busy ? "Working..." : "Pay"}
             </GatedButton>
           )}
@@ -194,12 +242,12 @@ export function CartPanel(props: CartPanelProps) {
           <GatedButton
             gate={props.createGate}
             variant={props.payGate ? "outline" : "primary"}
-            size="lg"
+            size="md"
             className="w-full"
             disabled={empty || props.busy || blocked}
             onClick={props.onSendToKitchen}
           >
-            <Glyph name="kitchen" size={18} />
+            <Glyph name="kitchen" size={16} />
             {props.busy && !props.payGate ? "Sending..." : (props.sendLabel ?? "Send to kitchen")}
           </GatedButton>
 
@@ -208,13 +256,13 @@ export function CartPanel(props: CartPanelProps) {
           {props.onPrint && (
             <Button
               variant="ghost"
-              size="lg"
+              size="md"
               className="w-full"
               disabled={Boolean(printReason) || props.printBusy || props.busy}
               title={printReason ?? undefined}
               onClick={props.onPrint}
             >
-              <Glyph name="print" size={18} />
+              <Glyph name="print" size={16} />
               {props.printBusy ? "Preparing..." : "Print"}
             </Button>
           )}
@@ -222,12 +270,12 @@ export function CartPanel(props: CartPanelProps) {
           {/* 4 - The destructive one, last and unmistakable. */}
           <Button
             variant="danger"
-            size="lg"
+            size="md"
             className="w-full"
             disabled={empty && !props.savedOrderNumber}
             onClick={props.onNewOrder}
           >
-            <Glyph name="trash" size={18} />
+            <Glyph name="trash" size={16} />
             {props.clearLabel ?? "Clear cart"}
           </Button>
         </div>

@@ -169,35 +169,41 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
       <div className="space-y-2 pb-2">
         {/* Pay reuses Level 3C's settlement path in full - the same gate, the
             same dialog, the same pre-payment re-read and the same latch. There
-            is no second payment implementation behind this button. */}
+            is no second payment implementation behind this button. Kept the
+            full-size primary so it stays the obvious control. */}
         {!terminal && o.payment_status !== "paid" && (
           <GatedButton gate={props.payGate} size="lg" className="w-full" onClick={props.onPay}>
             Pay (F4)
           </GatedButton>
         )}
 
-        {!terminal && (
-          <GatedButton gate={props.editGate} variant="ghost" size="lg" className="w-full" onClick={props.onEdit}>
-            Edit order
-          </GatedButton>
-        )}
-
-        <Button
-          variant="ghost"
-          size="lg"
-          className="w-full"
-          disabled={props.receiptBusy}
-          onClick={props.onReceipt}
-        >
-          {props.receiptBusy ? "Opening receipt..." : "Receipt preview"}
-        </Button>
+        {/* Edit + Print, paired to save height. "Print" (was mislabelled
+            "Receipt preview") prints this order's receipt through the existing
+            path - it does not open a separate preview screen. When the order is
+            terminal it can only be read, so Edit is gone and Print spans the row. */}
+        <div className="grid grid-cols-2 gap-2">
+          {!terminal && (
+            <GatedButton gate={props.editGate} variant="ghost" size="md" className="w-full" onClick={props.onEdit}>
+              Edit order
+            </GatedButton>
+          )}
+          <Button
+            variant="ghost"
+            size="md"
+            className={terminal ? "col-span-2 w-full" : "w-full"}
+            disabled={props.receiptBusy}
+            onClick={props.onReceipt}
+          >
+            {props.receiptBusy ? "Preparing..." : "Print"}
+          </Button>
+        </div>
 
         {!terminal && (
           <>
             <GatedButton
               gate={props.voidGate}
               variant="danger"
-              size="lg"
+              size="md"
               className="w-full"
               onClick={props.onVoid}
             >

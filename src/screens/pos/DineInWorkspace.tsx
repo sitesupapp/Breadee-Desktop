@@ -63,7 +63,7 @@ import {
   validateTableDiscount,
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
-import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt } from "@/lib/pos/tablePaymentCompletion";
+import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt, buildTableBillReceipt } from "@/lib/pos/tablePaymentCompletion";
 import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import {
   completeTableOnAccount,
@@ -137,6 +137,16 @@ export function useDineInWorkspace(input: {
    * loading states on purpose (see `state/receipt.ts`).
    */
   onPresentReceipt: (receipt: ReceiptData) => void;
+  /**
+   * MANUAL receipt presentation, for the "print the bill before payment" action.
+   *
+   * Distinct from `onPresentReceipt` on purpose: that one is the settlement
+   * funnel and may auto-print, which is correct for a paid receipt. Printing an
+   * UNPAID bill must go to the manual preview layer (the same one takeaway's
+   * saved-order Print and the Orders modal use) so it never routes a paid-style
+   * document and never touches the automatic path. Wired to `receiptStore.present`.
+   */
+  onPreviewReceipt: (receipt: ReceiptData) => void;
   /**
    * Kitchen ticket for ONE submitted batch, routed through the caller for the
    * same reason the receipt is: there is one implementation of "print what was
@@ -988,7 +998,10 @@ export function useDineInWorkspace(input: {
   // to the menu instead - one binding, one owner, decided by the visible view.
   useShortcuts(
     {
-      tableSearch: () => searchRef.current?.focus(),
+      // The table Search Bar is intentionally hidden on Dine-in, so "tableSearch"
+      // (Ctrl+F) no longer has a handler - it must not focus an invisible field.
+      // The binding stays in the keyboard model; with no handler the dispatcher
+      // ignores the key. Tables are browsed with the arrows / grid, not search.
       tableLeft: () => move(-1),
       tableRight: () => move(1),
       // Shared vertical ids - in the map view they walk a grid row.
@@ -1077,6 +1090,54 @@ export function useDineInWorkspace(input: {
     [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select],
   );
 
+  // --- print the current bill BEFORE payment ---------------------------------
+  //
+  // Read-only: builds a receipt from the server's bill and hands it to the
+  // MANUAL preview layer. No payment, no close, no mutation. A bill that spans
+  // currencies has no single total, so it is refused rather than printed with an
+  // invented one - the same honesty the payment path keeps.
+  const [printingBill, setPrintingBill] = useState(false);
+  const printBill = useCallback(async () => {
+    if (printingBill) return;
+    const { bill: shownBill, table } = readTableState();
+    if (!table || !shownBill || shownBill.orders.length === 0) {
+      toast.push({ tone: "warning", message: "There is no open bill on this table to print yet." });
+      return;
+    }
+    if (shownBill.currency == null || shownBill.subtotal == null) {
+      toast.push({
+        tone: "warning",
+        message: "This table's bill spans more than one currency and can't be printed as a single receipt.",
+      });
+      return;
+    }
+    setPrintingBill(true);
+    try {
+      const receiptMeta = await fetchReceiptCurrency(
+        shownBill.orders[0]?.id,
+        receiptFallbackCurrency(shownBill.currency ?? input.currency),
+      );
+      input.onPreviewReceipt(
+        buildTableBillReceipt({
+          bill: shownBill,
+          table,
+          tenantName: pos.tenantName,
+          branchName: pos.branch.name,
+          operatorName: pos.userName,
+          receiptCurrency: receiptMeta.currency,
+          decimalDigits: receiptMeta.decimalDigits,
+          shiftId: input.shiftId,
+          at: new Date().toLocaleString(),
+        }),
+      );
+    } catch (e) {
+      toast.push({ tone: "error", message: "The bill could not be prepared for printing.", detail: classifyError(e).message });
+    } finally {
+      setPrintingBill(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printingBill, readTableState, input, pos.tenantName, pos.branch.name, pos.userName]);
+
   const bill = useCallback(
     () => (
       <TableBillPanel
@@ -1101,10 +1162,12 @@ export function useDineInWorkspace(input: {
         onClear={() => requestOp("clear")}
         payGate={payGate}
         onPay={requestPay}
+        onPrintBill={() => void printBill()}
+        printBusy={printingBill}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, printBill, printingBill],
   );
 
   const roundPanel = useCallback(

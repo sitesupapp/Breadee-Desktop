@@ -107,7 +107,7 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
               hint="Pick items from the menu, or press Ctrl+K to search. This round is not sent until you press Submit round."
             />
           ) : (
-            <ul className="space-y-2">
+            <ul className="space-y-1.5">
               {props.lines.map((line) => (
                 <CartLineRow
                   key={line.key}
@@ -178,9 +178,9 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
       {/* Pinned action area. Submit round sits alone: the destructive table
           actions arrive in later levels and must never share this row. */}
       <div className="shrink-0 border-t border-line bg-white p-3">
-        <div className="mb-3 flex items-baseline justify-between">
+        <div className="mb-2 flex items-baseline justify-between">
           <span className="text-sm font-semibold text-sub">This round</span>
-          <span className="text-2xl font-extrabold tabular-nums text-ink">
+          <span className="text-xl font-extrabold tabular-nums text-ink">
             {formatMoney(props.subtotal, props.currency)}
           </span>
         </div>

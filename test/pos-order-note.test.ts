@@ -117,9 +117,14 @@ test("the round payload builder forwards the order note", () => {
 
 test("takeaway wires the order note into its submit and kitchen ticket", () => {
   const src = stripJsxComments(read("src/screens/pos/PosWorkspace.tsx"));
-  // Fed into buildSubmitPayload via the live ref, and rendered as an input.
+  // Fed into buildSubmitPayload via the live ref (unchanged plumbing) and wired
+  // into the compact order-note control that now lives in the CartPanel header
+  // (v1.0.12 Current Order compaction) rather than a standalone field above it.
   assert.match(src, /orderNote: orderNoteRef\.current\.trim\(\)/);
-  assert.match(src, /onChange=\{\(e\) => editOrderNote\(e\.target\.value\)\}/);
+  assert.match(src, /onOrderNoteChange=\{editOrderNote\}/);
+  // The control itself still writes the same note value on change.
+  const cart = stripJsxComments(read("src/components/pos/CartPanel.tsx"));
+  assert.match(cart, /onChange=\{\(e\) => props\.onOrderNoteChange\?\.\(e\.target\.value\)\}/);
 });
 
 test("dine-in wires the order note into performRound", () => {

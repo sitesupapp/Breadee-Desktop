@@ -735,6 +735,10 @@ function PosWorkspaceInner() {
     // The receipt goes to the same store-owned layer takeaway uses, which is
     // mounted outside this component's loading states on purpose.
     onPresentReceipt: presentReceipt,
+    // "Print the bill before payment" uses the MANUAL preview layer - the same
+    // one takeaway's saved-order Print and the Orders modal use - so an UNPAID
+    // bill never reaches the automatic settlement path.
+    onPreviewReceipt: (receipt) => receiptStore.present(receipt),
     // The kitchen ticket goes through the one shared call site, so a dine-in
     // round and a delivery order get the same document, the same routing and
     // the same duplicate protection as a takeaway order.
@@ -1517,7 +1521,12 @@ function PosWorkspaceInner() {
   // would be editing something invisible.
   useShortcuts(
     {
-      search: () => searchRef.current?.focus(),
+      // The menu Search Bar is intentionally hidden on the POS routes, so the
+      // "search" binding (Ctrl+K / "/") no longer has a handler: focusing an
+      // invisible field with no visible query feedback would be worse than no
+      // shortcut. The binding stays declared in the keyboard model (the field is
+      // browsed by category instead); with no handler the key is simply ignored
+      // by the dispatcher rather than focusing the sr-only input.
       prevCategory: () => setCategory((c) => stepCategory(categoryIds, c, -1)),
       nextCategory: () => setCategory((c) => stepCategory(categoryIds, c, 1)),
       lineUp: () => cart.moveSelection(-1),
@@ -1737,13 +1746,23 @@ function PosWorkspaceInner() {
                     {delivery.identity}
                   </>
                 )}
-                <Input
-                  ref={searchRef}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search the menu (Ctrl+K)"
-                  className="max-w-md"
-                />
+                {/* The visible menu Search Bar is intentionally hidden on the
+                    POS routes (product request) to reclaim vertical space and
+                    declutter. The field stays in the DOM but visually hidden
+                    (sr-only) so the query state/filtering plumbing is NOT
+                    deleted; the Ctrl+K / "/" shortcut that used to focus it has
+                    had its handler removed (see useShortcuts above), so nothing
+                    can focus this invisible field. The menu is browsed by
+                    category instead. */}
+                <div className="sr-only">
+                  <Input
+                    ref={searchRef}
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search the menu (Ctrl+K)"
+                    className="max-w-md"
+                  />
+                </div>
                 {!online && (
                   <span className="rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900">
                     Offline - ordering needs a connection
@@ -1871,20 +1890,13 @@ function PosWorkspaceInner() {
                 />
               </section>
             ) : (
-              <>
-              {/* Fast ORDER-level note for the whole takeaway order - distinct
-                  from an item's kitchen note (the per-line "Note" button below).
-                  Wired to the existing orderNote -> pos_orders.notes plumbing. */}
-              <label className="mb-2 block">
-                <span className="mb-1 block text-xs font-bold text-ink">Order note</span>
-                <input
-                  type="text"
-                  value={orderNote}
-                  onChange={(e) => editOrderNote(e.target.value)}
-                  placeholder="Whole-order note - e.g. Call customer when ready"
-                  className="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-sub"
-                />
-              </label>
+              /* The ORDER-level note now lives INSIDE the panel header as a
+                 compact control (see CartPanel `orderNote`/`onOrderNoteChange`),
+                 reclaiming the ~64px the standalone field used to cost above the
+                 list. Same `orderNote` state, same `editOrderNote` handler, same
+                 orderNote -> pos_orders.notes plumbing - only the placement
+                 changed, and the panel is once again the sole child of the
+                 column. */
               <CartPanel
                 lines={cart.lines}
                 selectedKey={cart.selectedKey}
@@ -1903,10 +1915,12 @@ function PosWorkspaceInner() {
                 onPay={openPayment}
                 onOpenShift={() => setOpenShiftOpen(true)}
                 onNewOrder={clearOrder}
-                /* An unsaved draft is scratch, and its destructive action says
-                   so. `Delete / Void` belongs to a saved order and appears only
-                   on the panel above. */
-                clearLabel={cart.savedOrder ? "Clear cart (leaves the order unpaid)" : "Clear cart"}
+                orderNote={orderNote}
+                onOrderNoteChange={editOrderNote}
+                /* An unsaved draft is scratch. The saved-order status already
+                   shows in the header, and clearing a sent order is guarded by
+                   its own confirm, so the destructive label stays short. */
+                clearLabel="Clear cart"
                 orderCarousel={
                   <OrderCarousel
                     orderNumber={null}
@@ -1920,7 +1934,6 @@ function PosWorkspaceInner() {
                 onPrint={() => void printCurrentOrder()}
                 printBusy={printingOrder}
               />
-              </>
             )
           )
         }
