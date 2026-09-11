@@ -346,6 +346,16 @@ export type ReceiptDoc = {
    */
   deliveryFee: number | null;
   total: number;
+  /**
+   * Customer Receivables / On Account. The server's payment status and the exact
+   * operational paid/owed amounts, so the PAPER shows "Paid now" / "Balance due"
+   * and a "Partial" / "On account" status instead of a bare "Unpaid" - the same
+   * lines the on-screen preview draws. Null on a full-pay receipt (nothing extra
+   * prints). camelCase maps to Rust `payment_status` / `paid_amount` / `balance_due`.
+   */
+  paymentStatus: "unpaid" | "partial" | null;
+  paidAmount: number | null;
+  balanceDue: number | null;
   tenderCurrency: string | null;
   tenderTotal: number | null;
   tendered: number | null;
@@ -407,6 +417,9 @@ export function toReceiptDoc(receipt: {
   discount: number;
   deliveryFee?: number | null;
   total: number;
+  paymentStatus?: "unpaid" | "partial" | null;
+  paidAmount?: number | null;
+  balanceDue?: number | null;
   tenderCurrency?: string | null;
   tenderTotal?: number | null;
   tendered?: number | null;
@@ -451,6 +464,11 @@ export function toReceiptDoc(receipt: {
     // Mapped to the Rust `delivery_fee` (camelCase serde). Null/0 prints nothing.
     deliveryFee: receipt.deliveryFee ?? null,
     total: receipt.total,
+    // On-account paid/owed + status reach the printer, so the paper matches the
+    // preview (Paid now / Balance due / Partial) instead of a bare "Unpaid".
+    paymentStatus: receipt.paymentStatus ?? null,
+    paidAmount: receipt.paidAmount ?? null,
+    balanceDue: receipt.balanceDue ?? null,
     tenderCurrency: receipt.tenderCurrency ?? null,
     tenderTotal: receipt.tenderTotal ?? null,
     tendered: receipt.tendered ?? null,

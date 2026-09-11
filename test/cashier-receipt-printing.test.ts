@@ -333,13 +333,15 @@ test("the receipt document carries exactly the fields the renderer needs", () =>
   // The set grew by six when the receipt designer landed, and each addition is
   // deliberate: `address`/`phone`/`welcome`/`footer` are the branding the
   // native renderer can now draw, `sections` is the tenant's block list, and
-  // `qr` is a pre-encoded matrix. Nothing else may appear - the point of
-  // listing them exhaustively is that a seventh has to be argued for here.
+  // `qr` is a pre-encoded matrix. It then grew by three for Customer Receivables:
+  // `paymentStatus`/`paidAmount`/`balanceDue` carry the on-account paid/owed split
+  // to paper. Nothing else may appear - the point of listing them exhaustively is
+  // that the next one has to be argued for here.
   assert.deepEqual(Object.keys(doc).sort(), [
-    "address", "at", "branchName", "businessName", "change", "currency", "customerName",
+    "address", "at", "balanceDue", "branchName", "businessName", "change", "currency", "customerName",
     "customerPhone", "deliveryAddress", "deliveryFee", "discount", "footer", "lines", "method",
-    "orderNumber", "orderType", "paid", "phone", "qr", "seats", "sections", "shiftRef", "staffName",
-    "subtotal", "tableName", "tenderCurrency", "tenderTotal", "tendered", "total", "welcome",
+    "orderNumber", "orderType", "paid", "paidAmount", "paymentStatus", "phone", "qr", "seats", "sections",
+    "shiftRef", "staffName", "subtotal", "tableName", "tenderCurrency", "tenderTotal", "tendered", "total", "welcome",
   ]);
   // The branding defaults to null/absent, so a caller written before the designer
   // existed produces exactly the document it always did.
@@ -349,6 +351,10 @@ test("the receipt document carries exactly the fields the renderer needs", () =>
   assert.equal(doc.footer, null);
   // Delivery fee defaults to null — takeaway/dine-in receipts print no fee line.
   assert.equal(doc.deliveryFee, null);
+  // A full-pay receipt carries no receivable split, so all three default to null.
+  assert.equal(doc.paymentStatus, null);
+  assert.equal(doc.paidAmount, null);
+  assert.equal(doc.balanceDue, null);
   assert.equal(doc.lines[0].modifiers[0].name, "Small");
   assert.equal(doc.lines[0].note, "No olives");
 });
@@ -360,6 +366,28 @@ test("the delivery fee crosses to the native document (camelCase → Rust delive
   assert.equal(toReceiptDoc({ ...receipt(), deliveryFee: 2 }).deliveryFee, 2);
   assert.equal(toReceiptDoc({ ...receipt(), deliveryFee: 0 }).deliveryFee, 0);
   assert.equal(toReceiptDoc(receipt()).deliveryFee, null);
+});
+
+test("on-account paid/balance/status cross to the native document", () => {
+  // Franks #260911-0001: the same class of gap as the delivery fee. toReceiptDoc
+  // dropped paymentStatus/paidAmount/balanceDue, so the paper printed a bare
+  // "Unpaid" for a real 300,000 / paid 200,000 / balance 100,000 partial sale.
+  // They now cross the boundary onto the Rust payment_status/paid_amount/balance_due.
+  const partial = toReceiptDoc({
+    ...receipt(),
+    paid: false,
+    paymentStatus: "partial",
+    paidAmount: 200000,
+    balanceDue: 100000,
+  });
+  assert.equal(partial.paymentStatus, "partial");
+  assert.equal(partial.paidAmount, 200000);
+  assert.equal(partial.balanceDue, 100000);
+  // A full-pay receipt (the default) carries none of them.
+  const full = toReceiptDoc(receipt());
+  assert.equal(full.paymentStatus, null);
+  assert.equal(full.paidAmount, null);
+  assert.equal(full.balanceDue, null);
 });
 
 test("live tender and change are carried; a historical receipt omits them", () => {
