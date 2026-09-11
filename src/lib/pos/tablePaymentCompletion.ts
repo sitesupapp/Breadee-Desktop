@@ -236,8 +236,12 @@ export function buildTableOnAccountReceipt(input: TableOnAccountReceiptInput): R
   const subtotal = input.result?.subtotal ?? input.bill.subtotal ?? 0;
   const discount = input.result ? input.result.discount : Math.max(0, input.requestedDiscount);
   const total = input.result?.bill_total ?? Math.max(0, subtotal - discount);
-  const paidNow = input.result ? input.result.paid_usd : Math.max(0, input.requestedPaidNow);
-  const balance = input.result ? input.result.outstanding_primary : Math.max(0, total - paidNow);
+  // Paid now in the bill's OWN (operational) currency: bill total minus what is
+  // still owed. `paid_usd` is the USD accounting figure and would print e.g. 2.22
+  // on an LBP receipt - both operational figures are the server's, so derive from
+  // them and never show the USD amount as if it were local money.
+  const balance = input.result ? input.result.outstanding_primary : Math.max(0, total - Math.max(0, input.requestedPaidNow));
+  const paidNow = input.result ? Math.max(0, total - balance) : Math.max(0, input.requestedPaidNow);
 
   const orderNumbers = input.bill.orders.map((o) => o.order_number).filter(Boolean);
 

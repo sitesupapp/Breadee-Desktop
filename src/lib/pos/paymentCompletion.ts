@@ -180,6 +180,16 @@ export type OnAccountCompletionInput = {
     order_number: string;
     subtotal: number;
     discount: number;
+    /**
+     * Operational-currency authoritative figures (the order's own currency).
+     * `total` is the bill total with any delivery fee already folded in;
+     * `outstanding` is the exact operational balance; `delivery_fee` prints on
+     * its own line. Using these instead of the USD fields keeps the receipt's
+     * money exact for an LBP order (no USD round-trip).
+     */
+    total: number;
+    outstanding: number;
+    delivery_fee: number;
   };
   lines: CartLine[];
   receiptLines?: ReceiptLine[] | null;
@@ -207,8 +217,11 @@ export function buildOnAccountReceipt(input: OnAccountCompletionInput): ReceiptD
     // Not paid - there is a balance. `paymentStatus` says how much.
     paid: false,
     paymentStatus: result.payment_status,
-    paidAmount: result.paid_usd,
-    balanceDue: result.outstanding_usd,
+    // Exact operational money: paid now = bill total - what is still owed; the
+    // balance is the server's operational outstanding. NEVER the USD round-trip
+    // (which prints e.g. 199,998 / 100,002 for a clean 200,000 / 100,000).
+    paidAmount: result.total - result.outstanding,
+    balanceDue: result.outstanding,
     method: input.method,
     currency: input.primaryCurrency,
     lines:
@@ -223,8 +236,13 @@ export function buildOnAccountReceipt(input: OnAccountCompletionInput): ReceiptD
       })),
     subtotal: result.subtotal,
     discount: result.discount,
-    // The bill total owed, before what was paid now.
-    total: result.subtotal - result.discount,
+    // The bill total owed. The SERVER's operational total, with any delivery fee
+    // already folded in - never subtotal-minus-discount, which drops the fee and
+    // (when the server omits subtotal) prints a 0 grand total for a real order.
+    total: result.total,
+    // Delivery orders: the fee, on its own line between Subtotal and Total. Absent
+    // or 0 prints nothing; takeaway/dine-in are unaffected.
+    deliveryFee: result.delivery_fee || null,
     // A receivable takes no cash tender at the drawer, so no tender/change block.
     tenderCurrency: null,
     shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,

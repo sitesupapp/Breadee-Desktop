@@ -1246,9 +1246,14 @@ export function useDeliveryWorkspace(input: {
 
         const money = outcome.result;
         const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
-        const total = money ? Math.max(0, money.subtotal - money.discount) : (settled.total_amount ?? 0);
-        const paidNow = money ? money.paid_usd : confirm.mode === "partial" ? confirm.amountNow : 0;
-        const balance = money ? money.outstanding_usd : Math.max(0, total - paidNow);
+        // Operational money, exact and delivery-fee-inclusive: `total` is the
+        // server's order total (fee already folded in), `paidNow` = total minus
+        // the operational balance, `balance` is the server's operational
+        // outstanding. Never `subtotal - discount` (drops the fee, and prints 0
+        // when the server omits subtotal) and never the USD paid/outstanding.
+        const total = money ? money.total : (settled.total_amount ?? 0);
+        const balance = money ? money.outstanding : Math.max(0, total - (confirm.mode === "partial" ? confirm.amountNow : 0));
+        const paidNow = money ? Math.max(0, money.total - money.outstanding) : confirm.mode === "partial" ? confirm.amountNow : 0;
         const who = receiptIdentity(order);
         input.onPresentReceipt(
           buildReceipt({
@@ -1270,6 +1275,9 @@ export function useDeliveryWorkspace(input: {
             lines,
             subtotal: money?.subtotal ?? settled.total_amount ?? 0,
             discount: money?.discount ?? 0,
+            // Delivery fee on its own line between Subtotal and Total (already
+            // folded into `total`). Absent/0 prints nothing.
+            deliveryFee: money?.delivery_fee ?? null,
             total,
             // A receivable takes no cash tender at the drawer.
             tenderCurrency: null,

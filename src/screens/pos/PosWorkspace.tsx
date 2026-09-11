@@ -1343,6 +1343,12 @@ function PosWorkspaceInner() {
             order_number: o?.order_number ?? orderNumber,
             subtotal: total,
             discount: 0,
+            // Operational figures for the receipt. On this recovered best-effort
+            // path they are the read-back order total in its own currency (the
+            // delivery fee is already inside `total`; its own line is omitted).
+            total,
+            outstanding: Math.max(0, total - paidNow),
+            delivery_fee: 0,
           };
         }
 

@@ -172,6 +172,17 @@ export type OnAccountResult = {
   order_number: string;
   subtotal: number;
   discount: number;
+  /**
+   * The order's authoritative figures in its OWN (operational) currency, so the
+   * receipt prints exact local money instead of a USD round-trip. `total` is the
+   * order's bill total (delivery fee already folded in by the finance engine);
+   * `outstanding` is the exact operational balance still owed; `delivery_fee` is
+   * carried so the receipt can show it on its own line. All three come from the
+   * server. USD fields above remain for accounting/back-compat.
+   */
+  total: number;
+  outstanding: number;
+  delivery_fee: number;
 };
 
 export type TableOnAccountResult = {
@@ -220,6 +231,9 @@ export async function completeOnAccount(input: {
     order_number: str(row.order_number),
     subtotal: num(row.subtotal),
     discount: num(row.discount),
+    total: num(row.total),
+    outstanding: num(row.outstanding),
+    delivery_fee: num(row.delivery_fee),
   };
 }
 
