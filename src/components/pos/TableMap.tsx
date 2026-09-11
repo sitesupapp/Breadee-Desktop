@@ -40,13 +40,22 @@ export const TableMap = forwardRef<HTMLInputElement, TableMapProps>(function Tab
   return (
     <>
       <div className="mb-3 flex shrink-0 flex-wrap items-center gap-2">
-        <Input
-          ref={searchRef}
-          value={props.query}
-          onChange={(e) => props.onQueryChange(e.target.value)}
-          placeholder="Search tables (Ctrl+F)"
-          className="max-w-xs"
-        />
+        {/* The visible table Search Bar is intentionally hidden on the Dine-in
+            route (product request). Kept in the DOM but visually hidden
+            (sr-only) so the query/filter plumbing is preserved; the Ctrl+F
+            shortcut that used to focus it has had its handler removed (see
+            DineInWorkspace useShortcuts), so nothing can focus this invisible
+            field. The status badges beside it (free / occupied / configured)
+            stay visible, and tables are browsed with the arrows / grid. */}
+        <div className="sr-only">
+          <Input
+            ref={searchRef}
+            value={props.query}
+            onChange={(e) => props.onQueryChange(e.target.value)}
+            placeholder="Search tables (Ctrl+F)"
+            className="max-w-xs"
+          />
+        </div>
         <Badge tone="slate">{map.available} free</Badge>
         <Badge tone="amber">{map.occupied} occupied</Badge>
         <Badge tone="blue">{map.configured} configured</Badge>

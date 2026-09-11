@@ -39,6 +39,13 @@ export type TableBillPanelProps = {
   payGate: Gate;
   /** Opens the payment dialog. Settling happens there, behind the same gate. */
   onPay: () => void;
+  /**
+   * Print the table's CURRENT bill BEFORE payment (guest asked for the bill).
+   * Manual preview of the server's bill; it takes no payment, closes no table,
+   * and mutates nothing. Enabled only while there is an open bill to print.
+   */
+  onPrintBill: () => void;
+  printBusy?: boolean;
 };
 
 /** A submitted time, shown short. The server's timestamp, never a local clock. */
@@ -182,62 +189,77 @@ export function TableBillPanel(props: TableBillPanelProps) {
 
       <div className="shrink-0 border-t border-line bg-white p-3">
         {bill && bill.orders.length > 0 && (
-          <div className="mb-3 flex items-baseline justify-between">
+          <div className="mb-2 flex items-baseline justify-between">
             <span className="text-sm font-semibold text-sub">Bill total</span>
-            <span className="text-2xl font-extrabold tabular-nums text-ink">
+            <span className="text-xl font-extrabold tabular-nums text-ink">
               {bill.total != null && bill.currency ? formatMoney(bill.total, bill.currency) : "—"}
             </span>
           </div>
         )}
 
         {table && bill && bill.orders.length === 0 && props.openGate.allowed && (
-          <Button size="lg" className="mb-3 w-full" onClick={props.onOpenTable}>
+          <Button size="lg" className="mb-2 w-full" onClick={props.onOpenTable}>
             Open table
           </Button>
         )}
         {table && bill && bill.orders.length === 0 && !props.openGate.allowed && props.openGate.reason && (
-          <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
+          <p className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
             {props.openGate.reason}
           </p>
         )}
 
         {/* Level 2D. The money action, at the TOP of the action stack and as far
             from Clear as the panel allows - Pay collects the bill, Clear voids
-            it, and those two must never be adjacent on a touch screen. */}
+            it, and those two must never be adjacent on a touch screen. Kept the
+            full-width, large primary so it stays the obvious control. */}
         {table && bill && bill.orders.length > 0 && (
-          <GatedButton gate={props.payGate} size="lg" className="mb-3 w-full" onClick={props.onPay}>
+          <GatedButton gate={props.payGate} size="lg" className="mb-2 w-full" onClick={props.onPay}>
             <Glyph name="pay" size={18} />
             Pay (F4)
           </GatedButton>
         )}
 
-        {/* Level 2B. Deliberately separated from the operations below - the
-            action that adds food must never sit in the same row as the ones that
-            move or void a bill. */}
+        {/* Secondary actions, paired to save height: Add items (which enters the
+            round builder) and Print bill (the guest's copy, BEFORE payment).
+            Both are non-destructive, so pairing them carries none of the mis-tap
+            risk that keeps Clear on its own row below. */}
         {table && (
-          <GatedButton
-            gate={props.addItemsGate}
-            size="lg"
-            className="mb-3 w-full"
-            disabled={!props.addItemsGate.allowed}
-            onClick={props.onAddItems}
-          >
-            <Glyph name="kitchen" size={18} />
-            Add items (A)
-          </GatedButton>
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            <GatedButton
+              gate={props.addItemsGate}
+              variant="outline"
+              size="md"
+              className="w-full"
+              disabled={!props.addItemsGate.allowed}
+              onClick={props.onAddItems}
+            >
+              <Glyph name="kitchen" size={16} />
+              Add items (A)
+            </GatedButton>
+            <Button
+              variant="ghost"
+              size="md"
+              className="w-full"
+              disabled={!bill || bill.orders.length === 0 || props.printBusy}
+              onClick={props.onPrintBill}
+            >
+              <Glyph name="print" size={16} />
+              {props.printBusy ? "Preparing..." : "Print bill"}
+            </Button>
+          </div>
         )}
 
-        {/* Level 2C operations, now stacked full-width to match the rest of the
-            POS: a half-width control beside another half-width control is the
-            arrangement a thumb gets wrong, and one of these two ends a table's
-            service. Clear stays separated below because it VOIDS the bill. */}
-        <div className="space-y-2">
-          <GatedButton gate={props.moveGate} variant="ghost" size="lg" className="w-full" onClick={props.onMove}>
-            <Glyph name="move" size={17} />
+        {/* Level 2C operations. Move and Close are paired - both are table
+            operations, neither voids the bill - while Clear stays on its own row
+            below because it VOIDS the bill and must never sit beside another
+            control a thumb could reach by mistake. */}
+        <div className="grid grid-cols-2 gap-2">
+          <GatedButton gate={props.moveGate} variant="ghost" size="md" className="w-full" onClick={props.onMove}>
+            <Glyph name="move" size={16} />
             Move table
           </GatedButton>
-          <GatedButton gate={props.closeGate} variant="ghost" size="lg" className="w-full" onClick={props.onClose}>
-            <Glyph name="check" size={17} />
+          <GatedButton gate={props.closeGate} variant="ghost" size="md" className="w-full" onClick={props.onClose}>
+            <Glyph name="check" size={16} />
             Close table
           </GatedButton>
         </div>
@@ -246,11 +268,11 @@ export function TableBillPanel(props: TableBillPanelProps) {
           <GatedButton
             gate={props.clearGate}
             variant="danger"
-            size="lg"
+            size="md"
             className="w-full"
             onClick={props.onClear}
           >
-            <Glyph name="trash" size={17} />
+            <Glyph name="trash" size={16} />
             Clear bill (voids the bill)
           </GatedButton>
         </div>

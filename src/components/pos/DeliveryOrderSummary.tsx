@@ -67,7 +67,7 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
 
       <div className="mt-3 flex items-baseline justify-between border-t border-line pt-2">
         <span className="text-sm font-semibold text-sub">Total</span>
-        <span className="text-2xl font-extrabold tabular-nums text-ink">
+        <span className="text-xl font-extrabold tabular-nums text-ink">
           {formatMoney(o.total_amount ?? 0, (o.currency as CurrencyCode) ?? props.currency)}
         </span>
       </div>
@@ -89,7 +89,7 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
         </p>
       )}
 
-      <Button variant="ghost" size="lg" className="mt-3 w-full" onClick={props.onStartNewOrder}>
+      <Button variant="ghost" size="md" className="mt-3 w-full" onClick={props.onStartNewOrder}>
         Start another delivery order
       </Button>
     </section>

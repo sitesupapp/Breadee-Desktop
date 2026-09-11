@@ -32,15 +32,20 @@ export function CartLineRow({
     <li
       onClick={onSelect}
       className={cn(
-        "rounded-xl border p-3 transition",
+        "rounded-xl border px-2.5 py-2 transition",
         selected ? "border-brand bg-brand-soft/40" : "border-line bg-white hover:border-brand/40",
       )}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-bold text-ink">{line.name}</p>
+          {/* Name and unit price share one line so the row loses the separate
+              "each" line it used to carry, without losing either fact. */}
+          <div className="flex items-baseline gap-2">
+            <p className="min-w-0 flex-1 truncate text-sm font-bold text-ink">{line.name}</p>
+            <span className="shrink-0 text-[11px] text-sub">{formatMoney(finalUnitPrice, currency)} ea</span>
+          </div>
           {line.modifiers.length > 0 && (
-            <ul className="mt-1 space-y-0.5">
+            <ul className="mt-0.5 space-y-0.5">
               {line.modifiers.map((m) => (
                 <li key={`${m.option_id}`} className="flex justify-between gap-2 text-xs text-sub">
                   <span className="truncate">+ {m.name}</span>
@@ -49,13 +54,12 @@ export function CartLineRow({
               ))}
             </ul>
           )}
-          {line.kitchen_note && <p className="mt-1 truncate text-xs italic text-amber-700">Note: {line.kitchen_note}</p>}
-          <p className="mt-1 text-xs text-sub">{formatMoney(finalUnitPrice, currency)} each</p>
+          {line.kitchen_note && <p className="mt-0.5 truncate text-xs italic text-amber-700">Note: {line.kitchen_note}</p>}
         </div>
         <p className="shrink-0 text-sm font-extrabold text-ink">{formatMoney(lineTotal, currency)}</p>
       </div>
 
-      <div className="mt-2 flex items-center justify-between gap-2">
+      <div className="mt-1.5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1">
           <button
             type="button"
