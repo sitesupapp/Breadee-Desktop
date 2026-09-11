@@ -37,6 +37,14 @@ export type DeliveryOrderSummaryProps = {
 export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
   const o = props.order;
   const paid = o.payment_status === "paid";
+  const orderCurrency = (o.currency as OperationalCurrencyCode) ?? props.currency;
+  const total = o.total_amount ?? 0;
+  // The canonical persisted delivery fee, already folded into `total`, shown as
+  // its own line so the driver's collectable amount reconciles: Subtotal +
+  // Delivery Fee = Total. 0/absent shows no fee line. The subtotal falls back to
+  // the total for a legacy order saved before the fee was applied at creation.
+  const deliveryFee = o.delivery_fee ?? 0;
+  const subtotal = o.subtotal ?? total;
 
   return (
     <section aria-label="Sent delivery order" className="rounded-2xl border border-line bg-white p-4">
@@ -65,11 +73,23 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
         <p className="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-ink">{o.notes}</p>
       )}
 
-      <div className="mt-3 flex items-baseline justify-between border-t border-line pt-2">
-        <span className="text-sm font-semibold text-sub">Total</span>
-        <span className="text-xl font-extrabold tabular-nums text-ink">
-          {formatMoney(o.total_amount ?? 0, (o.currency as OperationalCurrencyCode) ?? props.currency)}
-        </span>
+      <div className="mt-3 space-y-1 border-t border-line pt-2">
+        {deliveryFee > 0 && (
+          <>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[11px] font-semibold text-sub">Subtotal</span>
+              <span className="text-sm tabular-nums text-ink">{formatMoney(subtotal, orderCurrency)}</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-[11px] font-semibold text-sub">Delivery Fee</span>
+              <span className="text-sm tabular-nums text-ink">{formatMoney(deliveryFee, orderCurrency)}</span>
+            </div>
+          </>
+        )}
+        <div className="flex items-baseline justify-between border-t border-line pt-2">
+          <span className="text-sm font-semibold text-sub">Total</span>
+          <span className="text-xl font-extrabold tabular-nums text-ink">{formatMoney(total, orderCurrency)}</span>
+        </div>
       </div>
 
       {paid ? (

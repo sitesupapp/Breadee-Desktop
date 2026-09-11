@@ -494,6 +494,43 @@ test("every figure on a reprint is the server's, and cash handling is left blank
   assert.equal(r.currency, "USD");
 });
 
+test("a delivery reprint shows the persisted Delivery Fee from canonical data, once", () => {
+  // The regression this guards: the reprint/detail path dropped the fee. It now
+  // carries the ORDER's own delivery_fee — its own line, never derived from
+  // total - subtotal — so Subtotal + Delivery Fee reconciles to Total.
+  const withFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 67_500, delivery_fee: 2, total_amount: 67_502, payment_status: "paid" }),
+    payment: { method: "cash", currency: "LBP", amount: 67_502, originalAmount: 67_502, exchangeRate: null, paidAt: null },
+    lines: [],
+    party,
+    fallbackCurrency: "LBP",
+    receiptCurrency: "LBP",
+    decimalDigits: 2,
+    at: "x",
+  });
+  assert.equal(withFee.subtotal, 67_500);
+  assert.equal(withFee.deliveryFee, 2);
+  assert.equal(withFee.total, 67_502);
+  // A delivery order with no fee shows no fee line (null, never a phantom 0).
+  const noFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 10, total_amount: 10, payment_status: "paid" }),
+    payment: null,
+    lines: [],
+    party,
+    fallbackCurrency: "USD",
+    receiptCurrency: "USD",
+    decimalDigits: 2,
+    at: "x",
+  });
+  assert.equal(noFee.deliveryFee ?? null, null);
+});
+
 test("an unpaid order's receipt says unpaid rather than pretending otherwise", () => {
   const r = buildHistoricalReceipt({
     tenantName: null,
@@ -622,9 +659,14 @@ test("the queue row shape is converted for settlement rather than re-implemented
   assert.equal(open.total_amount, o.total_amount);
   assert.equal(open.customer_id, o.customer_id);
   assert.equal(open.address_id, o.address_id);
-  // Queue-only fields do not travel into the settlement shape.
+  // The items subtotal and the persisted delivery fee DO travel into the
+  // settlement shape now: the fee belongs to the ORDER, so the settlement dialog
+  // and the order detail reconcile Subtotal + Delivery Fee = Total from canonical
+  // data rather than re-deriving them from the total.
+  assert.equal(open.subtotal, o.subtotal);
+  assert.equal(open.delivery_fee ?? null, o.delivery_fee ?? null);
+  // A queue-only field still does not travel into the settlement shape.
   assert.equal("shift_id" in open, false);
-  assert.equal("subtotal" in open, false);
 });
 
 // --- permissions -------------------------------------------------------------

@@ -65,6 +65,9 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
   const total = o.total_amount ?? 0;
   const subtotal = o.subtotal ?? total;
   const discount = o.discount_amount ?? 0;
+  // The canonical persisted delivery fee, already folded into `total`. Shown as
+  // its own line so subtotal - discount + fee reconciles to the total on screen.
+  const deliveryFee = o.delivery_fee ?? 0;
 
   return (
     <section aria-label="Delivery order detail" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -149,6 +152,7 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
         <div className="mt-3 space-y-1 border-t border-line pt-2">
           <Row label="Subtotal" value={formatMoney(subtotal, currency)} />
           {discount > 0 && <Row label="Discount" value={`- ${formatMoney(discount, currency)}`} />}
+          {deliveryFee > 0 && <Row label="Delivery Fee" value={formatMoney(deliveryFee, currency)} />}
           <div className="flex items-baseline justify-between border-t border-line pt-2">
             <span className="text-sm font-semibold text-sub">Total</span>
             <span className="text-2xl font-extrabold tabular-nums text-ink">{formatMoney(total, currency)}</span>

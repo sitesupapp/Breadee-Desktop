@@ -154,6 +154,16 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
           <span>-{formatReceiptMoney(data.discount, data.currency, data.decimalDigits)}</span>
         </div>
       )}
+      {/* The delivery fee is the amount the driver collects, so it is NOT gated by
+          the tenant's template section list (like the receivables lines below): a
+          receipt that silently dropped the fee would understate what is owed. Only
+          delivery orders carry one; 0/absent draws nothing. */}
+      {data.deliveryFee != null && data.deliveryFee > 0 && (
+        <div className="flex justify-between">
+          <span>Delivery Fee</span>
+          <span>{formatReceiptMoney(data.deliveryFee, data.currency, data.decimalDigits)}</span>
+        </div>
+      )}
       {show("total") && (
         <div className="mt-1 flex justify-between text-sm font-bold">
           <span>Total</span>

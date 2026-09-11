@@ -137,6 +137,41 @@ test("takeaway and dine-in payloads gain no delivery fields", () => {
   assert.equal(dineIn.table_id, "t1");
 });
 
+// --- the delivery fee belongs to the ORDER, entered before it is sent --------
+//
+// Business rule: the fee is a property of the delivery order, not only of the Pay
+// action. It is enterable before the order is sent, persisted with it (canonical
+// pos_orders.delivery_fee), and shown on the unpaid bill. It is delivery-only, and
+// blank means "no fee".
+
+test("a delivery order created WITH a fee carries the canonical delivery_fee", () => {
+  // Entering the fee before send persists it, so an unpaid order already shows it.
+  // 0 is a real value (free delivery) and is sent; a positive fee is sent as given.
+  assert.equal(buildDeliveryPayload({ ...base, deliveryFee: 2 }).delivery_fee, 2);
+  assert.equal(buildDeliveryPayload({ ...base, deliveryFee: 0 }).delivery_fee, 0);
+});
+
+test("a delivery order created WITHOUT a fee carries no delivery_fee key", () => {
+  // Blank at creation leaves the key absent — the order simply has no fee.
+  assert.equal("delivery_fee" in (buildDeliveryPayload(base) as Record<string, unknown>), false);
+  assert.equal(
+    "delivery_fee" in (buildDeliveryPayload({ ...base, deliveryFee: null }) as Record<string, unknown>),
+    false,
+  );
+});
+
+test("takeaway and dine-in never carry a delivery_fee, even if one is passed", () => {
+  const takeaway = buildSubmitPayload({
+    branchId: "b1",
+    shiftId: "s1",
+    orderType: "takeaway",
+    clientOpId: "op-1",
+    lines: [line()],
+    deliveryFee: 5,
+  }) as Record<string, unknown>;
+  assert.equal("delivery_fee" in takeaway, false);
+});
+
 test("items and modifiers keep the shape the server iterates over", () => {
   const p = buildDeliveryPayload({
     ...base,
