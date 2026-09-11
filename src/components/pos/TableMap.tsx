@@ -43,8 +43,9 @@ export const TableMap = forwardRef<HTMLInputElement, TableMapProps>(function Tab
         {/* The visible table Search Bar is intentionally hidden on the Dine-in
             route (product request). Kept in the DOM but visually hidden
             (sr-only) so the query/filter plumbing is preserved; the Ctrl+F
-            shortcut that used to focus it has had its handler removed (see
-            DineInWorkspace useShortcuts), so nothing can focus this invisible
+            shortcut that used to focus it has been removed from the keyboard
+            model entirely (see DineInWorkspace useShortcuts and
+            lib/keyboard/shortcuts.ts), so nothing can focus this invisible
             field. The status badges beside it (free / occupied / configured)
             stay visible, and tables are browsed with the arrows / grid. */}
         <div className="sr-only">

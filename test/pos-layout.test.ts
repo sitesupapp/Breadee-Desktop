@@ -101,7 +101,9 @@ const ev = (over: Partial<Parameters<typeof matchShortcut>[0]>) => ({
 test("core POS shortcuts resolve", () => {
   assert.equal(matchShortcut(ev({ key: "F2" })), "newOrder");
   assert.equal(matchShortcut(ev({ key: "F4" })), "openPayment");
-  assert.equal(matchShortcut(ev({ key: "k", ctrlKey: true })), "search");
+  // The menu Search Bar is hidden, so Ctrl+K was removed from the model: it
+  // resolves to nothing rather than focusing an invisible field.
+  assert.equal(matchShortcut(ev({ key: "k", ctrlKey: true })), null);
   assert.equal(matchShortcut(ev({ key: "Enter", ctrlKey: true })), "confirmPayment");
   assert.equal(matchShortcut(ev({ key: "O", ctrlKey: true, shiftKey: true })), "openShift");
   assert.equal(matchShortcut(ev({ key: "E", ctrlKey: true, shiftKey: true })), "endShift");
@@ -111,7 +113,9 @@ test("core POS shortcuts resolve", () => {
 
 test("quantity and search keys are declared unsafe inside inputs; Esc and F-keys are not", () => {
   assert.equal(matchShortcut(ev({ key: "+" })), "qtyUp");
-  const unsafeInInput = ["qtyUp", "qtyDown", "removeLine", "lineUp", "lineDown", "search"];
+  // "search" (Ctrl+K / "/") was removed with the hidden menu Search Bar, so the
+  // remaining unsafe-in-input keys are the cart ones.
+  const unsafeInInput = ["qtyUp", "qtyDown", "removeLine", "lineUp", "lineDown"];
   for (const id of unsafeInInput) {
     const spec = SHORTCUTS.find((s) => s.id === id);
     assert.equal(spec?.worksInInput ?? false, false, `${id} must not fire while typing`);
