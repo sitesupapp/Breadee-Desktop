@@ -12,7 +12,7 @@
 
 import { useState } from "react";
 import { Button, GatedButton, Input, type Gate } from "@/components/ui";
-import type { CurrencyCode } from "@/lib/currency";
+import type { OperationalCurrencyCode } from "@/lib/currency";
 import { parseDeliveryCost, type DeliveryHandlerType, type DeliveryOps } from "@/lib/pos/deliveryOrderManagement";
 
 const HANDLERS: [DeliveryHandlerType, string][] = [
@@ -22,7 +22,7 @@ const HANDLERS: [DeliveryHandlerType, string][] = [
 
 export type DeliveryOpsEditorProps = {
   initial: DeliveryOps;
-  currency: CurrencyCode;
+  currency: OperationalCurrencyCode;
   /** `pos.delivery.manage`. The server re-enforces it; this only gates the Save. */
   gate: Gate;
   busy: boolean;

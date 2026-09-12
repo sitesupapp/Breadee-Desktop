@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, GatedButton, Input, Skeleton, type Gate } from "@/components/ui";
-import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { formatMoney, type CurrencyCode, type OperationalCurrencyCode } from "@/lib/currency";
 import { loadDeliveryReport, type DeliveryReport as Report } from "@/lib/pos/deliveryOrderManagement";
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -41,7 +41,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; branchId: string | null }) {
+export function DeliveryReport(props: { gate: Gate; currency: OperationalCurrencyCode; branchId: string | null }) {
   const [from, setFrom] = useState(todayStr());
   const [to, setTo] = useState(todayStr());
   const [applied, setApplied] = useState<{ from: string; to: string }>({ from: todayStr(), to: todayStr() });
