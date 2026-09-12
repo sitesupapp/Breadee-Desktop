@@ -150,7 +150,10 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // READS (`pos_receivables_search`, `pos_receivables_customer`) and ONE money
   // WRITE (`pos_receivable_collect`, idempotent on client_op_id). All three
   // reviewed and gated behind the same dark `pos.receivables` feature.
-  assert.equal(names.length, 21);
+  // 21 -> 23 in Delivery Management: `pos_set_delivery_ops` (internal Delivered-By
+  // / Delivery-Cost write, gated on pos.delivery.manage) and `pos_delivery_report`
+  // (read-only report, gated on pos.reports.view). Neither moves customer money.
+  assert.equal(names.length, 23);
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
   assert.ok(names.includes("pos_configure_tables"));
@@ -158,6 +161,8 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   assert.ok(names.includes("pos_receivables_search"));
   assert.ok(names.includes("pos_receivables_customer"));
   assert.ok(names.includes("pos_receivable_collect"));
+  assert.ok(names.includes("pos_set_delivery_ops"));
+  assert.ok(names.includes("pos_delivery_report"));
   // Two RPC names now carry "customer": `pos_upsert_customer` (Level 3A) and
   // `pos_receivables_customer` (Wave 3C's account read). Neither is a money RPC.
   assert.equal(names.filter((n) => n.includes("customer")).length, 2);

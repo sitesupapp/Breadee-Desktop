@@ -787,6 +787,10 @@ function PosWorkspaceInner() {
     // incremented here.
     takePayments: pos.gates.takePayments,
     applyDiscounts: pos.gates.applyDiscounts,
+    // Delivery Management: the internal ops editor and the read-only report,
+    // gated server-side by pos.delivery.manage and pos.reports.view respectively.
+    manageDelivery: pos.gates.manageDelivery,
+    viewDeliveryReport: pos.gates.viewDeliveryReport,
     rate,
     onPresentReceipt: presentReceipt,
     // The kitchen ticket goes through the one shared call site, so a dine-in

@@ -102,7 +102,25 @@ export type PosRpcName =
   // outbox. See `lib/pos/receivables.ts`.
   | "pos_receivables_search"
   | "pos_receivables_customer"
-  | "pos_receivable_collect";
+  | "pos_receivable_collect"
+  // Delivery Operations + BI (Delivery Management). The SAME two RPCs the Breadee
+  // web delivery panel and report call - listed here rather than reached through a
+  // desktop helper of their own, for the same one-answer reason as
+  // `pos_configure_tables`.
+  //
+  // `pos_set_delivery_ops` is the ONLY path that writes the INTERNAL operational
+  // fields (delivery handler type, delivered-by, delivery cost). It never touches
+  // the customer total, delivery fee, payment, taxes or the receipt - it writes
+  // only those internal columns and rejects a negative cost or a non-delivery
+  // order. Editing gates on `pos.delivery.manage`, which the server enforces; the
+  // desktop must never UPDATE `pos_orders` directly for these.
+  //
+  // `pos_delivery_report` is a READ: it returns the server-computed rows and
+  // summary (Total Deliveries, Fees, Cost Entered, Recorded Cost/Margin) for a
+  // date range, business-day- and OU-scoped, gated on `pos.reports.view`. The
+  // desktop renders what it returns and performs NO aggregation of its own.
+  | "pos_set_delivery_ops"
+  | "pos_delivery_report";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

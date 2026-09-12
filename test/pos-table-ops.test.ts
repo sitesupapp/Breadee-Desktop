@@ -310,8 +310,10 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // capacity contract; and WAVE 2C: 16 -> 18, for the two receivables
   // settlement RPCs; and WAVE 3C: 18 -> 21, for the Customer Accounts surface
   // (two reads + one money write). Same discipline as the 11 -> 12 bump above -
-  // the number moves by exactly what was reviewed.
-  assert.equal(members.length, 21, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // the number moves by exactly what was reviewed. AND DELIVERY MANAGEMENT:
+  // 21 -> 23, for `pos_set_delivery_ops` (internal ops write) and
+  // `pos_delivery_report` (read-only report).
+  assert.equal(members.length, 23, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

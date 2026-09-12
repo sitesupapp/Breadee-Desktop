@@ -104,11 +104,13 @@ import {
   performVoid,
   queueCounts,
   readDeliveryOrder,
+  setDeliveryOps,
   validateVoidReason,
   voidActionFor,
   voidDeliveryOrder,
   voidOrderGate,
   OrderChangedError,
+  type DeliveryHandlerType,
   type DeliveryOrderLine,
   type DeliveryQueueOrder,
 } from "@/lib/pos/deliveryOrderManagement";
@@ -123,6 +125,7 @@ import {
 } from "@/lib/pos/deliveryHistory";
 import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
 import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
+import { DeliveryReport } from "@/components/pos/DeliveryReport";
 import { EditOrderDialog, VoidOrderDialog, type EditOrderIntent } from "@/components/pos/DeliveryOrderDialogs";
 import { computeDiscount } from "@/lib/pos/discounts";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
@@ -163,7 +166,7 @@ type DeliveryDialog =
  * deliberately out of scope - this one shows deliveries, which is what the
  * person answering the phone is responsible for.
  */
-export type DeliveryView = "customer" | "add_items" | "orders";
+export type DeliveryView = "customer" | "add_items" | "orders" | "report";
 
 export type DeliveryWorkspace = {
   view: DeliveryView;
@@ -220,6 +223,12 @@ export function useDeliveryWorkspace(input: {
   /** Level 3C. Settlement needs the payment permission and the tenant rate. */
   takePayments: Gate;
   applyDiscounts: Gate;
+  /** Delivery Management. `manageDelivery` gates the internal Delivered-By /
+      Delivery-Cost editor (`pos.delivery.manage`); `viewDeliveryReport` gates the
+      read-only delivery report (`pos.reports.view`). Both are re-enforced by their
+      RPCs server-side. */
+  manageDelivery: Gate;
+  viewDeliveryReport: Gate;
   /** Tenant USD->LBP rate. LBP is refused without one - never guessed. */
   rate: number | null;
   /**
@@ -315,6 +324,11 @@ export function useDeliveryWorkspace(input: {
   const [voidBusy, setVoidBusy] = useState(false);
   const [voidError, setVoidError] = useState<string | null>(null);
   const [receiptBusy, setReceiptBusy] = useState(false);
+  // Delivery Management: the internal Delivered-By / Delivery-Cost editor.
+  const [opsEditing, setOpsEditing] = useState(false);
+  const [opsBusy, setOpsBusy] = useState(false);
+  const [opsError, setOpsError] = useState<string | null>(null);
+  const opsLatch = useRef(createMutationLatch());
   /** Which history row is assembling a receipt, so only that one shows busy. */
   const [receiptBusyId, setReceiptBusyId] = useState<string | null>(null);
   /**
@@ -902,9 +916,48 @@ export function useDeliveryWorkspace(input: {
       setDetailLines([]);
       setEditError(null);
       setVoidError(null);
+      setOpsEditing(false);
+      setOpsError(null);
       void refreshDetail(order.id);
     },
     [refreshDetail],
+  );
+
+  // Save the internal delivery ops through the ONE server authority
+  // (`pos_set_delivery_ops`), then re-read the order so the panel shows what the
+  // server actually stored. Never a direct `pos_orders` update from the client;
+  // never a fee/total/payment field. A latch keeps a double-tap to one write.
+  const saveOps = useCallback(
+    async (values: { handlerType: DeliveryHandlerType | null; personRef: string | null; cost: number | null }) => {
+      const target = detail;
+      if (!target) return;
+      if (!input.manageDelivery.allowed) {
+        setOpsError(input.manageDelivery.reason ?? "You do not have permission to manage delivery details.");
+        return;
+      }
+      if (!opsLatch.current.acquire()) return;
+      setOpsBusy(true);
+      setOpsError(null);
+      try {
+        await setDeliveryOps({
+          orderId: target.id,
+          handlerType: values.handlerType,
+          deliveredByUserId: target.delivered_by_user_id ?? null,
+          personRef: values.personRef,
+          cost: values.cost,
+        });
+        setOpsEditing(false);
+        await refreshDetail(target.id);
+        void refreshQueue();
+        toast.push({ tone: "success", message: "Delivery details saved" });
+      } catch (e) {
+        setOpsError(classifyError(e).message);
+      } finally {
+        setOpsBusy(false);
+        opsLatch.current.release();
+      }
+    },
+    [detail, input.manageDelivery, refreshDetail, refreshQueue, toast],
   );
 
   // Load the queue when Orders is opened, and whenever the shift changes under
@@ -1729,7 +1782,7 @@ export function useDeliveryWorkspace(input: {
   const viewSwitch = (
     <div className="flex shrink-0 gap-2">
       <Button
-        variant={view === "orders" ? "ghost" : "primary"}
+        variant={view === "orders" || view === "report" ? "ghost" : "primary"}
         size="lg"
         className="flex-1"
         onClick={() => setView("customer")}
@@ -1744,6 +1797,17 @@ export function useDeliveryWorkspace(input: {
         onClick={() => setView("orders")}
       >
         Orders
+      </GatedButton>
+      {/* The read-only delivery report. Gated on `pos.reports.view`; a cashier
+          without it sees the button refused rather than a missing feature. */}
+      <GatedButton
+        gate={input.viewDeliveryReport}
+        variant={view === "report" ? "primary" : "ghost"}
+        size="lg"
+        className="flex-1"
+        onClick={() => setView("report")}
+      >
+        Report
       </GatedButton>
     </div>
   );
@@ -1778,6 +1842,11 @@ export function useDeliveryWorkspace(input: {
             <EmptyState title="Orders are not available for this account" hint={viewOrdersGate.reason ?? undefined} />
           </div>
         )}
+      </div>
+    ) : view === "report" ? (
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {viewSwitch}
+        <DeliveryReport gate={input.viewDeliveryReport} currency={input.currency} branchId={branchId || null} />
       </div>
     ) : (
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -1857,6 +1926,10 @@ export function useDeliveryWorkspace(input: {
             voidGate={voidGate}
             payGate={payGate}
             receiptBusy={receiptBusy}
+            manageDeliveryGate={input.manageDelivery}
+            opsEditing={opsEditing}
+            opsBusy={opsBusy}
+            opsError={opsError}
             onBack={() => setDetail(null)}
             onEdit={() => {
               setEditError(null);
@@ -1869,6 +1942,15 @@ export function useDeliveryWorkspace(input: {
             /* The SAME entry point F4 and the customer half use. */
             onPay={requestPay}
             onReceipt={() => void openHistoricalReceipt(detail)}
+            onEditOps={() => {
+              setOpsError(null);
+              setOpsEditing(true);
+            }}
+            onCancelOps={() => {
+              setOpsError(null);
+              setOpsEditing(false);
+            }}
+            onSaveOps={(values) => void saveOps(values)}
           />
         ) : (
           <EmptyState
@@ -1899,6 +1981,12 @@ export function useDeliveryWorkspace(input: {
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{sendError}</p>
           )}
         </div>
+      ) : view === "report" ? (
+        <EmptyState
+          icon="-"
+          title="Delivery report"
+          hint="Fees, delivery cost and recorded margin for the period you pick. Read-only; it moves no money."
+        />
       ) : (
         card
       )}
