@@ -134,6 +134,8 @@ test("the RPC allow-list contains exactly the twenty-two expected names", () => 
       "pos_complete_on_account",
       "pos_complete_table_on_account",
       "pos_configure_tables",
+      // Delivery Management: the read-only delivery report (pos.reports.view).
+      "pos_delivery_report",
       "pos_edit_order",
       "pos_end_shift",
       "pos_move_table",
@@ -145,6 +147,9 @@ test("the RPC allow-list contains exactly the twenty-two expected names", () => 
       "pos_receivable_collect",
       "pos_receivables_customer",
       "pos_receivables_search",
+      // Delivery Management: the internal Delivered-By / Delivery-Cost write
+      // (pos.delivery.manage). Never a customer-money RPC.
+      "pos_set_delivery_ops",
       "pos_shift_expected",
       "pos_submit_order",
       "pos_table_map",
@@ -153,7 +158,7 @@ test("the RPC allow-list contains exactly the twenty-two expected names", () => 
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 22);
+  assert.equal(members.length, 24);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

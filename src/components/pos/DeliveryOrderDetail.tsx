@@ -26,7 +26,16 @@ import {
   UNKNOWN_PARTY,
   type OrderParty,
 } from "@/lib/pos/deliveryHistory";
-import { isTerminal, type DeliveryOrderLine, type DeliveryQueueOrder, type VoidAction } from "@/lib/pos/deliveryOrderManagement";
+import {
+  isCollected,
+  isTerminal,
+  recordedMargin,
+  type DeliveryHandlerType,
+  type DeliveryOrderLine,
+  type DeliveryQueueOrder,
+  type VoidAction,
+} from "@/lib/pos/deliveryOrderManagement";
+import { DeliveryOpsEditor } from "@/components/pos/DeliveryOpsEditor";
 
 export type DeliveryOrderDetailProps = {
   order: DeliveryQueueOrder;
@@ -41,11 +50,24 @@ export type DeliveryOrderDetailProps = {
   voidGate: Gate;
   payGate: Gate;
   receiptBusy: boolean;
+  /** `pos.delivery.manage`. Offers the internal Delivery-details editor; the
+      server (pos_set_delivery_ops) re-enforces it. */
+  manageDeliveryGate: Gate;
+  opsEditing: boolean;
+  opsBusy: boolean;
+  opsError: string | null;
   onBack: () => void;
   onEdit: () => void;
   onVoid: () => void;
   onPay: () => void;
   onReceipt: () => void;
+  onEditOps: () => void;
+  onCancelOps: () => void;
+  onSaveOps: (values: {
+    handlerType: DeliveryHandlerType | null;
+    personRef: string | null;
+    cost: number | null;
+  }) => void;
 };
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -65,6 +87,21 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
   const total = o.total_amount ?? 0;
   const subtotal = o.subtotal ?? total;
   const discount = o.discount_amount ?? 0;
+  // The canonical persisted delivery fee, already folded into `total`. Shown as
+  // its own line so subtotal - discount + fee reconciles to the total on screen.
+  const deliveryFee = o.delivery_fee ?? 0;
+  // Internal operations. The COST and MARGIN are the business's own record - shown
+  // here, never on the customer receipt. Collection follows payment status.
+  const collected = isCollected(o);
+  const margin = recordedMargin(o);
+  const handlerType: DeliveryHandlerType | null =
+    o.delivery_handler_type === "driver" || o.delivery_handler_type === "delivery_company"
+      ? o.delivery_handler_type
+      : null;
+  const handlerLabel = handlerType === "driver" ? "Driver" : handlerType === "delivery_company" ? "Delivery Company" : null;
+  const deliveredBy = o.delivery_person_ref
+    ? `${o.delivery_person_ref}${handlerLabel ? ` (${handlerLabel})` : ""}`
+    : handlerLabel ?? "Not recorded";
 
   return (
     <section aria-label="Delivery order detail" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -164,6 +201,53 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
           <Row label="Currency" value={currency} />
           {o.shift_id && <Row label="Shift" value={o.shift_id.slice(0, 8)} />}
         </div>
+      </div>
+
+      {/* Internal delivery operations. The delivery FEE is the customer's charge
+          (also on the receipt); the delivery COST and the recorded MARGIN are the
+          business's own record and are DELIBERATELY never printed on the customer
+          receipt. Editing writes only through pos_set_delivery_ops, gated by
+          pos.delivery.manage - never a direct pos_orders update from here. */}
+      <div className="rounded-2xl border border-line bg-white p-4">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-extrabold text-ink">Delivery details</p>
+          <Badge tone={collected ? "green" : "amber"}>{collected ? "Collected" : "Not collected"}</Badge>
+        </div>
+        <div className="mt-2 space-y-1">
+          <Row label="Delivered by" value={deliveredBy} />
+          <Row label="Delivery fee" value={formatMoney(deliveryFee, currency)} />
+          <Row
+            label="Delivery cost"
+            value={o.delivery_cost == null ? "Not recorded" : formatMoney(o.delivery_cost, currency)}
+          />
+          <Row label="Recorded margin" value={margin == null ? "-" : formatMoney(margin, currency)} />
+        </div>
+        {!props.opsEditing ? (
+          <GatedButton
+            gate={props.manageDeliveryGate}
+            variant="ghost"
+            size="md"
+            className="mt-3 w-full"
+            onClick={props.onEditOps}
+          >
+            Edit delivery details
+          </GatedButton>
+        ) : (
+          <DeliveryOpsEditor
+            initial={{
+              delivery_handler_type: handlerType,
+              delivered_by_user_id: o.delivered_by_user_id ?? null,
+              delivery_person_ref: o.delivery_person_ref ?? null,
+              delivery_cost: o.delivery_cost ?? null,
+            }}
+            currency={currency}
+            gate={props.manageDeliveryGate}
+            busy={props.opsBusy}
+            error={props.opsError}
+            onSave={props.onSaveOps}
+            onCancel={props.onCancelOps}
+          />
+        )}
       </div>
 
       <div className="space-y-2 pb-2">
