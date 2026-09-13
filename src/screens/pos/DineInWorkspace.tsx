@@ -29,7 +29,10 @@ import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
-import { canClearTable, canCloseTable, canMoveTable, canOpenTable } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
+import { ServiceFloor } from "@/components/pos/floor/ServiceFloor";
+import { MapListToggle, type DineInFloorView } from "@/components/pos/floor/MapListToggle";
+import { readPosFeatures, writePosFeatures } from "@/lib/pos/posFeatures";
 import { ClearTableDialog, CloseTableDialog, MoveTableDialog } from "@/components/pos/TableOpsDialogs";
 import {
   clearOutcomeMessage,
@@ -163,6 +166,24 @@ export function useDineInWorkspace(input: {
 
   const [query, setQuery] = useState("");
   const [focusedId, setFocusedId] = useState<string | null>(null);
+
+  // Service Floor Map (Phase 2). Gated on `pos.floor_map`; when off, the Map|List
+  // control never renders and Dine-in is exactly today's List. The preferred view
+  // is a per-terminal switch (like every other `posFeatures` field), defaulting to
+  // List. Losing entitlement (a context change) can never strand the operator on
+  // a Map they may no longer see.
+  const floorGate = useMemo(() => canViewFloor(pos.access), [pos.access]);
+  const [floorView, setFloorViewState] = useState<DineInFloorView>(() =>
+    canViewFloor(pos.access).allowed && readPosFeatures().preferFloorView ? "floor" : "list",
+  );
+  const setFloorView = useCallback((next: DineInFloorView) => {
+    setFloorViewState(next);
+    const current = readPosFeatures();
+    writePosFeatures({ ...current, preferFloorView: next === "floor" });
+  }, []);
+  useEffect(() => {
+    if (!floorGate.allowed && floorView === "floor") setFloorViewState("list");
+  }, [floorGate.allowed, floorView]);
   const [seatOpen, setSeatOpen] = useState(false);
   /**
    * The open dialog is naming a NEW table rather than opening a mapped one.
@@ -1043,38 +1064,69 @@ export function useDineInWorkspace(input: {
   );
 
   const work = useCallback(
-    (layout: LayoutSpec) => (
-      <TableMap
-        ref={searchRef}
-        map={tables.map}
-        visible={visible}
-        layout={layout}
-        selectedTableId={tables.selectedTableId}
-        focusedTableId={focusedId}
-        loading={tables.loading}
-        refreshing={tables.refreshing}
-        stale={stale}
-        error={tables.error}
-        query={query}
-        now={now}
-        onQueryChange={setQuery}
-        onSelect={(id) => {
-          select(id);
-          if (layout.cartAsDrawer) input.onBillDrawerOpen();
-        }}
-        onRetry={() => void tables.refresh(ctx)}
-        canOpenTable={openGate.allowed}
-        onOpenTable={() => {
-          // No card to select, so this is the free-text path the server allows
-          // only on a branch with no configured tables.
-          setManualOpen(true);
-          setSeatOpen(true);
-        }}
-        onConfigureTables={input.onConfigureTables}
-      />
-    ),
+    (layout: LayoutSpec) => {
+      const onSelectTable = (id: string) => {
+        select(id);
+        if (layout.cartAsDrawer) input.onBillDrawerOpen();
+      };
+      // The List (today's card grid) is always the fallback and stays exactly as
+      // it was; the Map is an ADDITIVE view over the same store selection.
+      const list = (
+        <TableMap
+          ref={searchRef}
+          map={tables.map}
+          visible={visible}
+          layout={layout}
+          selectedTableId={tables.selectedTableId}
+          focusedTableId={focusedId}
+          loading={tables.loading}
+          refreshing={tables.refreshing}
+          stale={stale}
+          error={tables.error}
+          query={query}
+          now={now}
+          onQueryChange={setQuery}
+          onSelect={onSelectTable}
+          onRetry={() => void tables.refresh(ctx)}
+          canOpenTable={openGate.allowed}
+          onOpenTable={() => {
+            // No card to select, so this is the free-text path the server allows
+            // only on a branch with no configured tables.
+            setManualOpen(true);
+            setSeatOpen(true);
+          }}
+          onConfigureTables={input.onConfigureTables}
+        />
+      );
+      const showFloor = floorGate.allowed && floorView === "floor";
+      const renderer = showFloor ? (
+        <ServiceFloor
+          ctx={ctx}
+          tables={tables.map.tables}
+          selectedTableId={tables.selectedTableId}
+          focusedTableId={focusedId}
+          now={now}
+          onSelect={onSelectTable}
+          onSwitchToList={() => setFloorView("list")}
+          onRefreshTables={() => void tables.refresh(ctx)}
+        />
+      ) : (
+        list
+      );
+      // With the feature off there is no toggle at all — the List fills the work
+      // region as it does today.
+      if (!floorGate.allowed) return list;
+      return (
+        <div className="flex h-full min-h-0 flex-col gap-2">
+          <div className="flex items-center">
+            <MapListToggle view={floorView} onChange={setFloorView} />
+          </div>
+          <div className="min-h-0 flex-1">{renderer}</div>
+        </div>
+      );
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select],
+    [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select, floorGate.allowed, floorView, setFloorView],
   );
 
   const bill = useCallback(

@@ -115,7 +115,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // new RPC cannot slip in under an unchanged total.
 // RETARGETED AGAIN BY DESKTOP 1.0.4: `pos_configure_tables` was added, so the
 // expected set grows by exactly one more reviewed name.
-test("the RPC allow-list contains exactly the twenty-two expected names", () => {
+test("the RPC allow-list contains exactly the twenty-three expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -127,6 +127,9 @@ test("the RPC allow-list contains exactly the twenty-two expected names", () => 
       // i18n Slice 6B-2: the authoritative receipt-financial READ (order historical
       // currency + decimal_digits). Sorts first as it does not start with "pos_".
       "finance_order_financials",
+      // Dine-In Floor Map Phase 2: the published-floor READ (ship-dark, gated on
+      // pos.floor_map). Sorts before the pos_* names.
+      "floor_service_layout",
       "pos_cash_box_shift",
       "pos_clear_table",
       "pos_close_table",
@@ -153,7 +156,7 @@ test("the RPC allow-list contains exactly the twenty-two expected names", () => 
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 22);
+  assert.equal(members.length, 23);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
