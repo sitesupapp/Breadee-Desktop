@@ -108,6 +108,27 @@ export default {
         "paper-ink": "#000000",
         "paper-sub": "#4b4b4b",
         "paper-line": "#c8c8c8",
+
+        /**
+         * DINE-IN FLOOR MAP — the approved Option-D operational language.
+         *
+         * Deliberately NOT themed, for the same reason `paper` is not: the floor's
+         * operational semantics are fixed and must read the same on every terminal
+         * theme. A table with an open bill is a soft BLUSH with a coral border and
+         * dark ink — never the brand green (green stays brand/nav/CTA) and never
+         * destructive red (that is reserved for Clear/Void). Selection is an
+         * independent NAVY ring, so it composes on top of any status without
+         * repainting it. Free tables use the themed neutral surface + `line`
+         * border and so are not listed here. `dot` is the near-invisible spatial
+         * background, always used at a very low alpha (e.g. `bg-floor-dot/10`).
+         */
+        floor: {
+          active: "#fdeeee",
+          "active-border": "#efa6a6",
+          "active-ink": "#4c1d1d",
+          select: "#1e2a4a",
+          dot: "#94a3b8",
+        },
       },
     },
   },

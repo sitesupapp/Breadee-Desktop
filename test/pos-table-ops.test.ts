@@ -1,4 +1,4 @@
-﻿// Dine-In table operations (Level 2C): Move, Close, Clear.
+// Dine-In table operations (Level 2C): Move, Close, Clear.
 //
 // These are the first dine-in actions that destroy or move money, so the tests
 // are written against the SERVER definitions read from staging, not against what
@@ -313,7 +313,7 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // the number moves by exactly what was reviewed. AND DELIVERY MANAGEMENT:
   // 21 -> 23, for `pos_set_delivery_ops` (internal ops write) and
   // `pos_delivery_report` (read-only report).
-  assert.equal(members.length, 23, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.equal(members.length, 24, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

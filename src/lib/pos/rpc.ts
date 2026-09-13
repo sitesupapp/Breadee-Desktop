@@ -120,7 +120,12 @@ export type PosRpcName =
   // date range, business-day- and OU-scoped, gated on `pos.reports.view`. The
   // desktop renders what it returns and performs NO aggregation of its own.
   | "pos_set_delivery_ops"
-  | "pos_delivery_report";
+  | "pos_delivery_report"
+  // Dine-In Floor Map — Phase 1 server foundation (ship-dark). The published-floor
+  // READ for the Service Floor Map; gated server-side on pos.floor_map + pos.tables.view;
+  // operational table state still comes from pos_table_map. No floor WRITE RPC here —
+  // Phase 2 is read-only and the Designer (draft/publish) is a later phase.
+  | "floor_service_layout";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

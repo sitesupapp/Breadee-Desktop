@@ -25,10 +25,19 @@ export const POS_FEATURES_KEY = "breadee.desktop.posFeatures";
 export type PosFeatures = {
   /** Offer a Menu Builder ingredient list when an item is tapped. */
   ingredientCustomization: boolean;
+  /**
+   * Prefer the Dine-In Floor MAP over the List when a published floor exists and
+   * the tenant is entitled. Per-terminal, like every other switch here. Default
+   * OFF: a till that has never chosen keeps today's List. Ignored entirely when
+   * the `pos.floor_map` feature is off, so it can never surface a Map a tenant
+   * is not entitled to.
+   */
+  preferFloorView: boolean;
 };
 
 export const POS_FEATURE_DEFAULTS: PosFeatures = {
   ingredientCustomization: false,
+  preferFloorView: false,
 };
 
 /**
@@ -52,6 +61,7 @@ export function parsePosFeatures(raw: unknown): PosFeatures {
     typeof r[key] === "boolean" ? (r[key] as boolean) : POS_FEATURE_DEFAULTS[key];
   return {
     ingredientCustomization: pick("ingredientCustomization"),
+    preferFloorView: pick("preferFloorView"),
   };
 }
 
