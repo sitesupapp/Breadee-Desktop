@@ -107,7 +107,15 @@ export type PosRpcName =
   // historical currency and decimal_digits (from finance_currencies, the sole catalog),
   // so a receipt prints in the order's own currency at the server's precision. A READ:
   // it moves no money and gates on tenant + can_access_branch server-side.
-  | "finance_order_financials";
+  | "finance_order_financials"
+  // Dine-In Floor Map — Phase 1 server foundation (ship-dark). The ONE read the
+  // Service Floor Map needs: the PUBLISHED floor revision for a branch. SECURITY
+  // DEFINER, gated server-side on the `pos.floor_map` entitlement + `pos.tables.view`.
+  // Returns geometry only ({ has_published, revision_id, revision_no, published_at,
+  // doc }); operational table state still comes from `pos_table_map`. No floor WRITE
+  // RPC is listed here — Phase 2 is read-only and the Designer (draft/publish) is a
+  // later phase.
+  | "floor_service_layout";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

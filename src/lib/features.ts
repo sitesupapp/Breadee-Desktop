@@ -29,6 +29,12 @@ export const FEATURES = {
   // `get_tenant_effective_features`; the desktop stays dark unless the tenant is
   // entitled, exactly like every other POS sub-feature.
   POS_RECEIVABLES: "pos.receivables",
+  // Dine-In Floor Map (Phase-1 server foundation). The server emits this key via
+  // `get_tenant_effective_features` (`pos` feature, `floor_map` sub-feature) and
+  // it is OFF for every plan by default — the desktop stays dark unless the
+  // tenant is entitled, exactly like every other POS sub-feature. Gating only the
+  // NEW Map view: with the feature off the Dine-in List is unchanged.
+  POS_FLOOR_MAP: "pos.floor_map",
 } as const;
 
 export type FeatureMap = Record<string, boolean>;

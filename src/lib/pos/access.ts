@@ -310,6 +310,25 @@ export function canClearTable(ctx: PosAccessContext): Gate {
   return tableOpGate(ctx, POS_PERMISSIONS.TABLES_CLEAR, "You do not have permission to clear tables.");
 }
 
+/**
+ * Viewing the Dine-In SERVICE FLOOR MAP (Phase 2).
+ *
+ * Exactly the shape `floor_service_layout` demands server-side: the `pos.floor_map`
+ * entitlement ON TOP OF everything `canViewTables` already requires (POS access +
+ * `pos.dine_in` + `pos.tables.view`). No new PERMISSION key: viewing a floor is
+ * viewing tables by another presentation, so a cashier who can see the List can
+ * see the Map. When the feature is off this returns not-allowed and the Dine-in
+ * workspace simply never offers the Map toggle — the List is unaffected.
+ */
+export function canViewFloor(ctx: PosAccessContext): Gate {
+  const view = canViewTables(ctx);
+  if (!view.allowed) return view;
+  if (!hasFeature(ctx.features, FEATURES.POS_FLOOR_MAP)) {
+    return { allowed: false, reason: "Floor map is not enabled for this plan." };
+  }
+  return { allowed: true, reason: null };
+}
+
 // --- Delivery (Level 3A) -----------------------------------------------------
 
 /**

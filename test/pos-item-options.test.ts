@@ -187,7 +187,15 @@ test("removing an ingredient changes NO canonical record and no price", () => {
 // =============================================================================
 
 test("the terminal switch defaults OFF", () => {
-  assert.deepEqual(POS_FEATURE_DEFAULTS, { ingredientCustomization: false });
+  assert.deepEqual(POS_FEATURE_DEFAULTS, { ingredientCustomization: false, preferFloorView: false });
+});
+
+test("the floor-view preference defaults OFF and round-trips per field", () => {
+  // A terminal that has never chosen keeps today's List.
+  assert.equal(parsePosFeatures("{}").preferFloorView, false);
+  // Set independently of the ingredient switch, and both survive.
+  assert.equal(parsePosFeatures(JSON.stringify({ preferFloorView: true })).preferFloorView, true);
+  assert.equal(parsePosFeatures(JSON.stringify({ preferFloorView: "yes" })).preferFloorView, false);
 });
 
 test("a stored choice survives; only an ABSENT key gets the default", () => {

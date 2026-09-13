@@ -255,7 +255,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // `pos_receivable_collect` (the one money write, idempotent on client_op_id).
   // AND AGAIN BY i18n SLICE 6B-2: 21 -> 22, for `finance_order_financials`, the
   // authoritative receipt-financial READ (order historical currency + decimal_digits).
-  assert.equal(members.length, 22, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY FLOOR MAP PHASE 2: 22 -> 23, for `floor_service_layout`, the
+  // published-floor READ (ship-dark, gated on pos.floor_map). A read, not money.
+  assert.equal(members.length, 23, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:
