@@ -9,12 +9,20 @@
 //
 // THREE RULES SHAPE EVERYTHING BELOW.
 //
-// 1. STAGING MUST NEVER CONSUME THE PRODUCTION CHANNEL. This repository has
-//    already published a release tagged `desktop-v1.0.0-rc1-staging`. A generic
-//    "latest release" endpoint would happily serve that to a production till, so
-//    the endpoint is a dedicated production-only manifest AND every entry point
-//    here refuses to run unless `env.IS_PRODUCTION`. Two independent guards,
-//    because either one alone is a single point of failure.
+// 1. EACH ENVIRONMENT UPDATES FROM ITS OWN CHANNEL, AND NEVER THE OTHER'S. A
+//    production build reads a dedicated production-only manifest
+//    (`desktop-production-channel`, production key); a staging build reads a
+//    dedicated staging-only manifest (`desktop-staging-channel`, staging key).
+//    Which one a build talks to is baked in at compile time - production from
+//    `tauri.conf.json`, staging from `tauri.staging.conf.json` - so this module
+//    never selects a channel and cannot cross them. A generic "latest release"
+//    endpoint is still refused on both, because this repository has published a
+//    tag like `desktop-v1.0.0-rc1-staging` that such an endpoint would serve to
+//    the wrong fleet. The updater runs in a packaged production OR staging build
+//    and nowhere else - not the dev server, a browser, or the test runner, none
+//    of which can install anything. Staging updating itself is the whole point
+//    of the isolated staging release infrastructure; its own channel and key
+//    make it safe.
 //
 // 2. AN UPDATE OUTAGE MUST NEVER STOP A TILL OPENING. GitHub being unreachable,
 //    a malformed manifest, a rejected signature, a failed download - none of
@@ -78,23 +86,35 @@ export type UpdateState =
 /**
  * Is the updater usable in this build at all?
  *
- * False in dev, in the browser, and in every staging build. Staging is excluded
- * on purpose and not as an oversight: the production manifest describes
- * production binaries, and a staging terminal that "updated" itself onto one
- * would silently change which database it talks to.
+ * True only in a packaged native (Tauri) PRODUCTION or STAGING build. False in
+ * dev, in the browser, and under the test runner, none of which can install
+ * anything. Staging is INCLUDED on purpose: it reads its own dedicated
+ * `desktop-staging-channel` manifest, signed with the staging key, baked in from
+ * `tauri.staging.conf.json` - it can neither see nor install a production
+ * binary, so it cannot silently change which database it talks to. That
+ * per-environment channel is what makes enabling staging safe; nothing here
+ * chooses a channel.
  */
 export function isUpdaterAvailable(): boolean {
-  if (!env.IS_PRODUCTION) return false;
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  // A packaged native build only - never the dev server, a browser, or the
+  // Node test runner. This is the guard that keeps the updater out of every
+  // context that cannot install an application.
+  const isNativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (!isNativeApp) return false;
+  // Enabled for BOTH production and staging packaged builds. Each consumes only
+  // its own baked-in channel and key, so this can never cross environments.
+  return env.IS_PRODUCTION || env.IS_STAGING;
 }
 
 /** Why the updater is unavailable, in words a support technician can act on. */
 export function unavailableReason(): string | null {
-  if (!isUpdaterAvailable()) {
-    if (!env.IS_PRODUCTION) return `Updates are delivered to production builds only (this is ${env.APP_ENV}).`;
-    return "Updates are available only in the installed Desktop app.";
-  }
-  return null;
+  if (isUpdaterAvailable()) return null;
+  const isNativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (!isNativeApp) return "Updates are available only in the installed Desktop app.";
+  // Native, but an environment the app does not update from. `env.ts` only
+  // admits "production" and "staging", both enabled above, so this is a
+  // defensive fallback rather than a state a real build reaches.
+  return `Updates are not delivered to ${env.APP_ENV} builds.`;
 }
 
 /** True only when `candidate` is a well-formed version strictly newer than ours. */
@@ -130,7 +150,9 @@ export function hasPendingUpdate(): boolean {
 }
 
 /**
- * Ask the production channel whether there is a newer version.
+ * Ask this build's own update channel whether there is a newer version - the
+ * production channel in a production build, the staging channel in a staging
+ * build, chosen by the compiled-in config, never here.
  *
  * `silent` marks the automatic startup check, whose failures are not worth
  * interrupting anyone over.

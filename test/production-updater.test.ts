@@ -94,12 +94,22 @@ test("an unparseable version is never treated as newer", () => {
   assert.equal(isNewerThanCurrent("1.0.1-beta.1", "1.0.0"), true);
 });
 
-// --- staging can never use the production channel -----------------------------
+// --- each environment updates only from its own channel -----------------------
 
-test("the updater refuses to run outside a production build", () => {
-  assert.match(updaterTs, /if \(!env\.IS_PRODUCTION\) return false;/);
-  // And the reason is explicit rather than a silent no-op.
-  assert.match(updaterTs, /Updates are delivered to production builds only/);
+test("the updater runs only in a packaged production or staging build", () => {
+  // A packaged native build is the hard precondition: the dev server, a browser
+  // and the Node test runner cannot install anything and must never see it.
+  assert.match(updaterTs, /const isNativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;/);
+  assert.match(updaterTs, /if \(!isNativeApp\) return false;/);
+  // Enabled for BOTH environments - each reads only its own baked-in channel.
+  assert.match(updaterTs, /return env\.IS_PRODUCTION \|\| env\.IS_STAGING;/);
+  // env.ts must actually define BOTH flags, or the line above is a silent no-op.
+  const envTs = read("src", "env.ts");
+  assert.match(envTs, /IS_PRODUCTION: APP_ENV === "production"/);
+  assert.match(envTs, /IS_STAGING: APP_ENV === "staging"/);
+  // The old production-only gate, and its message, are gone.
+  assert.equal(/if \(!env\.IS_PRODUCTION\) return false;/.test(updaterTs), false, "the production-only gate must be gone");
+  assert.equal(/Updates are delivered to production builds only/.test(updaterTs), false);
 });
 
 test("every entry point goes through the availability gate", () => {
@@ -119,6 +129,32 @@ test("the endpoint is a dedicated production channel over HTTPS", () => {
   // The trap this avoids: /releases/latest would serve desktop-v1.0.0-rc1-staging.
   assert.equal(/releases\/latest/.test(url), false, "a generic latest endpoint could serve a staging RC");
   assert.equal(url.includes(STAGING_REF), false);
+  assert.equal(url.includes("desktop-staging-channel"), false, "production must never read the staging channel");
+});
+
+test("the staging build updates only from the staging channel", () => {
+  // The mirror of the production endpoint test. Staging is now a first-class
+  // updating build, so its channel isolation is pinned exactly as hard.
+  const stagingConf = JSON.parse(read("src-tauri", "tauri.staging.conf.json"));
+  // A separate identity, so it installs side-by-side and never over production.
+  assert.equal(stagingConf.identifier, "app.breadee.desktop.staging");
+  const endpoints: string[] = stagingConf.plugins.updater.endpoints;
+  assert.equal(endpoints.length, 1, "exactly one endpoint");
+  const url = endpoints[0];
+  assert.ok(url.startsWith("https://"), "HTTPS only");
+  assert.ok(url.includes("desktop-staging-channel"), "must read the staging channel branch");
+  assert.ok(url.endsWith("/latest.json"));
+  // It must never reach the production channel or the production project.
+  assert.equal(url.includes(CHANNEL), false, "staging must never read the production channel");
+  assert.equal(url.includes(PRODUCTION_REF), false);
+  assert.equal(/releases\/latest/.test(url), false);
+  // Signed with the staging key: a real PUBLIC key, and never the production one.
+  const pubkey: string = stagingConf.plugins.updater.pubkey;
+  assert.ok(pubkey && pubkey.length > 40, "a staging public key must be configured");
+  assert.notEqual(pubkey, conf.plugins.updater.pubkey, "staging and production must not share a key");
+  const decoded = Buffer.from(pubkey, "base64").toString("utf8");
+  assert.match(decoded, /minisign public key/i);
+  assert.equal(/private key/i.test(decoded), false, "a PRIVATE key must never be in the config");
 });
 
 test("no dangerous transport options are enabled", () => {
