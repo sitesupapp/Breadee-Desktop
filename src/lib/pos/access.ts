@@ -54,12 +54,20 @@ export const POS_PERMISSIONS = {
   TABLES_MOVE: "pos.tables.move",
   TABLES_CLEAR: "pos.tables.clear",
   TABLES_CLOSE: "pos.tables.close",
-  // Delivery customers (Level 3A). There is deliberately no `pos.delivery.*`
-  // key: the server has none. Delivery order-taking is gated by the ordinary
-  // POS permissions plus the `pos.delivery` sub-feature, and only the CUSTOMER
-  // record has keys of its own.
+  // Delivery customers (Level 3A). Delivery ORDER-TAKING has no key of its own -
+  // it is gated by the ordinary POS permissions plus the `pos.delivery`
+  // sub-feature - and only the CUSTOMER record and, now, the internal DELIVERY
+  // OPERATIONS surface carry keys.
   CUSTOMERS_VIEW: "pos.customers.view",
   CUSTOMERS_MANAGE: "pos.customers.manage",
+  // Delivery Management (Delivery Ops + BI). `pos.delivery.manage` is the key the
+  // server's `pos_set_delivery_ops` checks before writing the internal
+  // Delivered-By / Delivery-Cost fields; the desktop offers the editor only where
+  // the server would honour it. `pos.reports.view` is what `pos_delivery_report`
+  // demands for the read-only delivery report. Both are enforced server-side; the
+  // gates below only decide whether the control is offered.
+  DELIVERY_MANAGE: "pos.delivery.manage",
+  REPORTS_VIEW: "pos.reports.view",
   // Order management (Level 3D). These three are the keys `pos_edit_order` and
   // `pos_void_order` check for themselves; VIEW_ORDERS guards the queue, which
   // is a read of `pos_orders` that RLS already scopes.
@@ -136,6 +144,41 @@ export function canTakePayments(ctx: PosAccessContext): Gate {
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.APPLY_DISCOUNTS), "You do not have permission to apply discounts.");
+}
+
+/**
+ * Editing a delivery order's INTERNAL operations (Delivered By / Delivery Cost).
+ *
+ * The order the server would refuse in: POS access (carrying the owner block,
+ * mirroring `pos_assert_operator`), the `pos.delivery` sub-feature, then the
+ * `pos.delivery.manage` permission `pos_set_delivery_ops` checks for itself.
+ * STRICTER than a bare permission lookup, never looser - and not a security
+ * boundary: the RPC re-enforces every rule. It exists so the "Delivery details"
+ * editor is offered only where the server would honour a write.
+ */
+export function canManageDelivery(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY)) {
+    return { allowed: false, reason: "Delivery is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_MANAGE), "You do not have permission to manage delivery details.");
+}
+
+/**
+ * Viewing the read-only delivery report. Gated like the editor on POS access and
+ * the `pos.delivery` sub-feature, then on `pos.reports.view` - the permission
+ * `pos_delivery_report` checks for itself. Reads only; moves no money.
+ */
+export function canViewDeliveryReport(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY)) {
+    return { allowed: false, reason: "Delivery is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.REPORTS_VIEW), "You do not have permission to view POS reports.");
 }
 
 /**

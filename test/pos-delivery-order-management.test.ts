@@ -548,21 +548,28 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
   // Level 3D took it to 15; Desktop 1.0.4's `pos_configure_tables` is the 16th;
   // Wave 2C adds the two receivables settlement RPCs (17th, 18th); Wave 3C adds
-  // the Customer Accounts surface's two reads and one money write (19th-21st).
-  assert.equal(names.length, 21);
+  // the Customer Accounts surface's two reads and one money write (19th-21st);
+  // Delivery Management adds `pos_set_delivery_ops` and `pos_delivery_report`
+  // (22nd, 23rd) - one internal write and one read-only report.
+  assert.equal(names.length, 23);
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
+  assert.ok(names.includes("pos_set_delivery_ops"));
+  assert.ok(names.includes("pos_delivery_report"));
   assert.equal(names.includes("pos_remove_order_item"), false, "line removal is deferred");
   assert.equal(new Set(names).size, names.length);
 });
 
-test("order management calls only its own two RPCs", () => {
+test("the module calls only its own RPCs: the two mutations plus delivery ops and the report", () => {
+  // Order management owns pos_edit_order / pos_void_order; Delivery Management adds
+  // the internal ops write (pos_set_delivery_ops) and the read-only report
+  // (pos_delivery_report). Nothing else - no payment, no order save, no removal.
   const code = stripComments(read("lib", "pos", "deliveryOrderManagement.ts"));
   const calls = [...code.matchAll(/callPosRpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]).sort();
-  assert.deepEqual(calls, ["pos_edit_order", "pos_void_order"]);
+  assert.deepEqual(calls, ["pos_delivery_report", "pos_edit_order", "pos_set_delivery_ops", "pos_void_order"]);
 });
 
 test("order management touches no printer, no offline queue and no line removal", () => {

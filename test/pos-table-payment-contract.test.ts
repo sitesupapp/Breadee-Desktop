@@ -115,7 +115,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // new RPC cannot slip in under an unchanged total.
 // RETARGETED AGAIN BY DESKTOP 1.0.4: `pos_configure_tables` was added, so the
 // expected set grows by exactly one more reviewed name.
-test("the RPC allow-list contains exactly the twenty-one expected names", () => {
+test("the RPC allow-list contains exactly the twenty-three expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -131,6 +131,8 @@ test("the RPC allow-list contains exactly the twenty-one expected names", () => 
       "pos_complete_on_account",
       "pos_complete_table_on_account",
       "pos_configure_tables",
+      // Delivery Management: the read-only delivery report (pos.reports.view).
+      "pos_delivery_report",
       "pos_edit_order",
       "pos_end_shift",
       "pos_move_table",
@@ -142,6 +144,9 @@ test("the RPC allow-list contains exactly the twenty-one expected names", () => 
       "pos_receivable_collect",
       "pos_receivables_customer",
       "pos_receivables_search",
+      // Delivery Management: the internal Delivered-By / Delivery-Cost write
+      // (pos.delivery.manage). Never a customer-money RPC.
+      "pos_set_delivery_ops",
       "pos_shift_expected",
       "pos_submit_order",
       "pos_table_map",
@@ -150,7 +155,7 @@ test("the RPC allow-list contains exactly the twenty-one expected names", () => 
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 21);
+  assert.equal(members.length, 23);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

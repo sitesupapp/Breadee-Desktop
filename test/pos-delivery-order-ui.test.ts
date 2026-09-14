@@ -145,14 +145,20 @@ test("the chips use only states the server produces", () => {
   assert.equal(paymentStateLabel("partial"), "partial");
 });
 
-test("no collection lifecycle is invented anywhere on the delivery surface", () => {
-  // The web calls settlement "Mark collected". The desktop has no collection
-  // step to mark: `pos_pay_order` sets paid AND completed in one statement.
+test("no collection lifecycle is invented - collection is a read-only view of payment", () => {
+  // There is still NO delivery motion/lifecycle and NO separate collection STEP to
+  // perform: `pos_pay_order` sets paid AND completed in one statement, so there is
+  // nothing to "mark collected". Delivery Management surfaces a read-only
+  // Collected / Not collected STATUS, but it is purely a projection of the payment
+  // status (`isCollected`), not an invented state machine or action.
   for (const src of [workspace, queue, detail, dialogs]) {
-    for (const phrase of ["Mark collected", "Collected", "Awaiting collection", "Out for delivery", "Dispatch"]) {
-      assert.equal(src.includes(phrase), false, `"${phrase}" is not a state this system has`);
+    for (const phrase of ["Mark collected", "Awaiting collection", "Out for delivery", "Dispatch"]) {
+      assert.equal(src.includes(phrase), false, `"${phrase}" is not a state or action this system has`);
     }
   }
+  // Where the status IS shown (the detail panel), it is driven by payment, never a
+  // second lifecycle field.
+  assert.ok(detail.includes("isCollected"), "the collection status must be derived from payment, via isCollected");
 });
 
 test("the tones separate money from motion", () => {
@@ -685,9 +691,14 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // 16 since Desktop 1.0.4 (`pos_configure_tables`); 21 with Customer Receivables -
   // Wave 2C's two settlement RPCs and Wave 3C's three Customer-Accounts RPCs, all
   // `pos_`-prefixed. Level 3D's own screens still add none of their own.
-  assert.equal(names.length, 21);
+  // 23 since Delivery Management added `pos_set_delivery_ops` and
+  // `pos_delivery_report`. Those two are called through the adapter from the
+  // library layer, not from these screens - the check below still holds.
+  assert.equal(names.length, 23);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
+  assert.ok(names.includes("pos_set_delivery_ops"));
+  assert.ok(names.includes("pos_delivery_report"));
   assert.equal(names.includes("pos_remove_order_item"), false);
   // And no component reaches an RPC directly - they all go through the adapter.
   for (const src of [queue, detail, dialogs]) {
