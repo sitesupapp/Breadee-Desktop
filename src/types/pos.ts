@@ -27,6 +27,16 @@ export type MenuItem = PriceMetadata & {
   price: number | string | null;
   category_id: string | null;
   image_url: string | null;
+  /**
+   * `menu_items.ingredients` - the CUSTOMER-FACING list the Menu Builder writes
+   * and the public E-Menu shows, as a `text[]`.
+   *
+   * Deliberately NOT a recipe: Cost Control's materials live in
+   * `cost_materials` and are a different business concept with different
+   * quantities, units and waste. Nullable, because the column is - an item
+   * whose ingredients were never filled in simply offers no customization.
+   */
+  ingredients?: string[] | null;
 };
 
 export type ModifierGroup = {
@@ -63,6 +73,15 @@ export type CartLine = {
   quantity: number;
   kitchen_note: string | null;
   modifiers: SelectedModifier[];
+  /**
+   * Menu Builder ingredients the cashier switched off for THIS line.
+   *
+   * Names only, from `menu_items.ingredients`. It changes nothing canonical: the
+   * line still sells the same menu item at the same price, and the removal
+   * travels as line customization. See `lib/pos/itemOptions.ts` for why this is
+   * kept apart from Cost Control's `removed_ingredients` channel.
+   */
+  removed_ingredients?: string[];
 };
 
 /** The full menu payload a POS route needs, loaded once per tenant/branch. */
