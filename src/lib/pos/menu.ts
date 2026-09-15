@@ -140,12 +140,60 @@ export function mapPosMenu(json: PosMenuJson | null | undefined): MenuData {
   };
 }
 
+/**
+ * Merge a per-item `menu_items.ingredients` map onto the items an OU projection
+ * already returned. Pure, so the shape contract is testable without a network.
+ *
+ * OU ISOLATION IS PRESERVED COMPLETELY: the item SET is untouched — only items
+ * the projection returned are enriched, keyed by their own id. `ingredients` is
+ * customer-facing display text (a `text[]`) with no price, cost or availability
+ * meaning, so enriching it can never offer an item the OU may not sell.
+ */
+export function mergeIngredients(menu: MenuData, byId: Map<string, string[] | null>): MenuData {
+  if (byId.size === 0) return menu;
+  return {
+    ...menu,
+    items: menu.items.map((i) => (byId.has(i.id) ? { ...i, ingredients: byId.get(i.id) ?? null } : i)),
+  };
+}
+
 export async function loadPosMenu(branchId: string | null): Promise<MenuData> {
   if (!branchId) return { ...EMPTY };
   const { supabase } = await import("@/lib/supabase");
   const { data, error } = await supabase.rpc("pos_menu" as never, { p_branch: branchId } as never);
   if (error) throw new Error(error.message);
-  return mapPosMenu(data as PosMenuJson | null);
+  const menu = mapPosMenu(data as PosMenuJson | null);
+
+  // `pos_menu` is OU-isolated but does NOT project `menu_items.ingredients`, the
+  // customer-facing array the cashier ingredient-customization popup offers. It
+  // is read here in a SEPARATE, tenant-scoped pass (RLS is the boundary) and
+  // merged by id onto the items the OU projection already returned — so OU
+  // isolation is untouched. FAIL-SOFT by contract: any error or empty result
+  // leaves the menu fully sellable with no ingredient list, because nothing
+  // about this presentation nicety may ever stop a till from selling.
+  const ids = menu.items.map((i) => i.id);
+  if (ids.length === 0) return menu;
+  const byId = new Map<string, string[] | null>();
+  try {
+    // Schema-loose read: the generated `database.types.ts` predates the
+    // `ingredients` column (repo<->DB drift, see the price-metadata note above),
+    // so this one select is typed loosely rather than dropping the column. RLS
+    // remains the real guard.
+    const loose = supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => { in: (col: string, vals: string[]) => Promise<{ data: unknown; error: unknown }> };
+      };
+    };
+    const res = await loose.from("menu_items").select("id, ingredients").in("id", ids);
+    if (!res.error && Array.isArray(res.data)) {
+      for (const row of res.data as { id: string; ingredients: string[] | null }[]) {
+        byId.set(row.id, row.ingredients ?? null);
+      }
+    }
+  } catch {
+    /* fail-soft: no ingredients, the menu still sells exactly as before */
+  }
+  return mergeIngredients(menu, byId);
 }
 
 /**
