@@ -11,6 +11,7 @@ import { Button, Textarea, cn } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { allowedMax, isSingleSelect, lineTotals, modifierViolations, requiredMin, toggleModifier } from "@/lib/pos/modifiers";
+import { ingredientsOf, removalLabel, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import type { MenuItem, ModifierGroup, ModifierOption, SelectedModifier } from "@/types/pos";
 
 export type ModifierDialogProps = {
@@ -21,8 +22,10 @@ export type ModifierDialogProps = {
   optionsByGroup: Record<string, ModifierOption[]>;
   currency: CurrencyCode;
   rate: number | null;
+  /** Show the Menu Builder ingredient list for this item so it can be edited. */
+  ingredientCustomization?: boolean;
   onCancel: () => void;
-  onConfirm: (input: { modifiers: SelectedModifier[]; quantity: number; note: string | null }) => void;
+  onConfirm: (input: ItemOptionsResult) => void;
 };
 
 export function ModifierDialog(props: ModifierDialogProps) {
@@ -30,6 +33,8 @@ export function ModifierDialog(props: ModifierDialogProps) {
   const [quantity, setQuantity] = useState(1);
   const [note, setNote] = useState("");
   const [showErrors, setShowErrors] = useState(false);
+  /** Menu Builder ingredients the cashier has switched OFF for this line. */
+  const [removed, setRemoved] = useState<string[]>([]);
 
   // Reset whenever a different item opens the dialog.
   const itemId = props.item?.id ?? null;
@@ -39,8 +44,24 @@ export function ModifierDialog(props: ModifierDialogProps) {
     setSelected([]);
     setQuantity(1);
     setNote("");
+    setRemoved([]);
     setShowErrors(false);
   }
+
+  /**
+   * The item's customer-facing ingredients, from `menu_items.ingredients`.
+   *
+   * NOT a recipe and not Cost Control materials - see `itemOptions.ts`. Empty
+   * when the terminal switch is off or the item lists no ingredients, in which
+   * case the section does not render.
+   */
+  const ingredients = useMemo(
+    () => (props.ingredientCustomization && props.item ? ingredientsOf(props.item) : []),
+    [props.ingredientCustomization, props.item],
+  );
+
+  const toggleIngredient = (name: string) =>
+    setRemoved((cur) => (cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name]));
 
   const knownOptionIds = useMemo(() => {
     const ids = new Set<string>();
@@ -69,7 +90,14 @@ export function ModifierDialog(props: ModifierDialogProps) {
       setShowErrors(true);
       return;
     }
-    props.onConfirm({ modifiers: selected, quantity, note: note.trim() ? note.trim() : null });
+    props.onConfirm({
+      modifiers: selected,
+      quantity,
+      note: note.trim() ? note.trim() : null,
+      // Only ingredients this item actually offers can be removed, so a stale
+      // selection left by a previous item can never reach an order line.
+      removedIngredients: removed.filter((name) => ingredients.includes(name)),
+    });
   }
 
   return (
@@ -118,7 +146,50 @@ export function ModifierDialog(props: ModifierDialogProps) {
       )}
 
       <div className="space-y-4">
-        {props.groups.length === 0 && <p className="text-sm text-sub">This item has no options.</p>}
+        {props.groups.length === 0 && ingredients.length === 0 && (
+          <p className="text-sm text-sub">This item has no options.</p>
+        )}
+
+        {/* --- ingredients --------------------------------------------------
+            The Menu Builder list. Switching one off removes it from THIS line;
+            it changes no menu item, no recipe and no cost. */}
+        {ingredients.length > 0 && (
+          <fieldset className="rounded-xl border border-line p-3">
+            <legend className="px-1 text-sm font-bold text-ink">
+              Ingredients{" "}
+              <span className="text-xs font-semibold text-sub">
+                {removed.length > 0 ? `${removed.length} removed` : "Tap to remove"}
+              </span>
+            </legend>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {ingredients.map((name) => {
+                const off = removed.includes(name);
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    aria-pressed={!off}
+                    onClick={() => toggleIngredient(name)}
+                    className={cn(
+                      "flex min-h-[52px] items-center justify-between gap-2 rounded-xl border px-3 text-left text-sm font-semibold transition",
+                      off
+                        ? "border-red-300 bg-red-50 text-red-700 line-through"
+                        : "border-brand bg-brand-soft text-brand-dark",
+                    )}
+                  >
+                    <span className="truncate">{name}</span>
+                    <span aria-hidden className="shrink-0 text-xs font-bold">
+                      {off ? "✕" : "✓"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {removed.length > 0 && (
+              <p className="mt-2 text-xs font-bold text-red-700">{removed.map(removalLabel).join(" · ")}</p>
+            )}
+          </fieldset>
+        )}
 
         {props.groups.map((group) => {
           const options = props.optionsByGroup[group.id] ?? [];

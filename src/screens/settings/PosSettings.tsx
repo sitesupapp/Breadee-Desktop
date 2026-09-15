@@ -22,6 +22,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Badge, Button, Card, EmptyState, ErrorState, Input, Skeleton } from "@/components/ui";
 import { Switch } from "@/components/Switch";
+import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 import { usePosContext } from "@/state/pos";
 import { configureTables, loadTableMap, tableNamesForCount, validateTableCount } from "@/lib/pos/tables";
 import type { TableMap } from "@/types/tables";
@@ -165,6 +166,19 @@ export function PosSettings() {
     setCollection((current) =>
       writeCollectionSettings({ ...current, enabled: { ...current.enabled, [source]: next } }),
     );
+  }, []);
+
+  // --- cashier behaviour (this terminal) --------------------------------------
+  //
+  // TERMINAL-LOCAL, like the per-printer and collection-ticket switches above.
+  // Whether a cashier is offered a menu item's ingredients to edit is a per-till
+  // choice, stored in `breadee.desktop.posFeatures` and never in the branch's
+  // shared settings. Default OFF: a till that has never chosen keeps today's
+  // behaviour.
+  const [features, setFeatures] = useState<PosFeatures>(() => readPosFeatures());
+
+  const setFeature = useCallback((key: keyof PosFeatures, next: boolean) => {
+    setFeatures((current) => writePosFeatures({ ...current, [key]: next }));
   }, []);
 
   // --- tables ----------------------------------------------------------------
@@ -519,6 +533,29 @@ export function PosSettings() {
           A cashier can also print or reprint one by hand from the receipt window at any time, whether or not these
           switches are on.
         </p>
+      </Card>
+
+      {/* --- cashier behaviour (this terminal) ---------------------------- */}
+      <Card className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-sm font-extrabold text-ink">Cashier screen</p>
+            <p className="mt-0.5 text-xs text-sub">
+              How the ordering screen behaves at <strong className="text-ink">this terminal</strong>. These choices are
+              saved on this till only, not shared with the branch.
+            </p>
+          </div>
+          <Badge tone="slate">This terminal</Badge>
+        </div>
+
+        <div className="mt-2">
+          <Switch
+            checked={features.ingredientCustomization}
+            onChange={(next) => setFeature("ingredientCustomization", next)}
+            label="Ingredient customization"
+            hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Onion”. It changes only that line: the menu item, its recipe and its cost are untouched."
+          />
+        </div>
       </Card>
 
       <Card className="p-4">
