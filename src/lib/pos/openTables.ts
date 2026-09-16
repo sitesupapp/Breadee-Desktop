@@ -93,10 +93,13 @@ const openedMs = (t: TableSummary): number | null => {
  *  - "oldest"  - longest-open first (opened_at ascending; unknown time last).
  *    The service default: the table that has waited longest to be paid.
  *  - "newest"  - most recently opened first.
- *  - "highest" - largest outstanding first, by the table's own `total`. Within a
- *    single-currency branch this is exactly "who owes the most"; a mixed USD/LBP
- *    branch orders by raw magnitude, which is a rough guide - no FX is invented to
- *    rank one currency against another. A table with no summable total sorts last.
+ *  - "highest" - largest outstanding first, by the table's own `total`. This is
+ *    ONLY a valid ordering when every summable row shares one selling currency
+ *    (`canSortByHighest`) - "who owes the most" has no meaning across currencies
+ *    without an exchange rate, and no FX is ever invented. If the set spans more
+ *    than one currency, "highest" REFUSES to rank raw amounts across them and
+ *    falls back to "oldest"; the UI additionally disables the option (see the
+ *    modal). A table with no summable total sorts last within a single currency.
  */
 export function sortOpenTables(open: TableSummary[], sort: OpenTablesSort): TableSummary[] {
   const rows = [...open];
@@ -104,11 +107,40 @@ export function sortOpenTables(open: TableSummary[], sort: OpenTablesSort): Tabl
     case "newest":
       return rows.sort((a, b) => (openedMs(b) ?? -Infinity) - (openedMs(a) ?? -Infinity));
     case "highest":
+      // Never compare LBP raw numbers against USD raw numbers. When the set is
+      // not single-currency, this is not a valid financial ordering, so fall
+      // back to the always-safe oldest-first rather than mislead.
+      if (!canSortByHighest(rows)) return sortOpenTables(rows, "oldest");
       return rows.sort((a, b) => (b.total ?? -Infinity) - (a.total ?? -Infinity));
     case "oldest":
     default:
       return rows.sort((a, b) => (openedMs(a) ?? Infinity) - (openedMs(b) ?? Infinity));
   }
+}
+
+/**
+ * The distinct selling currencies among the SUMMABLE rows (those with a real
+ * `total`/`currency`). A mixed-currency table - which the server declined to sum,
+ * so it has no single currency - contributes none, because it cannot be ranked by
+ * amount anyway. This is what decides whether "highest outstanding" is a valid
+ * ordering; it is deliberately computed from the CURRENT (searched) result set by
+ * the caller so a search that narrows to one currency re-enables the option.
+ */
+export function distinctSellingCurrencies(open: TableSummary[]): CurrencyCode[] {
+  const set = new Set<CurrencyCode>();
+  for (const t of open) {
+    if (t.currency !== null && t.total !== null && !t.mixed_currency) set.add(t.currency);
+  }
+  return [...set];
+}
+
+/**
+ * "Highest outstanding" is only offered when the rows share ONE selling currency
+ * (or there is nothing summable). More than one currency has no cross-currency
+ * numeric order without an exchange rate, and inventing one is forbidden.
+ */
+export function canSortByHighest(open: TableSummary[]): boolean {
+  return distinctSellingCurrencies(open).length <= 1;
 }
 
 /** Case-insensitive match on table name OR the open order number. */

@@ -18,6 +18,7 @@ import { Modal } from "@/components/overlays";
 import { formatMoney } from "@/lib/currency";
 import { elapsedMinutes, formatElapsed } from "@/lib/pos/tables";
 import {
+  canSortByHighest,
   mixedCurrencyOpenTables,
   oldestOpenMinutes,
   outstandingByCurrency,
@@ -76,7 +77,18 @@ export function OpenTablesModal(props: {
   const buckets = useMemo(() => outstandingByCurrency(open), [open]);
   const mixed = useMemo(() => mixedCurrencyOpenTables(open), [open]);
   const oldest = useMemo(() => oldestOpenMinutes(open, props.now), [open, props.now]);
-  const rows = useMemo(() => sortOpenTables(searchOpenTables(open, search), sort), [open, search, sort]);
+  // Currency diversity is judged on the CURRENT (searched) result set, so a
+  // search that narrows the rows to one currency re-enables "Highest".
+  const filtered = useMemo(() => searchOpenTables(open, search), [open, search]);
+  const highestAvailable = useMemo(() => canSortByHighest(filtered), [filtered]);
+  const rows = useMemo(() => sortOpenTables(filtered, sort), [filtered, sort]);
+
+  // "Highest" is not a valid ordering across currencies. If the visible set
+  // becomes multi-currency while it is selected, drop back to the safe default
+  // rather than show a cross-currency raw ranking.
+  useEffect(() => {
+    if (sort === "highest" && !highestAvailable) setSort("oldest");
+  }, [sort, highestAvailable]);
 
   if (!props.open) return null;
 
@@ -134,7 +146,7 @@ export function OpenTablesModal(props: {
             aria-label="Sort open tables"
           >
             {SORT_OPTIONS.map((s) => (
-              <option key={s.key} value={s.key}>
+              <option key={s.key} value={s.key} disabled={s.key === "highest" && !highestAvailable}>
                 {s.label}
               </option>
             ))}
@@ -142,6 +154,11 @@ export function OpenTablesModal(props: {
           <span className="text-[11px] text-sub">
             {rows.length} {rows.length === 1 ? "table" : "tables"}
           </span>
+          {!highestAvailable && (
+            <span className="text-[11px] text-amber-700">
+              Highest outstanding is available when results use one currency.
+            </span>
+          )}
         </div>
 
         {showError && (

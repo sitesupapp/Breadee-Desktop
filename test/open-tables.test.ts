@@ -10,6 +10,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  canSortByHighest,
+  distinctSellingCurrencies,
   mixedCurrencyOpenTables,
   oldestOpenMinutes,
   outstandingByCurrency,
@@ -142,13 +144,61 @@ test("oldest-first orders by opened_at ascending", () => {
   assert.deepEqual(sortOpenTables(open, "newest").map((t) => t.id), ["new", "mid", "old"]);
 });
 
-test("highest-first orders by the table's own total descending", () => {
+test("highest-first orders by the table's own total descending (single currency USD)", () => {
   const open = [
     tbl({ id: "small", orders: 1, total: 5, currency: "USD" }),
     tbl({ id: "big", orders: 1, total: 50, currency: "USD" }),
     tbl({ id: "mid", orders: 1, total: 20, currency: "USD" }),
   ];
+  assert.equal(canSortByHighest(open), true);
   assert.deepEqual(sortOpenTables(open, "highest").map((t) => t.id), ["big", "mid", "small"]);
+});
+
+test("highest works for a single-currency LBP set too", () => {
+  const open = [
+    tbl({ id: "a", orders: 1, total: 350000, currency: "LBP" }),
+    tbl({ id: "b", orders: 1, total: 1440000, currency: "LBP" }),
+    tbl({ id: "c", orders: 1, total: 540000, currency: "LBP" }),
+  ];
+  assert.equal(canSortByHighest(open), true);
+  assert.deepEqual(sortOpenTables(open, "highest").map((t) => t.id), ["b", "c", "a"]);
+});
+
+test("highest is NOT allowed across mixed currencies, and never ranks raw amounts across them", () => {
+  const open = [
+    tbl({ id: "lbp", name: "L", opened_at: T0, orders: 1, total: 1440000, currency: "LBP" }),
+    tbl({ id: "usd", name: "U", opened_at: T2, orders: 1, total: 50, currency: "USD" }),
+  ];
+  assert.deepEqual(distinctSellingCurrencies(open).sort(), ["LBP", "USD"]);
+  assert.equal(canSortByHighest(open), false);
+  // A cross-currency "highest" would put the 1,440,000 LBP row first purely by
+  // raw magnitude. Instead it must fall back to oldest-first (no FX, no mixing).
+  assert.deepEqual(sortOpenTables(open, "highest").map((t) => t.id), sortOpenTables(open, "oldest").map((t) => t.id));
+  assert.deepEqual(sortOpenTables(open, "highest").map((t) => t.id), ["lbp", "usd"]);
+});
+
+test("a search that narrows a mixed set to one currency re-enables highest", () => {
+  const open = [
+    tbl({ id: "lbp", name: "TR-01", order_number: "260916-0003", orders: 1, total: 1440000, currency: "LBP" }),
+    tbl({ id: "usd", name: "999", order_number: "260704-0001", orders: 1, total: 50, currency: "USD" }),
+  ];
+  assert.equal(canSortByHighest(open), false); // full set: mixed
+  const onlyLbp = searchOpenTables(open, "TR"); // narrows to the LBP row
+  assert.equal(canSortByHighest(onlyLbp), true);
+  assert.deepEqual(sortOpenTables(onlyLbp, "highest").map((t) => t.id), ["lbp"]);
+});
+
+test("a mixed-currency (unsummable) table does not by itself block highest", () => {
+  // It has no single currency to compare, so it contributes none; the summable
+  // rows are all USD, so highest is valid and the mixed table sorts last.
+  const open = [
+    tbl({ id: "usd1", orders: 1, total: 10, currency: "USD" }),
+    tbl({ id: "usd2", orders: 1, total: 40, currency: "USD" }),
+    tbl({ id: "mix", orders: 2, total: null, currency: null, mixed_currency: true }),
+  ];
+  assert.deepEqual(distinctSellingCurrencies(open), ["USD"]);
+  assert.equal(canSortByHighest(open), true);
+  assert.deepEqual(sortOpenTables(open, "highest").map((t) => t.id), ["usd2", "usd1", "mix"]);
 });
 
 // --- search ------------------------------------------------------------------

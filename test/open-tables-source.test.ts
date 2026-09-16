@@ -97,3 +97,15 @@ test("Open Tables uses the existing pos.tables.view gate - no new permission key
     assert.ok(!/["']pos\.[a-z_.]+["']/.test(src), `${rel} must not hardcode a permission key`);
   }
 });
+
+test("highest outstanding is gated to a single currency - never a cross-currency raw sort", () => {
+  const lib = ts("src/lib/pos/openTables.ts");
+  assert.match(lib, /export function canSortByHighest/, "exposes the single-currency guard");
+  // The highest branch falls back to a safe ordering rather than ranking raw
+  // amounts across currencies, and no exchange rate is ever consulted.
+  assert.match(lib, /canSortByHighest\(rows\)[\s\S]{0,120}sortOpenTables\(rows,\s*"oldest"\)/);
+  assert.ok(!lib.includes("convertUsdToLbp") && !lib.includes("* rate") && !lib.includes("/ rate"));
+  const modal = jsx("src/components/pos/OpenTablesModal.tsx");
+  assert.match(modal, /highestAvailable/, "the modal computes availability from the visible rows");
+  assert.match(modal, /disabled=\{s\.key === "highest" && !highestAvailable\}/, "the option is disabled when mixed");
+});
