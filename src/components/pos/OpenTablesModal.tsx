@@ -191,7 +191,6 @@ export function OpenTablesModal(props: {
                 {rows.map((t) => {
                   const section = props.sectionFor(t.id);
                   const elapsed = formatElapsed(elapsedMinutes(t.opened_at, props.now));
-                  const unsummable = t.mixed_currency || t.total === null || t.currency === null;
                   return (
                     <tr
                       key={t.id}
@@ -214,10 +213,13 @@ export function OpenTablesModal(props: {
                         <Badge tone="amber">Unpaid</Badge>
                       </td>
                       <td className="px-2 py-2 text-right font-semibold">
-                        {unsummable ? (
-                          <span className="text-amber-700">Mixed</span>
-                        ) : (
+                        {/* A summable single-currency bill, or the server's
+                            refusal to sum a mixed one - never a guessed number.
+                            Guarding on the fields directly narrows the nulls. */}
+                        {t.total !== null && t.currency !== null ? (
                           formatMoney(t.total, t.currency)
+                        ) : (
+                          <span className="text-amber-700">Mixed</span>
                         )}
                       </td>
                     </tr>
