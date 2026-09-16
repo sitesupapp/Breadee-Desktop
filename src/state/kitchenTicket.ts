@@ -26,6 +26,13 @@ export type KitchenTicketStatus =
   | { kind: "auto_sent"; copies: number; printer: string }
   /** Automatic printing was on, but the document could not be routed or sent. */
   | { kind: "auto_failed"; message: string }
+  /**
+   * Routing was incomplete, so NOTHING was printed - not the resolvable subset,
+   * not one job. `items` are the eligible lines that had no reachable kitchen
+   * printer, and `message` is the one fix to make. Shown, never merely toasted:
+   * a kitchen that is not being told about food is the case a human must act on.
+   */
+  | { kind: "blocked"; message: string; items: string[] }
   /** Nothing automatic happened - the operator may send it by hand. */
   | { kind: "manual" };
 
