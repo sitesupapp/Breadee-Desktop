@@ -579,6 +579,22 @@ function PosWorkspaceInner() {
         ticket,
       });
 
+      // ROUTING WAS INCOMPLETE, so NOTHING printed - not the resolvable subset.
+      // Unlike a printer failure this is SHOWN, not merely staged: some eligible
+      // items have no kitchen printer at all, which is the one case a human must
+      // act on before the next customer. The full ticket is on the modal and the
+      // affected items are named, on screen and in the notice. This is the
+      // operator-facing half of the fix for order #260916-0003.
+      if (status.kind === "blocked") {
+        kitchenStore.present(ticket, status);
+        toast.push({
+          tone: "error",
+          message: "Order sent. The kitchen ticket was NOT printed.",
+          detail: `${status.items.length} item${status.items.length === 1 ? "" : "s"} have no kitchen route: ${status.items.join(", ")}`,
+        });
+        return;
+      }
+
       // A ticket that printed by itself is already withheld by the store, which
       // is where that rule lives. The change in 1.0.4 is the FAILURE case: it
       // used to raise the full ticket modal, which stops a cashier mid-service

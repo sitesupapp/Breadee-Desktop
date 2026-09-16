@@ -258,6 +258,26 @@ export function KitchenTicketModal({
             </p>
           )}
 
+          {/* Routing was incomplete: NOTHING printed, and the named items have no
+              kitchen printer at all. Shown in full, red and persistent - a
+              dismissible-only notice is exactly what let order #260916-0003 drop
+              three lines in silence. */}
+          {status.kind === "blocked" && (
+            <div className="space-y-1 rounded-lg bg-red-50 px-3 py-2 text-[11px] text-red-800">
+              <p className="font-bold uppercase tracking-wide">Kitchen ticket not printed</p>
+              <p>
+                {status.items.length} item{status.items.length === 1 ? "" : "s"} could not be routed to a kitchen
+                printer:
+              </p>
+              <ul className="list-disc pl-4 font-semibold">
+                {status.items.map((name) => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+              <p>{status.message}</p>
+            </div>
+          )}
+
           {native && target && !confirming && !outcome && (
             <p className="text-[11px] text-sub">
               Print to <strong className="text-ink">{target.printerName}</strong> ({target.windowsName}) ·{" "}
@@ -268,7 +288,7 @@ export function KitchenTicketModal({
             </p>
           )}
 
-          {native && resolution?.kind === "blocked" && status.kind !== "auto_failed" && (
+          {native && resolution?.kind === "blocked" && status.kind !== "auto_failed" && status.kind !== "blocked" && (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-900">
               {kitchenBlockMessage(resolution.block)}
             </p>
