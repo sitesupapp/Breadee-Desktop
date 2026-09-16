@@ -31,7 +31,7 @@
 // imports nothing from the offline database.
 
 import { asRecord, callPosRpc, num, str, strOrNull } from "@/lib/pos/rpc";
-import { isKnownOperationalCurrency, type OperationalCurrencyCode } from "@/lib/currency";
+import type { CurrencyCode } from "@/lib/currency";
 import type { PaymentMethod } from "@/lib/pos/payments";
 
 // --- shortlist ---------------------------------------------------------------
@@ -49,9 +49,8 @@ export type ReceivableSearchRow = {
 /** How many customers the search returns. A longer list is a narrower-query problem. */
 export const RECEIVABLES_SEARCH_LIMIT = 20;
 
-function toCurrency(value: unknown): OperationalCurrencyCode {
-  const s = str(value, "USD");
-  return isKnownOperationalCurrency(s) ? s : "USD";
+function toCurrency(value: unknown): CurrencyCode {
+  return str(value, "USD") === "LBP" ? "LBP" : "USD";
 }
 
 function toSearchRow(raw: unknown): ReceivableSearchRow | null {
@@ -92,7 +91,7 @@ export async function searchReceivables(
 export type ReceivablePayment = {
   paidAt: string | null;
   amount: number;
-  currency: OperationalCurrencyCode;
+  currency: CurrencyCode;
   amountUsd: number;
   method: string | null;
   collector: string | null;
@@ -106,7 +105,7 @@ export type ReceivableOrder = {
   orderType: string;
   createdAt: string | null;
   branchId: string | null;
-  currency: OperationalCurrencyCode;
+  currency: CurrencyCode;
   total: number;
   paid: number;
   balance: number;
@@ -117,7 +116,7 @@ export type ReceivableOrder = {
 };
 
 /** One currency's slice of the outstanding balance. NEVER summed across currencies. */
-export type ReceivableByCurrency = { currency: OperationalCurrencyCode; outstanding: number };
+export type ReceivableByCurrency = { currency: CurrencyCode; outstanding: number };
 
 export type ReceivableSummary = {
   totalOutstandingUsd: number;

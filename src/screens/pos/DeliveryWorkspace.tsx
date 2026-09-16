@@ -1,4 +1,4 @@
-// Delivery workspace (Level 3A: customer foundation).
+﻿// Delivery workspace (Level 3A: customer foundation).
 //
 // Like Dine-in, this is a HOOK rather than a second shell - one PosShell, one
 // status bar, one layout resolver.
@@ -79,6 +79,7 @@ import {
   createSettlementLatch,
   deliveryIsSettled,
   deliveryPaymentGate,
+  parseDeliveryFee,
   payDeliveryOrder,
   performDeliverySettlement,
   readOrderReceiptLines,
@@ -103,11 +104,13 @@ import {
   performVoid,
   queueCounts,
   readDeliveryOrder,
+  setDeliveryOps,
   validateVoidReason,
   voidActionFor,
   voidDeliveryOrder,
   voidOrderGate,
   OrderChangedError,
+  type DeliveryHandlerType,
   type DeliveryOrderLine,
   type DeliveryQueueOrder,
 } from "@/lib/pos/deliveryOrderManagement";
@@ -122,12 +125,12 @@ import {
 } from "@/lib/pos/deliveryHistory";
 import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
 import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
+import { DeliveryReport } from "@/components/pos/DeliveryReport";
 import { EditOrderDialog, VoidOrderDialog, type EditOrderIntent } from "@/components/pos/DeliveryOrderDialogs";
 import { computeDiscount } from "@/lib/pos/discounts";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
-import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import { submitOrder } from "@/lib/pos/orders";
 import type { KitchenSourceLine } from "@/lib/pos/kitchenPrinter";
@@ -136,13 +139,13 @@ import { cartSubtotal } from "@/lib/pos/orders";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { DeliveryOrderSummary } from "@/components/pos/DeliveryOrderSummary";
 import { addressLine } from "@/components/pos/CustomerCard";
-import { Button, EmptyState, GatedButton, Textarea } from "@/components/ui";
+import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
-import { type OperationalCurrencyCode } from "@/lib/currency";
+import type { CurrencyCode } from "@/lib/currency";
 import type { CartLine } from "@/types/pos";
 import type { Gate } from "@/components/ui";
 
@@ -163,7 +166,7 @@ type DeliveryDialog =
  * deliberately out of scope - this one shows deliveries, which is what the
  * person answering the phone is responsible for.
  */
-export type DeliveryView = "customer" | "add_items" | "orders";
+export type DeliveryView = "customer" | "add_items" | "orders" | "report";
 
 export type DeliveryWorkspace = {
   view: DeliveryView;
@@ -209,7 +212,7 @@ export function useDeliveryWorkspace(input: {
   /** The open shift's id. Required on the payload - never inferred. */
   shiftId: string | null;
   createOrders: Gate;
-  currency: OperationalCurrencyCode;
+  currency: CurrencyCode;
   cartLines: CartLine[];
   cartSelectedKey: string | null;
   onSelectLine: (key: string) => void;
@@ -220,6 +223,12 @@ export function useDeliveryWorkspace(input: {
   /** Level 3C. Settlement needs the payment permission and the tenant rate. */
   takePayments: Gate;
   applyDiscounts: Gate;
+  /** Delivery Management. `manageDelivery` gates the internal Delivered-By /
+      Delivery-Cost editor (`pos.delivery.manage`); `viewDeliveryReport` gates the
+      read-only delivery report (`pos.reports.view`). Both are re-enforced by their
+      RPCs server-side. */
+  manageDelivery: Gate;
+  viewDeliveryReport: Gate;
   /** Tenant USD->LBP rate. LBP is refused without one - never guessed. */
   rate: number | null;
   /**
@@ -262,6 +271,11 @@ export function useDeliveryWorkspace(input: {
   // --- Level 3B ordering state ------------------------------------------------
   const [view, setView] = useState<DeliveryView>("customer");
   const [orderNote, setOrderNote] = useState("");
+  // The manual delivery fee, entered during the delivery order flow BEFORE the
+  // order is sent — the fee belongs to the order, not only to payment. Held as a
+  // raw string and parsed by the shared helper; sent to pos_save_order, which
+  // persists it and applies the finance layer. Empty = no fee (0).
+  const [orderDeliveryFee, setOrderDeliveryFee] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ order: OpenDeliveryOrder; recovered: boolean } | null>(null);
@@ -310,6 +324,11 @@ export function useDeliveryWorkspace(input: {
   const [voidBusy, setVoidBusy] = useState(false);
   const [voidError, setVoidError] = useState<string | null>(null);
   const [receiptBusy, setReceiptBusy] = useState(false);
+  // Delivery Management: the internal Delivered-By / Delivery-Cost editor.
+  const [opsEditing, setOpsEditing] = useState(false);
+  const [opsBusy, setOpsBusy] = useState(false);
+  const [opsError, setOpsError] = useState<string | null>(null);
+  const opsLatch = useRef(createMutationLatch());
   /** Which history row is assembling a receipt, so only that one shows busy. */
   const [receiptBusyId, setReceiptBusyId] = useState<string | null>(null);
   /**
@@ -663,8 +682,15 @@ export function useDeliveryWorkspace(input: {
       // retry, and cleared only once an order is definitively accepted.
       clientOpId: useCart.getState().ensureOpId(),
       note: orderNote.trim() === "" ? null : orderNote.trim(),
+      // The manual fee, parsed once against the SNAPSHOT so it validates exactly
+      // what will be sent. Blank = no fee (null); 0 = free delivery.
+      deliveryFee: parseDeliveryFee(orderDeliveryFee),
     };
     if (!snapshot.customerId || !snapshot.addressId) return;
+    if (snapshot.deliveryFee.provided && !snapshot.deliveryFee.valid) {
+      setSendError("Enter a valid delivery fee (0 or more), or leave it blank for no fee.");
+      return;
+    }
 
     setSendError(null);
     setSending(true);
@@ -685,6 +711,9 @@ export function useDeliveryWorkspace(input: {
         customerId: snapshot.customerId,
         addressId: snapshot.addressId,
         orderNote: snapshot.note,
+        // The fee travels with the order at creation. Only when actually entered;
+        // blank leaves the order with no fee (it can still be set at settlement).
+        deliveryFee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
       });
 
       const outcome = await performDeliveryOrder({
@@ -725,6 +754,11 @@ export function useDeliveryWorkspace(input: {
         order_number: outcome.result.order_number,
         status: "sent_to_kitchen",
         payment_status: "unpaid",
+        // The server's own figures from the submit result, plus the fee we sent,
+        // so the just-created order shows Subtotal + Delivery Fee = Total even on
+        // the rare fallback path where the re-read did not find the row.
+        subtotal: outcome.result.subtotal,
+        delivery_fee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
         total_amount: outcome.result.total,
         currency: null,
         customer_id: snapshot.customerId,
@@ -765,6 +799,7 @@ export function useDeliveryWorkspace(input: {
       // Only this delivery basket. Takeaway and dine-in state is untouched.
       useCart.getState().reset();
       setOrderNote("");
+      setOrderDeliveryFee("");
       setView("customer");
       // Authoritative history refresh - server values, never a local increment.
       await useCustomers.getState().refresh();
@@ -781,7 +816,7 @@ export function useDeliveryWorkspace(input: {
     } finally {
       setSending(false);
     }
-  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, pos.branch.id, pos.tenantId, toast]);
+  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, orderDeliveryFee, pos.branch.id, pos.tenantId, toast]);
 
   const requestSend = useCallback(() => void send(), [send]);
 
@@ -881,9 +916,48 @@ export function useDeliveryWorkspace(input: {
       setDetailLines([]);
       setEditError(null);
       setVoidError(null);
+      setOpsEditing(false);
+      setOpsError(null);
       void refreshDetail(order.id);
     },
     [refreshDetail],
+  );
+
+  // Save the internal delivery ops through the ONE server authority
+  // (`pos_set_delivery_ops`), then re-read the order so the panel shows what the
+  // server actually stored. Never a direct `pos_orders` update from the client;
+  // never a fee/total/payment field. A latch keeps a double-tap to one write.
+  const saveOps = useCallback(
+    async (values: { handlerType: DeliveryHandlerType | null; personRef: string | null; cost: number | null }) => {
+      const target = detail;
+      if (!target) return;
+      if (!input.manageDelivery.allowed) {
+        setOpsError(input.manageDelivery.reason ?? "You do not have permission to manage delivery details.");
+        return;
+      }
+      if (!opsLatch.current.acquire()) return;
+      setOpsBusy(true);
+      setOpsError(null);
+      try {
+        await setDeliveryOps({
+          orderId: target.id,
+          handlerType: values.handlerType,
+          deliveredByUserId: target.delivered_by_user_id ?? null,
+          personRef: values.personRef,
+          cost: values.cost,
+        });
+        setOpsEditing(false);
+        await refreshDetail(target.id);
+        void refreshQueue();
+        toast.push({ tone: "success", message: "Delivery details saved" });
+      } catch (e) {
+        setOpsError(classifyError(e).message);
+      } finally {
+        setOpsBusy(false);
+        opsLatch.current.release();
+      }
+    },
+    [detail, input.manageDelivery, refreshDetail, refreshQueue, toast],
   );
 
   // Load the queue when Orders is opened, and whenever the shift changes under
@@ -980,10 +1054,12 @@ export function useDeliveryWorkspace(input: {
   const settle = useCallback(
     async (confirm: {
       method: PaymentMethod;
-      currency: OperationalCurrencyCode;
+      currency: CurrencyCode;
       discountType: DiscountType;
       discountValue: string;
       tendered: number | null;
+      /** The manual delivery fee entered at the pay step; null when none. */
+      deliveryFee: number | null;
     }) => {
       const order = payTarget.order;
       if (!order || !payGate.allowed) return;
@@ -1005,7 +1081,10 @@ export function useDeliveryWorkspace(input: {
 
         const discount = validateDeliveryDiscount({
           canDiscount: input.applyDiscounts,
-          subtotal: fresh?.total_amount ?? intended.total,
+          // The ITEMS subtotal is the discount base — the delivery fee is not
+          // discountable. Falls back to the total for a legacy order that carried
+          // no separate subtotal.
+          subtotal: fresh?.subtotal ?? fresh?.total_amount ?? intended.total,
           type: confirm.discountType,
           value: confirm.discountValue,
         });
@@ -1018,6 +1097,9 @@ export function useDeliveryWorkspace(input: {
             // Named fields only - `tendered` travels in the same object and has
             // no column on `pos_payments`.
             discount: discount.fields,
+            // The manual delivery fee. pos_pay_order persists it and the finance
+            // engine computes the total - the client sends only the fee.
+            deliveryFee: confirm.deliveryFee,
           }),
           submit: payDeliveryOrder,
           // Used only after a failure, and it asks BOTH questions: what the
@@ -1052,8 +1134,6 @@ export function useDeliveryWorkspace(input: {
 
         const money = outcome.result;
         const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
-        // 6B-2: the order's own historical currency + server precision.
-        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1077,14 +1157,18 @@ export function useDeliveryWorkspace(input: {
             // the reopen must be financially identical, so both now read the
             // same stored snapshot. The tender currency has its own field two
             // lines down, where "Charged in LBP" belongs.
-            currency: receiptMeta.currency,
-            decimalDigits: receiptMeta.decimalDigits,
+            currency: (settled!.currency ?? input.currency) as CurrencyCode,
             lines,
             // Server figures win over anything computed here.
             subtotal: money?.subtotal ?? settled!.total_amount ?? 0,
             discount: money?.discount ?? 0,
+            // The delivery fee the server actually charged, read from the finance
+            // breakdown - its own receipt line, already inside `total`. Null on the
+            // recovered path (no payment response), where the fee simply isn't
+            // itemised; the total still includes it.
+            deliveryFee: money?.delivery_fee ?? null,
             total: money?.amount ?? settled!.total_amount ?? 0,
-            tenderCurrency: (money?.currency_code ?? confirm.currency) as OperationalCurrencyCode,
+            tenderCurrency: (money?.currency_code ?? confirm.currency) as CurrencyCode,
             tenderTotal: money?.original_amount ?? null,
             tendered: confirm.tendered,
             change:
@@ -1215,12 +1299,15 @@ export function useDeliveryWorkspace(input: {
 
         const money = outcome.result;
         const lines = await readOrderReceiptLines(intended.orderId).catch(() => []);
-        const total = money ? Math.max(0, money.subtotal - money.discount) : (settled.total_amount ?? 0);
-        const paidNow = money ? money.paid_usd : confirm.mode === "partial" ? confirm.amountNow : 0;
-        const balance = money ? money.outstanding_usd : Math.max(0, total - paidNow);
+        // Operational money, exact and delivery-fee-inclusive: `total` is the
+        // server's order total (fee already folded in), `paidNow` = total minus
+        // the operational balance, `balance` is the server's operational
+        // outstanding. Never `subtotal - discount` (drops the fee, and prints 0
+        // when the server omits subtotal) and never the USD paid/outstanding.
+        const total = money ? money.total : (settled.total_amount ?? 0);
+        const balance = money ? money.outstanding : Math.max(0, total - (confirm.mode === "partial" ? confirm.amountNow : 0));
+        const paidNow = money ? Math.max(0, money.total - money.outstanding) : confirm.mode === "partial" ? confirm.amountNow : 0;
         const who = receiptIdentity(order);
-        // 6B-2: the order's own historical currency + server precision.
-        const receiptMeta = await fetchReceiptCurrency(intended.orderId, input.currency);
         input.onPresentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
@@ -1235,11 +1322,15 @@ export function useDeliveryWorkspace(input: {
             paidAmount: paidNow,
             balanceDue: balance,
             method: confirm.method,
-            currency: receiptMeta.currency,
-            decimalDigits: receiptMeta.decimalDigits,
+            // The order's OWN selling currency - classic USD/LBP, no historical
+            // currency or decimal-digits layer on this production baseline.
+            currency: (settled.currency ?? input.currency) as CurrencyCode,
             lines,
             subtotal: money?.subtotal ?? settled.total_amount ?? 0,
             discount: money?.discount ?? 0,
+            // Delivery fee on its own line between Subtotal and Total (already
+            // folded into `total`). Absent/0 prints nothing.
+            deliveryFee: money?.delivery_fee ?? null,
             total,
             // A receivable takes no cash tender at the drawer.
             tenderCurrency: null,
@@ -1648,6 +1739,38 @@ export function useDeliveryWorkspace(input: {
   );
 
   /**
+   * The delivery fee, entered on the ORDER before it is sent.
+   *
+   * The fee belongs to the order, not only to the Pay action: entering it here
+   * lets the server persist it and apply the canonical finance layer, so an
+   * unpaid delivery order already shows the fee on its bill/receipt and settlement
+   * reuses the same value. Blank = no fee; 0 = free delivery. The number is
+   * validated the same way the settlement input is.
+   */
+  const feeInputParsed = parseDeliveryFee(orderDeliveryFee);
+  const deliveryFeeBox = (
+    <div className="rounded-2xl border border-line bg-white p-3">
+      <label className="block">
+        <span className="text-xs font-bold text-ink">Delivery fee ({input.currency})</span>
+        <p className="mt-0.5 text-[11px] text-sub">
+          Saved with the order and shown on the bill before payment. Leave blank for none; 0 = free delivery.
+        </p>
+        <Input
+          className="mt-1 w-32 text-right font-bold"
+          inputMode="decimal"
+          value={orderDeliveryFee}
+          placeholder="0"
+          aria-invalid={feeInputParsed.provided && !feeInputParsed.valid}
+          onChange={(e) => setOrderDeliveryFee(e.target.value)}
+        />
+        {feeInputParsed.provided && !feeInputParsed.valid && (
+          <p className="mt-1 text-[11px] font-semibold text-amber-800">Enter a fee of 0 or more, or leave it blank.</p>
+        )}
+      </label>
+    </div>
+  );
+
+  /**
    * The one switch between taking an order and managing the ones already taken.
    *
    * Two buttons rather than a new route: Delivery is a single workspace with a
@@ -1659,7 +1782,7 @@ export function useDeliveryWorkspace(input: {
   const viewSwitch = (
     <div className="flex shrink-0 gap-2">
       <Button
-        variant={view === "orders" ? "ghost" : "primary"}
+        variant={view === "orders" || view === "report" ? "ghost" : "primary"}
         size="lg"
         className="flex-1"
         onClick={() => setView("customer")}
@@ -1674,6 +1797,17 @@ export function useDeliveryWorkspace(input: {
         onClick={() => setView("orders")}
       >
         Orders
+      </GatedButton>
+      {/* The read-only delivery report. Gated on `pos.reports.view`; a cashier
+          without it sees the button refused rather than a missing feature. */}
+      <GatedButton
+        gate={input.viewDeliveryReport}
+        variant={view === "report" ? "primary" : "ghost"}
+        size="lg"
+        className="flex-1"
+        onClick={() => setView("report")}
+      >
+        Report
       </GatedButton>
     </div>
   );
@@ -1708,6 +1842,11 @@ export function useDeliveryWorkspace(input: {
             <EmptyState title="Orders are not available for this account" hint={viewOrdersGate.reason ?? undefined} />
           </div>
         )}
+      </div>
+    ) : view === "report" ? (
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {viewSwitch}
+        <DeliveryReport gate={input.viewDeliveryReport} currency={input.currency} branchId={branchId || null} />
       </div>
     ) : (
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -1787,6 +1926,10 @@ export function useDeliveryWorkspace(input: {
             voidGate={voidGate}
             payGate={payGate}
             receiptBusy={receiptBusy}
+            manageDeliveryGate={input.manageDelivery}
+            opsEditing={opsEditing}
+            opsBusy={opsBusy}
+            opsError={opsError}
             onBack={() => setDetail(null)}
             onEdit={() => {
               setEditError(null);
@@ -1799,6 +1942,15 @@ export function useDeliveryWorkspace(input: {
             /* The SAME entry point F4 and the customer half use. */
             onPay={requestPay}
             onReceipt={() => void openHistoricalReceipt(detail)}
+            onEditOps={() => {
+              setOpsError(null);
+              setOpsEditing(true);
+            }}
+            onCancelOps={() => {
+              setOpsError(null);
+              setOpsEditing(false);
+            }}
+            onSaveOps={(values) => void saveOps(values)}
           />
         ) : (
           <EmptyState
@@ -1823,11 +1975,18 @@ export function useDeliveryWorkspace(input: {
       ) : view === "add_items" ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
           {noteBox}
+          {deliveryFeeBox}
           <div className="min-h-0 flex-1">{cartPanel}</div>
           {sendError && (
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{sendError}</p>
           )}
         </div>
+      ) : view === "report" ? (
+        <EmptyState
+          icon="-"
+          title="Delivery report"
+          hint="Fees, delivery cost and recorded margin for the period you pick. Read-only; it moves no money."
+        />
       ) : (
         card
       )}
@@ -1873,7 +2032,14 @@ export function useDeliveryWorkspace(input: {
            describes the order that would actually be charged - whether it was
            just sent, or opened from the Level 3D queue while a different
            customer happens to be selected behind it. */
-        subtotal={payTarget.order?.total_amount ?? 0}
+        /* The ITEMS subtotal, not the total: the fee lives on the order now, so
+           the dialog shows Subtotal + Delivery Fee = Total rather than adding a
+           fee on top of a total that already contains one. Falls back to the total
+           for a legacy order saved before the fee was applied at creation. */
+        subtotal={payTarget.order?.subtotal ?? payTarget.order?.total_amount ?? 0}
+        /* Pre-fill the fee already persisted on the order, so settlement REUSES the
+           one canonical fee instead of asking again. */
+        initialDeliveryFee={payTarget.order?.delivery_fee ?? null}
         primaryCurrency={input.currency}
         rate={input.rate}
         discountGate={input.applyDiscounts}
@@ -1995,3 +2161,4 @@ export function useDeliveryWorkspace(input: {
     identity: identityStrip,
   };
 }
+

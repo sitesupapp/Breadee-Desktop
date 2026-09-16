@@ -15,7 +15,7 @@
 import { buildReceipt, type ReceiptData, type ReceiptLine } from "@/lib/receipt";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { computeChange } from "@/lib/pos/payments";
-import { convertCurrency, hasValidRate, type OperationalCurrencyCode } from "@/lib/currency";
+import { convertCurrency, hasValidRate, type CurrencyCode } from "@/lib/currency";
 import type { CartLine, PayOrderResult } from "@/types/pos";
 
 export type PaymentCompletionInput = {
@@ -47,19 +47,10 @@ export type PaymentCompletionInput = {
   tenantName: string;
   branchName: string;
   operatorName: string;
-  /** The tenant's primary (selling) currency — kept for the tender math below. */
-  primaryCurrency: OperationalCurrencyCode;
-  /**
-   * The order's HISTORICAL currency and display precision, from the server contract
-   * `finance_order_financials` (Slice 6B-2). Authoritative for what the receipt shows —
-   * never today's tenant currency, `finance_base_currency`, or a local catalog. For a
-   * third-currency order the caller must obtain a valid `decimalDigits` from the server
-   * (see `fetchReceiptCurrency`), never the 2-decimal default.
-   */
-  receiptCurrency: string;
-  decimalDigits: number;
+  /** The tenant's primary (selling) currency. */
+  primaryCurrency: CurrencyCode;
   /** The currency actually tendered. */
-  tenderCurrency: OperationalCurrencyCode;
+  tenderCurrency: CurrencyCode;
   rate: number | null;
   tenderedInput: number | null;
   shiftId: string | null;
@@ -97,8 +88,8 @@ export type PaymentCompletion = {
  */
 export function tenderTotalFor(
   amount: number,
-  primaryCurrency: OperationalCurrencyCode,
-  tenderCurrency: OperationalCurrencyCode,
+  primaryCurrency: CurrencyCode,
+  tenderCurrency: CurrencyCode,
   rate: number | null,
 ): number | null {
   if (tenderCurrency === primaryCurrency) return amount;
@@ -135,8 +126,7 @@ export function buildPaymentReceipt(input: PaymentCompletionInput): ReceiptData 
     at: input.at,
     paid: true,
     method: result.method,
-    currency: input.receiptCurrency,
-    decimalDigits: input.decimalDigits,
+    currency: input.primaryCurrency,
     lines:
       input.receiptLines ??
       input.lines.map((l) => ({
@@ -175,6 +165,11 @@ export function completePayment(input: PaymentCompletionInput): PaymentCompletio
 // outstanding balance, so this sibling carries `paid: false`, the SERVER's
 // payment status, and the paid/balance split instead. Every figure is the
 // server's - nothing here is recomputed - and the full-pay path is untouched.
+//
+// PRESENTATION IS CLASSIC USD/LBP. The receipt currency is the order's own
+// selling currency (`primaryCurrency`); there is no separate historical-currency
+// or decimal-digits input on this production baseline, and the on-screen preview
+// formats every figure with the shared `formatMoney`.
 
 export type OnAccountCompletionInput = {
   /** The server's answer, whose figures win outright. */
@@ -185,6 +180,16 @@ export type OnAccountCompletionInput = {
     order_number: string;
     subtotal: number;
     discount: number;
+    /**
+     * Operational-currency authoritative figures (the order's own currency).
+     * `total` is the bill total with any delivery fee already folded in;
+     * `outstanding` is the exact operational balance; `delivery_fee` prints on
+     * its own line. Using these instead of the USD fields keeps the receipt's
+     * money exact for an LBP order (no USD round-trip).
+     */
+    total: number;
+    outstanding: number;
+    delivery_fee: number;
   };
   lines: CartLine[];
   receiptLines?: ReceiptLine[] | null;
@@ -195,10 +200,7 @@ export type OnAccountCompletionInput = {
   branchName: string;
   operatorName: string;
   /** The order's primary (selling) currency - the currency every figure is in. */
-  primaryCurrency: OperationalCurrencyCode;
-  /** The order's HISTORICAL currency + precision from finance_order_financials (6B-2). */
-  receiptCurrency: string;
-  decimalDigits: number;
+  primaryCurrency: CurrencyCode;
   shiftId: string | null;
   at: string;
 };
@@ -215,11 +217,13 @@ export function buildOnAccountReceipt(input: OnAccountCompletionInput): ReceiptD
     // Not paid - there is a balance. `paymentStatus` says how much.
     paid: false,
     paymentStatus: result.payment_status,
-    paidAmount: result.paid_usd,
-    balanceDue: result.outstanding_usd,
+    // Exact operational money: paid now = bill total - what is still owed; the
+    // balance is the server's operational outstanding. NEVER the USD round-trip
+    // (which prints e.g. 199,998 / 100,002 for a clean 200,000 / 100,000).
+    paidAmount: result.total - result.outstanding,
+    balanceDue: result.outstanding,
     method: input.method,
-    currency: input.receiptCurrency,
-    decimalDigits: input.decimalDigits,
+    currency: input.primaryCurrency,
     lines:
       input.receiptLines ??
       input.lines.map((l) => ({
@@ -232,8 +236,13 @@ export function buildOnAccountReceipt(input: OnAccountCompletionInput): ReceiptD
       })),
     subtotal: result.subtotal,
     discount: result.discount,
-    // The bill total owed, before what was paid now.
-    total: result.subtotal - result.discount,
+    // The bill total owed. The SERVER's operational total, with any delivery fee
+    // already folded in - never subtotal-minus-discount, which drops the fee and
+    // (when the server omits subtotal) prints a 0 grand total for a real order.
+    total: result.total,
+    // Delivery orders: the fee, on its own line between Subtotal and Total. Absent
+    // or 0 prints nothing; takeaway/dine-in are unaffected.
+    deliveryFee: result.delivery_fee || null,
     // A receivable takes no cash tender at the drawer, so no tender/change block.
     tenderCurrency: null,
     shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,

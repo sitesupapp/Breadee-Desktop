@@ -11,7 +11,11 @@
 //! figure here arrives already decided by the server and is only formatted.
 //! There is no tax line, no service charge, no receipt sequence number and no
 //! rounding: none of those exist authoritatively in this system, and printing a
-//! plausible-looking one would be inventing a record.
+//! plausible-looking one would be inventing a record. The one order-level charge
+//! that IS authoritative - a delivery order's manually-entered delivery fee - is
+//! carried as its own optional figure (`delivery_fee`) and printed only when the
+//! server actually provides it, exactly like every other number here: decided
+//! upstream, only formatted below.
 //!
 //! TENDERED AND CHANGE ARE CONDITIONAL, AND THAT IS THE POINT. They are captured
 //! at the till during a live payment and are stored nowhere. A reprint of last
@@ -75,18 +79,32 @@ pub struct ReceiptDoc {
     #[serde(default)]
     pub method: Option<String>,
     pub currency: String,
-    /// Display precision for `currency` (Slice 6B-1). Non-LBP amounts print at this many
-    /// decimals — USD 2, JOD/KWD 3 — from the server contract, never a local catalog.
-    /// Defaults to 2 so a payload built before this field still renders USD correctly.
-    #[serde(default = "default_decimal_digits")]
-    pub decimal_digits: u8,
     pub lines: Vec<ReceiptLine>,
     #[serde(default)]
     pub subtotal: f64,
     #[serde(default)]
     pub discount: f64,
+    /// Delivery orders only: the manually-entered delivery fee, already folded
+    /// into `total` by the server's finance engine. Carried separately so the
+    /// paper can show it on its own line. `None` (or 0) prints nothing.
+    #[serde(default)]
+    pub delivery_fee: Option<f64>,
     #[serde(default)]
     pub total: f64,
+    // --- On Account (pay later) ---------------------------------------------
+    // Present only on an on-account (pay-later) receipt: the server's payment
+    // status ("partial" | "unpaid"), what was paid now, and what is still owed -
+    // all in `currency`. Absent on a full-pay receipt, so nothing extra prints.
+    // The on-screen preview already renders these; carrying them here keeps the
+    // PAPER identical to the SCREEN instead of printing a bare "Unpaid". These
+    // are payment-state figures, not a customer-account concept - the debt-slip
+    // document stays in the report layer, never here.
+    #[serde(default)]
+    pub payment_status: Option<String>,
+    #[serde(default)]
+    pub paid_amount: Option<f64>,
+    #[serde(default)]
+    pub balance_due: Option<f64>,
     // --- cash handling: present ONLY during a live payment ------------------
     #[serde(default)]
     pub tender_currency: Option<String>,
@@ -259,38 +277,27 @@ pub fn validate_receipt(doc: &ReceiptDoc) -> Result<(), PrintError> {
     Ok(())
 }
 
-/// The display precision used when a payload predates `ReceiptDoc::decimal_digits`.
-/// Two decimals keeps USD (and any 2dp currency) rendering exactly as before.
-fn default_decimal_digits() -> u8 {
-    2
-}
-
 /// Format money the way the on-screen receipt does.
 ///
-/// LBP has no minor unit in practice and is printed whole with thousands separators,
-/// which is how prices are written and read here — a receipt showing "150000" instead
-/// of "150,000" is technically correct and practically unreadable at a till.
-///
-/// Every other currency prints at `digits` decimals followed by its ISO code
-/// ("7.00 USD", "45.000 JOD"). The precision comes from the server contract
-/// (`ReceiptDoc::decimal_digits`), never a hard-coded 2 — so JOD/KWD render at 3 while
-/// USD (precision 2) is byte-identical to before. Mirrors the TypeScript
-/// `formatReceiptMoney`, so the on-screen preview and the paper agree.
-pub fn format_money(amount: f64, currency: &str, digits: usize) -> String {
+/// USD to two decimals; LBP has no minor unit in practice and is printed whole
+/// with thousands separators, which is how prices are written and read here. A
+/// receipt showing "150000" instead of "150,000" is technically correct and
+/// practically unreadable at a till.
+pub fn format_money(amount: f64, currency: &str) -> String {
     if currency.eq_ignore_ascii_case("LBP") {
         let rounded = amount.round().abs() as i64;
         let sign = if amount < 0.0 { "-" } else { "" };
-        let digit_str = rounded.to_string();
+        let digits = rounded.to_string();
         let mut grouped = String::new();
-        for (i, c) in digit_str.chars().enumerate() {
-            if i > 0 && (digit_str.len() - i) % 3 == 0 {
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
                 grouped.push(',');
             }
             grouped.push(c);
         }
         return format!("{sign}{grouped} LBP");
     }
-    format!("{amount:.prec$} {currency}", prec = digits)
+    format!("{amount:.2} {currency}")
 }
 
 /// Quantities print as integers when they are whole, which they almost always
@@ -436,19 +443,17 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     // total with nothing to explain it - which is a tenant's decision to make
     // for, say, a duplicate card slip. `validate_receipt` still refuses a
     // document that HAS no items, which is a different thing entirely.
-    // Display precision for the order's OWN currency (6B-1). USD stays 2, JOD/KWD 3.
-    let digits = doc.decimal_digits as usize;
     for line in doc.lines.iter().filter(|_| doc.shows("items")) {
         out.push(PageLine::pair(
             format!("{}x {}", format_qty(line.qty), line.name),
-            format_money(line.line_total, &doc.currency, digits),
+            format_money(line.line_total, &doc.currency),
             LineStyle::Body,
             direction_for(&line.name),
         ));
         for m in &line.modifiers {
             let count = if m.quantity > 1.0 { format!("{} x ", format_qty(m.quantity)) } else { String::new() };
             let amount = if m.price_delta != 0.0 {
-                format_money(m.price_delta, &doc.currency, digits)
+                format_money(m.price_delta, &doc.currency)
             } else {
                 String::new()
             };
@@ -470,7 +475,7 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     if doc.shows("subtotal") {
         out.push(PageLine::pair(
             "Subtotal",
-            format_money(doc.subtotal, &doc.currency, digits),
+            format_money(doc.subtotal, &doc.currency),
             LineStyle::Body,
             Direction::Auto,
         ));
@@ -478,15 +483,29 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     if doc.shows("discount") && doc.discount > 0.0 {
         out.push(PageLine::pair(
             "Discount",
-            format!("-{}", format_money(doc.discount, &doc.currency, digits)),
+            format!("-{}", format_money(doc.discount, &doc.currency)),
             LineStyle::Body,
             Direction::Auto,
         ));
     }
+    // Delivery fee: its own line between the discount and the total, present ONLY
+    // when the server actually charged one (a delivery order with a fee > 0). Data
+    // gated rather than template gated, like Tendered/Change, so an existing tenant
+    // whose saved template predates this line still sees the fee they were charged.
+    if let Some(fee) = doc.delivery_fee {
+        if fee > 0.0 {
+            out.push(PageLine::pair(
+                "Delivery Fee",
+                format_money(fee, &doc.currency),
+                LineStyle::Body,
+                Direction::Auto,
+            ));
+        }
+    }
     if doc.shows("total") {
         out.push(PageLine::pair(
             "TOTAL",
-            format_money(doc.total, &doc.currency, digits),
+            format_money(doc.total, &doc.currency),
             LineStyle::Total,
             Direction::Auto,
         ));
@@ -496,12 +515,9 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
     // against a USD total, and the paper should say what was actually charged.
     if let (Some(tc), Some(tt)) = (doc.tender_currency.as_deref(), doc.tender_total) {
         if !tc.eq_ignore_ascii_case(&doc.currency) {
-            // A different tender currency is the USD/LBP dual-tender pair; LBP ignores
-            // digits and USD is 2. (Phase-1 third-currency tender is operational-only,
-            // i.e. the same currency as the order, so it never reaches this branch.)
             out.push(PageLine::pair(
                 format!("Charged in {tc}"),
-                format_money(tt, tc, 2),
+                format_money(tt, tc),
                 LineStyle::Small,
                 Direction::Auto,
             ));
@@ -510,13 +526,10 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
 
     // --- cash handling, only when it genuinely exists ------------------------
     if let (Some(tendered), Some(tc)) = (doc.tendered, doc.tender_currency.as_deref()) {
-        // Same-currency tender (incl. a third operational currency) uses the order's
-        // precision; a USD/LBP cross-tender uses 2 (LBP's branch ignores it anyway).
-        let tender_digits = if tc.eq_ignore_ascii_case(&doc.currency) { digits } else { 2 };
-        out.push(PageLine::pair("Tendered", format_money(tendered, tc, tender_digits), LineStyle::Small, Direction::Auto));
+        out.push(PageLine::pair("Tendered", format_money(tendered, tc), LineStyle::Small, Direction::Auto));
         out.push(PageLine::pair(
             "Change",
-            format_money(doc.change.unwrap_or(0.0), tc, tender_digits),
+            format_money(doc.change.unwrap_or(0.0), tc),
             LineStyle::Small,
             Direction::Auto,
         ));
@@ -524,10 +537,28 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
 
     // --- payment ------------------------------------------------------------
     if doc.shows("payment_method") {
+        // On Account (pay later): a pay-later sale is NOT fully paid (`doc.paid`
+        // is false), so without this it printed a bare "Unpaid" for a real partial
+        // sale. Show what was paid now and what is still owed - the server's exact
+        // operational figures, the same lines the on-screen preview draws (Paid
+        // now / Balance due), so paper and screen agree.
+        if let Some(pa) = doc.paid_amount {
+            out.push(PageLine::pair("Paid now", format_money(pa, &doc.currency), LineStyle::Body, Direction::Auto));
+        }
+        if let Some(bd) = doc.balance_due {
+            out.push(PageLine::pair("Balance due", format_money(bd, &doc.currency), LineStyle::Body, Direction::Auto));
+        }
+        // Status label mirrors the preview: full-pay -> "Paid - method"; a partial
+        // pay-later sale -> "Partial - method"; a whole bill on account -> "On
+        // account"; anything else -> "Unpaid" (unchanged for full-pay receipts).
         let status = if doc.paid {
             format!("Paid - {}", doc.method.as_deref().unwrap_or("cash"))
         } else {
-            "Unpaid".to_string()
+            match doc.payment_status.as_deref() {
+                Some("partial") => format!("Partial - {}", doc.method.as_deref().unwrap_or("cash")),
+                Some("unpaid") => "On account".to_string(),
+                _ => "Unpaid".to_string(),
+            }
         };
         out.push(PageLine::pair(status, doc.currency.clone(), LineStyle::Body, Direction::Auto));
     }
@@ -579,11 +610,14 @@ mod tests {
             paid: true,
             method: Some("cash".into()),
             currency: "USD".into(),
-            decimal_digits: 2,
             lines: vec![line("Margherita", 1.0, 7.0)],
             subtotal: 7.0,
             discount: 0.0,
+            delivery_fee: None,
             total: 7.0,
+            payment_status: None,
+            paid_amount: None,
+            balance_due: None,
             tender_currency: None,
             tender_total: None,
             tendered: None,
@@ -714,49 +748,11 @@ mod tests {
 
     #[test]
     fn lbp_is_grouped_and_usd_has_two_decimals() {
-        assert_eq!(format_money(7.0, "USD", 2), "7.00 USD");
-        assert_eq!(format_money(626500.0, "LBP", 0), "626,500 LBP");
-        assert_eq!(format_money(1000.0, "LBP", 0), "1,000 LBP");
-        assert_eq!(format_money(999.0, "LBP", 0), "999 LBP");
-        assert_eq!(format_money(-2.5, "USD", 2), "-2.50 USD");
-        // LBP has no minor unit, so the digit count is ignored entirely.
-        assert_eq!(format_money(626500.0, "LBP", 3), "626,500 LBP");
-    }
-
-    #[test]
-    fn third_currencies_use_server_precision_without_dollar_or_lbp() {
-        // AED/SAR render at 2dp; JOD/KWD at 3dp — the precision is the caller's
-        // (server `decimal_digits`), never a hard-coded 2 and never a local catalog.
-        assert_eq!(format_money(45.0, "AED", 2), "45.00 AED");
-        assert_eq!(format_money(45.0, "SAR", 2), "45.00 SAR");
-        assert_eq!(format_money(45.678, "JOD", 3), "45.678 JOD");
-        assert_eq!(format_money(45.0, "KWD", 3), "45.000 KWD");
-        // No USD "$" and no "LBP" ever leak onto a third-currency amount.
-        let s = format_money(45.0, "JOD", 3);
-        assert!(!s.contains('$'), "no $ on a third currency");
-        assert!(!s.contains("LBP"), "no LBP on a third currency");
-    }
-
-    #[test]
-    fn a_third_currency_receipt_prints_at_three_decimals_total_once() {
-        // End-to-end through the page builder: a JOD order renders every money line at
-        // 3dp, with no USD/LBP notation, and the total (which already folds in any
-        // delivery fee server-side — the desktop has no separate fee line) prints once.
-        let mut d = doc();
-        d.currency = "JOD".into();
-        d.decimal_digits = 3;
-        d.subtotal = 40.0;
-        d.discount = 0.0;
-        d.total = 45.0;
-        d.lines = vec![line("Mansaf", 1.0, 40.0)];
-        let p = build_receipt_page(&d, PaperWidth::Mm80);
-        let r = rights(&p);
-        assert!(r.contains(&"40.000 JOD".to_string()));
-        assert!(r.contains(&"45.000 JOD".to_string()));
-        assert!(!r.iter().any(|x| x.contains('$') || x.contains("LBP")), "no USD/LBP leakage");
-        let total_lines: Vec<_> = p.iter().filter(|l| l.text == "TOTAL").collect();
-        assert_eq!(total_lines.len(), 1, "the total is stated exactly once");
-        assert_eq!(total_lines[0].right.as_deref(), Some("45.000 JOD"));
+        assert_eq!(format_money(7.0, "USD"), "7.00 USD");
+        assert_eq!(format_money(626500.0, "LBP"), "626,500 LBP");
+        assert_eq!(format_money(1000.0, "LBP"), "1,000 LBP");
+        assert_eq!(format_money(999.0, "LBP"), "999 LBP");
+        assert_eq!(format_money(-2.5, "USD"), "-2.50 USD");
     }
 
     #[test]
@@ -767,6 +763,51 @@ mod tests {
         unpaid.paid = false;
         unpaid.method = None;
         assert!(texts(&build_receipt_page(&unpaid, PaperWidth::Mm80)).iter().any(|t| t == "Unpaid"));
+    }
+
+    #[test]
+    fn partial_on_account_prints_paid_and_balance_not_bare_unpaid() {
+        // Franks #260911-0001: a real LBP partial on-account sale (total 300,000,
+        // paid 200,000, balance 100,000) printed a bare "Unpaid" with no amounts,
+        // because the PAPER renderer carried no paid/balance fields while the
+        // on-screen preview showed them. Paper must now match the screen.
+        let mut d = doc();
+        d.currency = "LBP".into();
+        d.paid = false;
+        d.method = Some("cash".into());
+        d.payment_status = Some("partial".into());
+        d.subtotal = 300000.0;
+        d.total = 300000.0;
+        d.paid_amount = Some(200000.0);
+        d.balance_due = Some(100000.0);
+        let p = build_receipt_page(&d, PaperWidth::Mm80);
+        let right_of = |label: &str| p.iter().find(|l| l.text == label).and_then(|l| l.right.clone());
+        assert_eq!(right_of("Paid now").as_deref(), Some("200,000 LBP"));
+        assert_eq!(right_of("Balance due").as_deref(), Some("100,000 LBP"));
+        assert_eq!(right_of("TOTAL").as_deref(), Some("300,000 LBP"), "total must never be zero");
+        assert!(texts(&p).iter().any(|t| t == "Partial - cash"), "status must read 'Partial - cash'");
+        assert!(!texts(&p).iter().any(|t| t == "Unpaid"), "must NOT print a bare 'Unpaid' for a partial");
+    }
+
+    #[test]
+    fn full_on_account_prints_on_account_status_and_full_balance() {
+        // Whole bill on account (nothing paid now): status "On account",
+        // Balance due = total, and the total is still printed (never zero).
+        let mut d = doc();
+        d.currency = "LBP".into();
+        d.paid = false;
+        d.method = Some("cash".into());
+        d.payment_status = Some("unpaid".into());
+        d.subtotal = 300000.0;
+        d.total = 300000.0;
+        d.paid_amount = Some(0.0);
+        d.balance_due = Some(300000.0);
+        let p = build_receipt_page(&d, PaperWidth::Mm80);
+        let right_of = |label: &str| p.iter().find(|l| l.text == label).and_then(|l| l.right.clone());
+        assert_eq!(right_of("Balance due").as_deref(), Some("300,000 LBP"));
+        assert_eq!(right_of("TOTAL").as_deref(), Some("300,000 LBP"));
+        assert!(texts(&p).iter().any(|t| t == "On account"));
+        assert!(!texts(&p).iter().any(|t| t == "Unpaid"));
     }
 
     #[test]
@@ -1014,6 +1055,42 @@ mod tests {
         let joined = texts(&build_receipt_page(&d, PaperWidth::Mm80)).join(" ").to_lowercase();
         for invented in ["vat", "tax", "service charge", "invoice no", "fiscal", "receipt no"] {
             assert!(!joined.contains(invented), "the receipt must not invent {invented:?}");
+        }
+        // A delivery fee is a REAL server figure, not an invented one - but it must
+        // never appear when the server did not send one (delivery_fee: None here).
+        assert!(!joined.contains("delivery fee"), "no fee was charged, so none may print");
+    }
+
+    #[test]
+    fn a_delivery_fee_prints_on_its_own_line_when_the_server_charged_one() {
+        // $10 items + $2 delivery fee = $12, exactly as the finance engine returns.
+        let mut d = doc();
+        d.subtotal = 10.0;
+        d.delivery_fee = Some(2.0);
+        d.total = 12.0;
+        let page = build_receipt_page(&d, PaperWidth::Mm80);
+        let fee = page.iter().find(|l| l.text == "Delivery Fee").expect("the Delivery Fee line is drawn");
+        assert_eq!(fee.right.as_deref(), Some("2.00 USD"));
+        // It sits between the subtotal and the total, and the total is unchanged.
+        let idx = |t: &str| page.iter().position(|l| l.text == t).unwrap();
+        assert!(idx("Subtotal") < idx("Delivery Fee") && idx("Delivery Fee") < idx("TOTAL"));
+        assert_eq!(page.iter().find(|l| l.text == "TOTAL").unwrap().right.as_deref(), Some("12.00 USD"));
+    }
+
+    #[test]
+    fn a_zero_delivery_fee_prints_nothing() {
+        // Free delivery: the server persisted 0, and a $0 line would be noise.
+        let mut d = doc();
+        d.delivery_fee = Some(0.0);
+        assert!(!texts(&build_receipt_page(&d, PaperWidth::Mm80)).contains(&"Delivery Fee".to_string()));
+    }
+
+    #[test]
+    fn a_non_delivery_receipt_has_no_delivery_fee_line() {
+        // Takeaway/dine-in carry no fee (None), so the line is never fabricated.
+        for t in ["Takeaway", "Dine-in"] {
+            let d = routed(t);
+            assert!(!texts(&build_receipt_page(&d, PaperWidth::Mm80)).contains(&"Delivery Fee".to_string()));
         }
     }
 }

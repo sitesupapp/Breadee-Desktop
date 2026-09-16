@@ -66,8 +66,7 @@ import {
   validateTableDiscount,
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
-import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt } from "@/lib/pos/tablePaymentCompletion";
-import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
+import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt, buildTableBillReceipt } from "@/lib/pos/tablePaymentCompletion";
 import {
   completeTableOnAccount,
   createOnAccountLatch,
@@ -81,7 +80,7 @@ import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/ta
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
-import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
+import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import type { ReceiptData } from "@/lib/receipt";
 import type { CartLine } from "@/types/pos";
@@ -121,7 +120,7 @@ export function useDineInWorkspace(input: {
   online: boolean;
   menu: RoundMenu;
   createOrders: Gate;
-  currency: OperationalCurrencyCode;
+  currency: CurrencyCode;
   cartLines: CartLine[];
   cartSelectedKey: string | null;
   onSelectLine: (key: string) => void;
@@ -140,6 +139,16 @@ export function useDineInWorkspace(input: {
    * loading states on purpose (see `state/receipt.ts`).
    */
   onPresentReceipt: (receipt: ReceiptData) => void;
+  /**
+   * MANUAL receipt presentation, for the "print the bill before payment" action.
+   *
+   * Distinct from `onPresentReceipt` on purpose: that one is the settlement
+   * funnel and may auto-print, which is correct for a paid receipt. Printing an
+   * UNPAID bill must go to the manual preview layer (the same one takeaway's
+   * saved-order Print and the Orders modal use) so it never routes a paid-style
+   * document and never touches the automatic path. Wired to `receiptStore.present`.
+   */
+  onPreviewReceipt: (receipt: ReceiptData) => void;
   /**
    * Kitchen ticket for ONE submitted batch, routed through the caller for the
    * same reason the receipt is: there is one implementation of "print what was
@@ -204,15 +213,6 @@ export function useDineInWorkspace(input: {
   const [leaveConfirm, setLeaveConfirm] = useState(false);
   const [roundBusy, setRoundBusy] = useState(false);
   const [billChange, setBillChange] = useState<string | null>(null);
-  /**
-   * The ORDER-level note for the dine-in bill (pos_orders.notes), DISTINCT from
-   * an item's `kitchen_note`. It persists across rounds for the same table (it is
-   * NOT tied to the per-round line buffer) and is sent with each round; it is
-   * cleared when a different table is selected. Read via a ref inside the latched
-   * submit so a double-tap can never send a stale value.
-   */
-  const [orderNote, setOrderNote] = useState("");
-  const orderNoteRef = useRef("");
   // Separate latch from open-table: sending a round and opening a table are
   // different operations and must not block one another.
   const roundInFlight = useRef(false);
@@ -275,13 +275,6 @@ export function useDineInWorkspace(input: {
   }, [active]);
 
   const selected = pickSelected({ map: tables.map, selectedTableId: tables.selectedTableId });
-
-  // A different table starts with a clean order note; within one bill the note
-  // persists across rounds (it is not part of the per-round line buffer).
-  useEffect(() => {
-    orderNoteRef.current = "";
-    setOrderNote("");
-  }, [selected?.id]);
   const visible = useMemo(() => filterTables(tables.map.tables, query), [tables.map.tables, query]);
   const stale = isMapStale(tables.lastLoadedAt, now);
 
@@ -561,9 +554,6 @@ export function useDineInWorkspace(input: {
         lines: useCart.getState().lines,
         clientOpId: opId,
         menu: input.menu,
-        // The bill's order-level note (pos_orders.notes), read live so a latched
-        // retry is never stale. Persists across rounds; not the per-line note.
-        orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
         submit: submitOrder,
         // Accepted. Only now does the buffer go - and with it the operation id,
         // so the NEXT round mints a fresh one.
@@ -593,7 +583,6 @@ export function useDineInWorkspace(input: {
         orderNumber: outcome.result.order_number,
         batchNo: outcome.result.batch_no ?? null,
         tableName: selected.name,
-        orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
         lines: submitted.map((l) => ({
           name: l.name,
           qty: l.quantity,
@@ -658,8 +647,8 @@ export function useDineInWorkspace(input: {
         bill: TableBill;
         table: TableSummary;
         method: PaymentMethod;
-        primaryCurrency: OperationalCurrencyCode;
-        tenderCurrency: OperationalCurrencyCode;
+        primaryCurrency: CurrencyCode;
+        tenderCurrency: CurrencyCode;
         tendered: number | null;
         requestedDiscount: number;
       },
@@ -678,11 +667,6 @@ export function useDineInWorkspace(input: {
       await input.refreshCashBox();
 
       // 4. Receipt, from the PRE-payment bill (identity) + the server's figures.
-      //    6B-2: the bill's historical currency + server precision, read from a
-      //    representative order of the table (all orders on a table share the
-      //    operational currency). A third-currency table with no valid server precision
-      //    refuses rather than printing at a guessed 2 decimals.
-      const receiptMeta = await fetchReceiptCurrency(snapshot.bill.orders[0]?.id, snapshot.primaryCurrency);
       input.onPresentReceipt(
         buildTablePaymentReceipt({
           bill: snapshot.bill,
@@ -694,8 +678,6 @@ export function useDineInWorkspace(input: {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: snapshot.primaryCurrency,
-          receiptCurrency: receiptMeta.currency,
-          decimalDigits: receiptMeta.decimalDigits,
           tenderCurrency: snapshot.tenderCurrency,
           rate: input.rate,
           tenderedInput: snapshot.tendered,
@@ -734,7 +716,7 @@ export function useDineInWorkspace(input: {
   const confirmPay = useCallback(
     async (dialog: {
       method: PaymentMethod;
-      currency: OperationalCurrencyCode;
+      currency: CurrencyCode;
       discountType: DiscountType;
       discountValue: string;
       tendered: number | null;
@@ -745,7 +727,7 @@ export function useDineInWorkspace(input: {
 
       // The bill's OWN currency is what the server settles in. The dialog's
       // currency is the TENDER currency at the drawer - a different thing.
-      const primaryCurrency: OperationalCurrencyCode = shownBill.currency ?? input.currency;
+      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
       const subtotal = shownBill.subtotal ?? 0;
 
       let discount: ReturnType<typeof validateTableDiscount>;
@@ -873,7 +855,7 @@ export function useDineInWorkspace(input: {
         return;
       }
 
-      const primaryCurrency: OperationalCurrencyCode = shownBill.currency ?? input.currency;
+      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
       const discountFields =
         dialog.discountType !== "none" && dialog.discountValue.trim() !== ""
           ? { discountType: dialog.discountType as "percent" | "amount", discountValue: Number(dialog.discountValue) }
@@ -920,8 +902,8 @@ export function useDineInWorkspace(input: {
         const cleared = billIsCleared(after.bill, after.table);
         await input.refreshCashBox();
 
-        // 6B-2: the bill's historical currency + server precision (representative order).
-        const receiptMeta = await fetchReceiptCurrency(shownBill.orders[0]?.id, primaryCurrency);
+        // Classic USD/LBP: the receipt currency is the bill's own selling currency,
+        // which `buildTableOnAccountReceipt` uses directly from `primaryCurrency`.
         input.onPresentReceipt(
           buildTableOnAccountReceipt({
             bill: shownBill,
@@ -942,8 +924,6 @@ export function useDineInWorkspace(input: {
             branchName: pos.branch.name,
             operatorName: pos.userName,
             primaryCurrency,
-            receiptCurrency: receiptMeta.currency,
-            decimalDigits: receiptMeta.decimalDigits,
             shiftId: input.shiftId,
             at: new Date().toLocaleString(),
           }),
@@ -1009,7 +989,11 @@ export function useDineInWorkspace(input: {
   // to the menu instead - one binding, one owner, decided by the visible view.
   useShortcuts(
     {
-      tableSearch: () => searchRef.current?.focus(),
+      // The table Search Bar is intentionally hidden on Dine-in, so its Ctrl+F
+      // shortcut was removed entirely (binding + handler): there is no
+      // "tableSearch" id in the keyboard model any more, so nothing focuses the
+      // sr-only field and nothing advertises a dead shortcut. Tables are browsed
+      // with the arrows / grid.
       tableLeft: () => move(-1),
       tableRight: () => move(1),
       // Shared vertical ids - in the map view they walk a grid row.
@@ -1129,6 +1113,54 @@ export function useDineInWorkspace(input: {
     [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select, floorGate.allowed, floorView, setFloorView],
   );
 
+  // --- print the current bill BEFORE payment ---------------------------------
+  //
+  // Read-only: builds a receipt from the server's bill and hands it to the
+  // MANUAL preview layer. No payment, no close, no mutation. A bill that spans
+  // currencies has no single total, so it is refused rather than printed with an
+  // invented one - the same honesty the payment path keeps.
+  const [printingBill, setPrintingBill] = useState(false);
+  const printBill = useCallback(() => {
+    if (printingBill) return;
+    const { bill: shownBill, table } = readTableState();
+    if (!table || !shownBill || shownBill.orders.length === 0) {
+      toast.push({ tone: "warning", message: "There is no open bill on this table to print yet." });
+      return;
+    }
+    if (shownBill.currency == null || shownBill.subtotal == null) {
+      toast.push({
+        tone: "warning",
+        message: "This table's bill spans more than one currency and can't be printed as a single receipt.",
+      });
+      return;
+    }
+    setPrintingBill(true);
+    try {
+      // The receipt currency is the bill's OWN selling currency, formatted by the
+      // shared `formatMoney` in the preview - the same production-native source the
+      // payment and on-account receipts use (no per-order decimal-digits input).
+      // The guard above guarantees the bill is single-currency here.
+      const primaryCurrency: CurrencyCode = shownBill.currency ?? input.currency;
+      input.onPreviewReceipt(
+        buildTableBillReceipt({
+          bill: shownBill,
+          table,
+          tenantName: pos.tenantName,
+          branchName: pos.branch.name,
+          operatorName: pos.userName,
+          primaryCurrency,
+          shiftId: input.shiftId,
+          at: new Date().toLocaleString(),
+        }),
+      );
+    } catch (e) {
+      toast.push({ tone: "error", message: "The bill could not be prepared for printing.", detail: classifyError(e).message });
+    } finally {
+      setPrintingBill(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printingBill, readTableState, input, pos.tenantName, pos.branch.name, pos.userName]);
+
   const bill = useCallback(
     () => (
       <TableBillPanel
@@ -1153,32 +1185,17 @@ export function useDineInWorkspace(input: {
         onClear={() => requestOp("clear")}
         payGate={payGate}
         onPay={requestPay}
+        onPrintBill={() => void printBill()}
+        printBusy={printingBill}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, printBill, printingBill],
   );
 
   const roundPanel = useCallback(
     () =>
       selected ? (
-        <>
-        {/* Fast ORDER-level note for the whole bill - distinct from an item's
-            kitchen note (the per-line "Note" button). Persists across rounds and
-            rides the existing orderNote -> pos_orders.notes plumbing. */}
-        <label className="mb-2 block">
-          <span className="mb-1 block text-xs font-bold text-ink">Order note</span>
-          <input
-            type="text"
-            value={orderNote}
-            onChange={(e) => {
-              orderNoteRef.current = e.target.value;
-              setOrderNote(e.target.value);
-            }}
-            placeholder="Whole-order note - e.g. Table celebrating a birthday"
-            className="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-sub"
-          />
-        </label>
         <DineInRoundPanel
           table={selected}
           bill={tables.bill}
@@ -1200,12 +1217,10 @@ export function useDineInWorkspace(input: {
           onDiscardRound={discardRound}
           onBackToMap={requestLeaveAddItems}
         />
-        </>
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
-      orderNote,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
     ],

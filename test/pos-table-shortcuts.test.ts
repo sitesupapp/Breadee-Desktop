@@ -36,7 +36,9 @@ const press = (
 
 test("the dine-in bindings resolve to their own ids", () => {
   assert.equal(press("m", { alt: true }), "tableMap");
-  assert.equal(press("f", { ctrl: true }), "tableSearch");
+  // The table Search Bar is hidden, so its Ctrl+F binding was removed: it now
+  // resolves to nothing rather than focusing an invisible field.
+  assert.equal(press("f", { ctrl: true }), null);
   assert.equal(press("ArrowLeft"), "tableLeft");
   assert.equal(press("ArrowRight"), "tableRight");
   assert.equal(press("Enter"), "tableOpen");
@@ -176,7 +178,9 @@ test("submitting is latched, so a held Ctrl+Enter sends one round", () => {
 
 test("every declared id actually has a binding - no id is dead", () => {
   const bound = new Set(SHORTCUTS.map((s) => s.id));
-  for (const id of ["tableMap", "tableSearch", "tableLeft", "tableRight", "tableOpen"] as ShortcutId[]) {
+  // "tableSearch" was removed with the hidden table Search Bar, so it is no
+  // longer in the model at all - the remaining map bindings still have theirs.
+  for (const id of ["tableMap", "tableLeft", "tableRight", "tableOpen"] as ShortcutId[]) {
     assert.ok(bound.has(id), `${id} is declared but unbound`);
   }
 });

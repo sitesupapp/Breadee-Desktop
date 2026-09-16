@@ -316,7 +316,12 @@ test("a saved order says Delete / Void and a draft says Clear cart", () => {
   assert.match(cartPanel, /props\.clearLabel \?\? "Clear cart"/);
   assert.equal(cartPanel.includes("DESTRUCTIVE_ORDER_CTA"), false, "a draft has no order to void");
   assert.equal(cartPanel.includes("Delete / Void"), false);
-  assert.match(workspace, /clearLabel=\{cart\.savedOrder \? "Clear cart \(leaves the order unpaid\)" : "Clear cart"\}/);
+  // Compact Current Order (v1.0.12): the draft's destructive action is a short
+  // "Clear cart" so it fits the two-row action grid without wrapping. The saved
+  // order's "is saved - paying will settle this order" status now carries the
+  // "leaves it unpaid" warning in the header, and clearing a sent order is still
+  // guarded by its confirm dialog, so the label no longer needs the suffix.
+  assert.match(workspace, /clearLabel="Clear cart"/);
   // The destructive control is offered only where the lifecycle permits one, and
   // the existing reversal semantics are untouched: unpaid cancels, paid refunds.
   assert.equal(reversalActionFor(order({ payment_status: "unpaid" })), "cancel");

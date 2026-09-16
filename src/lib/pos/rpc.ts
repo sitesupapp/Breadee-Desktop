@@ -103,18 +103,28 @@ export type PosRpcName =
   | "pos_receivables_search"
   | "pos_receivables_customer"
   | "pos_receivable_collect"
-  // i18n Slice 6B-2 — the authoritative RECEIPT-financial read. Returns the order's
-  // historical currency and decimal_digits (from finance_currencies, the sole catalog),
-  // so a receipt prints in the order's own currency at the server's precision. A READ:
-  // it moves no money and gates on tenant + can_access_branch server-side.
-  | "finance_order_financials"
-  // Dine-In Floor Map — Phase 1 server foundation (ship-dark). The ONE read the
-  // Service Floor Map needs: the PUBLISHED floor revision for a branch. SECURITY
-  // DEFINER, gated server-side on the `pos.floor_map` entitlement + `pos.tables.view`.
-  // Returns geometry only ({ has_published, revision_id, revision_no, published_at,
-  // doc }); operational table state still comes from `pos_table_map`. No floor WRITE
-  // RPC is listed here — Phase 2 is read-only and the Designer (draft/publish) is a
-  // later phase.
+  // Delivery Operations + BI (Delivery Management). The SAME two RPCs the Breadee
+  // web delivery panel and report call - listed here rather than reached through a
+  // desktop helper of their own, for the same one-answer reason as
+  // `pos_configure_tables`.
+  //
+  // `pos_set_delivery_ops` is the ONLY path that writes the INTERNAL operational
+  // fields (delivery handler type, delivered-by, delivery cost). It never touches
+  // the customer total, delivery fee, payment, taxes or the receipt - it writes
+  // only those internal columns and rejects a negative cost or a non-delivery
+  // order. Editing gates on `pos.delivery.manage`, which the server enforces; the
+  // desktop must never UPDATE `pos_orders` directly for these.
+  //
+  // `pos_delivery_report` is a READ: it returns the server-computed rows and
+  // summary (Total Deliveries, Fees, Cost Entered, Recorded Cost/Margin) for a
+  // date range, business-day- and OU-scoped, gated on `pos.reports.view`. The
+  // desktop renders what it returns and performs NO aggregation of its own.
+  | "pos_set_delivery_ops"
+  | "pos_delivery_report"
+  // Dine-In Floor Map — Phase 1 server foundation (ship-dark). The published-floor
+  // READ for the Service Floor Map; gated server-side on pos.floor_map + pos.tables.view;
+  // operational table state still comes from pos_table_map. No floor WRITE RPC here —
+  // Phase 2 is read-only and the Designer (draft/publish) is a later phase.
   | "floor_service_layout";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */

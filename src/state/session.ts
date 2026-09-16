@@ -4,15 +4,11 @@ import { getDeviceIdentity } from "@/lib/device";
 import { purgeForeignSnapshots, clearSnapshotCache } from "@/lib/offline/db";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
-// The operational currency + precision resolution lives in `@/state/currencySettings`
-// (pure, no supabase/browser deps, unit-tested). The store just composes it.
-import {
-  DEFAULT_CURRENCY,
-  hydrateCachedCurrency,
-  resolveCurrencyFromSettings,
-  type CurrencySettings,
-} from "@/state/currencySettings";
-export type { CurrencySettings };
+import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
+
+// Read-only tenant currency settings for display (dual USD/LBP). Never used for POS math.
+export type CurrencySettings = { primary: CurrencyCode; rate: number | null };
+const DEFAULT_CURRENCY: CurrencySettings = { primary: "USD", rate: null };
 
 // Mirrors the web app's SessionContext + resolvePostLoginPath, plus an offline cache
 // so the app can restore the last valid role/tenant/branch/permissions after a first
@@ -105,7 +101,7 @@ export const useSession = create<SessionState>((set, get) => ({
         membership: cache.membership,
         features: cache.features,
         permissions: cache.permissions,
-        currency: hydrateCachedCurrency(cache.currency),
+        currency: cache.currency ?? DEFAULT_CURRENCY,
       });
       return;
     }
@@ -136,28 +132,21 @@ export const useSession = create<SessionState>((set, get) => ({
     let permissions: Record<string, boolean> = {};
     let currency: CurrencySettings = DEFAULT_CURRENCY;
     if (membership?.tenant_id) {
-      // `get_tenant_currency_and_regional_settings` post-dates this app's generated
-      // `database.types.ts`, so it is invoked through a narrow structural cast — the same
-      // one `lib/pos/rpc.ts` documents. It is called as a METHOD on the client object so
-      // Supabase keeps its `this`; a detached `supabase.rpc` throws. Any failure leaves
-      // `cur` null and falls back to USD, so a blocked read never fails sign-in.
-      const rpcAny = supabase as unknown as {
-        rpc(name: string, args?: Record<string, unknown>): PromiseLike<{ data: unknown; error: unknown }>;
-      };
       const [{ data: t }, { data: feat }, { data: perms }, { data: cur }] = await Promise.all([
         supabase.from("tenants").select("id, business_name, tenant_status, verification_status, selected_plan_id, main_branch_id").eq("id", membership.tenant_id).maybeSingle(),
         supabase.rpc("get_tenant_effective_features", { p_tenant: membership.tenant_id }),
         supabase.rpc("current_user_permissions", { p_tenant: membership.tenant_id }),
-        // The SERVER-AUTHORITATIVE operational currency + per-currency precision. This one
-        // RPC returns `operational_currency`, the `selectable_currencies` digit catalog and
-        // the legacy `usd_to_lbp_rate`. It resolves the tenant from the auth context, so it
-        // takes no argument.
-        rpcAny.rpc("get_tenant_currency_and_regional_settings"),
+        // Read-only display setting (dual USD/LBP). If RLS blocks it, we fall back to USD.
+        supabase.from("tenant_currency_settings").select("primary_currency, usd_to_lbp_rate").eq("tenant_id", membership.tenant_id).maybeSingle(),
       ]);
       tenant = (t as Tenant) ?? null;
       features = (feat as unknown as FeatureMap) ?? {};
       permissions = (perms as Record<string, boolean>) ?? {};
-      currency = resolveCurrencyFromSettings(cur);
+      const curRow = cur as { primary_currency?: unknown; usd_to_lbp_rate?: unknown } | null;
+      currency = {
+        primary: isCurrencyCode(curRow?.primary_currency) ? curRow.primary_currency : "USD",
+        rate: typeof curRow?.usd_to_lbp_rate === "number" ? curRow.usd_to_lbp_rate : null,
+      };
     }
 
     // Cache-scope hardening: drop any cached snapshots that don't belong to this

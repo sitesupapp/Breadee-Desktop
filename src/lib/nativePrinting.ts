@@ -329,9 +329,6 @@ export type ReceiptDoc = {
   paid: boolean;
   method: string | null;
   currency: string;
-  /** Display precision for `currency` (6B-1). Rust renders non-LBP amounts at this many
-   *  decimals; USD stays 2, JOD/KWD are 3. `#[serde(default)]` on the Rust side. */
-  decimalDigits: number;
   lines: {
     name: string;
     qty: number;
@@ -341,7 +338,24 @@ export type ReceiptDoc = {
   }[];
   subtotal: number;
   discount: number;
+  /**
+   * Delivery orders only: the manual delivery fee, already folded into `total` by
+   * the server's finance engine. Its own receipt line between Subtotal and Total.
+   * Null/0 prints nothing. Named `deliveryFee` because the Rust `ReceiptDoc` uses
+   * `#[serde(rename_all = "camelCase")]`, so this maps to its `delivery_fee` field.
+   */
+  deliveryFee: number | null;
   total: number;
+  /**
+   * Customer Receivables / On Account. The server's payment status and the exact
+   * operational paid/owed amounts, so the PAPER shows "Paid now" / "Balance due"
+   * and a "Partial" / "On account" status instead of a bare "Unpaid" - the same
+   * lines the on-screen preview draws. Null on a full-pay receipt (nothing extra
+   * prints). camelCase maps to Rust `payment_status` / `paid_amount` / `balance_due`.
+   */
+  paymentStatus: "unpaid" | "partial" | null;
+  paidAmount: number | null;
+  balanceDue: number | null;
   tenderCurrency: string | null;
   tenderTotal: number | null;
   tendered: number | null;
@@ -392,7 +406,6 @@ export function toReceiptDoc(receipt: {
   paid: boolean;
   method?: string | null;
   currency: string;
-  decimalDigits?: number;
   lines: {
     name: string;
     qty: number;
@@ -402,7 +415,11 @@ export function toReceiptDoc(receipt: {
   }[];
   subtotal: number;
   discount: number;
+  deliveryFee?: number | null;
   total: number;
+  paymentStatus?: "unpaid" | "partial" | null;
+  paidAmount?: number | null;
+  balanceDue?: number | null;
   tenderCurrency?: string | null;
   tenderTotal?: number | null;
   tendered?: number | null;
@@ -430,7 +447,6 @@ export function toReceiptDoc(receipt: {
     paid: receipt.paid,
     method: receipt.method ?? null,
     currency: receipt.currency,
-    decimalDigits: receipt.decimalDigits ?? 2,
     lines: receipt.lines.map((l) => ({
       name: l.name,
       qty: l.qty,
@@ -444,7 +460,15 @@ export function toReceiptDoc(receipt: {
     })),
     subtotal: receipt.subtotal,
     discount: receipt.discount,
+    // The delivery fee its own line on the printed receipt, mirroring the preview.
+    // Mapped to the Rust `delivery_fee` (camelCase serde). Null/0 prints nothing.
+    deliveryFee: receipt.deliveryFee ?? null,
     total: receipt.total,
+    // On-account paid/owed + status reach the printer, so the paper matches the
+    // preview (Paid now / Balance due / Partial) instead of a bare "Unpaid".
+    paymentStatus: receipt.paymentStatus ?? null,
+    paidAmount: receipt.paidAmount ?? null,
+    balanceDue: receipt.balanceDue ?? null,
     tenderCurrency: receipt.tenderCurrency ?? null,
     tenderTotal: receipt.tenderTotal ?? null,
     tendered: receipt.tendered ?? null,

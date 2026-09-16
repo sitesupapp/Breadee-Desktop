@@ -22,24 +22,22 @@ import {
   getEquivalentCurrency,
   hasValidRate,
   isCurrencyCode,
-  isLegacyDualCurrency,
   roundUsd,
-  type OperationalCurrencyCode,
+  type CurrencyCode,
 } from "@/lib/currency";
 import type { PriceMetadata } from "@/types/pos";
 
 export type MenuPriceSource = "normalized" | "legacy";
 
 export type ResolvedMenuPrice = {
-  /** Amount expressed in the tenant's CURRENT operational currency. */
+  /** Amount expressed in the tenant's CURRENT primary currency. */
   amount: number | null;
-  currency: OperationalCurrencyCode;
+  currency: CurrencyCode;
   /** Authoritative normalized USD. Null only when no usable basis exists. */
   amountUsd: number | null;
-  /** The same money in the opposite USD/LBP currency, or null. A third operational
-   *  currency has no second side, so this is always null for it. */
+  /** The same money in the opposite currency, or null without a usable rate. */
   equivalent: number | null;
-  equivalentCurrency: OperationalCurrencyCode | null;
+  equivalentCurrency: CurrencyCode;
   source: MenuPriceSource;
 };
 
@@ -70,15 +68,11 @@ export function hasCompletePriceMetadata(row: PriceMetadata | null | undefined):
 export function resolveMenuPrice(
   row: PriceMetadata | null | undefined,
   legacy: number | string | null | undefined,
-  primary: OperationalCurrencyCode,
+  primary: CurrencyCode,
   rate: number | null | undefined,
 ): ResolvedMenuPrice {
-  // A third operational currency (AED/JOD/…) is not part of a USD/LBP pair, so it has no
-  // equivalent line and never takes the normalized-USD branch below: its price is stored
-  // and read directly from the legacy column in its own currency (see `_price_write_prepare_op`).
-  const isDual = isLegacyDualCurrency(primary);
-  const equivalentCurrency: OperationalCurrencyCode | null = isDual ? getEquivalentCurrency(primary) : null;
-  const usable = isDual && hasValidRate(rate);
+  const equivalentCurrency = getEquivalentCurrency(primary);
+  const usable = hasValidRate(rate);
 
   // ---- Rule 1: complete metadata -> the normalized USD basis is authoritative.
   if (hasCompletePriceMetadata(row)) {

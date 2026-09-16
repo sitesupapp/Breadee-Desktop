@@ -14,8 +14,8 @@
 import { create } from "zustand";
 import type { CartLine, SelectedModifier, SubmitOrderResult } from "@/types/pos";
 import { lineTotals } from "@/lib/pos/modifiers";
-import { sameRemovals } from "@/lib/pos/itemOptions";
 import { newClientOpId } from "@/lib/pos/orders";
+import { sameRemovals } from "@/lib/pos/itemOptions";
 
 export type RemovedLine = { line: CartLine; index: number };
 
@@ -85,16 +85,7 @@ type CartState = {
   /** Null while the buffer is empty and unclaimed. */
   owner: CartOwner | null;
 
-  addLine: (input: {
-    menuItemId: string;
-    name: string;
-    basePrice: number;
-    quantity?: number;
-    modifiers?: SelectedModifier[];
-    note?: string | null;
-    /** Menu Builder ingredient names the cashier switched off for this line. */
-    removedIngredients?: string[];
-  }) => string;
+  addLine: (input: { menuItemId: string; name: string; basePrice: number; quantity?: number; modifiers?: SelectedModifier[]; note?: string | null; removedIngredients?: string[] }) => string;
   setQuantity: (key: string, quantity: number) => void;
   adjustQuantity: (key: string, delta: number) => void;
   setNote: (key: string, note: string | null) => void;
@@ -165,21 +156,8 @@ export const EMPTY_CART_SNAPSHOT: CartSnapshot = {
 let keySeq = 0;
 const nextKey = () => `line-${++keySeq}`;
 
-/**
- * Two lines merge only when the item, its modifiers, its note AND its removed
- * ingredients are all identical.
- *
- * The removals clause is load-bearing: without it a plain burger and a
- * no-tomato burger stack into one line of two, and the kitchen makes two of
- * whichever the first one was.
- */
-function sameConfiguration(
-  a: CartLine,
-  menuItemId: string,
-  modifiers: SelectedModifier[],
-  note: string | null,
-  removed: string[],
-): boolean {
+/** Two lines merge only when the item AND its modifier selection are identical. */
+function sameConfiguration(a: CartLine, menuItemId: string, modifiers: SelectedModifier[], note: string | null, removed: string[]): boolean {
   if (a.menu_item_id !== menuItemId) return false;
   if ((a.kitchen_note ?? "") !== (note ?? "")) return false;
   if (!sameRemovals(a.removed_ingredients, removed)) return false;

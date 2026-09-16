@@ -56,7 +56,11 @@ test("F4 OPENS the dialog in dine-in - it never charges", () => {
 
 test("F4 is registered on the table map only, not while Add Items owns the menu", () => {
   const source = read("screens", "pos", "DineInWorkspace.tsx");
-  const mapBlock = source.slice(source.indexOf("tableSearch: () =>"), source.indexOf('active && view === "map"'));
+  // Anchored on the map-view block's own comment. (It used to anchor on the
+  // "tableSearch: () =>" handler, but the hidden-search correction removed that
+  // handler; the property under test - F4/openPayment lives in the map view and
+  // not in Add Items - is unchanged.)
+  const mapBlock = source.slice(source.indexOf("// Map view bindings."), source.indexOf('active && view === "map"'));
   assert.match(mapBlock, /openPayment:/, "F4 is not bound in the map view");
   const addItemsBlock = source.slice(
     source.indexOf("// Add Items bindings."),

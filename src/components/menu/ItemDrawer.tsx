@@ -22,11 +22,11 @@ import { validateImageFile } from "@/lib/menu/image";
 import { ITEM_STATUSES, ITEM_STATUS_LABELS, type BuilderCategory, type BuilderGroup, type ItemDraft, type ItemStatus } from "@/lib/menu/types";
 import { describeGroup } from "@/lib/menu/modifierGroupConfig";
 import type { Gate } from "@/components/ui";
-import type { OperationalCurrencyCode } from "@/lib/currency";
+import type { CurrencyCode } from "@/lib/currency";
 
 export type ItemDrawerSubmit = {
   draft: ItemDraft;
-  price: { amount: number; currency: OperationalCurrencyCode } | null;
+  price: { amount: number; currency: CurrencyCode } | null;
   groupIds: string[] | undefined;
   file: File | null;
   clearImage: boolean;
@@ -53,14 +53,14 @@ export function ItemDrawer({
   categories: BuilderCategory[];
   groups: BuilderGroup[];
   showModifiers: boolean;
-  primaryCurrency: OperationalCurrencyCode;
-  priceCurrency: OperationalCurrencyCode;
+  primaryCurrency: CurrencyCode;
+  priceCurrency: CurrencyCode;
   rate: number | null;
   /** `menu.create` for a new item, `menu.edit` for an existing one. */
   saveGate: Gate;
   archiveGate: Gate;
   saving: boolean;
-  onPriceCurrencyChange: (next: OperationalCurrencyCode) => void;
+  onPriceCurrencyChange: (next: CurrencyCode) => void;
   onChange: (next: ItemDraft) => void;
   onClose: () => void;
   onSubmit: (submit: ItemDrawerSubmit) => void;

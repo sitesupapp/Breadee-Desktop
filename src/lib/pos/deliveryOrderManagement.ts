@@ -51,6 +51,22 @@ export type DeliveryQueueOrder = {
   payment_method: string | null;
   subtotal: number | null;
   discount_amount: number | null;
+  /**
+   * The canonical persisted delivery fee, already folded into `total_amount`.
+   * Optional so pre-fee callers and fixtures need not set it; the queue/detail
+   * reader always populates it from the `delivery_fee` column.
+   */
+  delivery_fee?: number | null;
+  /**
+   * The INTERNAL delivery operations fields (Delivery Management). Written ONLY by
+   * `pos_set_delivery_ops`, never by an order save or payment, and never shown on
+   * the customer receipt. `delivery_cost` preserves the NULL(unknown) vs 0(free)
+   * distinction; a recorded margin exists only where a cost is known.
+   */
+  delivery_handler_type?: string | null;
+  delivered_by_user_id?: string | null;
+  delivery_person_ref?: string | null;
+  delivery_cost?: number | null;
   total_amount: number | null;
   currency: string | null;
   customer_id: string | null;
@@ -76,6 +92,11 @@ function toQueueOrder(raw: unknown): DeliveryQueueOrder | null {
     payment_method: strOrNull(r.payment_method),
     subtotal: r.subtotal == null ? null : num(r.subtotal),
     discount_amount: r.discount_amount == null ? null : num(r.discount_amount),
+    delivery_fee: r.delivery_fee == null ? null : num(r.delivery_fee),
+    delivery_handler_type: strOrNull(r.delivery_handler_type),
+    delivered_by_user_id: strOrNull(r.delivered_by_user_id),
+    delivery_person_ref: strOrNull(r.delivery_person_ref),
+    delivery_cost: r.delivery_cost == null ? null : num(r.delivery_cost),
     total_amount: r.total_amount == null ? null : num(r.total_amount),
     currency: strOrNull(r.primary_currency_snapshot),
     customer_id: strOrNull(r.customer_id),
@@ -95,7 +116,7 @@ export function todayBounds(now: Date): { start: string; end: string } {
 }
 
 const QUEUE_COLUMNS =
-  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
+  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, delivery_fee, delivery_handler_type, delivered_by_user_id, delivery_person_ref, delivery_cost, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
 
 /**
  * The operator's delivery queue.
@@ -590,4 +611,222 @@ export async function performVoid(input: {
 export function recognisedTotal(order: DeliveryQueueOrder): number {
   if (isTerminal(order.status)) return 0;
   return numOrNull(order.total_amount) ?? 0;
+}
+
+// --- delivery operations (Delivery Management) -------------------------------
+//
+// The INTERNAL operational fields - who delivered, and what fulfilment COST the
+// business, kept apart from the customer's DELIVERY FEE. `pos_set_delivery_ops`
+// is the sole authority: it writes only these columns and never the subtotal,
+// delivery fee, charge total, payment, taxes or receipt, and it rejects a
+// negative cost or a non-delivery order. The desktop therefore NEVER updates
+// `pos_orders` directly for these - it calls the RPC, exactly as the web panel
+// does. Editing is gated by `pos.delivery.manage`, enforced server-side.
+
+export type DeliveryHandlerType = "driver" | "delivery_company";
+
+export type DeliveryOps = {
+  delivery_handler_type: DeliveryHandlerType | null;
+  /** Preserved through an edit - this MVP surfaces the free-text ref, not a picker. */
+  delivered_by_user_id: string | null;
+  delivery_person_ref: string | null;
+  /** NULL is UNKNOWN (no margin); 0 is an explicit free fulfilment. Kept distinct. */
+  delivery_cost: number | null;
+};
+
+/** Exactly the parameters `pos_set_delivery_ops` consumes. */
+export const DELIVERY_OPS_PARAM_KEYS = [
+  "p_order_id",
+  "p_delivery_handler_type",
+  "p_delivered_by_user_id",
+  "p_delivery_person_ref",
+  "p_delivery_cost",
+] as const;
+
+/**
+ * Fields the ops write must NEVER carry. The server ignores them, but sending any
+ * would claim the internal editor can move the customer's money - which it cannot.
+ * This is the financial firewall the source-contract test asserts against.
+ */
+export const FORBIDDEN_DELIVERY_OPS_FIELDS = [
+  "p_delivery_fee",
+  "delivery_fee",
+  "p_subtotal",
+  "subtotal",
+  "p_total",
+  "total_amount",
+  "p_charge_total",
+  "p_payment_status",
+  "payment_status",
+  "p_tax",
+  "p_amount",
+  "tendered",
+] as const;
+
+/**
+ * Parse the Delivery Cost input. Empty is UNKNOWN (null, no margin recorded); a
+ * number must be >= 0. Mirrors the delivery-fee parser's null-vs-zero care so a
+ * free fulfilment (0) stays distinct from an un-costed one (null).
+ */
+export function parseDeliveryCost(raw: string): { valid: boolean; value: number | null; provided: boolean } {
+  const t = raw.trim();
+  if (t === "") return { valid: true, value: null, provided: false };
+  const n = Number(t);
+  if (!Number.isFinite(n) || n < 0) return { valid: false, value: null, provided: true };
+  return { valid: true, value: n, provided: true };
+}
+
+/**
+ * The recorded delivery margin for one order: fee minus cost, and ONLY when a cost
+ * is known. An un-costed order has no margin (null) - never a fee-as-profit figure.
+ * Display only; the report's own margins come from the server.
+ */
+export function recordedMargin(order: Pick<DeliveryQueueOrder, "delivery_fee" | "delivery_cost">): number | null {
+  if (order.delivery_cost == null) return null;
+  return (order.delivery_fee ?? 0) - order.delivery_cost;
+}
+
+/** Whether a delivery order may be marked collected, from its payment status alone. */
+export function isCollected(order: Pick<DeliveryQueueOrder, "payment_status">): boolean {
+  return order.payment_status === "paid";
+}
+
+export type SetDeliveryOpsResult = DeliveryOps & {
+  order_id: string;
+  delivery_fee: number | null;
+  delivery_margin: number | null;
+  currency: string | null;
+};
+
+/**
+ * Persist the internal delivery ops through the one server authority. The cost is
+ * sent as the ONLY numeric field, and never a fee/total/payment; `null` clears a
+ * value (leaving cost unknown), a number sets it.
+ */
+export async function setDeliveryOps(input: {
+  orderId: string;
+  handlerType: DeliveryHandlerType | null;
+  deliveredByUserId: string | null;
+  personRef: string | null;
+  cost: number | null;
+}): Promise<SetDeliveryOpsResult> {
+  const row = asRecord(
+    await callPosRpc("pos_set_delivery_ops", {
+      p_order_id: input.orderId,
+      p_delivery_handler_type: input.handlerType,
+      p_delivered_by_user_id: input.deliveredByUserId,
+      p_delivery_person_ref: input.personRef,
+      p_delivery_cost: input.cost,
+    }),
+  );
+  const handler = strOrNull(row.delivery_handler_type);
+  return {
+    order_id: str(row.order_id, input.orderId),
+    delivery_handler_type: handler === "driver" || handler === "delivery_company" ? handler : null,
+    delivered_by_user_id: strOrNull(row.delivered_by_user_id),
+    delivery_person_ref: strOrNull(row.delivery_person_ref),
+    delivery_cost: row.delivery_cost == null ? null : num(row.delivery_cost),
+    delivery_fee: row.delivery_fee == null ? null : num(row.delivery_fee),
+    delivery_margin: row.delivery_margin == null ? null : num(row.delivery_margin),
+    currency: strOrNull(row.currency),
+  };
+}
+
+// --- delivery report (BI6) ---------------------------------------------------
+//
+// A READ-ONLY projection: `pos_delivery_report` computes the rows AND the summary
+// server-side (business-day- and OU-scoped, gated on `pos.reports.view`), and the
+// desktop renders exactly what it returns - NO client aggregation. Every money
+// figure is the server's: the fee is the persisted `delivery_fee`, never
+// total-minus-subtotal, and a margin exists only where a cost was entered.
+
+export type DeliveryReportRow = {
+  order_id: string;
+  order_number: string | null;
+  date: string | null;
+  time: string | null;
+  branch_name: string | null;
+  delivery_fee: number | null;
+  delivery_handler_type: DeliveryHandlerType | null;
+  delivered_by: string | null;
+  delivery_cost: number | null;
+  delivery_margin: number | null;
+  payment_status: string;
+  collected: boolean;
+  status: string;
+  currency: string | null;
+};
+
+export type DeliveryReportSummary = {
+  total_delivery_orders: number;
+  total_delivery_fees: number;
+  orders_with_cost: number;
+  recorded_delivery_cost: number;
+  recorded_delivery_margin: number;
+  currency: string | null;
+};
+
+export type DeliveryReport = {
+  from: string | null;
+  to: string | null;
+  timezone: string | null;
+  currency: string | null;
+  rows: DeliveryReportRow[];
+  summary: DeliveryReportSummary;
+};
+
+function toReportRow(raw: unknown): DeliveryReportRow {
+  const r = asRecord(raw);
+  const handler = strOrNull(r.delivery_handler_type);
+  return {
+    order_id: str(r.order_id),
+    order_number: strOrNull(r.order_number),
+    date: strOrNull(r.date),
+    time: strOrNull(r.time),
+    branch_name: strOrNull(r.branch_name),
+    delivery_fee: r.delivery_fee == null ? null : num(r.delivery_fee),
+    delivery_handler_type: handler === "driver" || handler === "delivery_company" ? handler : null,
+    delivered_by: strOrNull(r.delivered_by),
+    delivery_cost: r.delivery_cost == null ? null : num(r.delivery_cost),
+    delivery_margin: r.delivery_margin == null ? null : num(r.delivery_margin),
+    payment_status: str(r.payment_status),
+    collected: bool(r.collected),
+    status: str(r.status),
+    currency: strOrNull(r.currency),
+  };
+}
+
+/**
+ * Load the delivery report for a date range. `branch` is the operator's OU when
+ * one is in scope; omitted, the server applies the operator's own OU visibility.
+ * The dates are plain YYYY-MM-DD - the server resolves the branch business day.
+ */
+export async function loadDeliveryReport(input: {
+  from: string;
+  to: string;
+  branch?: string | null;
+}): Promise<DeliveryReport> {
+  const row = asRecord(
+    await callPosRpc("pos_delivery_report", {
+      p_from: input.from,
+      p_to: input.to,
+      ...(input.branch ? { p_branch: input.branch } : {}),
+    }),
+  );
+  const s = asRecord(row.summary);
+  return {
+    from: strOrNull(row.from),
+    to: strOrNull(row.to),
+    timezone: strOrNull(row.timezone),
+    currency: strOrNull(row.currency),
+    rows: Array.isArray(row.rows) ? (row.rows as unknown[]).map(toReportRow) : [],
+    summary: {
+      total_delivery_orders: num(s.total_delivery_orders),
+      total_delivery_fees: num(s.total_delivery_fees),
+      orders_with_cost: num(s.orders_with_cost),
+      recorded_delivery_cost: num(s.recorded_delivery_cost),
+      recorded_delivery_margin: num(s.recorded_delivery_margin),
+      currency: strOrNull(s.currency),
+    },
+  };
 }

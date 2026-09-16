@@ -8,7 +8,7 @@
 // No printing here, no side effects. Every monetary figure is passed IN from the
 // server response - nothing on a receipt is calculated by this module.
 
-import { operationalDigitsFor, type OperationalCurrencyCode } from "@/lib/currency";
+import type { CurrencyCode } from "@/lib/currency";
 
 /**
  * The order sources a receipt can be routed for.
@@ -78,28 +78,22 @@ export type ReceiptData = {
   paidAmount?: number | null;
   balanceDue?: number | null;
   method: string | null;
-  /**
-   * The order's OWN currency (Slice 6B-1). Widened from `CurrencyCode` to a runtime
-   * string so a future third-currency tenant's historical order can print in its own
-   * currency. USD/LBP render exactly as before; any other code renders as
-   * "<amount> <CODE>". The value is validated at the formatter boundary
-   * (`normalizeCurrencyCode`).
-   */
-  currency: string;
-  /**
-   * Display precision for `currency` (Slice 6B-1). USD/LBP ignore it (they render by
-   * code); a third currency uses it (JOD/KWD = 3). Sourced from the server contract
-   * `finance_order_financials.decimal_digits` once the assembly is wired (6B-2) — never
-   * derived from a local currency catalog.
-   */
-  decimalDigits: number;
+  /** The order's selling currency. USD/LBP, the desktop's production currency pair. */
+  currency: CurrencyCode;
   lines: ReceiptLine[];
   subtotal: number;
   discount: number;
+  /**
+   * Delivery orders only: the manually-entered delivery fee, already folded into
+   * `total` by the server's finance engine. Carried on its own so the receipt can
+   * show it as a line between Subtotal and Total. Absent/0 prints nothing, and it
+   * never appears on takeaway/dine-in. Passed IN from the server response, never
+   * computed here.
+   */
+  deliveryFee?: number | null;
   total: number;
-  /** Cash handling, in the TENDER currency. Null when not a cash tender. Widened to a
-   *  runtime string in 6B-1 for the same reason as `currency`. */
-  tenderCurrency?: string | null;
+  /** Cash handling, in the TENDER currency. Null when not a cash tender. */
+  tenderCurrency?: CurrencyCode | null;
   tenderTotal?: number | null;
   tendered?: number | null;
   change?: number | null;
@@ -123,10 +117,9 @@ export type ReceiptData = {
   deliveryAddress?: string | null;
 };
 
-export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType" | "decimalDigits"> & {
+export type BuildReceiptInput = Omit<ReceiptData, "businessName" | "orderType"> & {
   businessName: string | null | undefined;
   orderType?: string;
-  decimalDigits?: number;
 };
 
 export function buildReceipt(input: BuildReceiptInput): ReceiptData {
@@ -134,17 +127,11 @@ export function buildReceipt(input: BuildReceiptInput): ReceiptData {
     ...input,
     businessName: input.businessName?.trim() || "Breadee",
     orderType: input.orderType ?? "Takeaway",
-    // 6B-1: the receipt model now carries display precision. Until the assembly is wired
-    // to finance_order_financials (6B-2) callers omit it, and USD/LBP render by code (the
-    // formatter ignores digits for them), so this default is never consulted for them.
-    decimalDigits: input.decimalDigits ?? 2,
   };
 }
 
-/** A deterministic sample used by Settings -> Receipt design (no real data). The sample
- *  renders in the tenant's operational currency at its server-provided precision, so a
- *  third-currency (AED/JOD) tenant previews its own layout, not a USD one. */
-export function sampleReceipt(businessName: string | null | undefined, currency: OperationalCurrencyCode): ReceiptData {
+/** A deterministic sample used by Settings -> Receipt design (no real data). */
+export function sampleReceipt(businessName: string | null | undefined, currency: CurrencyCode): ReceiptData {
   const lines: ReceiptLine[] = [
     {
       name: "Chicken Sandwich",
@@ -167,7 +154,6 @@ export function sampleReceipt(businessName: string | null | undefined, currency:
     paid: true,
     method: "cash",
     currency,
-    decimalDigits: operationalDigitsFor(currency),
     lines,
     subtotal,
     discount: 0,

@@ -1,4 +1,4 @@
-// POS operations: the Orders workspace, the shift report, reversals, delivery.
+﻿// POS operations: the Orders workspace, the shift report, reversals, delivery.
 //
 // The properties worth pinning here are all about AUTHORITY:
 //   * one lifecycle decides what an order permits, so three screens cannot
@@ -428,3 +428,4 @@ test("every surface reads the one shift-order store", () => {
     assert.equal(src.includes("loadShiftOrders"), false, `${name} renders, it does not query the shift`);
   }
 });
+

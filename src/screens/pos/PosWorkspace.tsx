@@ -1,4 +1,4 @@
-// The POS workspace: access gate, shift lifecycle, and the Takeaway route.
+﻿// The POS workspace: access gate, shift lifecycle, and the Takeaway route.
 //
 // Composition only - the business rules live in `lib/pos/*` and the two stores.
 // The order of the guards below is the order the server would refuse in, so what
@@ -55,14 +55,14 @@ import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
 import { OrderCarousel } from "@/components/pos/OrderCarousel";
-import { filterItems, loadMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
+import { filterItems, loadPosMenu, cacheMenu, readCachedMenu, usableCategories, withSearchIndex, type SearchableItem } from "@/lib/pos/menu";
+import { MENU_CHANGED_EVENT } from "@/lib/menu/events";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { readPosFeatures } from "@/lib/pos/posFeatures";
 import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
-import { fetchReceiptCurrency } from "@/lib/pos/receiptCurrency";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
 import type { DiscountType } from "@/lib/pos/discounts";
@@ -80,7 +80,7 @@ import { canViewDelivery, canViewTables } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
-import { type OperationalCurrencyCode } from "@/lib/currency";
+import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
@@ -115,7 +115,7 @@ function PosWorkspaceInner() {
   const shiftStore = useShift();
   const cart = useCart();
 
-  const currency: OperationalCurrencyCode = session.currency.primary;
+  const currency: CurrencyCode = session.currency.primary;
   const rate = session.currency.rate;
   const online = session.online && !session.offlineMode;
 
@@ -135,15 +135,17 @@ function PosWorkspaceInner() {
     setMenuState("loading");
     setMenuError(null);
     try {
-      const data = await loadMenu(tenantId);
+      // The SELL surface reads the authoritative OU projection (pos_menu) for the
+      // operator's branch, so the till only ever offers items this OU can sell.
+      const data = await loadPosMenu(pos.branch.id);
       setMenu(data);
       setMenuStale(null);
       setMenuState("ready");
       void cacheMenu(data, tenantId, pos.branch.id);
     } catch (e) {
       // A cached menu is still worth showing - the cashier can see prices even
-      // though ordering is blocked while offline.
-      const cached = await readCachedMenu(tenantId).catch(() => null);
+      // though ordering is blocked while offline. The cache is tenant+OU scoped.
+      const cached = await readCachedMenu(tenantId, pos.branch.id).catch(() => null);
       if (cached) {
         setMenu(cached.menu);
         setMenuStale(cached.cachedAt);
@@ -155,8 +157,29 @@ function PosWorkspaceInner() {
     }
   }, [tenantId, pos.branch.id]);
 
+  // Load on open, and re-run whenever the OU (branch) changes — `fetchMenu`
+  // depends on `pos.branch.id`, so switching OU refetches that OU's menu.
   useEffect(() => {
     if (pos.allowed && tenantId) void fetchMenu();
+  }, [pos.allowed, tenantId, fetchMenu]);
+
+  // Refresh when the window regains focus / becomes visible (a menu edited on
+  // the web or another device appears without a manual reload) and when a local
+  // Menu Builder save announces a change. This only replaces the MENU list; it
+  // never touches the active cart, selected category, or search.
+  useEffect(() => {
+    if (!pos.allowed || !tenantId) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void fetchMenu();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener(MENU_CHANGED_EVENT, refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener(MENU_CHANGED_EVENT, refresh);
+    };
   }, [pos.allowed, tenantId, fetchMenu]);
 
   // --- shift -----------------------------------------------------------------
@@ -371,10 +394,6 @@ function PosWorkspaceInner() {
         const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
           ? order.order_type
           : "takeaway") as "takeaway" | "dine_in" | "delivery";
-        // 6B-2: the order's OWN historical currency + precision, from the server. A
-        // third-currency order with no valid server precision refuses here (caught below)
-        // rather than reprinting at a guessed 2 decimals.
-        const receiptMeta = await fetchReceiptCurrency(order.id, currency);
         receiptStore.present(
           buildReceipt({
             businessName: pos.tenantName,
@@ -386,8 +405,7 @@ function PosWorkspaceInner() {
             at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
             paid: order.payment_status === "paid",
             method: null,
-            currency: receiptMeta.currency,
-            decimalDigits: receiptMeta.decimalDigits,
+            currency: (order.currency ?? currency) as CurrencyCode,
             lines,
             subtotal: order.subtotal ?? order.total_amount ?? 0,
             discount: order.discount_amount,
@@ -735,6 +753,10 @@ function PosWorkspaceInner() {
     // The receipt goes to the same store-owned layer takeaway uses, which is
     // mounted outside this component's loading states on purpose.
     onPresentReceipt: presentReceipt,
+    // "Print the bill before payment" uses the MANUAL preview layer - the same
+    // one takeaway's saved-order Print and the Orders modal use - so an UNPAID
+    // bill never reaches the automatic settlement path.
+    onPreviewReceipt: (receipt) => receiptStore.present(receipt),
     // The kitchen ticket goes through the one shared call site, so a dine-in
     // round and a delivery order get the same document, the same routing and
     // the same duplicate protection as a takeaway order.
@@ -767,6 +789,10 @@ function PosWorkspaceInner() {
     // incremented here.
     takePayments: pos.gates.takePayments,
     applyDiscounts: pos.gates.applyDiscounts,
+    // Delivery Management: the internal ops editor and the read-only report,
+    // gated server-side by pos.delivery.manage and pos.reports.view respectively.
+    manageDelivery: pos.gates.manageDelivery,
+    viewDeliveryReport: pos.gates.viewDeliveryReport,
     rate,
     onPresentReceipt: presentReceipt,
     // The kitchen ticket goes through the one shared call site, so a dine-in
@@ -824,7 +850,7 @@ function PosWorkspaceInner() {
     return false;
   }, [addingToDelivery, delivery.cartOwner, addingToTable, dineIn.selected, toast]);
 
-  // The behaviour switch for THIS terminal. Read once per mount - leaving for
+  // Terminal-local POS switches (localStorage, default OFF). Read once; opening
   // Settings and coming back remounts this component and re-reads, which is the
   // right cadence for a decision nobody makes mid-service.
   const features = useMemo(() => readPosFeatures(), []);
@@ -1179,7 +1205,7 @@ function PosWorkspaceInner() {
   const confirmPayment = useCallback(
     async (input: {
       method: PaymentMethod;
-      currency: OperationalCurrencyCode;
+      currency: CurrencyCode;
       discount: Record<string, unknown>;
       tendered: number | null;
     }) => {
@@ -1217,10 +1243,6 @@ function PosWorkspaceInner() {
         // The completion sequence is deterministic and lives in one pure module:
         // present the receipt (data + visibility atomically) BEFORE the dialog
         // closes and the cart resets, so neither can race the receipt.
-        // 6B-2: the order's own historical currency + server precision. Best-effort for
-        // USD/LBP (falls back to the client currency if the read is unavailable); a
-        // third-currency order with no valid server precision refuses (caught below).
-        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
         const completion = completePayment({
           result,
           lines,
@@ -1231,8 +1253,6 @@ function PosWorkspaceInner() {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: currency,
-          receiptCurrency: receiptMeta.currency,
-          decimalDigits: receiptMeta.decimalDigits,
           tenderCurrency: input.currency,
           rate,
           tenderedInput: input.tendered,
@@ -1372,13 +1392,17 @@ function PosWorkspaceInner() {
             order_number: o?.order_number ?? orderNumber,
             subtotal: total,
             discount: 0,
+            // Operational figures for the receipt. On this recovered best-effort
+            // path they are the read-back order total in its own currency (the
+            // delivery fee is already inside `total`; its own line is omitted).
+            total,
+            outstanding: Math.max(0, total - paidNow),
+            delivery_fee: 0,
           };
         }
 
         const receiptLines = existing ? await readOrderReceiptLines(orderId).catch(() => []) : null;
 
-        // 6B-2: the order's own historical currency + server precision for the receivable.
-        const receiptMeta = await fetchReceiptCurrency(orderId, currency);
         const completion = completeOnAccountReceipt({
           result,
           lines,
@@ -1390,8 +1414,6 @@ function PosWorkspaceInner() {
           branchName: pos.branch.name,
           operatorName: pos.userName,
           primaryCurrency: currency,
-          receiptCurrency: receiptMeta.currency,
-          decimalDigits: receiptMeta.decimalDigits,
           shiftId,
           at: new Date().toLocaleString(),
         });
@@ -1412,8 +1434,6 @@ function PosWorkspaceInner() {
               : `On account - order ${result.order_number}`,
         });
 
-        // A new draft still owes the kitchen its ticket; an existing order was
-        // ticketed when it was created. Same rule as a full payment.
         if (draft) void ticketForOrder(draft, lines);
         await adoptCreatedOrder(orderId);
       } catch (e) {
@@ -1517,7 +1537,11 @@ function PosWorkspaceInner() {
   // would be editing something invisible.
   useShortcuts(
     {
-      search: () => searchRef.current?.focus(),
+      // The menu Search Bar is intentionally hidden on the POS routes, so its
+      // Ctrl+K / "/" shortcut was removed entirely (binding + handler) - there is
+      // no "search" id in the keyboard model any more, so nothing focuses the
+      // sr-only field and nothing advertises a dead shortcut in the F1 help. The
+      // menu is browsed by category instead.
       prevCategory: () => setCategory((c) => stepCategory(categoryIds, c, -1)),
       nextCategory: () => setCategory((c) => stepCategory(categoryIds, c, 1)),
       lineUp: () => cart.moveSelection(-1),
@@ -1737,13 +1761,24 @@ function PosWorkspaceInner() {
                     {delivery.identity}
                   </>
                 )}
-                <Input
-                  ref={searchRef}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search the menu (Ctrl+K)"
-                  className="max-w-md"
-                />
+                {/* The visible menu Search Bar is intentionally hidden on the
+                    POS routes (product request) to reclaim vertical space and
+                    declutter. The field stays in the DOM but visually hidden
+                    (sr-only) so the query state/filtering plumbing is NOT
+                    deleted; the Ctrl+K / "/" shortcut that used to focus it has
+                    been removed from the keyboard model entirely (see
+                    useShortcuts above and lib/keyboard/shortcuts.ts), so nothing
+                    can focus this invisible field. The menu is browsed by
+                    category instead. */}
+                <div className="sr-only">
+                  <Input
+                    ref={searchRef}
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search the menu (Ctrl+K)"
+                    className="max-w-md"
+                  />
+                </div>
                 {!online && (
                   <span className="rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900">
                     Offline - ordering needs a connection
@@ -1871,20 +1906,13 @@ function PosWorkspaceInner() {
                 />
               </section>
             ) : (
-              <>
-              {/* Fast ORDER-level note for the whole takeaway order - distinct
-                  from an item's kitchen note (the per-line "Note" button below).
-                  Wired to the existing orderNote -> pos_orders.notes plumbing. */}
-              <label className="mb-2 block">
-                <span className="mb-1 block text-xs font-bold text-ink">Order note</span>
-                <input
-                  type="text"
-                  value={orderNote}
-                  onChange={(e) => editOrderNote(e.target.value)}
-                  placeholder="Whole-order note - e.g. Call customer when ready"
-                  className="w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-sub"
-                />
-              </label>
+              /* The ORDER-level note now lives INSIDE the panel header as a
+                 compact control (see CartPanel `orderNote`/`onOrderNoteChange`),
+                 reclaiming the ~64px the standalone field used to cost above the
+                 list. Same `orderNote` state, same `editOrderNote` handler, same
+                 orderNote -> pos_orders.notes plumbing - only the placement
+                 changed, and the panel is once again the sole child of the
+                 column. */
               <CartPanel
                 lines={cart.lines}
                 selectedKey={cart.selectedKey}
@@ -1903,10 +1931,12 @@ function PosWorkspaceInner() {
                 onPay={openPayment}
                 onOpenShift={() => setOpenShiftOpen(true)}
                 onNewOrder={clearOrder}
-                /* An unsaved draft is scratch, and its destructive action says
-                   so. `Delete / Void` belongs to a saved order and appears only
-                   on the panel above. */
-                clearLabel={cart.savedOrder ? "Clear cart (leaves the order unpaid)" : "Clear cart"}
+                orderNote={orderNote}
+                onOrderNoteChange={editOrderNote}
+                /* An unsaved draft is scratch. The saved-order status already
+                   shows in the header, and clearing a sent order is guarded by
+                   its own confirm, so the destructive label stays short. */
+                clearLabel="Clear cart"
                 orderCarousel={
                   <OrderCarousel
                     orderNumber={null}
@@ -1920,7 +1950,6 @@ function PosWorkspaceInner() {
                 onPrint={() => void printCurrentOrder()}
                 printBusy={printingOrder}
               />
-              </>
             )
           )
         }
@@ -2155,3 +2184,4 @@ function ReceiptLayer() {
   if (!shouldShowReceipt({ receipt, visible })) return null;
   return <ReceiptModal data={receipt as ReceiptData} onClose={hide} />;
 }
+

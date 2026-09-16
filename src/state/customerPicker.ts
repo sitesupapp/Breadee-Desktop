@@ -1,4 +1,4 @@
-// A self-contained customer picker for the on-account payment slot.
+﻿// A self-contained customer picker for the on-account payment slot.
 //
 // WHY THIS EXISTS, AND WHY IT IS NOT `state/customers.ts`.
 // The delivery workspace drives the shared `useCustomers` zustand SINGLETON: it
@@ -227,3 +227,4 @@ export function useCustomerPicker(input: {
 
   return { selected, searchProps, clearSelection };
 }
+

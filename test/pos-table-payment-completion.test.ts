@@ -127,9 +127,6 @@ const receiptInput = (over: Record<string, unknown> = {}) =>
     branchName: "Main Branch",
     operatorName: "QA Cashier",
     primaryCurrency: "USD" as const,
-    // 6B-2: the server-provided historical currency + precision (USD here).
-    receiptCurrency: "USD",
-    decimalDigits: 2,
     tenderCurrency: "USD" as const,
     rate: 89_000,
     tenderedInput: 40,

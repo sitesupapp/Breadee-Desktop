@@ -1,4 +1,4 @@
-// The `pos_pay_table` contract: exactly what is sent, and what must never be.
+﻿// The `pos_pay_table` contract: exactly what is sent, and what must never be.
 //
 // The RPC reads FIVE keys - table_id, method, discount_type, discount_value,
 // currency_code - and nothing else. Everything a cashier's screen also knows
@@ -115,7 +115,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // new RPC cannot slip in under an unchanged total.
 // RETARGETED AGAIN BY DESKTOP 1.0.4: `pos_configure_tables` was added, so the
 // expected set grows by exactly one more reviewed name.
-test("the RPC allow-list contains exactly the twenty-three expected names", () => {
+test("the RPC allow-list contains exactly the twenty-four expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -124,11 +124,8 @@ test("the RPC allow-list contains exactly the twenty-three expected names", () =
   assert.deepEqual(
     [...members].sort(),
     [
-      // i18n Slice 6B-2: the authoritative receipt-financial READ (order historical
-      // currency + decimal_digits). Sorts first as it does not start with "pos_".
-      "finance_order_financials",
       // Dine-In Floor Map Phase 2: the published-floor READ (ship-dark, gated on
-      // pos.floor_map). Sorts before the pos_* names.
+      // pos.floor_map + pos.tables.view). Sorts before the pos_* names.
       "floor_service_layout",
       "pos_cash_box_shift",
       "pos_clear_table",
@@ -137,6 +134,8 @@ test("the RPC allow-list contains exactly the twenty-three expected names", () =
       "pos_complete_on_account",
       "pos_complete_table_on_account",
       "pos_configure_tables",
+      // Delivery Management: the read-only delivery report (pos.reports.view).
+      "pos_delivery_report",
       "pos_edit_order",
       "pos_end_shift",
       "pos_move_table",
@@ -148,6 +147,9 @@ test("the RPC allow-list contains exactly the twenty-three expected names", () =
       "pos_receivable_collect",
       "pos_receivables_customer",
       "pos_receivables_search",
+      // Delivery Management: the internal Delivered-By / Delivery-Cost write
+      // (pos.delivery.manage). Never a customer-money RPC.
+      "pos_set_delivery_ops",
       "pos_shift_expected",
       "pos_submit_order",
       "pos_table_map",
@@ -156,7 +158,7 @@ test("the RPC allow-list contains exactly the twenty-three expected names", () =
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 23);
+  assert.equal(members.length, 24);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
@@ -398,3 +400,4 @@ test("tendered and change exist only in the UI - the payment module never posts 
   assert.doesNotMatch(code, /tendered\s*:/, "tendered became a field in the payment module");
   assert.doesNotMatch(code, /\bchange\s*:/, "change became a field in the payment module");
 });
+

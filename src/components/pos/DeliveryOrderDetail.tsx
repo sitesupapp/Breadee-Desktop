@@ -17,7 +17,7 @@
 // two are never one control with a flag - see `voidActionFor`.
 
 import { Badge, Button, GatedButton, Skeleton, type Gate } from "@/components/ui";
-import { formatMoney, type OperationalCurrencyCode } from "@/lib/currency";
+import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import {
   orderStateLabel,
   orderStateTone,
@@ -26,7 +26,16 @@ import {
   UNKNOWN_PARTY,
   type OrderParty,
 } from "@/lib/pos/deliveryHistory";
-import { isTerminal, type DeliveryOrderLine, type DeliveryQueueOrder, type VoidAction } from "@/lib/pos/deliveryOrderManagement";
+import {
+  isCollected,
+  isTerminal,
+  recordedMargin,
+  type DeliveryHandlerType,
+  type DeliveryOrderLine,
+  type DeliveryQueueOrder,
+  type VoidAction,
+} from "@/lib/pos/deliveryOrderManagement";
+import { DeliveryOpsEditor } from "@/components/pos/DeliveryOpsEditor";
 
 export type DeliveryOrderDetailProps = {
   order: DeliveryQueueOrder;
@@ -34,18 +43,31 @@ export type DeliveryOrderDetailProps = {
   lines: DeliveryOrderLine[];
   linesLoading: boolean;
   linesError: string | null;
-  currency: OperationalCurrencyCode;
+  currency: CurrencyCode;
   /** "cancel" on an unpaid order, "refund" on a paid one. Derived, never chosen. */
   voidAction: VoidAction;
   editGate: Gate;
   voidGate: Gate;
   payGate: Gate;
   receiptBusy: boolean;
+  /** `pos.delivery.manage`. Offers the internal Delivery-details editor; the
+      server (pos_set_delivery_ops) re-enforces it. */
+  manageDeliveryGate: Gate;
+  opsEditing: boolean;
+  opsBusy: boolean;
+  opsError: string | null;
   onBack: () => void;
   onEdit: () => void;
   onVoid: () => void;
   onPay: () => void;
   onReceipt: () => void;
+  onEditOps: () => void;
+  onCancelOps: () => void;
+  onSaveOps: (values: {
+    handlerType: DeliveryHandlerType | null;
+    personRef: string | null;
+    cost: number | null;
+  }) => void;
 };
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -61,10 +83,25 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
   const o = props.order;
   const party = props.party ?? UNKNOWN_PARTY;
   const terminal = isTerminal(o.status);
-  const currency = (o.currency as OperationalCurrencyCode) ?? props.currency;
+  const currency = (o.currency as CurrencyCode) ?? props.currency;
   const total = o.total_amount ?? 0;
   const subtotal = o.subtotal ?? total;
   const discount = o.discount_amount ?? 0;
+  // The canonical persisted delivery fee, already folded into `total`. Shown as
+  // its own line so subtotal - discount + fee reconciles to the total on screen.
+  const deliveryFee = o.delivery_fee ?? 0;
+  // Internal operations. The COST and MARGIN are the business's own record - shown
+  // here, never on the customer receipt. Collection follows payment status.
+  const collected = isCollected(o);
+  const margin = recordedMargin(o);
+  const handlerType: DeliveryHandlerType | null =
+    o.delivery_handler_type === "driver" || o.delivery_handler_type === "delivery_company"
+      ? o.delivery_handler_type
+      : null;
+  const handlerLabel = handlerType === "driver" ? "Driver" : handlerType === "delivery_company" ? "Delivery Company" : null;
+  const deliveredBy = o.delivery_person_ref
+    ? `${o.delivery_person_ref}${handlerLabel ? ` (${handlerLabel})` : ""}`
+    : handlerLabel ?? "Not recorded";
 
   return (
     <section aria-label="Delivery order detail" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -149,6 +186,7 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
         <div className="mt-3 space-y-1 border-t border-line pt-2">
           <Row label="Subtotal" value={formatMoney(subtotal, currency)} />
           {discount > 0 && <Row label="Discount" value={`- ${formatMoney(discount, currency)}`} />}
+          {deliveryFee > 0 && <Row label="Delivery Fee" value={formatMoney(deliveryFee, currency)} />}
           <div className="flex items-baseline justify-between border-t border-line pt-2">
             <span className="text-sm font-semibold text-sub">Total</span>
             <span className="text-2xl font-extrabold tabular-nums text-ink">{formatMoney(total, currency)}</span>
@@ -166,38 +204,91 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
         </div>
       </div>
 
+      {/* Internal delivery operations. The delivery FEE is the customer's charge
+          (also on the receipt); the delivery COST and the recorded MARGIN are the
+          business's own record and are DELIBERATELY never printed on the customer
+          receipt. Editing writes only through pos_set_delivery_ops, gated by
+          pos.delivery.manage - never a direct pos_orders update from here. */}
+      <div className="rounded-2xl border border-line bg-white p-4">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-extrabold text-ink">Delivery details</p>
+          <Badge tone={collected ? "green" : "amber"}>{collected ? "Collected" : "Not collected"}</Badge>
+        </div>
+        <div className="mt-2 space-y-1">
+          <Row label="Delivered by" value={deliveredBy} />
+          <Row label="Delivery fee" value={formatMoney(deliveryFee, currency)} />
+          <Row
+            label="Delivery cost"
+            value={o.delivery_cost == null ? "Not recorded" : formatMoney(o.delivery_cost, currency)}
+          />
+          <Row label="Recorded margin" value={margin == null ? "-" : formatMoney(margin, currency)} />
+        </div>
+        {!props.opsEditing ? (
+          <GatedButton
+            gate={props.manageDeliveryGate}
+            variant="ghost"
+            size="md"
+            className="mt-3 w-full"
+            onClick={props.onEditOps}
+          >
+            Edit delivery details
+          </GatedButton>
+        ) : (
+          <DeliveryOpsEditor
+            initial={{
+              delivery_handler_type: handlerType,
+              delivered_by_user_id: o.delivered_by_user_id ?? null,
+              delivery_person_ref: o.delivery_person_ref ?? null,
+              delivery_cost: o.delivery_cost ?? null,
+            }}
+            currency={currency}
+            gate={props.manageDeliveryGate}
+            busy={props.opsBusy}
+            error={props.opsError}
+            onSave={props.onSaveOps}
+            onCancel={props.onCancelOps}
+          />
+        )}
+      </div>
+
       <div className="space-y-2 pb-2">
         {/* Pay reuses Level 3C's settlement path in full - the same gate, the
             same dialog, the same pre-payment re-read and the same latch. There
-            is no second payment implementation behind this button. */}
+            is no second payment implementation behind this button. Kept the
+            full-size primary so it stays the obvious control. */}
         {!terminal && o.payment_status !== "paid" && (
           <GatedButton gate={props.payGate} size="lg" className="w-full" onClick={props.onPay}>
             Pay (F4)
           </GatedButton>
         )}
 
-        {!terminal && (
-          <GatedButton gate={props.editGate} variant="ghost" size="lg" className="w-full" onClick={props.onEdit}>
-            Edit order
-          </GatedButton>
-        )}
-
-        <Button
-          variant="ghost"
-          size="lg"
-          className="w-full"
-          disabled={props.receiptBusy}
-          onClick={props.onReceipt}
-        >
-          {props.receiptBusy ? "Opening receipt..." : "Receipt preview"}
-        </Button>
+        {/* Edit + Print, paired to save height. "Print" (was mislabelled
+            "Receipt preview") prints this order's receipt through the existing
+            path - it does not open a separate preview screen. When the order is
+            terminal it can only be read, so Edit is gone and Print spans the row. */}
+        <div className="grid grid-cols-2 gap-2">
+          {!terminal && (
+            <GatedButton gate={props.editGate} variant="ghost" size="md" className="w-full" onClick={props.onEdit}>
+              Edit order
+            </GatedButton>
+          )}
+          <Button
+            variant="ghost"
+            size="md"
+            className={terminal ? "col-span-2 w-full" : "w-full"}
+            disabled={props.receiptBusy}
+            onClick={props.onReceipt}
+          >
+            {props.receiptBusy ? "Preparing..." : "Print"}
+          </Button>
+        </div>
 
         {!terminal && (
           <>
             <GatedButton
               gate={props.voidGate}
               variant="danger"
-              size="lg"
+              size="md"
               className="w-full"
               onClick={props.onVoid}
             >

@@ -130,12 +130,6 @@ export type BuildRoundInput = {
   lines: CartLine[];
   clientOpId: string;
   menu?: RoundMenu;
-  /**
-   * The ORDER-level note for the dine-in bill (pos_orders.notes), distinct from
-   * each line's `kitchen_note`. Optional and additive: omitting it produces the
-   * exact payload rounds sent before this existed.
-   */
-  orderNote?: string | null;
 };
 
 /**
@@ -165,8 +159,6 @@ export function buildRoundPayload(input: BuildRoundInput) {
     tableId: ctx.table.id,
     clientOpId: input.clientOpId,
     lines: input.lines,
-    // The bill's order-level note; buildSubmitPayload normalises it into `notes`.
-    orderNote: input.orderNote ?? null,
   });
 }
 

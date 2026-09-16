@@ -1,4 +1,4 @@
-// The receipt template model - the SAME one the Breadee web app stores.
+﻿// The receipt template model - the SAME one the Breadee web app stores.
 //
 // ONE SCHEMA, TWO RENDERERS. `pos_receipt_settings.customer_template_config`
 // and `kitchen_template_config` hold `{ blocks: [{ key, show }], size }`, written
@@ -187,3 +187,4 @@ export function visibleBlocks(config: TemplateConfig): string[] {
 export function blockVisible(sections: readonly string[] | null | undefined, key: string): boolean {
   return !sections || sections.includes(key);
 }
+

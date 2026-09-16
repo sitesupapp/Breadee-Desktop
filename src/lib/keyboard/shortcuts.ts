@@ -12,7 +12,6 @@
 export type ShortcutId =
   | "help"
   | "newOrder"
-  | "search"
   | "openPayment"
   | "confirmPayment"
   | "ordersList"
@@ -37,7 +36,6 @@ export type ShortcutId =
   // `confirmPayment` (see its spec below). The three table operations open a
   // confirmation rather than acting, so no chord alone can move or void a bill.
   | "tableMap"
-  | "tableSearch"
   | "tableLeft"
   | "tableRight"
   | "tableOpen"
@@ -87,8 +85,11 @@ export const SHORTCUTS: ShortcutSpec[] = [
     display: "Ctrl+Enter",
     worksInInput: true,
   },
-  { id: "search", keys: ["k"], ctrl: true, label: "Search the menu", group: "Navigation", display: "Ctrl+K" },
-  { id: "search", keys: ["/"], label: "Search the menu", group: "Navigation", display: "/" },
+  // The menu Search Bar is hidden on the POS routes, so its Ctrl+K / "/" binding
+  // was removed with it: a shortcut advertised in the F1 help for a feature that
+  // is intentionally invisible and does nothing would be worse than none. The
+  // menu is browsed by category. (Delivery's CustomerSearch is a separate,
+  // visible workflow control and is untouched.)
   { id: "routeTakeaway", keys: ["1"], alt: true, label: "Takeaway", group: "Navigation", display: "Alt+1", worksInInput: true },
   { id: "routeDineIn", keys: ["2"], alt: true, label: "Dine-in", group: "Navigation", display: "Alt+2", worksInInput: true },
   { id: "routeDelivery", keys: ["3"], alt: true, label: "Delivery", group: "Navigation", display: "Alt+3", worksInInput: true },
@@ -109,7 +110,9 @@ export const SHORTCUTS: ShortcutSpec[] = [
 
   // --- Dine-in (Level 2A) -----------------------------------------------------
   { id: "tableMap", keys: ["m"], alt: true, label: "Back to the table map", group: "Dine-in", display: "Alt+M", worksInInput: true },
-  { id: "tableSearch", keys: ["f"], ctrl: true, label: "Search tables", group: "Dine-in", display: "Ctrl+F" },
+  // The table Search Bar is hidden on Dine-in, so its Ctrl+F binding was removed
+  // with it (same reason as the menu search above). Tables are browsed with the
+  // arrows / grid.
   { id: "tableLeft", keys: ["ArrowLeft"], label: "Previous table", group: "Dine-in", display: "Left" },
   { id: "tableRight", keys: ["ArrowRight"], label: "Next table", group: "Dine-in", display: "Right" },
   { id: "tableOpen", keys: ["Enter"], label: "Select / open the focused table", group: "Dine-in", display: "Enter" },

@@ -33,6 +33,31 @@ import { isNewerThan } from "@/lib/version";
 /** What the app currently reports as its own version. */
 export const CURRENT_VERSION: string = env.APP_VERSION;
 
+/**
+ * The version the RUNNING BINARY reports, read from Tauri at runtime.
+ *
+ * `CURRENT_VERSION` above is baked into the JS bundle by Vite (from package.json),
+ * so a WebView that serves a stale frontend after an in-place update can display a
+ * version older than the binary actually is - which is exactly the symptom this
+ * resolves. Tauri's `getVersion()` returns the version compiled into the app from
+ * `tauri.conf.json`, read across the IPC boundary from Rust, so it is always the
+ * true installed version regardless of any frontend asset caching. Falls back to
+ * the baked value outside Tauri (dev / browser) or if the call ever fails - the
+ * display must never throw.
+ */
+export async function resolveRuntimeVersion(): Promise<string> {
+  try {
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+      const { getVersion } = await import("@tauri-apps/api/app");
+      const v = (await getVersion()).trim();
+      if (v) return v;
+    }
+  } catch {
+    /* fall through to the baked value */
+  }
+  return CURRENT_VERSION;
+}
+
 export type UpdateState =
   | { kind: "idle" }
   | { kind: "checking" }

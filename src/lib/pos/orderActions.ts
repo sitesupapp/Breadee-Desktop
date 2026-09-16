@@ -1,4 +1,4 @@
-// What may be done to a shift order, and what it is called.
+﻿// What may be done to a shift order, and what it is called.
 //
 // ONE LIFECYCLE, SHARED BY EVERY SURFACE. The Current Order panel, the Orders
 // modal and the Delivery modal all offer actions on the same orders, and the
@@ -130,3 +130,4 @@ export function typeLabel(order: Pick<ShiftOpenOrder, "order_type">, tableName: 
   const route = order.order_type === "dine_in" ? "dine-in" : order.order_type;
   return order.order_type === "dine_in" && tableName ? `${route} · ${tableName}` : route;
 }
+

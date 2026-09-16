@@ -1,4 +1,4 @@
-// PERMISSIONS: the desktop must refuse exactly what the database refuses.
+﻿// PERMISSIONS: the desktop must refuse exactly what the database refuses.
 //
 // The keys are not invented here. `m138_menu_write_authz` requires
 // `menu.create` to insert an item, `menu.edit` OR `menu.delete_or_archive` to
@@ -195,3 +195,4 @@ test("a typed URL cannot bypass the module gate", () => {
   assert.match(screen, /if \(!canViewMenuBuilder\(accessCtx\)\)/);
   assert.match(screen, /<Navigate to="\/dashboard" replace/);
 });
+

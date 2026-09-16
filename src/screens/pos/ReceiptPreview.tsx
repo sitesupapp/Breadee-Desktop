@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { ReceiptData } from "@/lib/receipt";
-import { formatReceiptMoney } from "@/lib/currency";
+import { formatMoney } from "@/lib/currency";
 import { Badge, Button, GatedButton } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { usePosContext } from "@/state/pos";
@@ -129,12 +129,12 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
                   {l.modifiers?.map((m) => (
                     <span key={m.name} className="block pl-2 text-[11px] text-paper-sub">
                       + {m.name}
-                      {m.price_delta !== 0 ? ` (${formatReceiptMoney(m.price_delta, data.currency, data.decimalDigits)})` : ""}
+                      {m.price_delta !== 0 ? ` (${formatMoney(m.price_delta, data.currency)})` : ""}
                     </span>
                   ))}
                   {l.note && <span className="block pl-2 text-[11px] italic text-paper-sub">{l.note}</span>}
                 </td>
-                <td className="py-0.5 text-right align-top">{formatReceiptMoney(l.lineTotal, data.currency, data.decimalDigits)}</td>
+                <td className="py-0.5 text-right align-top">{formatMoney(l.lineTotal, data.currency)}</td>
               </tr>
             ))}
           </tbody>
@@ -145,19 +145,28 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
       {show("subtotal") && (
         <div className="flex justify-between">
           <span>Subtotal</span>
-          <span>{formatReceiptMoney(data.subtotal, data.currency, data.decimalDigits)}</span>
+          <span>{formatMoney(data.subtotal, data.currency)}</span>
         </div>
       )}
       {show("discount") && data.discount > 0 && (
         <div className="flex justify-between">
           <span>Discount</span>
-          <span>-{formatReceiptMoney(data.discount, data.currency, data.decimalDigits)}</span>
+          <span>-{formatMoney(data.discount, data.currency)}</span>
+        </div>
+      )}
+      {/* Delivery fee: its own line between discount and total, present only when
+          the server actually charged one. Data gated (like the native renderer),
+          so the paper and the preview show the same line. */}
+      {data.deliveryFee != null && data.deliveryFee > 0 && (
+        <div className="flex justify-between">
+          <span>Delivery Fee</span>
+          <span>{formatMoney(data.deliveryFee, data.currency)}</span>
         </div>
       )}
       {show("total") && (
         <div className="mt-1 flex justify-between text-sm font-bold">
           <span>Total</span>
-          <span>{formatReceiptMoney(data.total, data.currency, data.decimalDigits)}</span>
+          <span>{formatMoney(data.total, data.currency)}</span>
         </div>
       )}
 
@@ -168,35 +177,37 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
           the point of the receipt, not a template-optional cosmetic line, so it
           appears regardless of the tenant's saved section list. (The native
           thermal receipt keeps these as `not_printed` in the catalog until it
-          gains the fields in a signed build.) */}
+          gains the fields in a signed build.) Every figure is the server's, in the
+          order's own USD/LBP selling currency, formatted with the shared
+          `formatMoney` - nothing is recomputed here. */}
       {data.paidAmount != null && (
         <div className="mt-1 flex justify-between">
           <span>Paid now</span>
-          <span>{formatReceiptMoney(data.paidAmount, data.currency, data.decimalDigits)}</span>
+          <span>{formatMoney(data.paidAmount, data.currency)}</span>
         </div>
       )}
       {data.balanceDue != null && (
         <div className="mt-0.5 flex justify-between font-bold">
           <span>Balance due</span>
-          <span>{formatReceiptMoney(data.balanceDue, data.currency, data.decimalDigits)}</span>
+          <span>{formatMoney(data.balanceDue, data.currency)}</span>
         </div>
       )}
 
       {data.tenderCurrency && data.tenderCurrency !== data.currency && data.tenderTotal != null && (
         <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
           <span>Charged in {data.tenderCurrency}</span>
-          <span>{formatReceiptMoney(data.tenderTotal, data.tenderCurrency, data.decimalDigits)}</span>
+          <span>{formatMoney(data.tenderTotal, data.tenderCurrency)}</span>
         </div>
       )}
       {data.tendered != null && data.tenderCurrency && (
         <>
           <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
             <span>Tendered</span>
-            <span>{formatReceiptMoney(data.tendered, data.tenderCurrency, data.decimalDigits)}</span>
+            <span>{formatMoney(data.tendered, data.tenderCurrency)}</span>
           </div>
           <div className="flex justify-between text-[11px] text-paper-sub">
             <span>Change</span>
-            <span>{formatReceiptMoney(data.change ?? 0, data.tenderCurrency, data.decimalDigits)}</span>
+            <span>{formatMoney(data.change ?? 0, data.tenderCurrency)}</span>
           </div>
         </>
       )}

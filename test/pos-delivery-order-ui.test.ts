@@ -1,4 +1,4 @@
-// The Level 3D operational surface: queue, detail, edit, cancel/refund, receipt.
+﻿// The Level 3D operational surface: queue, detail, edit, cancel/refund, receipt.
 //
 // The adapter's own contract is proved in `pos-delivery-order-management`. What
 // is proved HERE is that the screens reach it correctly, because every safety
@@ -145,14 +145,20 @@ test("the chips use only states the server produces", () => {
   assert.equal(paymentStateLabel("partial"), "partial");
 });
 
-test("no collection lifecycle is invented anywhere on the delivery surface", () => {
-  // The web calls settlement "Mark collected". The desktop has no collection
-  // step to mark: `pos_pay_order` sets paid AND completed in one statement.
+test("no collection lifecycle is invented - collection is a read-only view of payment", () => {
+  // There is still NO delivery motion/lifecycle and NO separate collection STEP to
+  // perform: `pos_pay_order` sets paid AND completed in one statement, so there is
+  // nothing to "mark collected". Delivery Management surfaces a read-only
+  // Collected / Not collected STATUS, but it is purely a projection of the payment
+  // status (`isCollected`), not an invented state machine or action.
   for (const src of [workspace, queue, detail, dialogs]) {
-    for (const phrase of ["Mark collected", "Collected", "Awaiting collection", "Out for delivery", "Dispatch"]) {
-      assert.equal(src.includes(phrase), false, `"${phrase}" is not a state this system has`);
+    for (const phrase of ["Mark collected", "Awaiting collection", "Out for delivery", "Dispatch"]) {
+      assert.equal(src.includes(phrase), false, `"${phrase}" is not a state or action this system has`);
     }
   }
+  // Where the status IS shown (the detail panel), it is driven by payment, never a
+  // second lifecycle field.
+  assert.ok(detail.includes("isCollected"), "the collection status must be derived from payment, via isCollected");
 });
 
 test("the tones separate money from motion", () => {
@@ -250,9 +256,12 @@ test("F4 stays Level 3C's, and reaches the same gate from both views", () => {
 });
 
 test("the payment dialog describes the order that would actually be charged", () => {
-  // Not "whoever is selected on the customer half" - that is how the wrong name
-  // reaches a receipt when an order is opened from the queue.
-  assert.match(workspace, /subtotal=\{payTarget\.order\?\.total_amount \?\? 0\}/);
+  // The ITEMS subtotal (the fee is shown on its own line, not added on top of a
+  // total that already contains it), the persisted fee PRE-FILLED so settlement
+  // reuses it, and the identity from the ORDER - never whoever is selected behind
+  // it, which is how the wrong name reaches a receipt from the queue.
+  assert.match(workspace, /subtotal=\{payTarget\.order\?\.subtotal \?\? payTarget\.order\?\.total_amount \?\? 0\}/);
+  assert.match(workspace, /initialDeliveryFee=\{payTarget\.order\?\.delivery_fee \?\? null\}/);
   assert.match(workspace, /orderNumber=\{payTarget\.order\?\.order_number \?\? null\}/);
   assert.match(workspace, /receiptIdentity\(payTarget\.order\)/);
 });
@@ -453,8 +462,6 @@ test("a past order's receipt is a Delivery receipt, with the identity it was sen
     lines: [{ name: "Pizza", qty: 1, unitPrice: 8, lineTotal: 8, modifiers: [{ name: "Small", price_delta: 0, quantity: 1 }] }],
     party,
     fallbackCurrency: "USD",
-    receiptCurrency: "USD",
-    decimalDigits: 2,
     at: "10/08/2026, 09:00",
   });
   // Without the explicit order type this inherits "Takeaway" - wrong on the one
@@ -478,9 +485,6 @@ test("every figure on a reprint is the server's, and cash handling is left blank
     lines: [],
     party,
     fallbackCurrency: "LBP",
-    // 6B-2: the server returns the order's own currency (USD here) — it wins over the fallback.
-    receiptCurrency: "USD",
-    decimalDigits: 2,
     at: "x",
   });
   assert.equal(r.subtotal, 10);
@@ -494,6 +498,38 @@ test("every figure on a reprint is the server's, and cash handling is left blank
   assert.equal(r.currency, "USD");
 });
 
+test("a delivery reprint shows the persisted Delivery Fee from canonical data, once", () => {
+  // The confirmed defect: the reprint/detail path dropped the fee. It now carries
+  // the ORDER's own delivery_fee — its own line, never derived from total - subtotal.
+  const withFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 67_500, delivery_fee: 2, total_amount: 67_502, payment_status: "paid" }),
+    payment: { method: "cash", currency: "LBP", amount: 67_502, originalAmount: 67_502, exchangeRate: null, paidAt: null },
+    lines: [],
+    party,
+    fallbackCurrency: "LBP",
+    at: "x",
+  });
+  assert.equal(withFee.subtotal, 67_500);
+  assert.equal(withFee.deliveryFee, 2);
+  assert.equal(withFee.total, 67_502);
+  // A delivery order with no fee shows no fee line (null, never a phantom 0).
+  const noFee = buildHistoricalReceipt({
+    tenantName: "Franks",
+    branchName: "Main Branch",
+    staffName: "Cashier",
+    order: order({ subtotal: 10, total_amount: 10, payment_status: "paid" }),
+    payment: null,
+    lines: [],
+    party,
+    fallbackCurrency: "USD",
+    at: "x",
+  });
+  assert.equal(noFee.deliveryFee ?? null, null);
+});
+
 test("an unpaid order's receipt says unpaid rather than pretending otherwise", () => {
   const r = buildHistoricalReceipt({
     tenantName: null,
@@ -504,8 +540,6 @@ test("an unpaid order's receipt says unpaid rather than pretending otherwise", (
     lines: [],
     party: UNKNOWN_PARTY,
     fallbackCurrency: "USD",
-    receiptCurrency: "USD",
-    decimalDigits: 2,
     at: "x",
   });
   assert.equal(r.paid, false);
@@ -622,9 +656,12 @@ test("the queue row shape is converted for settlement rather than re-implemented
   assert.equal(open.total_amount, o.total_amount);
   assert.equal(open.customer_id, o.customer_id);
   assert.equal(open.address_id, o.address_id);
-  // Queue-only fields do not travel into the settlement shape.
+  // shift_id is queue-only and does not travel into the settlement shape.
   assert.equal("shift_id" in open, false);
-  assert.equal("subtotal" in open, false);
+  // The items subtotal and the persisted fee DO travel now: settlement shows
+  // Subtotal + Delivery Fee = Total and reuses the one canonical fee.
+  assert.equal(open.subtotal, o.subtotal);
+  assert.equal(open.delivery_fee ?? null, o.delivery_fee ?? null);
 });
 
 // --- permissions -------------------------------------------------------------
@@ -651,14 +688,17 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
   const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
-  // 16 since Desktop 1.0.4; 18 since Wave 2C added the two receivables
-  // settlement RPCs (`pos_complete_on_account`, `pos_complete_table_on_account`);
-  // 21 since Wave 3C added the Customer Accounts surface (two reads + one write).
-  assert.equal(names.length, 21);
+  // 16 since Desktop 1.0.4 (`pos_configure_tables`); 21 with Customer Receivables -
+  // Wave 2C's two settlement RPCs and Wave 3C's three Customer-Accounts RPCs, all
+  // `pos_`-prefixed. Level 3D's own screens still add none of their own.
+  // 23 since Delivery Management added `pos_set_delivery_ops` and
+  // `pos_delivery_report`. Those two are called through the adapter from the
+  // library layer, not from these screens - the check below still holds.
+  assert.equal(names.length, 23);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
-  assert.ok(names.includes("pos_complete_on_account"));
-  assert.ok(names.includes("pos_complete_table_on_account"));
+  assert.ok(names.includes("pos_set_delivery_ops"));
+  assert.ok(names.includes("pos_delivery_report"));
   assert.equal(names.includes("pos_remove_order_item"), false);
   // And no component reaches an RPC directly - they all go through the adapter.
   for (const src of [queue, detail, dialogs]) {
@@ -725,3 +765,4 @@ test("the dashboard copy still promises only what the desktop has", () => {
   assert.ok(desc.includes("customers and addresses"));
   assert.equal(/delivery customers only|customers only/i.test(desc), false);
 });
+

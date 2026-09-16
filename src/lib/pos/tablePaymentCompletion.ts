@@ -26,7 +26,7 @@
 import { buildReceipt, type ReceiptData } from "@/lib/receipt";
 import { computeChange } from "@/lib/pos/payments";
 import { tenderTotalFor } from "@/lib/pos/paymentCompletion";
-import type { OperationalCurrencyCode } from "@/lib/currency";
+import type { CurrencyCode } from "@/lib/currency";
 import type { PaymentMethod } from "@/lib/pos/payments";
 import type { TablePaymentResult } from "@/lib/pos/tablePayment";
 import type { TableBill, TableSummary } from "@/types/tables";
@@ -105,18 +105,10 @@ export type TableReceiptInput = {
   tenantName: string;
   branchName: string;
   operatorName: string;
-  /** The bill's selling currency — kept for the tender math below. */
-  primaryCurrency: OperationalCurrencyCode;
-  /**
-   * The bill's HISTORICAL currency + precision from the server (Slice 6B-2), read from a
-   * representative order of the table (all orders on a table share the operational
-   * currency). Authoritative for display; a third currency requires a valid server
-   * `decimalDigits`, never the 2-decimal default.
-   */
-  receiptCurrency: string;
-  decimalDigits: number;
+  /** The bill's selling currency. */
+  primaryCurrency: CurrencyCode;
   /** The currency actually tendered at the drawer. */
-  tenderCurrency: OperationalCurrencyCode;
+  tenderCurrency: CurrencyCode;
   rate: number | null;
   tenderedInput: number | null;
   shiftId: string | null;
@@ -169,8 +161,7 @@ export function buildTablePaymentReceipt(input: TableReceiptInput): ReceiptData 
     at: input.at,
     paid: true,
     method: input.method,
-    currency: input.receiptCurrency,
-    decimalDigits: input.decimalDigits,
+    currency: input.primaryCurrency,
     lines: input.bill.orders.flatMap((order) =>
       order.lines.map((l) => ({
         name: l.name,
@@ -193,6 +184,75 @@ export function buildTablePaymentReceipt(input: TableReceiptInput): ReceiptData 
   });
 }
 
+// --- Unpaid table bill (print before payment) --------------------------------
+//
+// A guest asks for the bill at the table before paying. This builds the SAME
+// document the payment receipt does - from the server's bill, with table
+// identity and every round of every order on the table - but marks it UNPAID:
+// no tender, no change, no discount (a discount is chosen at payment, which has
+// not happened), and `paid: false` so the receipt prints "Unpaid". It creates
+// no payment and mutates nothing; it is presented through the MANUAL receipt
+// layer exactly like a takeaway saved-order reprint.
+//
+// COMPLETENESS: the lines are `bill.orders.flatMap(...)`, i.e. every line of
+// every order on the table, so a multi-order bill is represented in full - the
+// same aggregation the payment receipt uses. A bill that spans currencies has
+// no single subtotal/total (the fold leaves them null); the caller refuses to
+// print such a bill rather than inventing a total, so this builder is only ever
+// called with a single-currency bill.
+
+export type TableBillReceiptInput = {
+  /** The table's current bill, read from the server. */
+  bill: TableBill;
+  table: TableSummary;
+  tenantName: string;
+  branchName: string;
+  operatorName: string;
+  /** The bill's own selling currency (same source the payment / on-account receipts use). */
+  primaryCurrency: CurrencyCode;
+  shiftId: string | null;
+  at: string;
+};
+
+export function buildTableBillReceipt(input: TableBillReceiptInput): ReceiptData {
+  const subtotal = input.bill.subtotal ?? 0;
+  const total = input.bill.total ?? subtotal;
+  const orderNumbers = input.bill.orders.map((o) => o.order_number).filter(Boolean);
+
+  return buildReceipt({
+    businessName: input.tenantName,
+    branchName: input.branchName,
+    staffName: input.operatorName,
+    orderType: "Dine-in",
+    orderSource: "dine_in",
+    tableName: input.table.name,
+    seats: input.table.seats,
+    orderNumber: orderNumbers.join(", ") || input.table.name,
+    at: input.at,
+    // The bill has not been paid; the receipt says so and carries no tender.
+    paid: false,
+    method: null,
+    currency: input.primaryCurrency,
+    lines: input.bill.orders.flatMap((order) =>
+      order.lines.map((l) => ({
+        name: l.name,
+        qty: l.quantity,
+        unitPrice: l.final_unit_price,
+        lineTotal: l.line_total,
+        modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.price_delta, quantity: m.quantity })),
+        note: l.kitchen_note,
+      })),
+    ),
+    subtotal,
+    // No discount on an unpaid bill preview - a discount is applied at payment.
+    discount: 0,
+    total,
+    tenderCurrency: null,
+    exchangeRate: input.bill.orders[0]?.exchange_rate ?? null,
+    shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,
+  });
+}
+
 /** The receipt plus the ordered steps the caller must apply. */
 export function completeTablePayment(input: TableReceiptInput): {
   receipt: ReceiptData;
@@ -208,6 +268,10 @@ export function completeTablePayment(input: TableReceiptInput): {
 // split and no tendered/change pair, where the full-pay one carries `paid: true`
 // and a cash tender. The IDENTITY still comes from the pre-payment bill, and every
 // figure still comes from the server; the full-pay builder is untouched.
+//
+// Classic USD/LBP presentation: the receipt currency is the bill's own selling
+// currency (`primaryCurrency`), formatted by the shared `formatMoney` in the
+// preview - no separate historical-currency or decimal-digits input.
 
 export type TableOnAccountReceiptInput = {
   /** The bill as it stood immediately before completion - the ONLY source of identity. */
@@ -230,10 +294,7 @@ export type TableOnAccountReceiptInput = {
   branchName: string;
   operatorName: string;
   /** The bill's selling currency. */
-  primaryCurrency: OperationalCurrencyCode;
-  /** The bill's HISTORICAL currency + precision from the server (Slice 6B-2). */
-  receiptCurrency: string;
-  decimalDigits: number;
+  primaryCurrency: CurrencyCode;
   shiftId: string | null;
   at: string;
 };
@@ -244,8 +305,12 @@ export function buildTableOnAccountReceipt(input: TableOnAccountReceiptInput): R
   const subtotal = input.result?.subtotal ?? input.bill.subtotal ?? 0;
   const discount = input.result ? input.result.discount : Math.max(0, input.requestedDiscount);
   const total = input.result?.bill_total ?? Math.max(0, subtotal - discount);
-  const paidNow = input.result ? input.result.paid_usd : Math.max(0, input.requestedPaidNow);
-  const balance = input.result ? input.result.outstanding_primary : Math.max(0, total - paidNow);
+  // Paid now in the bill's OWN (operational) currency: bill total minus what is
+  // still owed. `paid_usd` is the USD accounting figure and would print e.g. 2.22
+  // on an LBP receipt - both operational figures are the server's, so derive from
+  // them and never show the USD amount as if it were local money.
+  const balance = input.result ? input.result.outstanding_primary : Math.max(0, total - Math.max(0, input.requestedPaidNow));
+  const paidNow = input.result ? Math.max(0, total - balance) : Math.max(0, input.requestedPaidNow);
 
   const orderNumbers = input.bill.orders.map((o) => o.order_number).filter(Boolean);
 
@@ -264,8 +329,7 @@ export function buildTableOnAccountReceipt(input: TableOnAccountReceiptInput): R
     paidAmount: paidNow,
     balanceDue: balance,
     method: input.method,
-    currency: input.receiptCurrency,
-    decimalDigits: input.decimalDigits,
+    currency: input.primaryCurrency,
     lines: input.bill.orders.flatMap((order) =>
       order.lines.map((l) => ({
         name: l.name,

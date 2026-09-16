@@ -25,7 +25,7 @@
 // restores the previous list because the list is only ever the server's.
 
 import { create } from "zustand";
-import { loadMenuBuilderData } from "@/lib/menu/repository";
+import { loadMenuBuilderOU, listBranches, type OUBranch } from "@/lib/menu/ouRepository";
 import { menuFailure, type MenuFailure } from "@/lib/menu/errors";
 import { EMPTY_MENU_BUILDER_DATA, type MenuBuilderData } from "@/lib/menu/types";
 
@@ -33,6 +33,9 @@ export type MenuBuilderStatus = "idle" | "loading" | "ready" | "error";
 
 export type MutationOutcome = { ok: true } | { ok: false; failure: MenuFailure };
 
+// The Menu Builder now authors ONE Operating Unit. `branchId` is the SELECTED unit
+// (null = nothing selected yet -> a blank, read-only workspace and no writes). There
+// is no implicit Main: the operator must choose a unit before any operational write.
 type MenuBuilderState = {
   status: MenuBuilderStatus;
   data: MenuBuilderData;
@@ -44,6 +47,13 @@ type MenuBuilderState = {
   pending: string[];
   /** True while a post-write refresh is running, so the UI can show it. */
   refreshing: boolean;
+  /** Operating Units the user may author, and the one currently selected. */
+  branches: OUBranch[];
+  branchesLoaded: boolean;
+  branchId: string | null;
+  loadBranches: (tenantId: string) => Promise<void>;
+  /** Select an OU (or clear). Blanks the workspace immediately; caller then load()s. */
+  setBranchId: (branchId: string | null) => void;
   load: (tenantId: string) => Promise<void>;
   refresh: (tenantId: string) => Promise<void>;
   mutate: (key: string, tenantId: string, action: string, run: () => Promise<void>) => Promise<MutationOutcome>;
@@ -58,11 +68,36 @@ export const useMenuBuilder = create<MenuBuilderState>((set, get) => ({
   loadedAt: null,
   pending: [],
   refreshing: false,
+  branches: [],
+  branchesLoaded: false,
+  branchId: null,
+
+  loadBranches: async (tenantId) => {
+    try {
+      const branches = await listBranches(tenantId);
+      set({ branches, branchesLoaded: true });
+    } catch {
+      set({ branches: [], branchesLoaded: true });
+    }
+  },
+
+  setBranchId: (branchId) => {
+    // Switching (or clearing) the OU blanks the workspace at once, so no stale
+    // categories/items/modifiers from the previous unit are ever shown.
+    set({ branchId, data: EMPTY_MENU_BUILDER_DATA, loadedAt: null, loadError: null, status: branchId ? "loading" : "ready" });
+  },
 
   load: async (tenantId) => {
+    const branchId = get().branchId;
+    if (!branchId) {
+      // No Operating Unit selected -> a genuinely blank workspace, never the tenant
+      // catalog or Main. Nothing is loaded until the operator chooses a unit.
+      set({ status: "ready", data: EMPTY_MENU_BUILDER_DATA, loadedAt: null, loadError: null });
+      return;
+    }
     set({ status: "loading", loadError: null });
     try {
-      const data = await loadMenuBuilderData(tenantId);
+      const data = await loadMenuBuilderOU(tenantId, branchId);
       set({ status: "ready", data, loadedAt: new Date().toISOString(), loadError: null });
     } catch (e) {
       set({ status: "error", loadError: menuFailure(e, "Loading the menu") });
@@ -70,16 +105,15 @@ export const useMenuBuilder = create<MenuBuilderState>((set, get) => ({
   },
 
   /**
-   * Re-read without blanking the screen.
-   *
-   * A failed refresh does NOT discard the data already on screen and does NOT
-   * flip the module into its error state - the last read is still the truth as
-   * of its timestamp, and `loadedAt` is what tells the operator how fresh it is.
+   * Re-read the SELECTED unit without blanking the screen. A failed refresh does
+   * NOT discard the data already on screen and does NOT flip into error state.
    */
   refresh: async (tenantId) => {
+    const branchId = get().branchId;
+    if (!branchId) return;
     set({ refreshing: true });
     try {
-      const data = await loadMenuBuilderData(tenantId);
+      const data = await loadMenuBuilderOU(tenantId, branchId);
       set({ data, loadedAt: new Date().toISOString(), status: "ready", loadError: null });
     } catch {
       /* keep the previous data; `loadedAt` still says when it was true */
@@ -110,5 +144,5 @@ export const useMenuBuilder = create<MenuBuilderState>((set, get) => ({
 
   isPending: (key) => get().pending.includes(key),
 
-  reset: () => set({ status: "idle", data: EMPTY_MENU_BUILDER_DATA, loadError: null, loadedAt: null, pending: [], refreshing: false }),
+  reset: () => set({ status: "idle", data: EMPTY_MENU_BUILDER_DATA, loadError: null, loadedAt: null, pending: [], refreshing: false, branchId: null }),
 }));
