@@ -87,6 +87,12 @@ export const POS_PERMISSIONS = {
   // are two separate authorities - the server treats them so, and so does this.
   RECEIVABLES_VIEW: "pos.receivables.view",
   RECEIVABLES_COLLECT: "pos.receivables.collect",
+  // Advanced Delivery Providers & Settlement configuration (Delivery Settlement WS3).
+  // The key delivery_provider_upsert / _set_active / _admin_list check for themselves,
+  // alongside the canonical `pos.delivery_providers` feature and exact-OU access. This
+  // is the SUBSCRIPTION-permission namespace and stays three-segment (the feature key
+  // is the two-segment `pos.delivery_providers`).
+  DELIVERY_PROVIDERS_MANAGE: "pos.delivery.providers.manage",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -164,6 +170,28 @@ export function canManageDelivery(ctx: PosAccessContext): Gate {
     return { allowed: false, reason: "Delivery is not enabled for this plan." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_MANAGE), "You do not have permission to manage delivery details.");
+}
+
+/**
+ * Managing the advanced Delivery Providers & Settlement configuration (Settings).
+ *
+ * A SETTINGS/admin surface, not an operational-POS action: unlike `canOperatePOS` it
+ * does NOT block owners — owners legitimately hold `pos.delivery.providers.manage` and
+ * the provider RPCs admit them. The order the server would refuse in: active membership,
+ * the canonical `pos.delivery_providers` feature (which itself requires the `pos` module),
+ * then the `pos.delivery.providers.manage` permission the provider RPCs check for
+ * themselves. Base Delivery / Delivery Fee / Delivery Ops / Delivery Report are never
+ * gated on this, and this is never a security boundary: the RPCs re-enforce every rule.
+ */
+export function canManageDeliveryProviders(ctx: PosAccessContext): Gate {
+  const m = ctx.membership;
+  if (!m || !isActiveMember(m.status)) {
+    return { allowed: false, reason: "Your membership is not active for this tenant." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS) || !hasFeature(ctx.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+    return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_PROVIDERS_MANAGE), "You do not have permission to manage delivery providers.");
 }
 
 /**
