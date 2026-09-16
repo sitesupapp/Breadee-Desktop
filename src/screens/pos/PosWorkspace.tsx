@@ -36,6 +36,9 @@ import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
 import { CurrentOrderPanel } from "@/components/pos/CurrentOrderPanel";
 import { OrdersModal } from "@/components/pos/OrdersModal";
+import { OpenTablesModal } from "@/components/pos/OpenTablesModal";
+import { selectOpenTables } from "@/lib/pos/openTables";
+import { loadFloorLayout, tableSectionMap } from "@/lib/pos/floor";
 import { DeliveryModal } from "@/components/pos/DeliveryModal";
 import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
@@ -76,7 +79,7 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canViewDelivery, canViewTables } from "@/lib/pos/access";
+import { canViewDelivery, canViewFloor, canViewTables } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
@@ -366,6 +369,13 @@ function PosWorkspaceInner() {
 
   // --- operations surfaces ---------------------------------------------------
   const [ordersOpen, setOrdersOpen] = useState(false);
+  const [openTablesOpen, setOpenTablesOpen] = useState(false);
+  // Best-effort section names from the PUBLISHED floor for the Open Tables list.
+  // Open Tables never DEPENDS on the floor: an empty map just means no section.
+  const [openTableSections, setOpenTableSections] = useState<Map<string, string>>(new Map());
+  // A slow tick so the "open for" badges age while the surface is watched. Runs
+  // only while the modal is open - no global timer.
+  const [openTablesNow, setOpenTablesNow] = useState(() => Date.now());
   const [deliveryOpen, setDeliveryOpen] = useState(false);
   /** The order a reversal was started for, and which reversal it is. */
   const [reversing, setReversing] = useState<{ order: ShiftOpenOrder; action: VoidAction } | null>(null);
@@ -724,6 +734,58 @@ function PosWorkspaceInner() {
   const deliveryGate = canViewDelivery(pos.access);
   const deliveryActive = mode === "delivery" && deliveryGate.allowed;
   const tableStore = useTables();
+  // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
+  // The rail count is derived from state already in memory - no fetch of its own.
+  const openTablesCount = useMemo(
+    () => selectOpenTables(tableStore.map.tables).length,
+    [tableStore.map.tables],
+  );
+  const refreshTables = useCallback(
+    () => void useTables.getState().refresh({ tenantId, branchId: pos.branch.id }),
+    [tenantId, pos.branch.id],
+  );
+  const openOpenTables = useCallback(() => {
+    setOpenTablesOpen(true);
+    refreshTables();
+  }, [refreshTables]);
+  // A row leaves the lens and enters the canonical Dine-in workspace with this
+  // table already selected. No settlement, clone or state change happens here -
+  // the existing bill panel owns everything the operator does next.
+  const openTableInService = useCallback(
+    (tableId: string) => {
+      setOpenTablesOpen(false);
+      setMode("dine_in");
+      void useTables.getState().select(tableId, { tenantId, branchId: pos.branch.id });
+    },
+    [tenantId, pos.branch.id],
+  );
+  // Section labels are best-effort: only when the surface is open AND the tenant
+  // is entitled to the floor. A branch with no published floor, or a load failure,
+  // yields no sections and Open Tables still works in full.
+  const floorEntitled = canViewFloor(pos.access).allowed;
+  useEffect(() => {
+    if (!openTablesOpen || !floorEntitled || !pos.branch.id) {
+      setOpenTableSections(new Map());
+      return;
+    }
+    let live = true;
+    loadFloorLayout(pos.branch.id)
+      .then((layout) => {
+        if (live) setOpenTableSections(tableSectionMap(layout));
+      })
+      .catch(() => {
+        if (live) setOpenTableSections(new Map());
+      });
+    return () => {
+      live = false;
+    };
+  }, [openTablesOpen, floorEntitled, pos.branch.id]);
+  useEffect(() => {
+    if (!openTablesOpen) return;
+    setOpenTablesNow(Date.now());
+    const id = window.setInterval(() => setOpenTablesNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, [openTablesOpen]);
   const roundMenu = useMemo(
     () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options }),
     [menu.groupsByItem, menu.groups, menu.options],
@@ -1617,7 +1679,7 @@ function PosWorkspaceInner() {
       icon: "takeaway",
       to: "/pos",
       enabled: true,
-      active: mode === "takeaway" && !ordersOpen,
+      active: mode === "takeaway" && !ordersOpen && !openTablesOpen,
       onSelect: () => setMode("takeaway"),
     },
     {
@@ -1627,7 +1689,7 @@ function PosWorkspaceInner() {
       to: "/pos",
       enabled: tablesGate.allowed,
       reason: tablesGate.reason,
-      active: mode === "dine_in" && !ordersOpen,
+      active: mode === "dine_in" && !ordersOpen && !openTablesOpen,
       onSelect: () => setMode("dine_in"),
     },
     {
@@ -1637,8 +1699,24 @@ function PosWorkspaceInner() {
       to: "/pos",
       enabled: deliveryGate.allowed,
       reason: deliveryGate.reason,
-      active: mode === "delivery" && !ordersOpen,
+      active: mode === "delivery" && !ordersOpen && !openTablesOpen,
       onSelect: () => setMode("delivery"),
+    },
+    {
+      // Open Tables: a read-only lens over the dine-in table map showing every
+      // table that still owes money. Gated EXACTLY like Dine-in (`canViewTables`,
+      // which is what `pos_table_map` itself demands) - viewing outstanding tables
+      // is viewing tables by another presentation, so it needs no new permission.
+      // A count-only badge; a row opens the canonical bill in Dine-in.
+      key: "open_tables",
+      label: "Open Tables",
+      icon: "open-tables",
+      to: "/pos",
+      enabled: tablesGate.allowed,
+      reason: tablesGate.reason,
+      active: openTablesOpen,
+      badge: openTablesCount,
+      onSelect: openOpenTables,
     },
     {
       // The EXISTING orders workspace, given the rail entry the approved design
@@ -1957,6 +2035,21 @@ function PosWorkspaceInner() {
 
       {dineInActive && dineIn.dialogs}
       {deliveryActive && delivery.dialogs}
+
+      {/* Open Tables: a read-only lens over the dine-in map. It reads the same
+          shared table store the workspace uses and settles nothing itself - a row
+          hands the table to the canonical Dine-in bill panel. */}
+      <OpenTablesModal
+        open={openTablesOpen}
+        onClose={() => setOpenTablesOpen(false)}
+        tables={tableStore.map.tables}
+        loading={tableStore.loading}
+        error={tableStore.error}
+        onRetry={refreshTables}
+        sectionFor={(id) => openTableSections.get(id) ?? null}
+        now={openTablesNow}
+        onSelectTable={openTableInService}
+      />
 
       {/* Operations surfaces. All three read the ONE shift-order store and all
           three reverse through the ONE dialog, so no screen can hold its own
