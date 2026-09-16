@@ -56,13 +56,19 @@ test("an owner cannot enter Delivery, same as every other POS workspace", () => 
   assert.equal(canViewDelivery(ctx({ role: "owner" })).allowed, false);
 });
 
-test("the only pos.delivery.* permission is the ops-management key", () => {
+test("the only pos.delivery.* permissions are the ops- and providers-management keys", () => {
   const keys = Object.values(POS_PERMISSIONS);
   // Delivery ORDER-TAKING still has no key of its own - POS access plus the
-  // `pos.delivery` sub-feature gate it. Delivery Management added exactly ONE
-  // delivery key: `pos.delivery.manage`, which `pos_set_delivery_ops` checks
-  // before writing the internal Delivered-By / Delivery-Cost fields.
-  assert.deepEqual(keys.filter((k) => k.startsWith("pos.delivery")), ["pos.delivery.manage"]);
+  // `pos.delivery` sub-feature gate it. Delivery Management added `pos.delivery.manage`,
+  // which `pos_set_delivery_ops` checks before writing the internal Delivered-By /
+  // Delivery-Cost fields. Delivery Settlement WS5 added exactly one more:
+  // `pos.delivery.providers.manage`, which the provider-config RPCs
+  // (delivery_provider_upsert / _set_active / _admin_list) check for themselves. No other
+  // pos.delivery.* permission exists.
+  assert.deepEqual(keys.filter((k) => k.startsWith("pos.delivery")), [
+    "pos.delivery.manage",
+    "pos.delivery.providers.manage",
+  ]);
   assert.ok(keys.includes("pos.customers.view"));
   assert.ok(keys.includes("pos.customers.manage"));
 });
