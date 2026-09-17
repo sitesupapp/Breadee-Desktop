@@ -60,8 +60,18 @@ import { MENU_CHANGED_EVENT } from "@/lib/menu/events";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { readPosFeatures } from "@/lib/pos/posFeatures";
-import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
+import { buildSubmitPayload, submitOrder, type SubmitOrderPayload } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
+import {
+  beginInflightSubmit,
+  clearInflightSubmit,
+  getUnresolvedSubmit,
+  UnresolvedSubmitExistsError,
+} from "@/lib/pos/inflightSubmit";
+import { isTransportFailure, recoverTakeawayPayment } from "@/lib/pos/takeawayPayment";
+import { getDeviceIdentity } from "@/lib/device";
+import type { InflightSubmit } from "@/lib/offline/db";
+import type { PayOrderResult } from "@/types/pos";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
@@ -960,10 +970,97 @@ function PosWorkspaceInner() {
       // an empty note is sent as null and produces the pre-existing payload.
       orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
     });
-    const saved = await submitOrder(payload);
+    const device = getDeviceIdentity();
+    // Durably journal this EXACT submit BEFORE the request, so a process/app crash
+    // between "sent" and "received" can be reconciled by the SAME id + SAME payload
+    // on restart (never rebuilt into a duplicate). This is NOT the offline outbox:
+    // nothing is queued and nothing replays on its own.
+    try {
+      await beginInflightSubmit({
+        client_op_id: opId,
+        payload,
+        ctx: {
+          tenant_id: tenantId ?? "",
+          branch_id: pos.branch.id,
+          terminal_id: device.terminal_id,
+          device_id: device.device_id,
+        },
+      });
+    } catch (e) {
+      if (e instanceof UnresolvedSubmitExistsError) {
+        toast.push({
+          tone: "warning",
+          message: "A previous order still needs verification.",
+          detail: "Resolve the pending order before sending another.",
+        });
+        return null;
+      }
+      throw e;
+    }
+    let saved: SubmitOrderResult;
+    try {
+      saved = await submitOrder(payload);
+    } catch (e) {
+      // Transport ambiguity (Failed to fetch / timeout): the request may have
+      // committed, so KEEP the journal unresolved for restart reconciliation. Any
+      // other failure is a certain non-commit, so the journal is cleared.
+      if (!isTransportFailure(e)) await clearInflightSubmit(opId).catch(() => {});
+      throw e;
+    }
+    await clearInflightSubmit(opId).catch(() => {});
     useCart.getState().setSavedOrder(saved);
     return saved;
-  }, [pos.branch.id, shiftId, toast]);
+  }, [pos.branch.id, shiftId, toast, tenantId]);
+
+  /**
+   * Explicit, cashier-initiated reconciliation of a crash-orphaned submit. Re-sends
+   * the EXACT persisted payload under the SAME `client_op_id`: m224 idempotency
+   * returns the original order if it committed (no duplicate), or commits it once
+   * if it never did. Never rebuilds the payload from the cart; never mints a new id.
+   */
+  const resolvePendingSubmit = useCallback(
+    async (entry: InflightSubmit) => {
+      try {
+        const saved = await submitOrder(entry.payload as SubmitOrderPayload);
+        await clearInflightSubmit(entry.client_op_id);
+        refreshShiftOrders(saved.order_id);
+        toast.push({
+          tone: "success",
+          message: `Pending order verified - ${saved.order_number || saved.order_id.slice(0, 8)}`,
+        });
+      } catch (e) {
+        // Transport still ambiguous, or a refusal: KEEP the journal unresolved.
+        // Never clear on uncertainty and never mint a new id.
+        const c = classifyError(e);
+        toast.push({
+          tone: "warning",
+          message: "Could not verify the pending order yet.",
+          detail: c.hint ? `${c.message} ${c.hint}` : c.message,
+        });
+      }
+    },
+    [refreshShiftOrders, toast],
+  );
+
+  // On startup, surface a crash-orphaned submit as an explicit one-tap action,
+  // scoped to THIS tenant + branch so another context's order is never shown or
+  // replayed (RLS is the server-side boundary on top). Never auto-submits.
+  const reconcileCheckedRef = useRef(false);
+  useEffect(() => {
+    if (reconcileCheckedRef.current) return;
+    if (!pos.allowed || !tenantId) return;
+    reconcileCheckedRef.current = true;
+    void (async () => {
+      const entry = await getUnresolvedSubmit(tenantId, pos.branch.id).catch(() => null);
+      if (!entry) return;
+      toast.push({
+        tone: "warning",
+        message: "A pending order needs verification.",
+        detail: "An order was being sent when the app last closed. Resolve it so it is neither lost nor duplicated.",
+        action: { label: "Resolve pending order", run: () => void resolvePendingSubmit(entry) },
+      });
+    })();
+  }, [pos.allowed, tenantId, pos.branch.id, toast, resolvePendingSubmit]);
 
   /**
    * Takeaway's shape of the shared kitchen-ticket call.
@@ -1233,6 +1330,8 @@ function PosWorkspaceInner() {
       setPayError(null);
       const lines = useCart.getState().lines;
       const existing = intent.kind === "order";
+      // Hoisted so the catch can recover a payment whose response was lost.
+      let recoverOrderId: string | null = null;
       try {
         // ONE settlement, whichever the target was. A draft has its order
         // created first (under the cart's own `client_op_id`, so a retry never
@@ -1242,6 +1341,7 @@ function PosWorkspaceInner() {
         const draft = intent.kind === "draft" ? await ensureOrder() : null;
         if (intent.kind === "draft" && !draft) return;
         const orderId = intent.kind === "order" ? intent.order.id : (draft as SubmitOrderResult).order_id;
+        recoverOrderId = orderId;
         const orderNumber =
           intent.kind === "order"
             ? (intent.order.order_number ?? intent.order.id.slice(0, 8))
@@ -1300,6 +1400,70 @@ function PosWorkspaceInner() {
         // receipt on screen and the order behind the buttons are the same sale.
         await adoptCreatedOrder(orderId);
       } catch (e) {
+        // A LOST RESPONSE after a committed charge looks like a transport failure.
+        // `pos_pay_order` has no idempotency key, so we ASK the server rather than
+        // guess - the same recovery model dine-in and delivery already use. The
+        // existing `inFlight` latch remains the only latch; none is added.
+        if (recoverOrderId && isTransportFailure(e)) {
+          try {
+            const rec = await recoverTakeawayPayment(recoverOrderId);
+            if (rec.verdict === "settled") {
+              const o = rec.order;
+              // Every figure is the SERVER's. Takeaway carries no delivery fee, so
+              // the discount is the exact subtotal-minus-total gap.
+              const recovered: PayOrderResult = {
+                order_id: o.id,
+                paid: true,
+                method: input.method,
+                subtotal: o.subtotal ?? 0,
+                discount: Math.max(0, (o.subtotal ?? 0) - (o.total_amount ?? 0)),
+                amount: o.total_amount ?? 0,
+                order_number: o.order_number ?? recoverOrderId.slice(0, 8),
+                currency_code: o.currency === "LBP" ? "LBP" : "USD",
+                original_amount: o.total_amount ?? 0,
+                exchange_rate: null,
+              };
+              const recoveredLines = await readOrderReceiptLines(recoverOrderId).catch(() => []);
+              const completion = completePayment({
+                result: recovered,
+                lines: [],
+                receiptLines: recoveredLines,
+                existingOrder: true,
+                fallbackOrderNumber: recovered.order_number,
+                tenantName: pos.tenantName,
+                branchName: pos.branch.name,
+                operatorName: pos.userName,
+                primaryCurrency: currency,
+                tenderCurrency: input.currency,
+                rate,
+                tenderedInput: input.tendered,
+                shiftId,
+                at: new Date().toLocaleString(),
+              });
+              for (const step of completion.steps) {
+                if (step === "present-receipt") presentReceipt(completion.receipt);
+                else if (step === "close-payment-dialog") setPayIntent(null);
+                else if (step === "reset-cart") newOrder();
+              }
+              void shiftStore.refreshCashBox();
+              toast.push({ tone: "success", message: `Payment recovered - order ${recovered.order_number}` });
+              await adoptCreatedOrder(recoverOrderId);
+              return;
+            }
+            if (rec.verdict === "unpaid") {
+              // Nothing was charged. A retry is a fresh, explicit operator choice.
+              setPayError("The payment did not go through. You can take payment again.");
+              return;
+            }
+          } catch {
+            /* fall through to the ambiguous message below */
+          }
+          // Ambiguous: never auto-retry, never guess about money.
+          setPayError(
+            "Could not confirm whether the payment went through. Do NOT take payment again - refresh and check whether the order is already paid.",
+          );
+          return;
+        }
         const c = classifyError(e);
         // The saved order is deliberately KEPT so a retry pays this same order.
         setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
