@@ -35,6 +35,13 @@ export const FEATURES = {
   // tenant is entitled, exactly like every other POS sub-feature. Gating only the
   // NEW Map view: with the feature off the Dine-in List is unchanged.
   POS_FLOOR_MAP: "pos.floor_map",
+  // Advanced Delivery Providers & Settlement (Delivery Settlement Wave 1). Canonical
+  // two-segment key emitted by `get_tenant_effective_features` (feature_key `pos`,
+  // sub-feature `delivery_providers`); OFF for Free/Basic, ON for Pro/Enterprise. The
+  // desktop stays dark unless the tenant is entitled, exactly like every other POS
+  // sub-feature. The advanced provider settings are gated on this AND the
+  // `pos.delivery.providers.manage` permission; base Delivery is never gated behind it.
+  POS_DELIVERY_PROVIDERS: "pos.delivery_providers",
 } as const;
 
 export type FeatureMap = Record<string, boolean>;
