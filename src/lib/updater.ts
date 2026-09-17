@@ -9,12 +9,17 @@
 //
 // THREE RULES SHAPE EVERYTHING BELOW.
 //
-// 1. STAGING MUST NEVER CONSUME THE PRODUCTION CHANNEL. This repository has
+// 1. NO BUILD MAY CONSUME ANOTHER ENVIRONMENT'S CHANNEL. This repository has
 //    already published a release tagged `desktop-v1.0.0-rc1-staging`. A generic
 //    "latest release" endpoint would happily serve that to a production till, so
-//    the endpoint is a dedicated production-only manifest AND every entry point
-//    here refuses to run unless `env.IS_PRODUCTION`. Two independent guards,
-//    because either one alone is a single point of failure.
+//    each environment reads its OWN dedicated manifest, signed with its OWN key,
+//    chosen by the compiled Tauri config: production reads
+//    `desktop-production-channel` from `tauri.conf.json`; staging reads
+//    `desktop-staging-channel` from `tauri.staging.conf.json`. A staging binary
+//    can therefore only ever reach the staging manifest and a production binary
+//    only the production one - the channel is picked by the build, never here.
+//    This module only decides WHEN to ask, in packaged production AND staging
+//    builds alike.
 //
 // 2. AN UPDATE OUTAGE MUST NEVER STOP A TILL OPENING. GitHub being unreachable,
 //    a malformed manifest, a rejected signature, a failed download - none of
@@ -78,23 +83,33 @@ export type UpdateState =
 /**
  * Is the updater usable in this build at all?
  *
- * False in dev, in the browser, and in every staging build. Staging is excluded
- * on purpose and not as an oversight: the production manifest describes
- * production binaries, and a staging terminal that "updated" itself onto one
- * would silently change which database it talks to.
+ * True only in a packaged native (Tauri) PRODUCTION or STAGING build. False in
+ * dev, in the browser, and under the test runner, none of which can install
+ * anything. Staging is INCLUDED on purpose: it reads its own dedicated
+ * `desktop-staging-channel` manifest, signed with the staging key, baked in from
+ * `tauri.staging.conf.json` - it can neither see nor install a production binary,
+ * so it cannot silently change which database it talks to. That per-environment
+ * channel is what makes enabling staging safe; nothing here chooses a channel.
  */
 export function isUpdaterAvailable(): boolean {
-  if (!env.IS_PRODUCTION) return false;
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  // A packaged native build only - never the dev server, a browser, or the Node
+  // test runner, none of which can install an application.
+  const isNativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (!isNativeApp) return false;
+  // Enabled for BOTH production and staging packaged builds. Each consumes only
+  // its own baked-in channel and key, so this can never cross environments.
+  return env.IS_PRODUCTION || env.IS_STAGING;
 }
 
 /** Why the updater is unavailable, in words a support technician can act on. */
 export function unavailableReason(): string | null {
-  if (!isUpdaterAvailable()) {
-    if (!env.IS_PRODUCTION) return `Updates are delivered to production builds only (this is ${env.APP_ENV}).`;
-    return "Updates are available only in the installed Desktop app.";
-  }
-  return null;
+  if (isUpdaterAvailable()) return null;
+  const isNativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (!isNativeApp) return "Updates are available only in the installed Desktop app.";
+  // Native, but an environment the app does not update from. `env.ts` admits only
+  // "production" and "staging", both enabled above, so this is a defensive
+  // fallback rather than a state a real build ever reaches.
+  return `Updates are not delivered to ${env.APP_ENV} builds.`;
 }
 
 /** True only when `candidate` is a well-formed version strictly newer than ours. */
@@ -150,8 +165,13 @@ export async function checkForUpdate(options: { silent: boolean }): Promise<Upda
     // Tauri already decided this is newer, and already verified the signature.
     // Re-checking the version is belt-and-braces against a manifest that
     // advertises a downgrade: installing one would be a silent rollback of a
-    // financial fix, which is the worst outcome this feature can produce.
-    if (!isNewerThanCurrent(found.version)) {
+    // financial fix, which is the worst outcome this feature can produce. The
+    // comparison reads the RUNNING binary's version (resolveRuntimeVersion, from
+    // Tauri) rather than the Vite-baked CURRENT_VERSION, so a stale frontend asset
+    // can never re-offer or suppress an update against a number the installed
+    // executable does not actually report.
+    const runningVersion = await resolveRuntimeVersion();
+    if (!isNewerThanCurrent(found.version, runningVersion)) {
       pending = null;
       return { kind: "up-to-date", checkedAt: Date.now() };
     }

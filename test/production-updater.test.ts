@@ -96,10 +96,16 @@ test("an unparseable version is never treated as newer", () => {
 
 // --- staging can never use the production channel -----------------------------
 
-test("the updater refuses to run outside a production build", () => {
-  assert.match(updaterTs, /if \(!env\.IS_PRODUCTION\) return false;/);
-  // And the reason is explicit rather than a silent no-op.
-  assert.match(updaterTs, /Updates are delivered to production builds only/);
+test("the updater runs in a packaged production or staging build, and nowhere else", () => {
+  // A packaged native build is required - never dev, the browser, or the test
+  // runner. Both production and staging self-update, each from its OWN channel.
+  assert.match(updaterTs, /const isNativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;/);
+  assert.match(updaterTs, /if \(!isNativeApp\) return false;/);
+  assert.match(updaterTs, /return env\.IS_PRODUCTION \|\| env\.IS_STAGING;/);
+  // The obsolete production-only lockout - which disabled the staging updater even
+  // though staging has its own isolated channel + key - must be gone.
+  assert.equal(/if \(!env\.IS_PRODUCTION\) return false;/.test(updaterTs), false);
+  assert.equal(/Updates are delivered to production builds only/.test(updaterTs), false);
 });
 
 test("every entry point goes through the availability gate", () => {
