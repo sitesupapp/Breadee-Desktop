@@ -28,9 +28,11 @@ import { compareVersions, isNewerThan } from "@/lib/version";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const read = (...p: string[]) => readFileSync(join(root, "..", ...p), "utf8");
+// tauri.staging.conf.json is saved with a UTF-8 BOM, which JSON.parse rejects.
+const readJson = (...p: string[]) => JSON.parse(read(...p).replace(/^﻿/, ""));
 
-const baseConf = JSON.parse(read("src-tauri", "tauri.conf.json"));
-const stagingConf = JSON.parse(read("src-tauri", "tauri.staging.conf.json"));
+const baseConf = readJson("src-tauri", "tauri.conf.json");
+const stagingConf = readJson("src-tauri", "tauri.staging.conf.json");
 const updaterTs = read("src", "lib", "updater.ts");
 const envTs = read("src", "env.ts");
 const storeTs = read("src", "state", "updates.ts");
