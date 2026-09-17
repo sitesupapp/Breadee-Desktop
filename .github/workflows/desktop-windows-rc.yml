@@ -32,6 +32,14 @@
 name: Desktop Windows RC (Artifact, Build-Only)
 
 on:
+  # BUILD-ONLY. A push to the dedicated RC packaging branch builds the isolated
+  # RC installer as a downloadable ARTIFACT only (no release, no tag, no channel
+  # write). Mirrors the staging BOOTSTRAP idiom, and is how this build is
+  # triggered while the workflow file lives only on the RC branch (a brand-new
+  # workflow_dispatch-only workflow is not dispatchable until it reaches the
+  # default branch). workflow_dispatch is kept for re-runs once it is on default.
+  push:
+    branches: [feature/pos-online-resilience-phaseA-rc-packaging]
   workflow_dispatch:
 
 # Artifact-only. No release assets, no channel manifest — read is enough.
