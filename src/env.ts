@@ -103,4 +103,5 @@ export const env = {
   APP_NAME: raw.APP_NAME,
   APP_VERSION: raw.APP_VERSION,
   IS_PRODUCTION: APP_ENV === "production",
+  IS_STAGING: APP_ENV === "staging",
 };
