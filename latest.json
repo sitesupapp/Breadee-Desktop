@@ -1,0 +1,11 @@
+{
+  "version": "1.0.22",
+  "notes": "Breadee Desktop 1.0.22",
+  "pub_date": "2026-09-17T19:56:58Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dHlyQjBtL2tGOXZnalVyTlh1ZjNiMis0R3VnTnVOeERCLzNzY2lmVTZFdjk1bXhEcFBqUC9qaFFHbXhhbW80VVNRTU9lSVQ4blcrWWxYejNUZE12emdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5Njc1MDEyCWZpbGU6QnJlYWRlZV8xLjAuMjJfeDY0LXNldHVwLmV4ZQo0MkxGbHZQVzJoSU9rWWNVZmY3OTJIdWp5VTJ0eVZNb2NpMlpqMFFVMFZ0RFVmRWtVeWtGT1BteW8xZkhxYytvemFqU29uMlBJZkVzM3h3ZkpncWNCdz09Cg==",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.22/Breadee_1.0.22_x64-setup.exe"
+    }
+  }
+}
