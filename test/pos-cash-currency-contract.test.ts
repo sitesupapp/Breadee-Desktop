@@ -79,10 +79,22 @@ test("the USD cash figure and the LBP sales figure are consistent, not equal", (
 // --- End Shift: expected, counted and difference share one unit --------------
 
 test("every drawer figure in End Shift is USD", () => {
-  for (const row of ["expected.opening_cash", "expected.cash_sales", "expected.expected"]) {
+  for (const row of ["expected.opening_cash", "expected.cash_sales"]) {
     assert.match(
       shiftDialog,
       new RegExp(`formatMoney\\(${row.replace(".", "\\.")}, CASH_CONTRACT_CURRENCY\\)`),
+      `${row} must be USD`,
+    );
+  }
+  // The headline Expected is the figure the drawer is closed against: the server's
+  // `expected` (delivery included) or `expected_excluded` (delivery kept separate).
+  // It is USD whatever the tenant currency - the whole point of this contract.
+  assert.match(shiftDialog, /formatMoney\(expectedForClose \?\? expected\.expected, CASH_CONTRACT_CURRENCY\)/);
+  // The Delivery Fee treatment figures are USD too (they adjust a USD drawer).
+  for (const row of ["expected.total_delivery_fees", "expected.delivery_fees_cash"]) {
+    assert.match(
+      shiftDialog,
+      new RegExp(`formatMoney\\(${row.replace(/\./g, "\\.")}, CASH_CONTRACT_CURRENCY\\)`),
       `${row} must be USD`,
     );
   }

@@ -98,6 +98,15 @@ export type MenuData = {
 
 export type ShiftStatus = "open" | "ended_by_cashier" | "pending_manager_review" | "approved" | "rejected";
 
+/**
+ * How Delivery Fees are treated against the drawer at End Shift.
+ *   - "included": Delivery Fees stay in Expected Cash (historical/default behaviour).
+ *   - "excluded": the CASH-collected portion of Delivery Fees is removed from
+ *                 Expected Cash (courier keeps the fee cash; no false shortage).
+ * The number itself is always the SERVER's - the desktop only selects and displays.
+ */
+export type DeliveryFeeCashTreatment = "included" | "excluded";
+
 export type ActiveShift = {
   id: string;
   status: ShiftStatus;
@@ -116,6 +125,16 @@ export type ShiftExpected = {
   cash_lbp_original: number;
   cash_lbp_usd: number;
   exchange_rate: number | null;
+  // Delivery Fee shift treatment (m20260917120000). All server-computed.
+  delivery_order_count: number;
+  total_delivery_fees: number;
+  /** Cash-collected (prorated) delivery fees eligible to be kept out of the drawer. */
+  delivery_fees_cash: number;
+  delivery_fee_cash_treatment: DeliveryFeeCashTreatment;
+  /** `expected` with delivery fees INCLUDED (== `expected`). */
+  expected_included: number;
+  /** `expected` with the cash delivery-fee portion EXCLUDED. */
+  expected_excluded: number;
 };
 
 /** `pos_cash_box_shift` response. Server-authoritative. */
@@ -134,6 +153,13 @@ export type CashBox = {
   total_lbp: number | null;
   expected_cash: number;
   payment_count: number;
+  // Delivery Fee shift treatment (m20260917120000). All server-computed.
+  delivery_order_count: number;
+  total_delivery_fees: number;
+  delivery_fees_cash: number;
+  delivery_fee_cash_treatment: DeliveryFeeCashTreatment;
+  /** `expected_cash` with the cash delivery-fee portion EXCLUDED. */
+  expected_cash_excluded: number;
 };
 
 /** `pos_end_shift` report. Server-authoritative. */
@@ -159,6 +185,11 @@ export type ShiftReport = {
   exchange_rate: number | null;
   by_item: { item: string; qty: number; total: number }[];
   payments: Record<string, number>;
+  // Delivery Fee shift treatment (m20260917120000). Persisted with the close snapshot.
+  delivery_order_count: number;
+  total_delivery_fees: number;
+  delivery_fees_cash: number;
+  delivery_fee_cash_treatment: DeliveryFeeCashTreatment;
 };
 
 // --- Orders / payments -------------------------------------------------------

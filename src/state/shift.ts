@@ -7,7 +7,7 @@
 // this level was built to remove.
 
 import { create } from "zustand";
-import type { ActiveShift, CashBox, ShiftReport } from "@/types/pos";
+import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftReport } from "@/types/pos";
 import { endShift, findOpenShift, getCashBox, openShift } from "@/lib/pos/shifts";
 
 type ShiftState = {
@@ -21,7 +21,11 @@ type ShiftState = {
   refresh: (tenantId: string, userId: string) => Promise<void>;
   refreshCashBox: () => Promise<void>;
   open: (input: { tenantId: string; userId: string; branchId: string | null; openingCash: number }) => Promise<void>;
-  close: (input: { actualCashCounted: number; notes: string | null }) => Promise<ShiftReport>;
+  close: (input: {
+    actualCashCounted: number;
+    notes: string | null;
+    deliveryFeeCashTreatment?: DeliveryFeeCashTreatment;
+  }) => Promise<ShiftReport>;
   clearReport: () => void;
   clear: () => void;
 };
@@ -66,10 +70,10 @@ export const useShift = create<ShiftState>((set, get) => ({
     await get().refresh(tenantId, userId);
   },
 
-  close: async ({ actualCashCounted, notes }) => {
+  close: async ({ actualCashCounted, notes, deliveryFeeCashTreatment }) => {
     const shift = get().shift;
     if (!shift) throw new Error("There is no open shift to end.");
-    const report = await endShift({ shiftId: shift.id, actualCashCounted, notes });
+    const report = await endShift({ shiftId: shift.id, actualCashCounted, notes, deliveryFeeCashTreatment });
     // The shift is now pending_manager_review - it is no longer usable for orders.
     set({ shift: null, cashBox: null, lastReport: report });
     return report;

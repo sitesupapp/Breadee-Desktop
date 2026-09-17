@@ -14,7 +14,7 @@
 // needed, it is read from the RPC response. That is the whole point: the desktop
 // can never disagree with the shift report.
 
-import type { ActiveShift, CashBox, ShiftExpected, ShiftReport, ShiftStatus } from "@/types/pos";
+import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftExpected, ShiftReport, ShiftStatus } from "@/types/pos";
 import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull } from "@/lib/pos/rpc";
 
 const SHIFT_STATUSES: ShiftStatus[] = ["open", "ended_by_cashier", "pending_manager_review", "approved", "rejected"];
@@ -22,6 +22,11 @@ const SHIFT_STATUSES: ShiftStatus[] = ["open", "ended_by_cashier", "pending_mana
 function toShiftStatus(value: unknown): ShiftStatus {
   const s = str(value);
   return (SHIFT_STATUSES as string[]).includes(s) ? (s as ShiftStatus) : "open";
+}
+
+/** Delivery-fee treatment, defaulting to the historical "included" for any older row. */
+function toTreatment(value: unknown): DeliveryFeeCashTreatment {
+  return str(value) === "excluded" ? "excluded" : "included";
 }
 
 /**
@@ -80,6 +85,13 @@ export async function getShiftExpected(shiftId: string): Promise<ShiftExpected> 
     cash_lbp_original: num(row.cash_lbp_original),
     cash_lbp_usd: num(row.cash_lbp_usd),
     exchange_rate: numOrNull(row.exchange_rate),
+    delivery_order_count: num(row.delivery_order_count),
+    total_delivery_fees: num(row.total_delivery_fees),
+    delivery_fees_cash: num(row.delivery_fees_cash),
+    delivery_fee_cash_treatment: toTreatment(row.delivery_fee_cash_treatment),
+    // Fall back to `expected` for older servers that don't return the split yet.
+    expected_included: row.expected_included == null ? num(row.expected) : num(row.expected_included),
+    expected_excluded: row.expected_excluded == null ? num(row.expected) : num(row.expected_excluded),
   };
 }
 
@@ -101,6 +113,12 @@ export async function getCashBox(shiftId: string | null): Promise<CashBox> {
     total_lbp: numOrNull(row.total_lbp),
     expected_cash: num(row.expected_cash),
     payment_count: num(row.payment_count),
+    delivery_order_count: num(row.delivery_order_count),
+    total_delivery_fees: num(row.total_delivery_fees),
+    delivery_fees_cash: num(row.delivery_fees_cash),
+    delivery_fee_cash_treatment: toTreatment(row.delivery_fee_cash_treatment),
+    expected_cash_excluded:
+      row.expected_cash_excluded == null ? num(row.expected_cash) : num(row.expected_cash_excluded),
   };
 }
 
@@ -126,6 +144,11 @@ export async function endShift(input: {
   shiftId: string;
   actualCashCounted: number;
   notes: string | null;
+  /**
+   * The one grouped shift-level choice. Omitted / older clients => the server
+   * defaults to "included", i.e. exactly the pre-feature behaviour.
+   */
+  deliveryFeeCashTreatment?: DeliveryFeeCashTreatment;
 }): Promise<ShiftReport> {
   const row = asRecord(
     await callPosRpc("pos_end_shift", {
@@ -133,6 +156,7 @@ export async function endShift(input: {
         shift_id: input.shiftId,
         actual_cash_counted: Number(input.actualCashCounted) || 0,
         notes: input.notes && input.notes.trim() !== "" ? input.notes.trim() : null,
+        delivery_fee_cash_treatment: input.deliveryFeeCashTreatment ?? "included",
       },
     }),
   );
@@ -158,6 +182,10 @@ export async function endShift(input: {
     exchange_rate: numOrNull(row.exchange_rate),
     by_item: toByItem(row.by_item),
     payments: toPayments(row.payments),
+    delivery_order_count: num(row.delivery_order_count),
+    total_delivery_fees: num(row.total_delivery_fees),
+    delivery_fees_cash: num(row.delivery_fees_cash),
+    delivery_fee_cash_treatment: toTreatment(row.delivery_fee_cash_treatment),
   };
 }
 

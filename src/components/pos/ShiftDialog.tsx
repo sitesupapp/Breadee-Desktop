@@ -13,7 +13,7 @@ import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } f
 import { differenceLabel } from "@/lib/pos/shifts";
 import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
-import type { ShiftExpected, ShiftReport } from "@/types/pos";
+import type { DeliveryFeeCashTreatment, ShiftExpected, ShiftReport } from "@/types/pos";
 
 export function OpenShiftDialog({
   open,
@@ -108,20 +108,30 @@ export function EndShiftDialog({
   gate: Gate;
   error: string | null;
   onCancel: () => void;
-  onConfirm: (input: { actual: number; notes: string | null }) => void;
+  onConfirm: (input: { actual: number; notes: string | null; treatment: DeliveryFeeCashTreatment }) => void;
 }) {
   const [actual, setActual] = useState("");
   const [notes, setNotes] = useState("");
+  // ONE grouped shift-level choice. Defaults to "included" = current behaviour.
+  const [treatment, setTreatment] = useState<DeliveryFeeCashTreatment>("included");
 
   useEffect(() => {
     if (open) {
       setActual("");
       setNotes("");
+      setTreatment("included");
     }
   }, [open]);
 
   const counted = parseAmount(actual);
-  const preview = expected ? expected.expected - counted : null;
+  // Which Expected the drawer is closed against - the SERVER computed both.
+  const hasDeliveryFees = !!expected && expected.total_delivery_fees > 0;
+  const expectedForClose = expected
+    ? treatment === "excluded"
+      ? expected.expected_excluded
+      : expected.expected
+    : null;
+  const preview = expectedForClose === null ? null : expectedForClose - counted;
   const previewLabel = preview === null ? null : differenceLabel(preview);
 
   return (
@@ -140,7 +150,7 @@ export function EndShiftDialog({
             </Button>
             <Button
               size="lg"
-              onClick={() => onConfirm({ actual: counted, notes: notes.trim() || null })}
+              onClick={() => onConfirm({ actual: counted, notes: notes.trim() || null, treatment })}
               disabled={busy || !gate.allowed}
               title={gate.reason ?? undefined}
             >
@@ -161,14 +171,56 @@ export function EndShiftDialog({
                     three and the input below must share one unit. */}
                 <SummaryRow label="Opening float" value={formatMoney(expected.opening_cash, CASH_CONTRACT_CURRENCY)} />
                 <SummaryRow label="Cash taken" value={formatMoney(expected.cash_sales, CASH_CONTRACT_CURRENCY)} />
+
+                {hasDeliveryFees && (
+                  <div className="mt-2 border-t border-line pt-2">
+                    <SummaryRow label="Delivery orders" value={String(expected.delivery_order_count)} />
+                    <SummaryRow
+                      label="Delivery fees"
+                      value={formatMoney(expected.total_delivery_fees, CASH_CONTRACT_CURRENCY)}
+                    />
+                    {/* ONE grouped choice for the whole shift. The number below is
+                        the server's - selecting only picks which Expected to close
+                        against; nothing is recomputed on the client. */}
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <Button
+                        variant={treatment === "included" ? "primary" : "ghost"}
+                        size="md"
+                        onClick={() => setTreatment("included")}
+                        disabled={busy}
+                      >
+                        Include in cash
+                      </Button>
+                      <Button
+                        variant={treatment === "excluded" ? "primary" : "ghost"}
+                        size="md"
+                        onClick={() => setTreatment("excluded")}
+                        disabled={busy}
+                      >
+                        Separate from cash
+                      </Button>
+                    </div>
+                    {treatment === "excluded" && (
+                      <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                        Delivery-fee cash kept out of the drawer:{" "}
+                        <span className="font-bold tabular-nums">
+                          {formatMoney(expected.delivery_fees_cash, CASH_CONTRACT_CURRENCY)}
+                        </span>
+                        . The courier keeps it, so it is not expected in the till.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <div className="mt-1 flex items-baseline justify-between border-t border-line pt-2">
                   <span className="text-sm font-bold text-ink">Expected</span>
                   <span className="text-xl font-extrabold tabular-nums text-ink">
-                    {formatMoney(expected.expected, CASH_CONTRACT_CURRENCY)}
+                    {formatMoney(expectedForClose ?? expected.expected, CASH_CONTRACT_CURRENCY)}
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-sub">
                   {expected.orders} paid order{expected.orders === 1 ? "" : "s"} this shift
+                  {treatment === "excluded" && hasDeliveryFees ? " · delivery fees kept separate" : ""}
                 </p>
               </>
             ) : (
@@ -290,6 +342,27 @@ export function ShiftReportDialog({
           <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, CASH_CONTRACT_CURRENCY)} />
           <SummaryRow label="Expected" value={formatMoney(report.expected_cash, CASH_CONTRACT_CURRENCY)} />
           <SummaryRow label="Counted" value={formatMoney(report.actual_cash, CASH_CONTRACT_CURRENCY)} />
+          {report.total_delivery_fees > 0 && (
+            <div className="mt-1 border-t border-line pt-1">
+              {/* Delivery fees stay visible and reportable regardless of treatment. */}
+              <SummaryRow
+                label={`Delivery fees (${report.delivery_order_count})`}
+                value={formatMoney(report.total_delivery_fees, CASH_CONTRACT_CURRENCY)}
+              />
+              <SummaryRow
+                label="Fee treatment"
+                value={report.delivery_fee_cash_treatment === "excluded" ? "Kept separate" : "In cash"}
+                tone={report.delivery_fee_cash_treatment === "excluded" ? "amber" : undefined}
+              />
+              {report.delivery_fee_cash_treatment === "excluded" && (
+                <SummaryRow
+                  label="Kept out of drawer"
+                  value={formatMoney(report.delivery_fees_cash, CASH_CONTRACT_CURRENCY)}
+                  tone="amber"
+                />
+              )}
+            </div>
+          )}
         </div>
         <div className="rounded-xl border border-line p-3">
           <p className="mb-2 text-sm font-bold text-ink">Sales ({currency})</p>

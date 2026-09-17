@@ -84,7 +84,7 @@ import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
-import type { CartLine, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
+import type { CartLine, DeliveryFeeCashTreatment, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
 
@@ -1494,7 +1494,7 @@ function PosWorkspaceInner() {
   }, [shiftId]);
 
   const doEndShift = useCallback(
-    async (input: { actual: number; notes: string | null }) => {
+    async (input: { actual: number; notes: string | null; treatment: DeliveryFeeCashTreatment }) => {
       setBusy(true);
       setShiftError(null);
       // Snapshotted BEFORE the close. Closing clears the active shift and the
@@ -1502,7 +1502,11 @@ function PosWorkspaceInner() {
       // shift - the one thing an end-of-shift report must not do.
       const closing = useShiftOrders.getState().orders;
       try {
-        await shiftStore.close({ actualCashCounted: input.actual, notes: input.notes });
+        await shiftStore.close({
+          actualCashCounted: input.actual,
+          notes: input.notes,
+          deliveryFeeCashTreatment: input.treatment,
+        });
         setClosedShiftOrders(closing);
         setEndShiftOpen(false);
         newOrder();
