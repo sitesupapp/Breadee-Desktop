@@ -61,13 +61,16 @@ test("the only pos.delivery.* permissions are the ops- and providers-management 
   // Delivery ORDER-TAKING still has no key of its own - POS access plus the
   // `pos.delivery` sub-feature gate it. Delivery Management added `pos.delivery.manage`,
   // which `pos_set_delivery_ops` checks before writing the internal Delivered-By /
-  // Delivery-Cost fields. Delivery Settlement WS5 added exactly one more:
-  // `pos.delivery.providers.manage`, which the provider-config RPCs
-  // (delivery_provider_upsert / _set_active / _admin_list) check for themselves. No other
-  // pos.delivery.* permission exists.
+  // Delivery-Cost fields. Delivery Settlement WS5 added `pos.delivery.providers.manage`,
+  // which the provider-CONFIG RPCs (delivery_provider_upsert / _set_active / _admin_list)
+  // check for themselves. WS6 added exactly one more, the cashier-default OPERATIONAL
+  // key `pos.delivery.cost.capture`, which delivery_providers_operational /
+  // pos_delivery_set_provider check for themselves — deliberately separate from the
+  // manager's providers.manage. No other pos.delivery.* permission exists.
   assert.deepEqual(keys.filter((k) => k.startsWith("pos.delivery")), [
     "pos.delivery.manage",
     "pos.delivery.providers.manage",
+    "pos.delivery.cost.capture",
   ]);
   assert.ok(keys.includes("pos.customers.view"));
   assert.ok(keys.includes("pos.customers.manage"));

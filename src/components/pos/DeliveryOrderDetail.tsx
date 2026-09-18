@@ -36,6 +36,8 @@ import {
   type VoidAction,
 } from "@/lib/pos/deliveryOrderManagement";
 import { DeliveryOpsEditor } from "@/components/pos/DeliveryOpsEditor";
+import { DeliveryProviderEditor } from "@/components/pos/DeliveryProviderEditor";
+import type { OperationalProvider } from "@/lib/pos/deliveryProviderCapture";
 
 export type DeliveryOrderDetailProps = {
   order: DeliveryQueueOrder;
@@ -56,6 +58,25 @@ export type DeliveryOrderDetailProps = {
   opsEditing: boolean;
   opsBusy: boolean;
   opsError: string | null;
+  /**
+   * Advanced Delivery Providers (WS6.3). When `providerModeOn` (feature ON AND the
+   * branch has active providers) the provider/cost capture surface REPLACES the
+   * legacy ops-cost editor — the two are separate models, never combined. With the
+   * feature off, or zero active providers, all of this is inert and the legacy
+   * "Delivery details" card renders exactly as before (zero-provider preservation).
+   */
+  providerModeOn: boolean;
+  providers: OperationalProvider[];
+  /** `pos.delivery.cost.capture`. Offers the provider editor; the RPC re-enforces it. */
+  costCaptureGate: Gate;
+  provEditing: boolean;
+  provBusy: boolean;
+  provError: string | null;
+  /** UX-only friendly pre-pay guard (server re-enforces). Null when finalize may proceed. */
+  finalizeBlock: string | null;
+  onEditProvider: () => void;
+  onCancelProvider: () => void;
+  onSaveProvider: (values: { providerId: string; cost: { value: number | null; provided: boolean } }) => void;
   onBack: () => void;
   onEdit: () => void;
   onVoid: () => void;
@@ -204,63 +225,138 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
         </div>
       </div>
 
-      {/* Internal delivery operations. The delivery FEE is the customer's charge
-          (also on the receipt); the delivery COST and the recorded MARGIN are the
-          business's own record and are DELIBERATELY never printed on the customer
+      {/* Advanced Delivery Providers (WS6.3). Shown INSTEAD of the legacy ops-cost
+          editor when the feature is on AND the branch has active providers. The two
+          are separate models (never combined): this card reads/writes only the
+          settlement provider + delivery cost, through pos_delivery_set_provider. The
+          Delivery FEE (customer charge) and Delivery COST (what you pay the provider)
+          are shown as two clearly-labelled lines so the distinction is obvious. */}
+      {props.providerModeOn &&
+        (() => {
+          const prov = o.delivery_provider_id
+            ? props.providers.find((p) => p.id === o.delivery_provider_id) ?? null
+            : null;
+          return (
+            <div className="rounded-2xl border border-line bg-white p-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-extrabold text-ink">Delivery provider</p>
+                <Badge tone={collected ? "green" : "amber"}>{collected ? "Collected" : "Not collected"}</Badge>
+              </div>
+              <div className="mt-2 space-y-1">
+                <Row label="Provider" value={prov ? prov.name : o.delivery_provider_id ? "-" : "Not set"} />
+                <Row label="Delivery fee (customer)" value={formatMoney(deliveryFee, currency)} />
+                {/* NULL (not provided) reads as "Not provided"; an explicit 0 formats
+                    as money — the display itself keeps NULL distinct from 0. */}
+                <Row
+                  label="Delivery cost (provider)"
+                  value={o.delivery_cost == null ? "Not provided" : formatMoney(o.delivery_cost, currency)}
+                />
+              </div>
+              {!props.provEditing ? (
+                <GatedButton
+                  gate={props.costCaptureGate}
+                  variant="ghost"
+                  size="md"
+                  className="mt-3 w-full"
+                  onClick={props.onEditProvider}
+                >
+                  {o.delivery_provider_id ? "Edit delivery provider" : "Set delivery provider"}
+                </GatedButton>
+              ) : (
+                <DeliveryProviderEditor
+                  initial={{ delivery_provider_id: o.delivery_provider_id ?? null, delivery_cost: o.delivery_cost ?? null }}
+                  providers={props.providers}
+                  currency={currency}
+                  gate={props.costCaptureGate}
+                  busy={props.provBusy}
+                  error={props.provError}
+                  onSave={props.onSaveProvider}
+                  onCancel={props.onCancelProvider}
+                />
+              )}
+              {props.finalizeBlock && !props.provEditing && (
+                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-900">
+                  {props.finalizeBlock}
+                </p>
+              )}
+            </div>
+          );
+        })()}
+
+      {/* Internal delivery operations (legacy). The delivery FEE is the customer's
+          charge (also on the receipt); the delivery COST and the recorded MARGIN are
+          the business's own record and are DELIBERATELY never printed on the customer
           receipt. Editing writes only through pos_set_delivery_ops, gated by
-          pos.delivery.manage - never a direct pos_orders update from here. */}
-      <div className="rounded-2xl border border-line bg-white p-4">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-extrabold text-ink">Delivery details</p>
-          <Badge tone={collected ? "green" : "amber"}>{collected ? "Collected" : "Not collected"}</Badge>
+          pos.delivery.manage - never a direct pos_orders update from here. Preserved
+          unchanged as the surface when advanced providers are off, OR the branch has
+          zero active providers (server no-ops the settlement — zero-provider mode). */}
+      {!props.providerModeOn && (
+        <div className="rounded-2xl border border-line bg-white p-4">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-extrabold text-ink">Delivery details</p>
+            <Badge tone={collected ? "green" : "amber"}>{collected ? "Collected" : "Not collected"}</Badge>
+          </div>
+          <div className="mt-2 space-y-1">
+            <Row label="Delivered by" value={deliveredBy} />
+            <Row label="Delivery fee" value={formatMoney(deliveryFee, currency)} />
+            <Row
+              label="Delivery cost"
+              value={o.delivery_cost == null ? "Not recorded" : formatMoney(o.delivery_cost, currency)}
+            />
+            <Row label="Recorded margin" value={margin == null ? "-" : formatMoney(margin, currency)} />
+          </div>
+          {!props.opsEditing ? (
+            <GatedButton
+              gate={props.manageDeliveryGate}
+              variant="ghost"
+              size="md"
+              className="mt-3 w-full"
+              onClick={props.onEditOps}
+            >
+              Edit delivery details
+            </GatedButton>
+          ) : (
+            <DeliveryOpsEditor
+              initial={{
+                delivery_handler_type: handlerType,
+                delivered_by_user_id: o.delivered_by_user_id ?? null,
+                delivery_person_ref: o.delivery_person_ref ?? null,
+                delivery_cost: o.delivery_cost ?? null,
+              }}
+              currency={currency}
+              gate={props.manageDeliveryGate}
+              busy={props.opsBusy}
+              error={props.opsError}
+              onSave={props.onSaveOps}
+              onCancel={props.onCancelOps}
+            />
+          )}
         </div>
-        <div className="mt-2 space-y-1">
-          <Row label="Delivered by" value={deliveredBy} />
-          <Row label="Delivery fee" value={formatMoney(deliveryFee, currency)} />
-          <Row
-            label="Delivery cost"
-            value={o.delivery_cost == null ? "Not recorded" : formatMoney(o.delivery_cost, currency)}
-          />
-          <Row label="Recorded margin" value={margin == null ? "-" : formatMoney(margin, currency)} />
-        </div>
-        {!props.opsEditing ? (
-          <GatedButton
-            gate={props.manageDeliveryGate}
-            variant="ghost"
-            size="md"
-            className="mt-3 w-full"
-            onClick={props.onEditOps}
-          >
-            Edit delivery details
-          </GatedButton>
-        ) : (
-          <DeliveryOpsEditor
-            initial={{
-              delivery_handler_type: handlerType,
-              delivered_by_user_id: o.delivered_by_user_id ?? null,
-              delivery_person_ref: o.delivery_person_ref ?? null,
-              delivery_cost: o.delivery_cost ?? null,
-            }}
-            currency={currency}
-            gate={props.manageDeliveryGate}
-            busy={props.opsBusy}
-            error={props.opsError}
-            onSave={props.onSaveOps}
-            onCancel={props.onCancelOps}
-          />
-        )}
-      </div>
+      )}
 
       <div className="space-y-2 pb-2">
         {/* Pay reuses Level 3C's settlement path in full - the same gate, the
             same dialog, the same pre-payment re-read and the same latch. There
             is no second payment implementation behind this button. Kept the
             full-size primary so it stays the obvious control. */}
-        {!terminal && o.payment_status !== "paid" && (
-          <GatedButton gate={props.payGate} size="lg" className="w-full" onClick={props.onPay}>
-            Pay (F4)
-          </GatedButton>
-        )}
+        {!terminal &&
+          o.payment_status !== "paid" &&
+          (props.finalizeBlock ? (
+            // UX-only settlement guard. The server re-enforces at pos_pay_order /
+            // pos_complete_on_account, so Pay is disabled here purely to guide.
+            <>
+              <Button size="lg" className="w-full" disabled>
+                Pay (F4)
+              </Button>
+              <p className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-900">
+                {props.finalizeBlock}
+              </p>
+            </>
+          ) : (
+            <GatedButton gate={props.payGate} size="lg" className="w-full" onClick={props.onPay}>
+              Pay (F4)
+            </GatedButton>
+          ))}
 
         {/* Edit + Print, paired to save height. "Print" (was mislabelled
             "Receipt preview") prints this order's receipt through the existing

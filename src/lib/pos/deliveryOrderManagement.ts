@@ -67,6 +67,14 @@ export type DeliveryQueueOrder = {
   delivered_by_user_id?: string | null;
   delivery_person_ref?: string | null;
   delivery_cost?: number | null;
+  /**
+   * Advanced Delivery Providers (Delivery Settlement WS6). `branch_id` anchors which
+   * operational provider list applies; `delivery_provider_id` is the settlement
+   * provider persisted by `pos_delivery_set_provider` (server-authoritative). Both
+   * optional so pre-WS6 callers and fixtures need not set them.
+   */
+  branch_id?: string | null;
+  delivery_provider_id?: string | null;
   total_amount: number | null;
   currency: string | null;
   customer_id: string | null;
@@ -97,6 +105,8 @@ function toQueueOrder(raw: unknown): DeliveryQueueOrder | null {
     delivered_by_user_id: strOrNull(r.delivered_by_user_id),
     delivery_person_ref: strOrNull(r.delivery_person_ref),
     delivery_cost: r.delivery_cost == null ? null : num(r.delivery_cost),
+    branch_id: strOrNull(r.branch_id),
+    delivery_provider_id: strOrNull(r.delivery_provider_id),
     total_amount: r.total_amount == null ? null : num(r.total_amount),
     currency: strOrNull(r.primary_currency_snapshot),
     customer_id: strOrNull(r.customer_id),
@@ -116,7 +126,7 @@ export function todayBounds(now: Date): { start: string; end: string } {
 }
 
 const QUEUE_COLUMNS =
-  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, delivery_fee, delivery_handler_type, delivered_by_user_id, delivery_person_ref, delivery_cost, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
+  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, delivery_fee, delivery_handler_type, delivered_by_user_id, delivery_person_ref, delivery_cost, branch_id, delivery_provider_id, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
 
 /**
  * The operator's delivery queue.
