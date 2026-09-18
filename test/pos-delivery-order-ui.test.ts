@@ -246,7 +246,12 @@ test("the pay target is resolved once, and carries the ORDER's shift with it", (
 });
 
 test("a paid order offers no Pay control at all", () => {
-  assert.match(detail, /!terminal && o\.payment_status !== "paid" && \(\s*<GatedButton gate=\{props\.payGate\}/);
+  // The Pay control is gated on a LIVE, UNPAID order. WS6.3 wraps it in a friendly
+  // settlement guard (finalizeBlock), but the gate that hides Pay on a paid or
+  // terminal order is unchanged — a paid order still renders no Pay control.
+  assert.match(detail, /!terminal &&\s*o\.payment_status !== "paid" &&\s*\(props\.finalizeBlock \?/);
+  // The normal (unblocked) branch is still exactly Level 3C's payGate GatedButton.
+  assert.match(detail, /<GatedButton gate=\{props\.payGate\} size="lg" className="w-full" onClick=\{props\.onPay\}>/);
 });
 
 test("F4 stays Level 3C's, and reaches the same gate from both views", () => {

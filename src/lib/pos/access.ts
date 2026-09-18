@@ -93,6 +93,13 @@ export const POS_PERMISSIONS = {
   // is the SUBSCRIPTION-permission namespace and stays three-segment (the feature key
   // is the two-segment `pos.delivery_providers`).
   DELIVERY_PROVIDERS_MANAGE: "pos.delivery.providers.manage",
+  // OPERATIONAL provider/cost capture at the POS (Delivery Settlement WS6). The
+  // cashier-default key `delivery_providers_operational` and `pos_delivery_set_provider`
+  // check for themselves. DELIBERATELY SEPARATE from providers.manage: selecting a
+  // provider and recording its cost on an order is a cashier's operational act, while
+  // configuring the provider catalogue is a manager's. A cashier holds this and not
+  // the manage key.
+  DELIVERY_COST_CAPTURE: "pos.delivery.cost.capture",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -192,6 +199,35 @@ export function canManageDeliveryProviders(ctx: PosAccessContext): Gate {
     return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_PROVIDERS_MANAGE), "You do not have permission to manage delivery providers.");
+}
+
+/**
+ * Capturing the advanced Delivery PROVIDER + delivery cost on a delivery order
+ * (Delivery Settlement WS6 operational surface).
+ *
+ * The order the server would refuse in: POS access (carrying the owner block,
+ * mirroring `pos_assert_operator`), the base `pos.delivery` sub-feature, the
+ * canonical `pos.delivery_providers` feature (dark unless the tenant is entitled),
+ * then the `pos.delivery.cost.capture` permission the operational RPCs check for
+ * themselves — NEVER `pos.delivery.providers.manage`, which is the manager's
+ * configuration authority. STRICTER than a bare lookup, never looser; not a
+ * security boundary (the RPCs re-enforce every rule). It exists so the provider /
+ * cost editor is offered only where the server would honour a write.
+ */
+export function canCaptureDeliveryCost(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY)) {
+    return { allowed: false, reason: "Delivery is not enabled for this plan." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+    return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
+  }
+  return gate(
+    perm(ctx, POS_PERMISSIONS.DELIVERY_COST_CAPTURE),
+    "You do not have permission to set the delivery provider or cost.",
+  );
 }
 
 /**
