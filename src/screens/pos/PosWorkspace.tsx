@@ -60,8 +60,8 @@ import { MENU_CHANGED_EVENT } from "@/lib/menu/events";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { readPosFeatures } from "@/lib/pos/posFeatures";
-import { buildSubmitPayload, submitOrder, type SubmitOrderPayload } from "@/lib/pos/orders";
-import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
+import { buildSubmitPayload, cartSubtotal, submitOrder, type SubmitOrderPayload } from "@/lib/pos/orders";
+import { payOrder, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import {
   beginInflightSubmit,
   clearInflightSubmit,
@@ -71,6 +71,8 @@ import {
 import { isTransportFailure, recoverTakeawayPayment } from "@/lib/pos/takeawayPayment";
 import { getDeviceIdentity } from "@/lib/device";
 import type { InflightSubmit } from "@/lib/offline/db";
+import { addPosOfflineTxn, pendingPosTxnCount } from "@/lib/offline/db";
+import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import type { PayOrderResult } from "@/types/pos";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
@@ -938,6 +940,12 @@ function PosWorkspaceInner() {
   // Crash-recovery: the durably-journaled but UNRESOLVED submit for THIS
   // tenant+branch, if any. Drives the persistent recovery banner below.
   const [pendingSubmit, setPendingSubmit] = useState<InflightSubmit | null>(null);
+  // Phase B1 — count of offline-originated sales still awaiting sync, for the
+  // persistent offline indicator and the Sync Center. Never blocks the cashier.
+  const [offlinePending, setOfflinePending] = useState(0);
+  const refreshOfflineQueue = useCallback(async () => {
+    setOfflinePending(await pendingPosTxnCount().catch(() => 0));
+  }, []);
   const refreshPendingSubmit = useCallback(async () => {
     // Gate on `pos.ready`: it becomes true only AFTER the branch context has
     // loaded (loadBranchContext resolved), so `getUnresolvedSubmit` runs with the
@@ -1058,6 +1066,24 @@ function PosWorkspaceInner() {
   useEffect(() => {
     void refreshPendingSubmit();
   }, [refreshPendingSubmit]);
+
+  // Phase B1 — reconnect + replay driver. Runs the offline queue when the POS
+  // context is ready and again on every browser `online` transition. syncPosTxns
+  // is single-flight and only replays transactions whose frozen tenant/branch/
+  // cashier match THIS live session, so it can never post another context's queue.
+  useEffect(() => {
+    void refreshOfflineQueue();
+    if (!pos.ready || !tenantId || !userId) return;
+    const run = () => {
+      void syncPosTxns(
+        { tenantId, branchId: pos.branch.id, cashierUserId: userId, online: navigator.onLine },
+        "auto",
+      ).then(() => refreshOfflineQueue());
+    };
+    run();
+    window.addEventListener("online", run);
+    return () => window.removeEventListener("online", run);
+  }, [pos.ready, tenantId, userId, pos.branch.id, refreshOfflineQueue]);
 
   /**
    * Takeaway's shape of the shared kitchen-ticket call.
@@ -1325,6 +1351,80 @@ function PosWorkspaceInner() {
       inFlight.current = true;
       setBusy(true);
       setPayError(null);
+
+      // ---- Phase B1: fully-offline Takeaway + Cash capture --------------------
+      // When the network is unavailable AT confirm time, a draft cash sale is
+      // committed DURABLY to the local transaction store and the cashier is told
+      // it is saved offline. The authoritative order number does not exist yet, so
+      // NONE is shown — only a provisional "OFF-…" reference. The order and payment
+      // are replayed exactly-once by syncPosTxns on reconnect. Only Takeaway + Cash
+      // drafts take this path; anything else stays on the online path unchanged.
+      if (!navigator.onLine && intent.kind === "draft" && input.method === "cash") {
+        try {
+          if (!shiftId) {
+            setPayError("Open a shift before taking payment.");
+            return;
+          }
+          const offlineLines = useCart.getState().lines;
+          if (offlineLines.length === 0) {
+            setPayError("The order is empty.");
+            return;
+          }
+          // LBP with no usable rate can never settle, even at replay — refuse now.
+          const blocked = paymentBlockedReason(input.currency, rate);
+          if (blocked) {
+            setPayError(blocked);
+            return;
+          }
+          const opId = useCart.getState().ensureOpId();
+          const payload = buildSubmitPayload({
+            branchId: pos.branch.id,
+            shiftId,
+            orderType: "takeaway",
+            clientOpId: opId,
+            lines: offlineLines,
+            orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
+          });
+          const device = getDeviceIdentity();
+          const localId = crypto.randomUUID();
+          // DURABLE COMMIT — awaited before the cart is cleared or success shown.
+          await addPosOfflineTxn({
+            local_txn_id: localId,
+            client_op_id: opId,
+            tenant_id: tenantId ?? "",
+            branch_id: pos.branch.id,
+            device_id: device.device_id,
+            terminal_id: device.terminal_id,
+            cashier_user_id: userId ?? "",
+            cashier_user_name: pos.userName,
+            shift_id: shiftId,
+            created_at: new Date().toISOString(),
+            order_payload: payload,
+            payment_intent: { method: "cash", currency: input.currency, discount: input.discount },
+            currency: input.currency,
+            total: cartSubtotal(offlineLines),
+            status: "queued",
+            attempts: 0,
+            paid: false,
+          });
+          setPayIntent(null);
+          newOrder();
+          void refreshOfflineQueue();
+          toast.push({
+            tone: "success",
+            message: "Saved offline — will sync when back online",
+            detail: `Ref OFF-${localId.slice(0, 6).toUpperCase()} · ${offlineLines.length} item${offlineLines.length > 1 ? "s" : ""}`,
+          });
+        } catch (e) {
+          const c = classifyError(e);
+          setPayError(`Could not save the sale offline. ${c.message}`);
+        } finally {
+          inFlight.current = false;
+          setBusy(false);
+        }
+        return;
+      }
+
       const lines = useCart.getState().lines;
       const existing = intent.kind === "order";
       // Hoisted so the catch can recover a payment whose response was lost.
@@ -1475,15 +1575,19 @@ function PosWorkspaceInner() {
       ensureOrder,
       newOrder,
       payIntent,
+      pos.branch.id,
       pos.branch.name,
       pos.tenantName,
       pos.userName,
       presentReceipt,
       rate,
+      refreshOfflineQueue,
       shiftId,
       shiftStore,
+      tenantId,
       ticketForOrder,
       toast,
+      userId,
     ],
   );
 
@@ -1858,6 +1962,28 @@ function PosWorkspaceInner() {
           >
             Resolve pending order
           </button>
+        </div>
+      )}
+      {/* PERSISTENT offline / pending-sync indicator (Phase B1). Bottom-anchored so
+          it never collides with the top recovery banner. Tells the cashier plainly
+          that sales are being recorded locally and will sync — it never blocks. */}
+      {(!online || offlinePending > 0) && (
+        <div
+          role="status"
+          className={`fixed inset-x-0 bottom-0 z-40 flex items-center justify-center gap-2 px-4 py-1.5 text-xs font-medium text-white shadow-md ${
+            !online ? "bg-slate-700" : "bg-sky-600"
+          }`}
+        >
+          <span
+            className={`inline-block h-2 w-2 rounded-full ${!online ? "bg-amber-400" : "bg-white"}`}
+            aria-hidden
+          />
+          <span>
+            {!online
+              ? "Offline — Takeaway cash sales are saved on this device and sync automatically when the connection returns."
+              : "Syncing offline sales…"}
+            {offlinePending > 0 ? ` (${offlinePending} pending)` : ""}
+          </span>
         </div>
       )}
       <PosShell
