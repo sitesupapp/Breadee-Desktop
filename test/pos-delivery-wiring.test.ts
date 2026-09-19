@@ -56,21 +56,23 @@ test("an owner cannot enter Delivery, same as every other POS workspace", () => 
   assert.equal(canViewDelivery(ctx({ role: "owner" })).allowed, false);
 });
 
-test("the only pos.delivery.* permissions are the ops- and providers-management keys", () => {
+test("the only pos.delivery.* permissions are the ops-, providers-, cost- and settlements-management keys", () => {
   const keys = Object.values(POS_PERMISSIONS);
   // Delivery ORDER-TAKING still has no key of its own - POS access plus the
   // `pos.delivery` sub-feature gate it. Delivery Management added `pos.delivery.manage`,
   // which `pos_set_delivery_ops` checks before writing the internal Delivered-By /
   // Delivery-Cost fields. Delivery Settlement WS5 added `pos.delivery.providers.manage`,
   // which the provider-CONFIG RPCs (delivery_provider_upsert / _set_active / _admin_list)
-  // check for themselves. WS6 added exactly one more, the cashier-default OPERATIONAL
-  // key `pos.delivery.cost.capture`, which delivery_providers_operational /
-  // pos_delivery_set_provider check for themselves — deliberately separate from the
-  // manager's providers.manage. No other pos.delivery.* permission exists.
+  // check for themselves. WS6 added the cashier-default OPERATIONAL key
+  // `pos.delivery.cost.capture` (delivery_providers_operational / pos_delivery_set_provider).
+  // WS7B added the back-office `pos.delivery.settlements.manage`, which
+  // pos_delivery_resolve_cost (post-close cost reconciliation) checks for itself —
+  // deliberately separate from the cashier's cost.capture. No other pos.delivery.* exists.
   assert.deepEqual(keys.filter((k) => k.startsWith("pos.delivery")), [
     "pos.delivery.manage",
     "pos.delivery.providers.manage",
     "pos.delivery.cost.capture",
+    "pos.delivery.settlements.manage",
   ]);
   assert.ok(keys.includes("pos.customers.view"));
   assert.ok(keys.includes("pos.customers.manage"));
