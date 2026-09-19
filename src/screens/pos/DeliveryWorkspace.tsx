@@ -238,6 +238,9 @@ export function useDeliveryWorkspace(input: {
       RPCs server-side. */
   manageDelivery: Gate;
   viewDeliveryReport: Gate;
+  /** Post-close cost reconciliation (pos.delivery.settlements.manage); re-enforced by
+      pos_delivery_resolve_cost server-side. Gates the "Resolve cost" action in the report. */
+  reconcileDeliverySettlements: Gate;
   /** Tenant USD->LBP rate. LBP is refused without one - never guessed. */
   rate: number | null;
   /**
@@ -1965,7 +1968,7 @@ export function useDeliveryWorkspace(input: {
     ) : view === "report" ? (
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {viewSwitch}
-        <DeliveryReport gate={input.viewDeliveryReport} currency={input.currency} branchId={branchId || null} />
+        <DeliveryReport gate={input.viewDeliveryReport} currency={input.currency} branchId={branchId || null} canReconcile={input.reconcileDeliverySettlements.allowed} />
       </div>
     ) : (
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">

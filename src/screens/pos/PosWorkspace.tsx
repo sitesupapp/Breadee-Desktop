@@ -809,6 +809,7 @@ function PosWorkspaceInner() {
     // gated server-side by pos.delivery.manage and pos.reports.view respectively.
     manageDelivery: pos.gates.manageDelivery,
     viewDeliveryReport: pos.gates.viewDeliveryReport,
+    reconcileDeliverySettlements: pos.gates.reconcileDeliverySettlements,
     rate,
     onPresentReceipt: presentReceipt,
     // The kitchen ticket goes through the one shared call site, so a dine-in

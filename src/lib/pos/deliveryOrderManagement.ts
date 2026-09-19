@@ -765,6 +765,12 @@ export type DeliveryReportRow = {
   collected: boolean;
   status: string;
   currency: string | null;
+  // WS7B settlement state (additive from pos_delivery_report) — used only to offer the
+  // post-close "Resolve cost" action; never to compute money client-side.
+  cost_status: string | null;
+  cost_entry_mode_snapshot: string | null;
+  settlement_status: string | null;
+  has_settlement: boolean;
 };
 
 export type DeliveryReportSummary = {
@@ -803,6 +809,10 @@ function toReportRow(raw: unknown): DeliveryReportRow {
     collected: bool(r.collected),
     status: str(r.status),
     currency: strOrNull(r.currency),
+    cost_status: strOrNull(r.cost_status),
+    cost_entry_mode_snapshot: strOrNull(r.cost_entry_mode_snapshot),
+    settlement_status: strOrNull(r.settlement_status),
+    has_settlement: bool(r.has_settlement),
   };
 }
 
@@ -839,4 +849,55 @@ export async function loadDeliveryReport(input: {
       currency: strOrNull(s.currency),
     },
   };
+}
+
+// --- WS7B post-close cost resolution -----------------------------------------
+//
+// Server (pos_delivery_resolve_cost) is the sole authority: it validates tenant/OU,
+// the pos.delivery.settlements.manage permission, the finalized settlement and the
+// cost lifecycle, computes the settlement status, audits, and stays cash-inert.
+// These helpers only decide when to OFFER the action and parse input (NULL != 0).
+
+/**
+ * Offer the "Resolve cost" action only for a FIRST resolution: the operator may
+ * reconcile, a finalized settlement exists, and its cost is still unknown. An
+ * already-known cost is never offered here (correction is deferred; server also
+ * rejects). Legacy / zero-provider orders (no settlement) are never offered.
+ */
+export function canResolveDeliveryRow(
+  row: Pick<DeliveryReportRow, "delivery_cost" | "cost_status" | "has_settlement" | "status">,
+  canReconcile: boolean,
+): boolean {
+  if (!canReconcile) return false;
+  if (!row.has_settlement) return false;
+  if (row.delivery_cost != null) return false;
+  if (row.cost_status != null && row.cost_status !== "unknown") return false;
+  if (["voided", "cancelled", "refunded"].includes(row.status)) return false;
+  return true;
+}
+
+/**
+ * Parse the resolution input. Resolution REQUIRES an explicit numeric (0 allowed);
+ * a blank box is NOT a resolution (unlike pre-pay capture where blank = not provided).
+ * Preserves NULL != 0: blank is rejected, "0" resolves to an explicit zero.
+ */
+export function parseResolveDeliveryCost(raw: string): { valid: boolean; value: number | null; reason: string | null } {
+  const t = raw.trim();
+  if (t === "") return { valid: false, value: null, reason: "Enter the delivery cost to resolve it (0 is allowed for free delivery)." };
+  const n = Number(t);
+  if (!Number.isFinite(n)) return { valid: false, value: null, reason: "Enter a valid number." };
+  if (n < 0) return { valid: false, value: null, reason: "Delivery cost cannot be negative." };
+  return { valid: true, value: n, reason: null };
+}
+
+/**
+ * Resolve a first unknown delivery cost through the canonical RPC. Never a raw
+ * settlement/order write; p_cost_provided is always true (an explicit value, incl 0).
+ */
+export async function resolveDeliveryCost(orderId: string, value: number): Promise<void> {
+  await callPosRpc("pos_delivery_resolve_cost", {
+    p_order_id: orderId,
+    p_delivery_cost: value,
+    p_cost_provided: true,
+  });
 }

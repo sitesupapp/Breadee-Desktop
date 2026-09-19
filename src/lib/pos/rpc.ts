@@ -121,6 +121,13 @@ export type PosRpcName =
   // desktop renders what it returns and performs NO aggregation of its own.
   | "pos_set_delivery_ops"
   | "pos_delivery_report"
+  // Delivery Settlement WS7B — post-close cost resolution. Fills a FIRST unknown
+  // delivery cost (entered_later/optional order completed without a cost) on the
+  // finalized settlement. Server-authoritative: validates OU + the
+  // `pos.delivery.settlements.manage` permission + the cost lifecycle, preserves
+  // NULL != 0, is idempotent, audits, and stays cash-inert (no drawer/GL). Never a
+  // client settlement/order write. Online-only; not enqueued to the offline outbox.
+  | "pos_delivery_resolve_cost"
   // Dine-In Floor Map — Phase 1 server foundation (ship-dark). The published-floor
   // READ for the Service Floor Map; gated server-side on pos.floor_map + pos.tables.view;
   // operational table state still comes from pos_table_map. No floor WRITE RPC here —

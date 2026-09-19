@@ -551,7 +551,9 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // the Customer Accounts surface's two reads and one money write (19th-21st);
   // Delivery Management adds `pos_set_delivery_ops` and `pos_delivery_report`
   // (22nd, 23rd) - one internal write and one read-only report.
-  assert.equal(names.length, 23);
+  // Delivery Settlement WS7B adds `pos_delivery_resolve_cost` (24th) - post-close
+  // cost reconciliation, gated on pos.delivery.settlements.manage.
+  assert.equal(names.length, 24);
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
@@ -563,13 +565,14 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   assert.equal(new Set(names).size, names.length);
 });
 
-test("the module calls only its own RPCs: the two mutations plus delivery ops and the report", () => {
+test("the module calls only its own RPCs: the two mutations plus delivery ops, the report and cost resolution", () => {
   // Order management owns pos_edit_order / pos_void_order; Delivery Management adds
   // the internal ops write (pos_set_delivery_ops) and the read-only report
-  // (pos_delivery_report). Nothing else - no payment, no order save, no removal.
+  // (pos_delivery_report). WS7B adds post-close cost resolution
+  // (pos_delivery_resolve_cost). Nothing else - no payment, no order save, no removal.
   const code = stripComments(read("lib", "pos", "deliveryOrderManagement.ts"));
   const calls = [...code.matchAll(/callPosRpc\(\s*"([a-z_]+)"/g)].map((m) => m[1]).sort();
-  assert.deepEqual(calls, ["pos_delivery_report", "pos_edit_order", "pos_set_delivery_ops", "pos_void_order"]);
+  assert.deepEqual(calls, ["pos_delivery_report", "pos_delivery_resolve_cost", "pos_edit_order", "pos_set_delivery_ops", "pos_void_order"]);
 });
 
 test("order management touches no printer, no offline queue and no line removal", () => {
