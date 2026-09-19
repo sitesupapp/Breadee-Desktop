@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "breadee-desktop"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "serde",
  "serde_json",
