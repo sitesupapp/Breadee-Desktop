@@ -220,6 +220,29 @@ export function cartSubtotal(lines: CartLine[]): number {
   return lines.reduce((sum, l) => sum + lineTotals(l.base_price, l.modifiers, l.quantity).lineTotal, 0);
 }
 
+/**
+ * Rebuild cart lines from a stored submit payload — the reverse of the item
+ * mapping in `buildSubmitPayload`. Used to RESUME an offline order after a
+ * restart: the cart is gone (it lives in memory) but the durable transaction
+ * holds the exact payload, so the cashier can re-open the same order and pay it.
+ * The `key`s are fresh (client-only, for React); everything the order depends on
+ * — item id, price, quantity, modifiers, note, removals — is restored verbatim.
+ */
+export function submitPayloadToCartLines(items: SubmitOrderItem[]): CartLine[] {
+  return items.map((it, i) => ({
+    key: `resume-${i + 1}`,
+    menu_item_id: it.menu_item_id,
+    name: it.name,
+    base_price: it.base_price,
+    quantity: it.quantity,
+    kitchen_note: it.kitchen_note,
+    modifiers: it.modifiers.map((m) => ({ ...m })),
+    ...(it.customization_json?.removed_menu_ingredients && it.customization_json.removed_menu_ingredients.length > 0
+      ? { removed_ingredients: it.customization_json.removed_menu_ingredients }
+      : {}),
+  }));
+}
+
 export async function submitOrder(payload: SubmitOrderPayload): Promise<SubmitOrderResult> {
   const row = asRecord(await callPosRpc("pos_submit_order", { p_payload: payload }));
   return {

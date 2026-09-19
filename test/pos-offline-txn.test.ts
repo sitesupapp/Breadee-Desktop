@@ -290,3 +290,29 @@ test("restart after Send, before Pay: sent-only txn persists and is still payabl
   assert.ok(found, "sent order survived restart");
   assert.equal(found!.payment_intent, null, "still unpaid, still one transaction");
 });
+
+test("K1: sent-only SYNCS unpaid, later Pay re-queues the SAME txn → one order + one payment", async () => {
+  // Send offline → sync (reconnect between Send and Pay).
+  await addPosOfflineTxn(makeTxn({ local_txn_id: "L1", client_op_id: "opK1", payment_intent: null, sent_to_kitchen: true }));
+  const first = happyDeps();
+  await syncPosTxns(ctx, "test", first.deps);
+  let row = await localdb.posOfflineTxns.get("L1");
+  assert.equal(row!.status, "synced", "order created on sync");
+  assert.equal(row!.paid ?? false, false, "and it is UNPAID");
+  assert.ok(row!.server_order_id, "server order recorded");
+  assert.equal(first.calls.pay, 0, "sent-only sync never pays");
+  // Later Pay: the offline capture UPSERTS this same row (re-queue + payment intent).
+  await updatePosOfflineTxn("L1", { payment_intent: { method: "cash", currency: "USD" }, status: "queued", paid: false });
+  assert.equal(
+    (await localdb.posOfflineTxns.where("client_op_id").equals("opK1").toArray()).length,
+    1,
+    "still exactly one transaction — not stranded in synced, not a second sale",
+  );
+  const second = happyDeps();
+  await syncPosTxns(ctx, "test", second.deps);
+  assert.equal(second.calls.submit, 0, "order is NOT re-created (server_order_id already set)");
+  assert.equal(second.calls.pay, 1, "exactly one payment on the existing order");
+  row = await localdb.posOfflineTxns.get("L1");
+  assert.equal(row!.status, "synced");
+  assert.equal(row!.paid, true);
+});

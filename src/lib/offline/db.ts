@@ -233,3 +233,32 @@ export async function updatePosOfflineTxn(localTxnId: string, patch: Partial<Pos
 export async function getPosOfflineTxnByOp(clientOpId: string): Promise<PosOfflineTxn | undefined> {
   return localdb.posOfflineTxns.where("client_op_id").equals(clientOpId).first();
 }
+
+/**
+ * Offline orders that were SENT to the kitchen but not yet paid, for the given
+ * live session (tenant + branch + cashier). These are the orders a cashier can
+ * RESUME and pay after a restart — the in-memory cart is gone, but the order is
+ * durable. Scoped so another context's order is never offered here.
+ */
+export async function listResumablePosTxns(
+  tenantId: string | null,
+  branchId: string | null,
+  cashierUserId: string | null,
+): Promise<PosOfflineTxn[]> {
+  const all = await localdb.posOfflineTxns.toArray();
+  return all
+    .filter(
+      (t) =>
+        t.sent_to_kitchen === true &&
+        !t.paid &&
+        !t.payment_intent &&
+        // Only orders still held locally. Once SYNCED, the order exists on the
+        // server (unpaid) and is paid through the normal shift-orders flow, so it
+        // must not linger here after an online payment.
+        t.status === "queued" &&
+        t.tenant_id === tenantId &&
+        (t.branch_id ?? null) === (branchId ?? null) &&
+        t.cashier_user_id === cashierUserId,
+    )
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}

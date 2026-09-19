@@ -60,7 +60,7 @@ import { MENU_CHANGED_EVENT } from "@/lib/menu/events";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { readPosFeatures } from "@/lib/pos/posFeatures";
-import { buildSubmitPayload, cartSubtotal, submitOrder, type SubmitOrderPayload } from "@/lib/pos/orders";
+import { buildSubmitPayload, cartSubtotal, submitOrder, submitPayloadToCartLines, type SubmitOrderPayload } from "@/lib/pos/orders";
 import { payOrder, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import {
   beginInflightSubmit,
@@ -71,7 +71,7 @@ import {
 import { isTransportFailure, recoverTakeawayPayment } from "@/lib/pos/takeawayPayment";
 import { getDeviceIdentity } from "@/lib/device";
 import type { InflightSubmit } from "@/lib/offline/db";
-import { addPosOfflineTxn, getPosOfflineTxnByOp, pendingPosTxnCount, updatePosOfflineTxn } from "@/lib/offline/db";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import type { PayOrderResult } from "@/types/pos";
@@ -944,9 +944,13 @@ function PosWorkspaceInner() {
   // Phase B1 — count of offline-originated sales still awaiting sync, for the
   // persistent offline indicator and the Sync Center. Never blocks the cashier.
   const [offlinePending, setOfflinePending] = useState(0);
+  // Offline orders sent to the kitchen but not yet paid — resumable after a
+  // restart (the in-memory cart is gone, the durable order is not).
+  const [resumable, setResumable] = useState<PosOfflineTxn[]>([]);
   const refreshOfflineQueue = useCallback(async () => {
     setOfflinePending(await pendingPosTxnCount().catch(() => 0));
-  }, []);
+    setResumable(await listResumablePosTxns(tenantId, pos.branch.id, userId).catch(() => []));
+  }, [tenantId, pos.branch.id, userId]);
   const refreshPendingSubmit = useCallback(async () => {
     // Gate on `pos.ready`: it becomes true only AFTER the branch context has
     // loaded (loadBranchContext resolved), so `getUnresolvedSubmit` runs with the
@@ -1319,6 +1323,38 @@ function PosWorkspaceInner() {
   // whether the cart happens to be empty, which is what made the panel disappear
   // underneath cashiers in 1.0.3.
   const [viewingSavedOrder, setViewingSavedOrder] = useState(false);
+
+  /**
+   * Resume an offline order that was sent to the kitchen but not yet paid.
+   *
+   * After a restart the in-memory cart is gone, but the durable transaction holds
+   * the exact payload, so the same order is rebuilt into the cart under its OWN
+   * client_op_id — the very id a later Pay upserts, keeping Send and Pay ONE
+   * logical order. The cashier reviews it and takes Cash; no second order is
+   * created because pos_submit_order is idempotent on that id.
+   */
+  const resumeOfflineOrder = useCallback(
+    (txn: PosOfflineTxn) => {
+      const payload = txn.order_payload as SubmitOrderPayload;
+      const lines = submitPayloadToCartLines(payload.items ?? []);
+      if (lines.length === 0) return;
+      useCart.getState().restore({
+        lines,
+        selectedKey: lines[0]?.key ?? null,
+        clientOpId: txn.client_op_id,
+        savedOrder: null,
+        owner: { kind: "takeaway" },
+      });
+      setViewingSavedOrder(false);
+      setMode("takeaway");
+      toast.push({
+        tone: "info",
+        message: `Resumed offline order OFF-${txn.local_txn_id.slice(0, 6).toUpperCase()}`,
+        detail: "Review the items and take Cash payment.",
+      });
+    },
+    [toast],
+  );
 
   /**
    * Show a real order, from wherever it was chosen.
@@ -2078,6 +2114,29 @@ function PosWorkspaceInner() {
             className="shrink-0 rounded bg-white px-3 py-1 font-semibold text-amber-700 hover:bg-amber-50"
           >
             Resolve pending order
+          </button>
+        </div>
+      )}
+      {/* RESUME banner (Phase B1): an offline order was sent to the kitchen but not
+          paid — after a restart the cart is gone, so this rebuilds it under the SAME
+          client_op_id for the cashier to take Cash. Shown only when the cart is free. */}
+      {resumable.length > 0 && cart.lines.length === 0 && (
+        <div
+          role="alert"
+          className="fixed inset-x-0 top-0 z-50 flex items-center justify-between gap-3 bg-emerald-600 px-4 py-2 text-sm text-white shadow-md"
+        >
+          <span className="font-medium">
+            {resumable.length === 1
+              ? `An offline order (OFF-${resumable[0].local_txn_id.slice(0, 6).toUpperCase()}) was sent to the kitchen but not paid yet.`
+              : `${resumable.length} offline orders were sent to the kitchen but not paid yet.`}{" "}
+            Resume it to take Cash payment.
+          </span>
+          <button
+            type="button"
+            onClick={() => resumeOfflineOrder(resumable[0])}
+            className="shrink-0 rounded bg-white px-3 py-1 font-semibold text-emerald-700 hover:bg-emerald-50"
+          >
+            Resume &amp; pay
           </button>
         </div>
       )}

@@ -113,3 +113,27 @@ test("replay pays only when a payment intent exists (sent-only stays unpaid)", (
   const src = stripComments(read("lib", "offline", "posTxnSync.ts"));
   assert.match(src, /if \(t\.payment_intent && !t\.paid\)/, "payment step is conditional on payment_intent");
 });
+
+test("K3: the replay engine never prints a kitchen ticket (no reprint on sync)", () => {
+  const src = stripComments(read("lib", "offline", "posTxnSync.ts"));
+  assert.doesNotMatch(src, /ticketForOrder|printKitchen|autoPrintKitchen|buildKitchenTicket/, "replay does no kitchen printing");
+});
+
+test("K3: offline Send prints through the latched printKitchenFor path (one ticket per order)", () => {
+  const src = stripComments(read("screens", "pos", "PosWorkspace.tsx"));
+  // printKitchenFor keys its present latch on orderId:batchNo, so a repeated Send
+  // for the same local order cannot present a second ticket.
+  assert.match(src, /const eventKey = `\$\{input\.orderId\}:\$\{input\.batchNo \?\? 1\}`/);
+  assert.match(src, /presentedTickets\.current\.has\(eventKey\)/);
+});
+
+test("K2: resume rebuilds the SAME order under its own client_op_id", () => {
+  const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
+  assert.match(src, /submitPayloadToCartLines\(/, "resume rebuilds the cart from the durable payload");
+  assert.match(src, /clientOpId: txn\.client_op_id/, "resumed cart keeps the transaction's client_op_id");
+  assert.match(src, /resumeOfflineOrder\(resumable\[0\]\)/, "a Resume control is wired");
+  // The reverse mapper exists and copies the fields the order depends on.
+  const orders = stripComments(read("lib", "pos", "orders.ts"));
+  assert.match(orders, /export function submitPayloadToCartLines/);
+  assert.match(orders, /menu_item_id: it\.menu_item_id/);
+});
