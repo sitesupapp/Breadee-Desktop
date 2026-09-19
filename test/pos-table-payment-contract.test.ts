@@ -136,6 +136,8 @@ test("the RPC allow-list contains exactly the twenty-four expected names", () =>
       "pos_configure_tables",
       // Delivery Management: the read-only delivery report (pos.reports.view).
       "pos_delivery_report",
+      // Delivery Settlement WS7B: post-close cost resolution (pos.delivery.settlements.manage).
+      "pos_delivery_resolve_cost",
       "pos_edit_order",
       "pos_end_shift",
       "pos_move_table",
@@ -158,7 +160,7 @@ test("the RPC allow-list contains exactly the twenty-four expected names", () =>
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 24);
+  assert.equal(members.length, 25);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

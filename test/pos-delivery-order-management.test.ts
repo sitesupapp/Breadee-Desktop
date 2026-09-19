@@ -551,7 +551,9 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // the Customer Accounts surface's two reads and one money write (19th-21st);
   // Delivery Management adds `pos_set_delivery_ops` and `pos_delivery_report`
   // (22nd, 23rd) - one internal write and one read-only report.
-  assert.equal(names.length, 23);
+  // Delivery Settlement WS7B adds `pos_delivery_resolve_cost` (24th) - post-close
+  // cost reconciliation, gated on pos.delivery.settlements.manage.
+  assert.equal(names.length, 24);
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
