@@ -74,6 +74,7 @@ import type { InflightSubmit } from "@/lib/offline/db";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { isBackendReachable } from "@/lib/offline/reachability";
+import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
 import type { PayOrderResult } from "@/types/pos";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
@@ -130,7 +131,13 @@ function PosWorkspaceInner() {
 
   const currency: CurrencyCode = session.currency.primary;
   const rate = session.currency.rate;
-  const online = session.online && !session.offlineMode;
+  // Backend REACHABILITY, not navigator.onLine, is what "online" must mean here:
+  // a physical Wi-Fi drop on Windows/WebView2 leaves navigator.onLine === true, so
+  // it can never be the deciding authority. Optimistic until the first probe so a
+  // healthy terminal never flickers offline on mount; corrected within a probe on
+  // a real outage. Gates the Online badge and every server-only affordance.
+  const [backendReachable, setBackendReachable] = useState(true);
+  const online = session.online && !session.offlineMode && backendReachable;
 
   // --- menu ------------------------------------------------------------------
   const [menu, setMenu] = useState<MenuData>(EMPTY_MENU);
@@ -204,6 +211,66 @@ function PosWorkspaceInner() {
   }, [pos.allowed, tenantId, userId]);
 
   const shiftId = requireOpenShiftId(shiftStore.shift);
+
+  // --- backend reachability (qualifies the Online badge) ---------------------
+  // A short, non-mutating probe is the deciding authority for connectivity, never
+  // navigator.onLine. Runs on mount, on a slow interval, and on the browser's own
+  // online/offline transitions - the last only as a hint that triggers a probe.
+  useEffect(() => {
+    let live = true;
+    const probe = () => {
+      void isBackendReachable().then((r) => {
+        if (live) setBackendReachable(r);
+      });
+    };
+    probe();
+    const id = window.setInterval(probe, 20_000);
+    const onOnline = () => probe();
+    const onOffline = () => {
+      if (live) setBackendReachable(false);
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
+  // --- durable POS-session snapshot (writer) ---------------------------------
+  // Persist the last-known-valid POS session whenever we hold an AUTHORITATIVE
+  // online context: a server-confirmed open shift and a resolved, named branch.
+  // This is the ONLY writer and it only ever runs online, so the snapshot can
+  // never contain anything the server did not confirm. An offline restart then
+  // restores exactly this - same shift id, same branch - and nothing else; the
+  // shift store drops it again the moment a live read shows no open shift.
+  useEffect(() => {
+    if (!online) return;
+    const shift = shiftStore.shift;
+    if (!shift || shift.status !== "open") return;
+    if (!tenantId || !userId || !pos.branch.id) return;
+    if (!isPersistableBranchName(pos.branch.name)) return;
+    savePosSessionSnapshot({
+      version: 1,
+      source: "server",
+      savedAt: Date.now(),
+      device_id: getDeviceIdentity().device_id,
+      tenant_id: tenantId,
+      cashier_user_id: userId,
+      branch_id: pos.branch.id,
+      branch_name: pos.branch.name,
+      currency,
+      shift: {
+        id: shift.id,
+        status: "open",
+        opened_at: shift.opened_at,
+        opening_cash_amount: shift.opening_cash_amount,
+        branch_id: shift.branch_id,
+      },
+    });
+  }, [online, shiftStore.shift, tenantId, userId, pos.branch.id, pos.branch.name, currency]);
 
   // --- window ----------------------------------------------------------------
   useEffect(() => {
@@ -2219,7 +2286,7 @@ function PosWorkspaceInner() {
             cashBox={shiftStore.cashBox}
             currency={currency}
             online={online}
-            offlineMode={session.offlineMode}
+            offlineMode={session.offlineMode || shiftStore.offlineRestored}
             pendingSync={pending}
             layout={layout}
             onOpenShift={() => setOpenShiftOpen(true)}
