@@ -52,19 +52,31 @@ test("engine: only queued/syncing work is replayed, FIFO by capture time", () =>
   assert.match(src, /created_at\.localeCompare/, "FIFO ordering");
 });
 
-test("PosWorkspace: offline capture is gated to Takeaway + Cash while offline", () => {
+test("PosWorkspace: offline routing is by BACKEND REACHABILITY, not navigator.onLine", () => {
   const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
+  // The gate probes the backend before any submit; only a Takeaway cash draft
+  // whose backend is confirmed unreachable is captured offline.
   assert.match(
     src,
-    /!navigator\.onLine && intent\.kind === "draft" && input\.method === "cash"/,
-    "offline path only for a fully-offline takeaway cash draft",
+    /intent\.kind === "draft" && input\.method === "cash" && !\(await isBackendReachable\(\)\)/,
+    "offline path is gated on !isBackendReachable() for a takeaway cash draft",
   );
+  assert.match(src, /import \{ isBackendReachable \} from "@\/lib\/offline\/reachability"/, "probe imported");
+  // The old, defective navigator.onLine-only gate must be gone.
+  assert.doesNotMatch(src, /!navigator\.onLine && intent\.kind === "draft"/, "navigator.onLine-only gate removed");
+});
+
+test("reachability probe is non-mutating (no order/payment RPC in the helper)", () => {
+  const src = stripComments(read("lib", "offline", "reachability.ts"));
+  assert.match(src, /mode: "no-cors"/, "no-cors: reachable iff the request resolves");
+  assert.match(src, /AbortController/, "bounded by a timeout");
+  assert.doesNotMatch(src, /pos_submit_order|pos_pay_order|callPosRpc|\.rpc\(/, "probe performs no business RPC");
 });
 
 test("PosWorkspace: durable commit before the cart clears; no fabricated server number", () => {
   const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
   // Anchor on the offline-capture CONDITION (code, not a comment the stripper removes).
-  const capture = src.slice(src.indexOf('!navigator.onLine && intent.kind === "draft"'));
+  const capture = src.slice(src.indexOf('!(await isBackendReachable())'));
   const commitAt = capture.indexOf("addPosOfflineTxn(");
   const clearAt = capture.indexOf("newOrder();");
   assert.ok(commitAt > -1 && clearAt > -1, "both the commit and the cart reset exist");

@@ -73,6 +73,7 @@ import { getDeviceIdentity } from "@/lib/device";
 import type { InflightSubmit } from "@/lib/offline/db";
 import { addPosOfflineTxn, pendingPosTxnCount } from "@/lib/offline/db";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
+import { isBackendReachable } from "@/lib/offline/reachability";
 import type { PayOrderResult } from "@/types/pos";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
@@ -1353,13 +1354,19 @@ function PosWorkspaceInner() {
       setPayError(null);
 
       // ---- Phase B1: fully-offline Takeaway + Cash capture --------------------
-      // When the network is unavailable AT confirm time, a draft cash sale is
-      // committed DURABLY to the local transaction store and the cashier is told
-      // it is saved offline. The authoritative order number does not exist yet, so
-      // NONE is shown — only a provisional "OFF-…" reference. The order and payment
-      // are replayed exactly-once by syncPosTxns on reconnect. Only Takeaway + Cash
-      // drafts take this path; anything else stays on the online path unchanged.
-      if (!navigator.onLine && intent.kind === "draft" && input.method === "cash") {
+      // ROUTING IS BY ACTUAL BACKEND REACHABILITY, NOT navigator.onLine. A physical
+      // Wi-Fi drop can leave navigator.onLine === true, so we ASK the backend with a
+      // short non-mutating probe BEFORE any submit. If it is confirmed unreachable,
+      // a draft cash sale is committed DURABLY to the local transaction store and
+      // the cashier is told it is saved offline — no online RPC is attempted, so no
+      // ambiguous submit is ever created here. The authoritative order number does
+      // not exist yet, so NONE is shown — only a provisional "OFF-…" reference; the
+      // order and payment are replayed exactly-once by syncPosTxns on reconnect.
+      // Only Takeaway + Cash drafts take this path; anything else, and every case
+      // where the backend IS reachable, stays on the online path unchanged (where a
+      // submit that then becomes ambiguous is owned by the Phase-A journal/reconcile
+      // path — it is never reclassified into a new offline transaction).
+      if (intent.kind === "draft" && input.method === "cash" && !(await isBackendReachable())) {
         try {
           if (!shiftId) {
             setPayError("Open a shift before taking payment.");
