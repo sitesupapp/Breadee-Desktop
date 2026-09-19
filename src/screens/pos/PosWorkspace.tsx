@@ -71,7 +71,7 @@ import {
 import { isTransportFailure, recoverTakeawayPayment } from "@/lib/pos/takeawayPayment";
 import { getDeviceIdentity } from "@/lib/device";
 import type { InflightSubmit } from "@/lib/offline/db";
-import { addPosOfflineTxn, pendingPosTxnCount } from "@/lib/offline/db";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, pendingPosTxnCount, updatePosOfflineTxn } from "@/lib/offline/db";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import type { PayOrderResult } from "@/types/pos";
@@ -1153,6 +1153,84 @@ function PosWorkspaceInner() {
     setBusy(true);
     // Snapshotted BEFORE the await, so a reset cannot empty the ticket.
     const submitted = useCart.getState().lines;
+
+    // ---- Phase B1: offline Send to kitchen ----------------------------------
+    // Same backend-reachability gate as Pay (never navigator.onLine). If the
+    // backend is unreachable, the order is committed DURABLY to the SAME offline
+    // transaction a later Pay will settle — both carry the cart's stable
+    // client_op_id, so this is ONE logical order, never two. No online RPC is
+    // attempted, so no ambiguous submit is created. A provisional OFF- kitchen
+    // ticket prints locally; the authoritative order number appears only after
+    // sync, and the replay engine never re-prints it. The cart is KEPT so the
+    // same order can be paid when the customer settles.
+    if (!(await isBackendReachable())) {
+      try {
+        if (!shiftId) {
+          toast.push({ tone: "warning", message: "Open a shift before sending an order." });
+          return;
+        }
+        const opId = useCart.getState().ensureOpId();
+        const payload = buildSubmitPayload({
+          branchId: pos.branch.id,
+          shiftId,
+          orderType: "takeaway",
+          clientOpId: opId,
+          lines: submitted,
+          orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
+        });
+        const device = getDeviceIdentity();
+        const existing = await getPosOfflineTxnByOp(opId);
+        const localId = existing?.local_txn_id ?? crypto.randomUUID();
+        if (existing) {
+          await updatePosOfflineTxn(existing.local_txn_id, {
+            order_payload: payload,
+            sent_to_kitchen: true,
+            total: cartSubtotal(submitted),
+          });
+        } else {
+          await addPosOfflineTxn({
+            local_txn_id: localId,
+            client_op_id: opId,
+            tenant_id: tenantId ?? "",
+            branch_id: pos.branch.id,
+            device_id: device.device_id,
+            terminal_id: device.terminal_id,
+            cashier_user_id: userId ?? "",
+            cashier_user_name: pos.userName,
+            shift_id: shiftId,
+            created_at: new Date().toISOString(),
+            order_payload: payload,
+            payment_intent: null,
+            sent_to_kitchen: true,
+            currency,
+            total: cartSubtotal(submitted),
+            status: "queued",
+            attempts: 0,
+            paid: false,
+          });
+        }
+        const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
+        // Local, provisional kitchen ticket. Never an authoritative server number.
+        await ticketForOrder(
+          { order_id: localId, order_number: ref, subtotal: cartSubtotal(submitted), total: cartSubtotal(submitted), batch_no: 1, appended: false, idempotent: false },
+          submitted,
+        );
+        void refreshOfflineQueue();
+        toast.push({
+          tone: "success",
+          message: "Saved offline — sent to kitchen",
+          detail: `Ref ${ref} · pay Cash when the customer settles`,
+        });
+      } catch (e) {
+        const c = classifyError(e);
+        toast.push({ tone: "error", message: "Could not save the order offline.", detail: c.message });
+      } finally {
+        inFlight.current = false;
+        setBusy(false);
+      }
+      return;
+    }
+
     try {
       const saved = await ensureOrder();
       if (saved) {
@@ -1181,7 +1259,20 @@ function PosWorkspaceInner() {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [adoptCreatedOrder, cart.lines.length, ensureOrder, ticketForOrder, toast]);
+  }, [
+    adoptCreatedOrder,
+    cart.lines.length,
+    currency,
+    ensureOrder,
+    pos.branch.id,
+    pos.userName,
+    refreshOfflineQueue,
+    shiftId,
+    tenantId,
+    ticketForOrder,
+    toast,
+    userId,
+  ]);
 
   /**
    * Clearing the cart, with one question when money is at stake.
@@ -1393,27 +1484,46 @@ function PosWorkspaceInner() {
             orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
           });
           const device = getDeviceIdentity();
-          const localId = crypto.randomUUID();
-          // DURABLE COMMIT — awaited before the cart is cleared or success shown.
-          await addPosOfflineTxn({
-            local_txn_id: localId,
-            client_op_id: opId,
-            tenant_id: tenantId ?? "",
-            branch_id: pos.branch.id,
-            device_id: device.device_id,
-            terminal_id: device.terminal_id,
-            cashier_user_id: userId ?? "",
-            cashier_user_name: pos.userName,
-            shift_id: shiftId,
-            created_at: new Date().toISOString(),
-            order_payload: payload,
-            payment_intent: { method: "cash", currency: input.currency, discount: input.discount },
-            currency: input.currency,
-            total: cartSubtotal(offlineLines),
-            status: "queued",
-            attempts: 0,
-            paid: false,
-          });
+          const paymentIntent = { method: "cash" as const, currency: input.currency, discount: input.discount };
+          // ONE logical order: if this cart was already sent to kitchen offline,
+          // UPDATE that same transaction (matched by client_op_id) to add the cash
+          // payment, instead of opening a second offline sale.
+          const existingTxn = await getPosOfflineTxnByOp(opId);
+          const localId = existingTxn?.local_txn_id ?? crypto.randomUUID();
+          if (existingTxn) {
+            await updatePosOfflineTxn(existingTxn.local_txn_id, {
+              order_payload: payload,
+              payment_intent: paymentIntent,
+              currency: input.currency,
+              total: cartSubtotal(offlineLines),
+              // Re-queue so replay settles it (submit is idempotent if it already
+              // created the order); server_order_id, if any, is preserved.
+              status: "queued",
+              paid: false,
+            });
+          } else {
+            // DURABLE COMMIT — awaited before the cart is cleared or success shown.
+            await addPosOfflineTxn({
+              local_txn_id: localId,
+              client_op_id: opId,
+              tenant_id: tenantId ?? "",
+              branch_id: pos.branch.id,
+              device_id: device.device_id,
+              terminal_id: device.terminal_id,
+              cashier_user_id: userId ?? "",
+              cashier_user_name: pos.userName,
+              shift_id: shiftId,
+              created_at: new Date().toISOString(),
+              order_payload: payload,
+              payment_intent: paymentIntent,
+              sent_to_kitchen: false,
+              currency: input.currency,
+              total: cartSubtotal(offlineLines),
+              status: "queued",
+              attempts: 0,
+              paid: false,
+            });
+          }
           setPayIntent(null);
           newOrder();
           void refreshOfflineQueue();

@@ -164,7 +164,10 @@ async function replayOne(t: PosOfflineTxn, report: PosTxnSyncReport, d: PosTxnSy
   }
 
   // --- 2. Cash payment (state-based `already paid` dedup) ---------------------
-  if (!t.paid) {
+  // Only when a payment intent exists. A "sent to kitchen" transaction with no
+  // payment yet syncs as an unpaid order (exactly what an online Send produces);
+  // a later Pay on the SAME client_op_id fills the intent so this branch runs.
+  if (t.payment_intent && !t.paid) {
     try {
       await d.pay({
         orderId,

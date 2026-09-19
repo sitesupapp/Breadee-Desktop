@@ -100,8 +100,15 @@ export interface PosOfflineTxn {
   created_at: string; // client ISO, at offline capture
   /** Immutable exact `pos_submit_order` payload (SubmitOrderPayload). */
   order_payload: unknown;
-  /** Immutable cash payment intent for `pos_pay_order`. */
-  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown> };
+  /**
+   * Cash payment intent for `pos_pay_order`, or null. A transaction created by an
+   * offline "Send to kitchen" starts with `payment_intent: null` (sent, unpaid);
+   * a later offline Cash Pay UPDATES the same transaction (matched by
+   * `client_op_id`) to fill this in. Replay pays only when it is present.
+   */
+  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown> } | null;
+  /** True once this order has been sent to the kitchen (online or offline). */
+  sent_to_kitchen?: boolean;
   currency: string;
   /** Local provisional total (display only); the authoritative total is the server's. */
   total: number;
@@ -214,4 +221,15 @@ export async function pendingPosTxnCount(): Promise<number> {
 /** Patch one offline transaction by its local id. */
 export async function updatePosOfflineTxn(localTxnId: string, patch: Partial<PosOfflineTxn>): Promise<void> {
   await localdb.posOfflineTxns.update(localTxnId, patch);
+}
+
+/**
+ * The offline transaction for a given cart operation id, if one exists. Used to
+ * keep "Send to kitchen" and a later "Pay" as ONE logical order: both carry the
+ * cart's stable `client_op_id`, so the second action updates the first row rather
+ * than opening a second sale. A row that already synced is still returned so the
+ * caller can decide (e.g. pay it online instead).
+ */
+export async function getPosOfflineTxnByOp(clientOpId: string): Promise<PosOfflineTxn | undefined> {
+  return localdb.posOfflineTxns.where("client_op_id").equals(clientOpId).first();
 }

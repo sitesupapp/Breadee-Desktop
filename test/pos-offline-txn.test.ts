@@ -9,8 +9,10 @@ import assert from "node:assert/strict";
 import {
   localdb,
   addPosOfflineTxn,
+  getPosOfflineTxnByOp,
   listPosOfflineTxns,
   pendingPosTxnCount,
+  updatePosOfflineTxn,
   type PosOfflineTxn,
 } from "@/lib/offline/db";
 import { syncPosTxns, type PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
@@ -239,4 +241,52 @@ test("guard: no live session → nothing replays", async () => {
   assert.equal(d.calls.submit, 0);
   assert.equal(rep.synced.length, 0);
   assert.equal((await localdb.posOfflineTxns.get("L1"))!.status, "queued");
+});
+
+// --- Phase B1 offline Send-to-kitchen (shared transaction) ------------------
+
+test("sent-only txn (payment_intent null) replays as an unpaid order, never pays", async () => {
+  await addPosOfflineTxn(makeTxn({ local_txn_id: "S1", client_op_id: "opSent", payment_intent: null, sent_to_kitchen: true }));
+  const { deps, calls } = happyDeps();
+  const rep = await syncPosTxns(ctx, "test", deps);
+  assert.ok(rep.synced.includes("S1"));
+  assert.equal(calls.submit, 1, "order created");
+  assert.equal(calls.pay, 0, "a sent-only order is never paid on replay");
+  const row = await localdb.posOfflineTxns.get("S1");
+  assert.equal(row!.status, "synced");
+  assert.equal(row!.paid ?? false, false);
+});
+
+test("getPosOfflineTxnByOp finds the row by client_op_id (send↔pay join key)", async () => {
+  await addPosOfflineTxn(makeTxn({ local_txn_id: "L1", client_op_id: "opJoin", payment_intent: null }));
+  const found = await getPosOfflineTxnByOp("opJoin");
+  assert.equal(found?.local_txn_id, "L1");
+  assert.equal(await getPosOfflineTxnByOp("nope"), undefined);
+});
+
+test("send-then-pay is ONE transaction per client_op_id → one order + one payment", async () => {
+  // Offline Send: durable, unpaid.
+  await addPosOfflineTxn(makeTxn({ local_txn_id: "L1", client_op_id: "opX", payment_intent: null, sent_to_kitchen: true }));
+  // Offline Pay (same cart op): UPSERT into the same row, not a second sale.
+  const existing = await getPosOfflineTxnByOp("opX");
+  assert.ok(existing, "the sent order is found");
+  await updatePosOfflineTxn(existing!.local_txn_id, { payment_intent: { method: "cash", currency: "USD" }, status: "queued", paid: false });
+  const all = await localdb.posOfflineTxns.where("client_op_id").equals("opX").toArray();
+  assert.equal(all.length, 1, "still exactly ONE transaction for the order");
+  const { deps, calls } = happyDeps();
+  await syncPosTxns(ctx, "test", deps);
+  assert.equal(calls.submit, 1, "exactly one order");
+  assert.equal(calls.pay, 1, "exactly one payment");
+  const row = await localdb.posOfflineTxns.get("L1");
+  assert.equal(row!.status, "synced");
+  assert.equal(row!.paid, true);
+});
+
+test("restart after Send, before Pay: sent-only txn persists and is still payable", async () => {
+  await addPosOfflineTxn(makeTxn({ local_txn_id: "L1", client_op_id: "opR", payment_intent: null, sent_to_kitchen: true }));
+  localdb.close();
+  await localdb.open();
+  const found = await getPosOfflineTxnByOp("opR");
+  assert.ok(found, "sent order survived restart");
+  assert.equal(found!.payment_intent, null, "still unpaid, still one transaction");
 });

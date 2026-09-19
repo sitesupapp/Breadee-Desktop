@@ -91,3 +91,25 @@ test("PosWorkspace: reconnect drives the replay engine", () => {
   assert.match(src, /addEventListener\("online"/, "auto-sync on reconnect");
   assert.match(src, /syncPosTxns\(/, "reconnect calls the replay engine");
 });
+
+test("PosWorkspace: Send to kitchen has an offline path gated on backend reachability", () => {
+  const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
+  const send = src.slice(src.indexOf("const sendToKitchen"), src.indexOf("const sendToKitchen") + 3500);
+  assert.match(send, /!\(await isBackendReachable\(\)\)/, "offline Send gated on reachability, not navigator.onLine");
+  assert.match(send, /getPosOfflineTxnByOp\(/, "Send reuses the same transaction by client_op_id");
+  assert.match(send, /sent_to_kitchen: true/, "Send marks the durable order sent");
+  assert.match(send, /OFF-/, "Send prints a provisional OFF- ref, not a server number");
+});
+
+test("Send and Pay share ONE transaction (upsert by client_op_id, never two sales)", () => {
+  const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
+  // Both offline paths look up an existing transaction before adding a new one.
+  const matches = src.match(/getPosOfflineTxnByOp\(opId\)/g) || [];
+  assert.ok(matches.length >= 2, "both Send and Pay match the existing transaction by op id");
+  assert.match(src, /updatePosOfflineTxn\([^)]*payment_intent/s, "Pay updates the existing transaction with the payment");
+});
+
+test("replay pays only when a payment intent exists (sent-only stays unpaid)", () => {
+  const src = stripComments(read("lib", "offline", "posTxnSync.ts"));
+  assert.match(src, /if \(t\.payment_intent && !t\.paid\)/, "payment step is conditional on payment_intent");
+});
