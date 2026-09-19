@@ -1,0 +1,191 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — RC (Release-Candidate) BUILD-ONLY installer.
+#
+# Packages the CURRENT functional candidate (prod v1.0.22 + Phase A + Phase B1
+# offline Takeaway+Cash + reachability-based routing fix) under a THIRD, isolated
+# identity — app.breadee.desktop.rc — so it installs side-by-side with the
+# installed Production (app.breadee.desktop) and Staging (app.breadee.desktop.
+# staging) apps and keeps its own WebView2 / IndexedDB profile, for native
+# acceptance.
+#
+# NOT a release: no GitHub Release, no tag, no latest.json, no channel write,
+# no updater signing (createUpdaterArtifacts stays false -> no *.sig). The RC
+# build is a STAGING-env build (VITE_APP_ENV=staging), so the app's own updater
+# is INERT (src/lib/updater.ts refuses to check unless IS_PRODUCTION).
+#
+# Fail-closed (all asserted before the long build):
+#   * environment: Staging — staging Supabase only; the compiled bundle is
+#     asserted to reference the staging project and NOT the production project.
+#   * identity app.breadee.desktop.rc + an RC-only updater endpoint come from
+#     src-tauri/tauri.rc.conf.json (Tauri deep-merges the override; override wins).
+#   * the RC updater endpoint must NOT be the production channel and must NOT be
+#     the live staging channel, or the job stops before packaging.
+# ---------------------------------------------------------------------------
+
+name: Desktop Windows RC (Artifact, Build-Only)
+
+on:
+  # BUILD-ONLY. A push to this RC packaging branch builds the isolated RC
+  # installer as a downloadable ARTIFACT only. workflow_dispatch kept for re-runs.
+  push:
+    branches: [feature/pos-offline-takeaway-cash-b1-rc2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-windows-rc-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  STAGING_REF: azjxprewycygsocusxjn
+  PRODUCTION_REF: cltlqfqormkhppmbvyrv
+  RC_IDENTIFIER: app.breadee.desktop.rc
+
+jobs:
+  rc-build:
+    name: Build RC installer (isolated, staging backend, no publish)
+    runs-on: windows-latest
+    environment: Staging
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify STAGING backend is configured (fail closed)
+        shell: bash
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::The Staging environment has no Supabase URL/key. Refusing to build."; exit 1
+          fi
+          case "$VITE_SUPABASE_ANON_KEY" in
+            *service_role*) echo "::error::A service_role key must never be used in the desktop app."; exit 1 ;;
+          esac
+          case "$VITE_SUPABASE_URL" in
+            *"$PRODUCTION_REF"*) echo "::error::The Staging environment points at the PRODUCTION project. Refusing."; exit 1 ;;
+          esac
+          case "$VITE_SUPABASE_URL" in
+            *"$STAGING_REF"*) : ;;
+            *) echo "::error::The Staging environment does not point at the staging project. Refusing."; exit 1 ;;
+          esac
+          host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
+          echo "Staging backend host: $host"
+
+      - name: Verify RC identity and updater endpoint (fail closed)
+        shell: bash
+        run: |
+          conf=src-tauri/tauri.rc.conf.json
+          if [ ! -f "$conf" ]; then
+            echo "::error::$conf is missing. The RC build has no isolated identity/endpoint. Refusing."; exit 1
+          fi
+          name=$(node -p "require('./$conf').productName")
+          id=$(node -p "require('./$conf').identifier")
+          ep=$(node -p "require('./$conf').plugins.updater.endpoints[0]")
+          echo "RC productName: $name"
+          echo "RC identifier:  $id"
+          echo "RC endpoint:    $ep"
+          if [ "$id" != "$RC_IDENTIFIER" ]; then
+            echo "::error::RC identity is not $RC_IDENTIFIER (got '$id'). Refusing."; exit 1
+          fi
+          if [ "$id" = "app.breadee.desktop" ]; then
+            echo "::error::RC identity collides with PRODUCTION. Refusing."; exit 1
+          fi
+          if [ "$id" = "app.breadee.desktop.staging" ]; then
+            echo "::error::RC identity collides with STAGING. Refusing."; exit 1
+          fi
+          case "$ep" in
+            *desktop-production-channel*) echo "::error::RC updater endpoint points at the PRODUCTION channel. Refusing."; exit 1 ;;
+          esac
+          case "$ep" in
+            *desktop-staging-channel*) echo "::error::RC updater endpoint points at the LIVE STAGING channel. Refusing."; exit 1 ;;
+          esac
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      - name: Build frontend (staging backend)
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
+
+      - name: Verify built bundle targets staging (not production)
+        shell: bash
+        run: |
+          if grep -rl "$PRODUCTION_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle references the PRODUCTION project. Refusing to package."; exit 1
+          fi
+          if ! grep -rl "$STAGING_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle does not reference the staging project. Refusing to package."; exit 1
+          fi
+          echo "Bundle backend target verified: staging."
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Force fresh frontend embed (bust stale app-crate cache)
+        run: cargo clean -p breadee-desktop --manifest-path src-tauri/Cargo.toml
+
+      - name: Build RC installer (--config tauri.rc.conf.json)
+        run: npm run tauri:build -- --config src-tauri/tauri.rc.conf.json
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
+
+      - name: Collect installer and record identity + checksum
+        shell: bash
+        run: |
+          nsis_dir=src-tauri/target/release/bundle/nsis
+          installer=$(ls "$nsis_dir"/*-setup.exe | head -n 1)
+          if [ -z "$installer" ] || [ ! -s "$installer" ]; then
+            echo "::error::No NSIS installer was produced. Refusing."; exit 1
+          fi
+          if ls "$nsis_dir"/*-setup.exe.sig >/dev/null 2>&1; then
+            echo "::error::An updater signature was produced. This build-only RC must not sign for the updater. Refusing."; exit 1
+          fi
+          ver=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          eff_id=$(node -p "require('./src-tauri/tauri.rc.conf.json').identifier")
+          eff_name=$(node -p "require('./src-tauri/tauri.rc.conf.json').productName")
+          mkdir -p out
+          cp "$installer" "out/Breadee_RC_${ver}_x64-setup.exe"
+          ( cd out && sha256sum "Breadee_RC_${ver}_x64-setup.exe" | tee SHA256SUMS.txt )
+          {
+            echo "productName=$eff_name"
+            echo "identifier=$eff_id"
+            echo "version=$ver"
+            echo "backend=staging"
+            echo "updater=inert (staging build; IS_PRODUCTION=false)"
+            echo "functional_source=edbdead (prod v1.0.22 + Phase A + B1 offline + reachability fix)"
+          } | tee out/RC_IDENTITY.txt
+          echo "VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Upload RC installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: breadee-desktop-rc-installer
+          path: |
+            out/Breadee_RC_${{ env.VERSION }}_x64-setup.exe
+            out/SHA256SUMS.txt
+            out/RC_IDENTITY.txt
+          if-no-files-found: error
+          retention-days: 14
