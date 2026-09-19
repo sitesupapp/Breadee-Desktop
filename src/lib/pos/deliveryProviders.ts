@@ -35,6 +35,10 @@ export type DeliveryProvider = {
   contact_phone: string | null;
   contact_email: string | null;
   notes: string | null;
+  // WS7B: the canonical HR employee this internal driver IS (delivery_providers.employee_id).
+  // Only meaningful for kind='internal_driver'; the server forces NULL for external providers.
+  // Current provider config — NOT the historical settlement snapshot.
+  employee_id: string | null;
 };
 
 /** The editable payload delivery_provider_upsert(p_payload jsonb) accepts. */
@@ -52,6 +56,19 @@ export type ProviderUpsert = {
   contact_email: string | null;
   notes: string | null;
   status?: "active" | "inactive";
+  // Optional internal-driver link. The server validates OU/tenant and forces NULL for
+  // external providers; sending null clears the link.
+  employee_id?: string | null;
+};
+
+/** One eligible internal-driver employee — exactly the leak-free fields the picker RPC
+ *  delivery_provider_eligible_employees returns (no salary/bank/contact/private HR data). */
+export type EligibleEmployee = {
+  id: string;
+  full_name: string;
+  employee_code: string | null;
+  employment_status: string;
+  has_login: boolean;
 };
 
 // The WS3 RPCs are newer than this build's generated database.types.ts, so the calls
@@ -78,4 +95,15 @@ export async function setProviderActive(id: string, active: boolean): Promise<De
   const { data, error } = await rpc("delivery_provider_set_active", { p_id: id, p_active: active });
   if (error) throw new Error(error.message);
   return data as DeliveryProvider;
+}
+
+/**
+ * Eligible internal-driver employees for one OU (WS7B). Leak-free picker over the
+ * canonical hr_employees, gated server-side by pos.delivery.providers.manage + exact-OU.
+ * Best-effort: callers treat a failure as an empty list and never block provider management.
+ */
+export async function loadEligibleEmployees(branchId: string): Promise<EligibleEmployee[]> {
+  const { data, error } = await rpc("delivery_provider_eligible_employees", { p_branch: branchId });
+  if (error) throw new Error(error.message);
+  return (data as EligibleEmployee[] | null) ?? [];
 }

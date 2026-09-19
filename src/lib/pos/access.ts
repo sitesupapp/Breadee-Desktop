@@ -100,6 +100,12 @@ export const POS_PERMISSIONS = {
   // configuring the provider catalogue is a manager's. A cashier holds this and not
   // the manage key.
   DELIVERY_COST_CAPTURE: "pos.delivery.cost.capture",
+  // Post-close delivery-cost reconciliation + settlement management (Delivery Settlement
+  // WS7B). The key pos_delivery_resolve_cost checks for itself, alongside the canonical
+  // pos.delivery_providers feature and exact-OU access. A back-office/manager authority,
+  // DELIBERATELY SEPARATE from the cashier's cost.capture: owner/admin default ON,
+  // manager/cashier OFF (tenants may grant it to a custom role).
+  DELIVERY_SETTLEMENTS_MANAGE: "pos.delivery.settlements.manage",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -199,6 +205,31 @@ export function canManageDeliveryProviders(ctx: PosAccessContext): Gate {
     return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_PROVIDERS_MANAGE), "You do not have permission to manage delivery providers.");
+}
+
+/**
+ * Post-close delivery-cost reconciliation (Delivery Settlement WS7B).
+ *
+ * A back-office/settlement-management authority, modelled exactly on
+ * canManageDeliveryProviders (NOT an operational-POS action, so owners are NOT blocked —
+ * owner/admin legitimately hold pos.delivery.settlements.manage). The order the server
+ * (pos_delivery_resolve_cost) would refuse in: active membership, the canonical
+ * pos.delivery_providers feature, then the pos.delivery.settlements.manage permission the
+ * RPC checks for itself. Never a security boundary; the RPC re-enforces every rule — this
+ * only decides whether the "Resolve cost" control is offered. No role-name check.
+ */
+export function canReconcileDeliverySettlements(ctx: PosAccessContext): Gate {
+  const m = ctx.membership;
+  if (!m || !isActiveMember(m.status)) {
+    return { allowed: false, reason: "Your membership is not active for this tenant." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS) || !hasFeature(ctx.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+    return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
+  }
+  return gate(
+    perm(ctx, POS_PERMISSIONS.DELIVERY_SETTLEMENTS_MANAGE),
+    "You do not have permission to reconcile delivery settlement costs.",
+  );
 }
 
 /**

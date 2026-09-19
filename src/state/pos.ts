@@ -18,6 +18,7 @@ import {
   canTakePayments,
   canUseOrderType,
   canViewDeliveryReport,
+  canReconcileDeliverySettlements,
   canViewReceivables,
   posAccessDenialReason,
   type PosAccessContext,
@@ -47,6 +48,7 @@ export type PosContext = {
     collectReceivables: Gate;
     manageDelivery: Gate;
     viewDeliveryReport: Gate;
+    reconcileDeliverySettlements: Gate;
   };
   routes: {
     takeaway: boolean;
@@ -117,6 +119,7 @@ export function usePosContext(): PosContext {
         collectReceivables: canCollectReceivables(access),
         manageDelivery: canManageDelivery(access),
         viewDeliveryReport: canViewDeliveryReport(access),
+        reconcileDeliverySettlements: canReconcileDeliverySettlements(access),
       },
       routes: {
         takeaway: canUseOrderType(access, FEATURES.POS_TAKEAWAY),

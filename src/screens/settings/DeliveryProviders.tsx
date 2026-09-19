@@ -19,10 +19,12 @@ import { usePosContext } from "@/state/pos";
 import { canManageDeliveryProviders } from "@/lib/pos/access";
 import {
   loadProviders,
+  loadEligibleEmployees,
   saveProvider,
   setProviderActive,
   type CostEntryMode,
   type DeliveryProvider,
+  type EligibleEmployee,
   type ProviderCurrency,
   type ProviderKind,
   type ProviderUpsert,
@@ -120,6 +122,7 @@ type FormState = {
   contact_phone: string;
   contact_email: string;
   notes: string;
+  employee_id: "" | string;
 };
 
 const emptyForm = (): FormState => ({
@@ -134,6 +137,7 @@ const emptyForm = (): FormState => ({
   contact_phone: "",
   contact_email: "",
   notes: "",
+  employee_id: "",
 });
 
 const formFrom = (p: DeliveryProvider): FormState => ({
@@ -150,6 +154,7 @@ const formFrom = (p: DeliveryProvider): FormState => ({
   contact_phone: p.contact_phone ?? "",
   contact_email: p.contact_email ?? "",
   notes: p.notes ?? "",
+  employee_id: p.employee_id ?? "",
 });
 
 const toPayload = (f: FormState, branchId: string): ProviderUpsert => ({
@@ -165,6 +170,8 @@ const toPayload = (f: FormState, branchId: string): ProviderUpsert => ({
   contact_phone: f.contact_phone.trim() || null,
   contact_email: f.contact_email.trim() || null,
   notes: f.notes.trim() || null,
+  // Link only for internal drivers; server also forces NULL for external providers.
+  employee_id: f.kind === "internal_driver" ? (f.employee_id || null) : null,
 });
 
 const FIELD = "mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm outline-none focus:border-brand";
@@ -228,6 +235,35 @@ function CostField({ value, onChange }: { value: CostEntryMode; onChange: (c: Co
   );
 }
 
+// Internal-driver → canonical HR employee link. Only rendered for kind='internal_driver'.
+// Employees without a Breadee login are selectable; external providers never see this.
+function EmployeeField({
+  value,
+  employees,
+  onChange,
+}: {
+  value: string;
+  employees: EligibleEmployee[];
+  onChange: (id: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className={LABEL}>Which employee is this driver? <span className="font-normal text-slate-400">(optional)</span></span>
+      <select className={FIELD} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Not linked to an employee</option>
+        {employees.map((emp) => (
+          <option key={emp.id} value={emp.id}>
+            {emp.full_name}{emp.employee_code ? ` (${emp.employee_code})` : ""}{emp.has_login ? "" : " — no login"}
+          </option>
+        ))}
+      </select>
+      <span className="mt-1 block text-[11px] text-sub">
+        Links this driver to your staff record so completed deliveries remember who delivered. A driver without a Breadee login can still be selected.
+      </span>
+    </label>
+  );
+}
+
 function InfoFields({ form, set }: { form: FormState; set: (patch: Partial<FormState>) => void }) {
   return (
     <div className="grid gap-4">
@@ -284,6 +320,7 @@ export function DeliveryProviders() {
   const gate = useMemo(() => canManageDeliveryProviders(pos.access), [pos.access]);
 
   const [providers, setProviders] = useState<DeliveryProvider[] | null>(null);
+  const [employees, setEmployees] = useState<EligibleEmployee[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>({ mode: "list" });
@@ -300,6 +337,12 @@ export function DeliveryProviders() {
     setError(null);
     try {
       setProviders(await loadProviders(branchId));
+      // Best-effort picker list; a failure just leaves the selector empty, never blocks.
+      try {
+        setEmployees(await loadEligibleEmployees(branchId));
+      } catch {
+        setEmployees([]);
+      }
     } catch (e) {
       setProviders(null);
       setError(e instanceof Error ? e.message : "Could not load delivery providers.");
@@ -307,6 +350,11 @@ export function DeliveryProviders() {
       setLoading(false);
     }
   }, [gate.allowed, branchId]);
+
+  const employeeName = useCallback(
+    (id: string | null) => (id ? (employees.find((e) => e.id === id)?.full_name ?? "Linked employee") : null),
+    [employees],
+  );
 
   useEffect(() => {
     void load();
@@ -372,6 +420,7 @@ export function DeliveryProviders() {
         heading={view.form.id ? "Edit provider" : "Add delivery provider"}
         branchName={branchName}
         form={view.form}
+        employees={employees}
         saving={saving}
         saveError={saveError}
         onChange={(patch) => setView({ mode: "form", form: { ...view.form, ...patch } })}
@@ -387,6 +436,7 @@ export function DeliveryProviders() {
         branchName={branchName}
         step={view.step}
         form={view.form}
+        employees={employees}
         saving={saving}
         saveError={saveError}
         onChange={(patch) => setView({ mode: "wizard", step: view.step, form: { ...view.form, ...patch } })}
@@ -461,6 +511,12 @@ export function DeliveryProviders() {
                 </div>
               </div>
               <dl className="mt-3 space-y-1 text-[12px]">
+                {p.kind === "internal_driver" && p.employee_id && (
+                  <div className="flex gap-2">
+                    <dt className="w-32 shrink-0 font-semibold text-slate-400">Driver</dt>
+                    <dd className="text-ink">{employeeName(p.employee_id)}</dd>
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <dt className="w-32 shrink-0 font-semibold text-slate-400">How they are paid</dt>
                   <dd className="text-ink">{SETTLE_LABEL[p.settlement_mode]}</dd>
@@ -500,6 +556,7 @@ function ProviderEditor(props: {
   heading: string;
   branchName: string;
   form: FormState;
+  employees: EligibleEmployee[];
   saving: boolean;
   saveError: string | null;
   onChange: (patch: Partial<FormState>) => void;
@@ -517,6 +574,9 @@ function ProviderEditor(props: {
         <div className="grid gap-4">
           <InfoFields form={form} set={onChange} />
           <KindField value={form.kind} onChange={(k) => onChange({ kind: k })} />
+          {form.kind === "internal_driver" && (
+            <EmployeeField value={form.employee_id} employees={props.employees} onChange={(id) => onChange({ employee_id: id })} />
+          )}
           <SettlementField value={form.settlement_mode} onChange={(m) => onChange({ settlement_mode: m })} />
           <CostField value={form.cost_entry_mode} onChange={(c) => onChange({ cost_entry_mode: c })} />
           {props.saveError && <p className="rounded bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">{props.saveError}</p>}
@@ -539,6 +599,7 @@ function ProviderWizard(props: {
   branchName: string;
   step: number;
   form: FormState;
+  employees: EligibleEmployee[];
   saving: boolean;
   saveError: string | null;
   onChange: (patch: Partial<FormState>) => void;
@@ -559,7 +620,14 @@ function ProviderWizard(props: {
       </div>
       <Card className="p-4 sm:p-5">
         <div className="grid gap-4">
-          {step === 1 && <KindField value={form.kind} onChange={(k) => props.onChange({ kind: k })} />}
+          {step === 1 && (
+            <div className="grid gap-4">
+              <KindField value={form.kind} onChange={(k) => props.onChange({ kind: k })} />
+              {form.kind === "internal_driver" && (
+                <EmployeeField value={form.employee_id} employees={props.employees} onChange={(id) => props.onChange({ employee_id: id })} />
+              )}
+            </div>
+          )}
           {step === 2 && <SettlementField value={form.settlement_mode} onChange={(m) => props.onChange({ settlement_mode: m })} />}
           {step === 3 && <CostField value={form.cost_entry_mode} onChange={(c) => props.onChange({ cost_entry_mode: c })} />}
           {step === 4 && <InfoFields form={form} set={props.onChange} />}
