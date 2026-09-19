@@ -2,7 +2,8 @@
 # Breadee Desktop - RC (Release-Candidate) BUILD-ONLY installer.
 #
 # Packages the CURRENT functional candidate (prod v1.0.22 + Phase A + Phase B1
-# offline Takeaway+Cash, reachability routing, offline Send-to-kitchen + resume)
+# offline Takeaway+Cash, reachability routing, offline Send-to-kitchen + resume,
+# + durable POS-session snapshot so an offline restart restores branch + shift)
 # under a THIRD, isolated identity - app.breadee.desktop.rc - so it installs
 # side-by-side with the installed Production (app.breadee.desktop) and Staging
 # (app.breadee.desktop.staging) apps and keeps its own WebView2 / IndexedDB
@@ -18,7 +19,7 @@ name: Desktop Windows RC (Artifact, Build-Only)
 
 on:
   push:
-    branches: [feature/pos-offline-takeaway-cash-b1-rc4]
+    branches: [feature/pos-offline-takeaway-cash-b1-rc5]
   workflow_dispatch:
 
 permissions:
