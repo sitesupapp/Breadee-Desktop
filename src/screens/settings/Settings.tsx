@@ -22,6 +22,9 @@ import { Themes } from "@/screens/settings/Themes";
 import { IconsGallery } from "@/screens/settings/IconsGallery";
 import { Help } from "@/screens/settings/Help";
 import { About } from "@/screens/settings/About";
+import { DeliveryProviders } from "@/screens/settings/DeliveryProviders";
+import { useSession } from "@/state/session";
+import { canManageDeliveryProviders } from "@/lib/pos/access";
 
 const TABS = [
   { to: "pos", label: "POS Settings" },
@@ -39,11 +42,24 @@ const TABS = [
 ];
 
 export function Settings() {
+  const session = useSession();
+  // The advanced Delivery Providers & Settlement tab is offered only when the tenant is
+  // entitled to `pos.delivery_providers` AND the user holds `pos.delivery.providers.manage`
+  // — the same gate the route and every WS3 RPC enforce. The route stays mounted so a deep
+  // link still lands on the screen, which self-gates identically.
+  const showProviders = canManageDeliveryProviders({
+    membership: session.membership,
+    permissions: session.permissions,
+    features: session.features,
+  }).allowed;
+  const tabs = showProviders
+    ? [TABS[0], { to: "delivery-providers", label: "Delivery Providers" }, ...TABS.slice(1)]
+    : TABS;
   return (
     <div className="mx-auto max-w-6xl">
       <h1 className="mb-4 text-2xl font-extrabold">Settings</h1>
       <div className="mb-5 flex flex-wrap gap-1 border-b border-line">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <NavLink
             key={t.to}
             to={`/settings/${t.to}`}
@@ -58,6 +74,7 @@ export function Settings() {
       <Routes>
         <Route index element={<Navigate to="/settings/pos" replace />} />
         <Route path="pos" element={<PosSettings />} />
+        <Route path="delivery-providers" element={<DeliveryProviders />} />
         <Route path="cashier-layout" element={<CashierLayout />} />
         <Route path="printing/*" element={<Printing />} />
         {/* The pre-P3 address. Kept so a bookmark, a support note or a deep link
