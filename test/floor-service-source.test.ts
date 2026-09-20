@@ -7,8 +7,11 @@
 //   * structures render behind tables and never intercept a tap;
 //   * the whole Map is gated on `pos.floor_map`, and with it off the List stands
 //     alone;
-//   * the floor read is the one Phase-1 RPC and NO Designer/draft/publish code
-//     ships in Phase 2.
+//   * the SERVICE READER is the one Phase-1 read RPC and performs no write. (The
+//     Phase-3A Designer now ships alongside it and adds the draft/lease RPCs to
+//     the shared union — asserted in floor-designer-source.test.ts — but it is a
+//     separate module; the reader here stays read-only, and no PUBLISH path ships
+//     in 3A.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,10 +24,14 @@ const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const read = (rel: string) => readFileSync(join(srcRoot, rel), "utf8");
 const code = (rel: string) => stripJsxComments(read(rel));
 
-test("the RPC allow-list includes floor_service_layout and no floor WRITE rpc", () => {
+test("the RPC allow-list exposes the floor read (and the 3A draft/lease) but never a PUBLISH path", () => {
   const rpc = code("lib/pos/rpc.ts");
   assert.match(rpc, /"floor_service_layout"/);
-  assert.doesNotMatch(rpc, /"floor_autosave_draft"|"floor_publish"|"floor_restore_revision"|"floor_acquire_lease"/);
+  // Phase 3A adds the DRAFT designer (autosave + the lease RPCs) to this shared
+  // union — that is expected and is asserted in floor-designer-source.test.ts. What
+  // must STILL be absent is any publish/restore/history path: Phase 3A edits a
+  // draft and never publishes, so the Service Floor read stays unaffected by edits.
+  assert.doesNotMatch(rpc, /"floor_publish"|"floor_restore_revision"|"floor_history"/);
 });
 
 test("the reader calls floor_service_layout and performs no write", () => {

@@ -132,7 +132,22 @@ export type PosRpcName =
   // READ for the Service Floor Map; gated server-side on pos.floor_map + pos.tables.view;
   // operational table state still comes from pos_table_map. No floor WRITE RPC here —
   // Phase 2 is read-only and the Designer (draft/publish) is a later phase.
-  | "floor_service_layout";
+  | "floor_service_layout"
+  // Dine-In Floor DESIGNER — Phase 3A foundation. The DRAFT/lease surface the
+  // editor uses, all gated server-side on the `pos.floor_map` entitlement +
+  // `pos.tables.floor_manage`. `floor_draft` loads the draft, its lease and the
+  // published-revision CAS key; `floor_autosave_draft` persists geometry (lease-
+  // held + CAS-guarded, never publishing); the four lease RPCs run the single-
+  // editor lifecycle; `floor_unplaced_tables` lists tables not on the draft.
+  // PUBLISH (`floor_publish`) is deliberately ABSENT — Phase 3A edits a draft and
+  // never publishes, so the Service Floor read above is never affected by an edit.
+  | "floor_draft"
+  | "floor_autosave_draft"
+  | "floor_acquire_lease"
+  | "floor_heartbeat"
+  | "floor_release_lease"
+  | "floor_takeover_lease"
+  | "floor_unplaced_tables";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {
