@@ -261,6 +261,27 @@ export function placedTableIds(layout: FloorLayout): Set<string> {
 }
 
 /**
+ * Map every placed canonical table id to the NAME of the section it sits in on
+ * the published floor.
+ *
+ * Best-effort CONTEXT only, for surfaces that show "where a table is" (e.g. Open
+ * Tables) without depending on the floor: a table that is not on the published
+ * layout - or a branch with no published floor at all - simply has no section,
+ * and the caller shows nothing rather than a wrong or invented one. This reads
+ * the published document only; it never touches a draft.
+ */
+export function tableSectionMap(layout: FloorLayout): Map<string, string> {
+  const sectionName = new Map(layout.sections.map((s) => [s.id, s.name] as const));
+  const bySection = new Map<string, string>();
+  for (const e of layout.elements) {
+    if (e.type !== "table" || !e.tableId) continue;
+    const name = sectionName.get(e.sectionId);
+    if (name) bySection.set(e.tableId, name);
+  }
+  return bySection;
+}
+
+/**
  * Load the published floor for a branch. The branch is REQUIRED by the server and
  * is never guessed here. Kept as the sole RPC boundary for this feature; parsing
  * is delegated so it can be unit-tested without the network.
