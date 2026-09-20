@@ -312,8 +312,11 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // (two reads + one money write). Same discipline as the 11 -> 12 bump above -
   // the number moves by exactly what was reviewed. AND DELIVERY MANAGEMENT:
   // 21 -> 23, for `pos_set_delivery_ops` (internal ops write) and
-  // `pos_delivery_report` (read-only report).
-  assert.equal(members.length, 25, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // `pos_delivery_report` (read-only report). AND SINCE: 23 -> 25 for WS7B
+  // `pos_delivery_resolve_cost` and the Floor Map read `floor_service_layout`; AND
+  // FLOOR DESIGNER (Phase 3A): 25 -> 32 for the six draft/lease RPCs plus
+  // floor_unplaced_tables (no floor_publish — 3A never publishes).
+  assert.equal(members.length, 32, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

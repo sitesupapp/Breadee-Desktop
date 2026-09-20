@@ -115,7 +115,11 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // new RPC cannot slip in under an unchanged total.
 // RETARGETED AGAIN BY DESKTOP 1.0.4: `pos_configure_tables` was added, so the
 // expected set grows by exactly one more reviewed name.
-test("the RPC allow-list contains exactly the twenty-four expected names", () => {
+// RETARGETED BY FLOOR DESIGNER (Phase 3A): 25 -> 32, for the six draft/lease RPCs
+// (floor_draft / floor_autosave_draft / floor_acquire_lease / floor_heartbeat /
+// floor_release_lease / floor_takeover_lease) and floor_unplaced_tables. NO
+// floor_publish is added — Phase 3A edits a draft and never publishes.
+test("the RPC allow-list contains exactly the thirty-two expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -124,9 +128,18 @@ test("the RPC allow-list contains exactly the twenty-four expected names", () =>
   assert.deepEqual(
     [...members].sort(),
     [
-      // Dine-In Floor Map Phase 2: the published-floor READ (ship-dark, gated on
-      // pos.floor_map + pos.tables.view). Sorts before the pos_* names.
+      // Dine-In Floor Map: the published-floor READ (Phase 2, ship-dark, gated on
+      // pos.floor_map + pos.tables.view) PLUS the Phase-3A Designer draft/lease
+      // surface (gated on pos.tables.floor_manage; NO publish path ships in 3A).
+      // All the floor_* names sort before the pos_* names.
+      "floor_acquire_lease",
+      "floor_autosave_draft",
+      "floor_draft",
+      "floor_heartbeat",
+      "floor_release_lease",
       "floor_service_layout",
+      "floor_takeover_lease",
+      "floor_unplaced_tables",
       "pos_cash_box_shift",
       "pos_clear_table",
       "pos_close_table",
@@ -160,7 +173,7 @@ test("the RPC allow-list contains exactly the twenty-four expected names", () =>
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 25);
+  assert.equal(members.length, 32);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
