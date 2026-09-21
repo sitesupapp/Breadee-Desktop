@@ -193,7 +193,10 @@ test("a rename stays rename_to and a new table stays a temp: intent — no canon
   assert.match(lib, /`temp:\$\{/, "temp identities use the server's temp: namespace");
   const store = ts(STORE);
   assert.ok(!store.includes("pos_tables"), "the store never names the canonical table store");
-  assert.ok(!store.includes("rename_to"), "the store stages renames through the edits model, not ad-hoc fields");
+  assert.match(store, /edits\.renames/, "renames flow through the edits model");
+  // Inspecting a loaded raw field ("rename_to" in raw) is fine — WRITING one
+  // directly would not be. The serializer is the only writer.
+  assert.ok(!/\.rename_to\s*=/.test(store), "the store never writes rename_to directly");
 });
 
 test("the inspector and dialogs speak restaurant language — no developer identifiers", () => {
@@ -214,4 +217,97 @@ test("the shell keeps the section nav in a fixed ROW so the canvas dominates (th
   );
   assert.match(shell, /UnplacedTray/, "the unplaced tray is mounted");
   assert.match(shell, /DesignerInspector/, "the inspector is mounted");
+});
+
+// --- Phase 3C: precision tools stay Designer-owned ---------------------------
+
+const SNAP_LIB = "src/lib/pos/floorSnap.ts";
+const COLLISION_LIB = "src/lib/pos/floorCollision.ts";
+const ARRANGE_LIB = "src/lib/pos/floorArrange.ts";
+const BULK_PANEL = "src/components/pos/floor/designer/DesignerBulkPanel.tsx";
+
+test("the SERVICE floor and Open Tables know nothing about snap/collision/multi-select", () => {
+  for (const rel of [
+    "src/components/pos/floor/ServiceFloor.tsx",
+    "src/components/pos/floor/FloorCanvas.tsx",
+    "src/components/pos/floor/FloorTableNode.tsx",
+    "src/lib/pos/floor.ts",
+    "src/state/floor.ts",
+    "src/components/pos/OpenTablesModal.tsx",
+    "src/lib/pos/openTables.ts",
+  ]) {
+    const src = ts(rel);
+    for (const forbidden of ["floorSnap", "floorCollision", "floorArrange", "analyzeCollisions", "computeMoveSnap", "selectedIds", "DesignerBulkPanel"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("the 3C geometry libs are pure: no network, no store, no React", () => {
+  for (const rel of [SNAP_LIB, COLLISION_LIB, ARRANGE_LIB]) {
+    const src = ts(rel);
+    for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("collision is ADVISORY: nothing gates the autosave path on a collision result", () => {
+  const store = ts(STORE);
+  assert.ok(!store.includes("analyzeCollisions"), "the store never consults collision before saving");
+  assert.ok(!store.includes("floorCollision"), "collision feedback lives in the render layer only");
+});
+
+test("group operations flow through ONE mutation: commitGeoms in the store, onCommitGroup from the canvas", () => {
+  const store = ts(STORE);
+  assert.match(store, /commitGeoms:\s*\(entries\)/, "the store exposes the single group commit");
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /onCommitGroup\(/, "the canvas commits a group as one call");
+  assert.ok(!canvas.includes("forEach(onCommit"), "never a per-table commit loop");
+  const shell = jsx(SHELL);
+  assert.match(shell, /d\.commitGeoms/, "bulk tools apply through the same single path");
+});
+
+test("snapping is zoom-normalised and bypassable, and guides are gesture-scoped", () => {
+  const snap = ts(SNAP_LIB);
+  assert.match(snap, /SNAP_THRESHOLD_PX\s*\/\s*Math\.max\(scale/, "screen threshold ÷ scale");
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /bypass:\s*e\.altKey/, "Alt bypasses snapping during a gesture");
+  assert.match(canvas, /setGuides\(\[\]\)/, "guides are cleared when the gesture ends");
+});
+
+test("multi-select is Ctrl/Cmd+click on tables; structures stay single-select", () => {
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /e\.ctrlKey \|\| e\.metaKey/, "the toggle modifier");
+  const store = ts(STORE);
+  assert.match(store, /el\.type !== "table"/, "toggling a structure demotes to single-select");
+});
+
+test("the bulk panel never offers a cross-table rename and speaks restaurant language", () => {
+  const bulk = ts(BULK_PANEL);
+  assert.ok(!bulk.includes("onRename") && !bulk.includes("TABLE NAME"), "no rename across canonical tables");
+  assert.match(bulk, /tables selected/, "an honest count");
+  assert.match(bulk, /min-h-\[44px\]/, "44px touch targets on bulk actions");
+});
+
+// --- Phase-3B follow-ups pinned ----------------------------------------------
+
+test("meta-less legacy placements cannot be renamed, and a staged rename is always discardable", () => {
+  const insp = jsx(INSPECTOR);
+  assert.match(insp, /isLegacy/, "the legacy branch exists");
+  assert.match(insp, /Legacy table/, "honest identity, nothing fabricated");
+  assert.match(insp, /Discard draft rename/, "the narrow escape hatch");
+  const store = ts(STORE);
+  assert.match(store, /discardRename:\s*\(id\)/, "the store clears a rename without the canonical name");
+});
+
+test("the inspector reveals the selection instead of re-fitting (zoom preserved)", () => {
+  const shell = jsx(SHELL);
+  assert.match(shell, /panToReveal/, "minimal reveal, not Fit");
+  assert.ok(!/selectedElementId[\s\S]{0,200}requestFit\(\)/.test(shell), "selection never triggers a full Fit");
+});
+
+test("inspector steppers meet the 44px touch floor", () => {
+  const insp = jsx(INSPECTOR);
+  assert.match(insp, /h-11 w-11/, "44px stepper hit targets");
 });

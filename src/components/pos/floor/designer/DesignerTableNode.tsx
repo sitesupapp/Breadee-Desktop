@@ -19,6 +19,7 @@ import { cn } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { shapeLabel, shapeRadiusFraction } from "@/lib/pos/floorStatus";
 import type { DesignerElement, ResizeHandle } from "@/lib/pos/floorDesigner";
+import type { CollisionStatus } from "@/lib/pos/floorCollision";
 
 /** Constant on-screen size for a handle, in CSS px, regardless of zoom. */
 const HANDLE_PX = 14;
@@ -37,6 +38,7 @@ export function DesignerTableNode({
   label,
   renamed,
   isNew,
+  warn = "clear",
   selected,
   editable,
   scale,
@@ -48,6 +50,8 @@ export function DesignerTableNode({
   renamed: boolean;
   /** True for a staged new-table intent (created at a future publish). */
   isNew: boolean;
+  /** Advisory collision/spacing status (Phase 3C) — quiet chrome, never blocking. */
+  warn?: CollisionStatus;
   selected: boolean;
   editable: boolean;
   /** Current view scale, so chrome can be counter-scaled to a constant size. */
@@ -68,6 +72,8 @@ export function DesignerTableNode({
     : isNew
       ? "New — created when the floor is published"
       : null;
+  const warnNote =
+    warn === "collision" ? "Overlaps a neighbouring table or structure" : warn === "tight" ? "Tight spacing with a neighbour" : null;
 
   return (
     <div
@@ -82,13 +88,17 @@ export function DesignerTableNode({
           "absolute inset-0 box-border flex items-center justify-center overflow-hidden border-2 shadow-sm",
           selected
             ? "border-floor-select bg-white text-ink"
-            : isNew
-              ? "border-dashed border-line bg-white text-ink"
-              : "border-line bg-white text-ink",
+            : warn === "collision"
+              ? "border-amber-500 bg-amber-50/60 text-ink"
+              : warn === "tight"
+                ? "border-amber-300 bg-white text-ink"
+                : isNew
+                  ? "border-dashed border-line bg-white text-ink"
+                  : "border-line bg-white text-ink",
         )}
         style={{ borderRadius: radius, transform: rotate, transformOrigin: "center center" }}
-        aria-label={`${label || "table"}, ${shapeLabel(element.shape)}${unpublishedNote ? `, ${unpublishedNote}` : ""}`}
-        title={unpublishedNote ?? undefined}
+        aria-label={`${label || "table"}, ${shapeLabel(element.shape)}${unpublishedNote ? `, ${unpublishedNote}` : ""}${warnNote ? `, ${warnNote}` : ""}`}
+        title={warnNote ?? unpublishedNote ?? undefined}
       >
         <span
           className="flex max-w-full flex-col items-center justify-center text-center leading-tight"

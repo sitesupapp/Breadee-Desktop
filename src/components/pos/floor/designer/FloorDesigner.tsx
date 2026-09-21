@@ -30,11 +30,15 @@ import { FloorMapControls } from "@/components/pos/floor/FloorMapControls";
 import { DesignerTopBar } from "@/components/pos/floor/designer/DesignerTopBar";
 import { DesignerCanvas, type DesignerLabel } from "@/components/pos/floor/designer/DesignerCanvas";
 import { DesignerInspector } from "@/components/pos/floor/designer/DesignerInspector";
+import { DesignerBulkPanel } from "@/components/pos/floor/designer/DesignerBulkPanel";
 import { UnplacedTray } from "@/components/pos/floor/designer/UnplacedTray";
 import { AddTableDialog } from "@/components/pos/floor/designer/AddTableDialog";
 import { SectionsDialog } from "@/components/pos/floor/designer/SectionsDialog";
 import { useFloorDesigner, FLOOR_HEARTBEAT_MS } from "@/state/floorDesigner";
-import type { DesignerElement } from "@/lib/pos/floorDesigner";
+import { geomOf, type DesignerElement, type ElementGeom } from "@/lib/pos/floorDesigner";
+import { analyzeCollisions, type CollisionStatus } from "@/lib/pos/floorCollision";
+import { alignGeoms, distributeGeoms, sameSize, type AlignMode, type ArrangeEntry, type SizeMode } from "@/lib/pos/floorArrange";
+import { panToReveal } from "@/lib/pos/floorSnap";
 import {
   clampPan,
   MAX_SCALE,
@@ -113,6 +117,27 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     () => d.elements.find((e) => e.id === d.selectedElementId) ?? null,
     [d.elements, d.selectedElementId],
   );
+  /** The TABLE members of the multi-selection, in selection order. */
+  const selectedTables = useMemo(
+    () =>
+      d.selectedIds
+        .map((id) => sectionElements.find((e) => e.id === id))
+        .filter((e): e is DesignerElement => !!e && e.type === "table"),
+    [d.selectedIds, sectionElements],
+  );
+  const isMulti = selectedTables.length >= 2;
+
+  // Advisory collision/spacing feedback — pure and memoized on the ACTIVE
+  // section's elements, recomputed automatically after every geometry mutation
+  // (drag, bulk action, resize…). Never blocks anything.
+  const collisionReport = useMemo(() => analyzeCollisions(sectionElements), [sectionElements]);
+  const warnFor = (el: DesignerElement): CollisionStatus => collisionReport.statusById.get(el.id) ?? "clear";
+
+  /** One bulk action → ONE draft mutation through the store's single save path. */
+  const arrangeEntries = (): ArrangeEntry[] => selectedTables.map((el) => ({ id: el.id, geom: geomOf(el) }));
+  const applyArrange = (result: Map<string, ElementGeom>) => {
+    if (result.size > 0) d.commitGeoms([...result.entries()]);
+  };
 
   /** Read-only identity projection: canonical name, staged rename, or new name. */
   const labelFor = (el: DesignerElement): DesignerLabel => {
@@ -135,6 +160,28 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     const center = { x: vp.width / 2, y: vp.height / 2 };
     d.setTransform(clampPan(zoomAt(d.transform, factor, center), plane, vp));
   };
+
+  // Phase-3B follow-up #2: when the side panel opens or the selection moves,
+  // pan JUST enough to keep the selected element visible. Never a surprise
+  // re-fit; the operator's zoom is always preserved, and nothing happens when
+  // the element is already comfortably in view. The rAF lets the panel-induced
+  // canvas resize settle before measuring.
+  const selectedElementId = selectedElement?.id ?? null;
+  useEffect(() => {
+    if (!open || selectedElementId === null) return;
+    const raf = window.requestAnimationFrame(() => {
+      const s = useFloorDesigner.getState();
+      const el = s.elements.find((e) => e.id === selectedElementId);
+      const cur = s.transform;
+      if (!el || !cur) return;
+      const vp = viewport();
+      if (vp.width === 0 || vp.height === 0) return;
+      const revealed = panToReveal(cur, el, vp);
+      if (revealed) d.setTransform(clampPan(revealed, plane, vp));
+    });
+    return () => window.cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, selectedElementId, isMulti]);
 
   if (!open) return null;
 
@@ -163,6 +210,17 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
                 <Glyph name="layers" size={15} />
                 Sections
               </button>
+              {(collisionReport.collisions > 0 || collisionReport.tight > 0) && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-bold text-amber-800"
+                  title="Layout guidance — advisory only, nothing is blocked"
+                >
+                  <Glyph name="info" size={13} />
+                  {collisionReport.collisions > 0 && `${collisionReport.collisions} overlap${collisionReport.collisions === 1 ? "" : "s"}`}
+                  {collisionReport.collisions > 0 && collisionReport.tight > 0 && " · "}
+                  {collisionReport.tight > 0 && `${collisionReport.tight} tight`}
+                </span>
+              )}
             </span>
           ) : undefined
         }
@@ -238,13 +296,16 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
               <DesignerCanvas
                 section={activeSection}
                 elements={sectionElements}
-                selectedId={d.selectedElementId}
+                selectedIds={d.selectedIds}
                 editable={editable}
                 transform={d.transform}
                 labelFor={labelFor}
+                warnFor={warnFor}
                 onTransform={(t) => d.setTransform(t)}
                 onSelect={(id) => d.selectElement(id)}
+                onToggleSelect={(id) => d.toggleSelect(id)}
                 onCommit={(id, geom) => d.commitGeom(id, geom)}
+                onCommitGroup={(entries) => d.commitGeoms(entries)}
               />
               <div className="absolute bottom-3 end-3">
                 <FloorMapControls
@@ -268,21 +329,40 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
             />
           </div>
 
-          {/* Inspector — opens for the selected object; the canvas stays dominant. */}
-          {selectedElement && (
+          {/* Side panel — the single-table Inspector, or the multi-selection
+              bulk tools. The canvas stays dominant either way. */}
+          {(isMulti || selectedElement) && (
             <div className="w-[320px] shrink-0 xl:w-[360px]">
-              <DesignerInspector
-                element={selectedElement}
-                meta={selectedElement.tableId ? d.tableMeta.get(selectedElement.tableId) ?? null : null}
-                sectionName={activeSection?.name ?? null}
-                readOnly={!editable}
-                onRename={(name) => d.renameTable(selectedElement.id, name)}
-                onSeats={(seats) => d.setTableSeats(selectedElement.id, seats)}
-                onShape={(shape) => d.setElementShape(selectedElement.id, shape)}
-                onSize={(w, h) => d.setElementSize(selectedElement.id, w, h)}
-                onRotate={(rotation) => d.setElementRotation(selectedElement.id, rotation)}
-                onRemove={() => d.removeElement(selectedElement.id)}
-              />
+              {isMulti ? (
+                <DesignerBulkPanel
+                  count={selectedTables.length}
+                  referenceName={labelFor(selectedTables[selectedTables.length - 1]).label}
+                  collisions={collisionReport.collisions}
+                  tight={collisionReport.tight}
+                  readOnly={!editable}
+                  onAlign={(mode: AlignMode) => applyArrange(alignGeoms(arrangeEntries(), mode))}
+                  onDistribute={(axis) => applyArrange(distributeGeoms(arrangeEntries(), axis))}
+                  onSameSize={(mode: SizeMode) => {
+                    const ref = selectedTables[selectedTables.length - 1];
+                    if (ref) applyArrange(sameSize(arrangeEntries(), ref.id, mode));
+                  }}
+                  onClear={() => d.selectElement(null)}
+                />
+              ) : selectedElement ? (
+                <DesignerInspector
+                  element={selectedElement}
+                  meta={selectedElement.tableId ? d.tableMeta.get(selectedElement.tableId) ?? null : null}
+                  sectionName={activeSection?.name ?? null}
+                  readOnly={!editable}
+                  onRename={(name) => d.renameTable(selectedElement.id, name)}
+                  onDiscardRename={() => d.discardRename(selectedElement.id)}
+                  onSeats={(seats) => d.setTableSeats(selectedElement.id, seats)}
+                  onShape={(shape) => d.setElementShape(selectedElement.id, shape)}
+                  onSize={(w, h) => d.setElementSize(selectedElement.id, w, h)}
+                  onRotate={(rotation) => d.setElementRotation(selectedElement.id, rotation)}
+                  onRemove={() => d.removeElement(selectedElement.id)}
+                />
+              ) : null}
             </div>
           )}
         </div>

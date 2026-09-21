@@ -108,7 +108,8 @@ export function SectionsDialog({
                   setError(r.ok ? null : r.reason);
                 }}
                 className={cn(
-                  "grid h-9 w-9 shrink-0 place-items-center rounded-lg border",
+                  // 44px touch target (Phase-3B follow-up #3).
+                  "grid h-11 w-11 shrink-0 place-items-center rounded-lg border",
                   deletable
                     ? "border-rose-200 bg-white text-rose-700 hover:bg-rose-50"
                     : "cursor-not-allowed border-line bg-white text-sub opacity-50",
