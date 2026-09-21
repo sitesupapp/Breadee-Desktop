@@ -16,6 +16,7 @@ import type { CartLine, SelectedModifier, SubmitOrderResult } from "@/types/pos"
 import { lineTotals } from "@/lib/pos/modifiers";
 import { newClientOpId } from "@/lib/pos/orders";
 import { sameRemovals } from "@/lib/pos/itemOptions";
+import { sameMaterialRemovals, type RemovedMaterial } from "@/lib/pos/recipeRemovals";
 
 export type RemovedLine = { line: CartLine; index: number };
 
@@ -85,7 +86,7 @@ type CartState = {
   /** Null while the buffer is empty and unclaimed. */
   owner: CartOwner | null;
 
-  addLine: (input: { menuItemId: string; name: string; basePrice: number; quantity?: number; modifiers?: SelectedModifier[]; note?: string | null; removedIngredients?: string[] }) => string;
+  addLine: (input: { menuItemId: string; name: string; basePrice: number; quantity?: number; modifiers?: SelectedModifier[]; note?: string | null; removedIngredients?: string[]; removedMaterials?: RemovedMaterial[] }) => string;
   setQuantity: (key: string, quantity: number) => void;
   adjustQuantity: (key: string, delta: number) => void;
   setNote: (key: string, note: string | null) => void;
@@ -157,10 +158,11 @@ let keySeq = 0;
 const nextKey = () => `line-${++keySeq}`;
 
 /** Two lines merge only when the item AND its modifier selection are identical. */
-function sameConfiguration(a: CartLine, menuItemId: string, modifiers: SelectedModifier[], note: string | null, removed: string[]): boolean {
+function sameConfiguration(a: CartLine, menuItemId: string, modifiers: SelectedModifier[], note: string | null, removed: string[], removedMaterials: RemovedMaterial[]): boolean {
   if (a.menu_item_id !== menuItemId) return false;
   if ((a.kitchen_note ?? "") !== (note ?? "")) return false;
   if (!sameRemovals(a.removed_ingredients, removed)) return false;
+  if (!sameMaterialRemovals(a.removed_materials, removedMaterials)) return false;
   if (a.modifiers.length !== modifiers.length) return false;
   const mine = a.modifiers.map((m) => m.option_id).sort();
   const theirs = modifiers.map((m) => m.option_id).sort();
@@ -184,9 +186,9 @@ export const useCart = create<CartState>((set, get) => ({
     return sameOwner(state.owner, owner);
   },
 
-  addLine: ({ menuItemId, name, basePrice, quantity = 1, modifiers = [], note = null, removedIngredients = [] }) => {
+  addLine: ({ menuItemId, name, basePrice, quantity = 1, modifiers = [], note = null, removedIngredients = [], removedMaterials = [] }) => {
     const state = get();
-    const existing = state.lines.find((l) => sameConfiguration(l, menuItemId, modifiers, note, removedIngredients));
+    const existing = state.lines.find((l) => sameConfiguration(l, menuItemId, modifiers, note, removedIngredients, removedMaterials));
     if (existing) {
       set({
         lines: state.lines.map((l) => (l.key === existing.key ? { ...l, quantity: l.quantity + quantity } : l)),
@@ -207,6 +209,7 @@ export const useCart = create<CartState>((set, get) => ({
       // Absent rather than an empty array when nothing was removed, so a line
       // built the old way is shaped exactly as it was.
       ...(removedIngredients.length > 0 ? { removed_ingredients: removedIngredients } : {}),
+      ...(removedMaterials.length > 0 ? { removed_materials: removedMaterials } : {}),
     };
     set({
       lines: [...state.lines, line],

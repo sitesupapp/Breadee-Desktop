@@ -1,10 +1,11 @@
-// Shared POS domain types for the desktop app.
+﻿// Shared POS domain types for the desktop app.
 //
 // These mirror the shapes the staging Supabase contracts actually read and write.
 // Nothing here invents a field: every property maps to a column the web POS
 // already selects, or to a key `pos_submit_order` / `pos_pay_order` already parse.
 
 import type { CurrencyCode } from "@/lib/currency";
+import type { RecipeRemovable, RemovedMaterial } from "@/lib/pos/recipeRemovals";
 
 export type OrderType = "takeaway" | "dine_in" | "delivery";
 
@@ -82,6 +83,14 @@ export type CartLine = {
    * kept apart from Cost Control's `removed_ingredients` channel.
    */
   removed_ingredients?: string[];
+  /**
+   * FT4 — material-linked removals for THIS line, keyed by material id (never by
+   * name), captured from the item's recipe removables. Serialized to
+   * `customization_json.removed_ingredients` (the Cost Control channel) so the
+   * server persists `pos_order_item_removals` and `pos_line_material_demand`
+   * subtracts them. Absent when the item has no recipe removables (text-only).
+   */
+  removed_materials?: RemovedMaterial[];
 };
 
 /** The full menu payload a POS route needs, loaded once per tenant/branch. */
@@ -92,6 +101,13 @@ export type MenuData = {
   options: ModifierOption[];
   /** menu_item_id -> attached modifier_group_id[] */
   groupsByItem: Record<string, string[]>;
+  /**
+   * FT4 — menu_item_id -> branch/OU-exact removable RECIPE materials (from
+   * `menu_item_recipe_lines` where is_removable). Empty/absent for items with no
+   * recipe removables, in which case the removal popup falls back to the
+   * customer-facing `ingredients` text list (text-only, unchanged).
+   */
+  removablesByItem?: Record<string, RecipeRemovable[]>;
 };
 
 // --- Shifts -----------------------------------------------------------------

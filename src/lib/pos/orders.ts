@@ -20,7 +20,7 @@
 
 import { asRecord, bool, callPosRpc, num, requireId, str } from "@/lib/pos/rpc";
 import { lineTotals } from "@/lib/pos/modifiers";
-import { buildCustomization, type LineCustomization } from "@/lib/pos/itemOptions";
+import { buildLineCustomization, type LineCustomization } from "@/lib/pos/itemOptions";
 import type { CartLine, OrderType, SubmitOrderResult } from "@/types/pos";
 
 /** Exactly the item shape `pos_save_order` iterates over. */
@@ -187,7 +187,13 @@ export function buildSubmitPayload(input: {
       ? { delivery_fee: input.deliveryFee }
       : {}),
     items: input.lines.map((l) => {
-      const customization = buildCustomization(l.removed_ingredients ?? []);
+      // FT4 — carries BOTH channels: descriptive names (menu text) and
+      // material-linked removals (Cost Control / inventory). A line with neither
+      // produces `customization === null`, i.e. byte-for-byte the old payload.
+      const customization = buildLineCustomization({
+        removedNames: l.removed_ingredients ?? [],
+        removedMaterials: l.removed_materials ?? [],
+      });
       return {
         menu_item_id: l.menu_item_id,
         name: l.name,
