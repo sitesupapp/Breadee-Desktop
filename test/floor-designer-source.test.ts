@@ -397,3 +397,82 @@ test("the automation dialogs never publish and speak draft language", () => {
     assert.match(src, /published/, `${rel} tells the operator changes land at publish`);
   }
 });
+
+// --- Phase 3D-B: structures / object palette stay Designer-owned & draft-only --
+
+const OBJECTS_LIB = "src/lib/pos/floorObjects.ts";
+const STRUCT_NODE = "src/components/pos/floor/designer/DesignerStructureNode.tsx";
+const PALETTE = "src/components/pos/floor/designer/DesignerObjectPalette.tsx";
+
+test("the SERVICE floor and Open Tables know nothing about the object palette", () => {
+  for (const rel of [
+    "src/components/pos/floor/ServiceFloor.tsx",
+    "src/components/pos/floor/FloorCanvas.tsx",
+    "src/components/pos/floor/FloorTableNode.tsx",
+    "src/lib/pos/floor.ts",
+    "src/state/floor.ts",
+    "src/components/pos/OpenTablesModal.tsx",
+    "src/lib/pos/openTables.ts",
+  ]) {
+    const src = ts(rel);
+    for (const forbidden of ["floorObjects", "DesignerStructureNode", "DesignerObjectPalette", "addStructure", "duplicateStructure"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("the object catalog is pure and offers only contract types (never a bar structure)", () => {
+  const src = ts(OBJECTS_LIB);
+  for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+    assert.ok(!src.includes(forbidden), `${OBJECTS_LIB} must not reference ${forbidden}`);
+  }
+  // No SAT/geometry engine is reimplemented here — collision stays in floorCollision.
+  assert.ok(!src.includes("obbsOverlap") && !src.toLowerCase().includes("separating axis"), "no second collision engine");
+  // "bar" only ever appears as a table shape elsewhere, never as a structure here.
+  assert.ok(!/type:\s*"bar"/.test(src), "no bar structure type");
+});
+
+test("structures are made interactive on the DESIGNER canvas only, never on the service FloorObject", () => {
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /DesignerStructureNode/, "the designer renders structures through its own interactive node");
+  assert.ok(!canvas.includes("FloorObject"), "the designer no longer uses the inert service object");
+  // The service object stays read-only: pointer-events off, no element-id marker.
+  const floorObj = ts("src/components/pos/floor/FloorObject.tsx");
+  assert.match(floorObj, /pointer-events-none/, "service structures stay inert");
+  assert.ok(!floorObj.includes("data-designer-element-id"), "service structures are not selectable");
+  // The designer structure node carries the gesture marker + resize handles.
+  const node = jsx(STRUCT_NODE);
+  assert.match(node, /data-designer-element-id/, "structures are selectable in the designer");
+  assert.match(node, /data-designer-handle/, "structures resize");
+  // elementById resolves any element (tables AND structures) for resize/rotate.
+  assert.match(canvas, /elementById\s*=\s*\(id: string\)\s*=>\s*elements\.find/, "gestures resolve structures too");
+});
+
+test("adding/duplicating a structure is a DRAFT layout object — no canonical entity, no temp id", () => {
+  const store = ts(STORE);
+  assert.match(store, /addStructure:\s*\(type\)/, "addStructure exists");
+  assert.match(store, /duplicateStructure:\s*\(id\)/, "duplicateStructure exists");
+  assert.match(store, /makeStructureElement\(/, "structures use the ordinary draft element factory");
+  const lib = ts(OBJECTS_LIB);
+  // A structure never borrows table identity semantics.
+  assert.ok(!lib.includes("temp_id") && !lib.includes("table_id"), "structures are not pending tables");
+  assert.match(lib, /newElementId\(\)/, "structures use the e- element id convention");
+});
+
+test("the inspector edits a structure's label and duplicates it, with no developer surfaces", () => {
+  const insp = jsx(INSPECTOR);
+  assert.match(insp, /onLabel/, "structure label editing is wired");
+  assert.match(insp, /Duplicate object/, "a structure can be duplicated");
+  // No raw coordinates, ids or JSON are ever exposed.
+  assert.ok(!/\bx:\s*element\.x\b/.test(insp) && !insp.includes("JSON.stringify"), "no raw x/y or JSON editor");
+});
+
+test("the palette adds to the active section and speaks plain restaurant language", () => {
+  const pal = jsx(PALETTE);
+  assert.match(pal, /onAdd/, "the palette adds an object");
+  assert.ok(!pal.includes("floor_publish"), "the palette never publishes");
+  const shell = jsx(SHELL);
+  assert.match(shell, /DesignerObjectPalette/, "the palette is mounted");
+  assert.match(shell, /d\.addStructure/, "add-structure is wired");
+  assert.match(shell, /d\.duplicateStructure/, "duplicate-structure is wired");
+});

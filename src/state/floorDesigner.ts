@@ -69,6 +69,13 @@ import {
   validateNameBatch,
   type OrderItem,
 } from "@/lib/pos/floorAutomate";
+import {
+  defaultStructureGeom,
+  isStructureType,
+  makeStructureElement,
+  STRUCTURE_LABEL_MAX,
+  type StructureType,
+} from "@/lib/pos/floorObjects";
 import { resolveActiveSection } from "@/lib/pos/floorSections";
 import { sectionPlane } from "@/lib/pos/floorGeometry";
 import type { FloorSection, FloorTableShape } from "@/lib/pos/floor";
@@ -165,6 +172,8 @@ type DesignerState = {
   setElementSize: (id: string, w: number, h: number) => void;
   setElementRotation: (id: string, rotation: number) => void;
   setElementShape: (id: string, shape: FloorTableShape) => void;
+  /** Phase 3D-B — a structure's label / text-object content (≤120, draft-only). */
+  setElementLabel: (id: string, label: string) => void;
   /** Seats for a staged NEW table only — existing-table seats are read-only. */
   setTableSeats: (id: string, seats: number) => void;
   /** Staged rename of an EXISTING table, or editing a NEW table's name. */
@@ -195,6 +204,17 @@ type DesignerState = {
   duplicateTable: (id: string) => OpResult;
   /** Deterministically arrange the selected tables into a grid. ONE mutation. */
   autoArrange: () => OpResult;
+  /**
+   * Phase 3D-B — add a STRUCTURE/object (wall, counter, text…) to the active
+   * section. Draft-only layout object; never a canonical table. ONE mutation.
+   */
+  addStructure: (type: StructureType) => OpResult;
+  /**
+   * Phase 3D-B — duplicate one structure into a new draft element at a small
+   * offset. Copies type/label/geometry/rotation/section; new element id; ONE
+   * mutation. Never creates a canonical entity.
+   */
+  duplicateStructure: (id: string) => OpResult;
   addSection: (name: string) => OpResult;
   renameSection: (sectionId: string, name: string) => OpResult;
   /** Safe delete: refused (with the reason) unless the section is empty. */
@@ -542,6 +562,22 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
       });
     },
 
+    setElementLabel: (id, label) => {
+      const el = elementById(id);
+      // A label belongs to a STRUCTURE (a table's name is its rename/new-name).
+      if (!el || el.type === "table") return;
+      const trimmed = label.slice(0, STRUCTURE_LABEL_MAX);
+      mutate(() => {
+        const added = addedRecordById(id);
+        if (added) {
+          if (trimmed.trim().length === 0) delete added.label;
+          else added.label = trimmed;
+        } else {
+          edits.labels.set(id, trimmed);
+        }
+      });
+    },
+
     setTableSeats: (id, seats) => {
       const el = elementById(id);
       // Existing canonical tables keep their seats — the publish contract has no
@@ -799,6 +835,51 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
       const applied = mutate(() => {
         for (const [eid, g] of result) edits.geom.set(eid, g);
       });
+      return applied ? OK : refuse("Editing is paused.");
+    },
+
+    addStructure: (type) => {
+      const s = get();
+      const sectionId = s.activeSectionId;
+      if (!sectionId) return refuse("Choose a section first.");
+      if (!isStructureType(type)) return refuse("That object type isn’t available.");
+      if (s.elements.length >= MAX_ELEMENTS) return refuse("This floor has reached its element limit.");
+
+      // A sensible spot near the section centre, stepped diagonally per existing
+      // element (the same placement tables use) so a new object never stacks.
+      const section = s.sections.find((sec) => sec.id === sectionId) ?? null;
+      const sectionEls = s.elements.filter((e) => e.sectionId === sectionId);
+      const spot = nextPlacementGeom(sectionEls, sectionPlane(section, sectionEls));
+      const geom = defaultStructureGeom(type, spot.x, spot.y);
+      // Text objects carry their content in `label`; give one a friendly starter.
+      const record = makeStructureElement(type, sectionId, geom, type === "text" ? "Text" : null);
+      const applied = mutate(() => {
+        edits.added.push(record);
+      });
+      if (applied) set({ selectedElementId: String(record.id), selectedIds: [String(record.id)] });
+      return applied ? OK : refuse("Editing is paused.");
+    },
+
+    duplicateStructure: (id) => {
+      const s = get();
+      const el = elementById(id);
+      if (!el || el.type === "table") return refuse("Select an object to duplicate.");
+      if (s.elements.length >= MAX_ELEMENTS) return refuse("This floor has reached its element limit.");
+      if (!isStructureType(el.type)) return refuse("That object can’t be duplicated.");
+      // A new independent draft element (fresh `e-…` id) at a small deterministic
+      // offset — copies type/label/geometry/rotation/section, no canonical entity.
+      const geom: ElementGeom = {
+        x: el.x + DUPLICATE_OFFSET,
+        y: el.y + DUPLICATE_OFFSET,
+        w: el.w,
+        h: el.h,
+        rotation: el.rotation,
+      };
+      const record = makeStructureElement(el.type, el.sectionId, geom, el.label);
+      const applied = mutate(() => {
+        edits.added.push(record);
+      });
+      if (applied) set({ selectedElementId: String(record.id), selectedIds: [String(record.id)] });
       return applied ? OK : refuse("Editing is paused.");
     },
 

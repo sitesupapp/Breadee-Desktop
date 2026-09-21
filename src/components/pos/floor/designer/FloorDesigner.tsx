@@ -35,6 +35,7 @@ import { UnplacedTray } from "@/components/pos/floor/designer/UnplacedTray";
 import { AddTableDialog } from "@/components/pos/floor/designer/AddTableDialog";
 import { QuickSetupDialog } from "@/components/pos/floor/designer/QuickSetupDialog";
 import { AutoNumberDialog } from "@/components/pos/floor/designer/AutoNumberDialog";
+import { DesignerObjectPalette } from "@/components/pos/floor/designer/DesignerObjectPalette";
 import { SectionsDialog } from "@/components/pos/floor/designer/SectionsDialog";
 import { useFloorDesigner, FLOOR_HEARTBEAT_MS } from "@/state/floorDesigner";
 import { geomOf, MAX_ELEMENTS, type DesignerElement, type ElementGeom } from "@/lib/pos/floorDesigner";
@@ -61,6 +62,7 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
   const [addOpen, setAddOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [autoNumberOpen, setAutoNumberOpen] = useState(false);
+  const [objectsOpen, setObjectsOpen] = useState(false);
   const [sectionsOpen, setSectionsOpen] = useState(false);
   const [trayNotice, setTrayNotice] = useState<string | null>(null);
 
@@ -75,6 +77,7 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     setAddOpen(false);
     setQuickOpen(false);
     setAutoNumberOpen(false);
+    setObjectsOpen(false);
     setSectionsOpen(false);
     setTrayNotice(null);
     void enter(ctx);
@@ -98,10 +101,11 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (addOpen || quickOpen || autoNumberOpen || sectionsOpen) {
+      if (addOpen || quickOpen || autoNumberOpen || objectsOpen || sectionsOpen) {
         setAddOpen(false);
         setQuickOpen(false);
         setAutoNumberOpen(false);
+        setObjectsOpen(false);
         setSectionsOpen(false);
         return;
       }
@@ -109,7 +113,7 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, addOpen, quickOpen, autoNumberOpen, sectionsOpen]);
+  }, [open, onClose, addOpen, quickOpen, autoNumberOpen, objectsOpen, sectionsOpen]);
 
   const activeSection = useMemo(
     () => d.sections.find((s) => s.id === d.activeSectionId) ?? null,
@@ -229,6 +233,10 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
               <button type="button" className={actionBtn} disabled={!editable} onClick={() => setQuickOpen(true)}>
                 <Glyph name="grid" size={15} />
                 Quick setup
+              </button>
+              <button type="button" className={actionBtn} disabled={!editable} onClick={() => setObjectsOpen(true)}>
+                <span aria-hidden className="text-base leading-none">+</span>
+                Objects
               </button>
               <button type="button" className={actionBtn} disabled={!editable} onClick={() => setSectionsOpen(true)}>
                 <Glyph name="layers" size={15} />
@@ -389,8 +397,14 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
                   onShape={(shape) => d.setElementShape(selectedElement.id, shape)}
                   onSize={(w, h) => d.setElementSize(selectedElement.id, w, h)}
                   onRotate={(rotation) => d.setElementRotation(selectedElement.id, rotation)}
+                  onLabel={(label) => d.setElementLabel(selectedElement.id, label)}
                   onDuplicate={() => {
-                    const r = d.duplicateTable(selectedElement.id);
+                    // A table duplicates to a new staged table; a structure to a
+                    // new draft object — same one-mutation autosave either way.
+                    const r =
+                      selectedElement.type === "table"
+                        ? d.duplicateTable(selectedElement.id)
+                        : d.duplicateStructure(selectedElement.id);
                     if (!r.ok) setTrayNotice(r.reason);
                   }}
                   onRemove={() => d.removeElement(selectedElement.id)}
@@ -430,6 +444,16 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
           const r = d.autoNumber(spec);
           if (r.ok) setAutoNumberOpen(false);
           return r;
+        }}
+      />
+      <DesignerObjectPalette
+        open={objectsOpen}
+        sectionName={activeSection?.name ?? null}
+        onCancel={() => setObjectsOpen(false)}
+        onAdd={(type) => {
+          const r = d.addStructure(type);
+          if (r.ok) setObjectsOpen(false);
+          else setTrayNotice(r.reason);
         }}
       />
       <SectionsDialog
