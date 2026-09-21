@@ -27,6 +27,11 @@
 // menu keeps its own, and neither can be mistaken for the other.
 
 import type { CartLine, MenuItem, SelectedModifier } from "@/types/pos";
+import {
+  toRemovedIngredientsPayload,
+  type RemovedIngredientPayload,
+  type RemovedMaterial,
+} from "@/lib/pos/recipeRemovals";
 
 // ----------------------------------------------------------- ingredients ----
 
@@ -87,11 +92,40 @@ export function removalSummary(removed: string[]): string {
  */
 export type LineCustomization = {
   removed_menu_ingredients?: string[];
+  /**
+   * FT4 — the Cost Control channel. Material-linked removals the server trigger
+   * `_pos_persist_line_removals` reads to write `pos_order_item_removals`, so
+   * `pos_line_material_demand` subtracts them. Present ONLY when the removal was
+   * captured against a recipe material (never derived from a menu name).
+   */
+  removed_ingredients?: RemovedIngredientPayload[];
 };
 
+/**
+ * Text-only customization (menu channel). Unchanged: a line with only descriptive
+ * removals produces byte-for-byte the payload it did before FT4.
+ */
 export function buildCustomization(removed: string[]): LineCustomization | null {
-  const clean = removed.map((r) => r.trim()).filter((r) => r !== "");
-  return clean.length > 0 ? { removed_menu_ingredients: clean } : null;
+  return buildLineCustomization({ removedNames: removed, removedMaterials: [] });
+}
+
+/**
+ * FT4 — the full line customization, carrying BOTH channels:
+ *   - `removed_menu_ingredients`: descriptive names (kitchen/receipt text), and
+ *   - `removed_ingredients`: material-linked removals (Cost Control / inventory).
+ * The two keys never collide. Emits a key only when its channel is non-empty, so
+ * a line with no removals is still `null` (byte-identical to a plain line).
+ */
+export function buildLineCustomization(input: {
+  removedNames?: string[];
+  removedMaterials?: RemovedMaterial[];
+}): LineCustomization | null {
+  const names = (input.removedNames ?? []).map((r) => r.trim()).filter((r) => r !== "");
+  const materials = input.removedMaterials ?? [];
+  const out: LineCustomization = {};
+  if (names.length > 0) out.removed_menu_ingredients = names;
+  if (materials.length > 0) out.removed_ingredients = toRemovedIngredientsPayload(materials);
+  return names.length > 0 || materials.length > 0 ? out : null;
 }
 
 /**
@@ -126,8 +160,13 @@ export type ItemOptionsResult = {
   quantity: number;
   /** The cashier's free text, kept separate from the removals. */
   note: string | null;
-  /** Menu Builder ingredient names the cashier switched off. */
+  /** Menu Builder ingredient names the cashier switched off (descriptive / text). */
   removedIngredients: string[];
+  /**
+   * FT4 — material-linked removals captured against the item's recipe removables
+   * (empty when the item has no recipe removables; then only text names apply).
+   */
+  removedMaterials: RemovedMaterial[];
 };
 
 /** Does a line carry any menu-ingredient removal? */

@@ -13,6 +13,7 @@
 // read - the POS contract does not need them and this level does not add them.
 
 import { PRICE_METADATA_COLUMNS } from "@/lib/pos/menuPrice";
+import type { RecipeRemovable } from "@/lib/pos/recipeRemovals";
 import type { MenuCategory, MenuData, MenuItem, ModifierGroup, ModifierOption } from "@/types/pos";
 
 /**
@@ -157,6 +158,39 @@ export function mergeIngredients(menu: MenuData, byId: Map<string, string[] | nu
   };
 }
 
+/** One `menu_item_recipe_lines` row as read for the removal popup (branch/OU-exact). */
+export type RecipeRemovableRow = {
+  menu_item_id: string;
+  material_id: string | null;
+  unit_id: string | null;
+  quantity: number | string | null;
+  waste_percent: number | string | null;
+  cost_materials?: { name?: string | null } | null;
+};
+
+/**
+ * FT4 — pivot removable RECIPE lines into `menu_item_id -> RecipeRemovable[]`.
+ * Pure, so the shape contract is testable without a network. Keyed by material
+ * id; the name is display only (from `cost_materials`). Rows without a resolved
+ * branch material instance (`material_id` null) are dropped — a removal with no
+ * material identity could never be persisted, and must never be offered.
+ */
+export function pivotRemovables(rows: RecipeRemovableRow[]): Record<string, RecipeRemovable[]> {
+  const out: Record<string, RecipeRemovable[]> = {};
+  for (const r of rows) {
+    if (!r.material_id || !r.unit_id) continue;
+    const removable: RecipeRemovable = {
+      materialId: r.material_id,
+      name: r.cost_materials?.name?.trim() || "Ingredient",
+      quantity: Number(r.quantity ?? 0),
+      unitId: r.unit_id,
+      wastePercent: Number(r.waste_percent ?? 0),
+    };
+    (out[r.menu_item_id] ??= []).push(removable);
+  }
+  return out;
+}
+
 export async function loadPosMenu(branchId: string | null): Promise<MenuData> {
   if (!branchId) return { ...EMPTY };
   const { supabase } = await import("@/lib/supabase");
@@ -193,7 +227,48 @@ export async function loadPosMenu(branchId: string | null): Promise<MenuData> {
   } catch {
     /* fail-soft: no ingredients, the menu still sells exactly as before */
   }
-  return mergeIngredients(menu, byId);
+  const withIngredients = mergeIngredients(menu, byId);
+
+  // FT4 — branch/OU-EXACT removable recipe materials for material-linked removals.
+  // Read in a separate, branch-scoped, FAIL-SOFT pass (RLS is the boundary; the
+  // explicit branch_id filter keeps it OU-exact — no Main/tenant/sibling fallback).
+  // Any error/empty leaves `removablesByItem` empty, so the popup falls back to the
+  // customer-facing ingredient text list exactly as before — a presentation nicety
+  // must never stop a till from selling.
+  let removablesByItem: Record<string, RecipeRemovable[]> = {};
+  try {
+    const loose = supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          in: (col: string, vals: string[]) => {
+            eq: (c2: string, v2: unknown) => {
+              eq: (c3: string, v3: unknown) => {
+                eq: (c4: string, v4: unknown) => {
+                  is: (c5: string, v5: unknown) => Promise<{ data: unknown; error: unknown }>;
+                };
+              };
+            };
+          };
+        };
+      };
+    };
+    const res = await loose
+      .from("menu_item_recipe_lines")
+      .select("menu_item_id, material_id, unit_id, quantity, waste_percent, cost_materials(name)")
+      .in("menu_item_id", ids)
+      .eq("branch_id", branchId)
+      .eq("status", "active")
+      .eq("is_removable", true)
+      .is("archived_at", null);
+    if (!res.error && Array.isArray(res.data)) {
+      removablesByItem = pivotRemovables(res.data as RecipeRemovableRow[]);
+    }
+  } catch {
+    /* fail-soft: no material-linked removables, popup uses ingredient text as before */
+  }
+  return Object.keys(removablesByItem).length > 0
+    ? { ...withIngredients, removablesByItem }
+    : withIngredients;
 }
 
 /**

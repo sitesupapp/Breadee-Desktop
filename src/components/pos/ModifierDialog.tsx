@@ -12,6 +12,12 @@ import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { resolveMenuPrice } from "@/lib/pos/menuPrice";
 import { allowedMax, isSingleSelect, lineTotals, modifierViolations, requiredMin, toggleModifier } from "@/lib/pos/modifiers";
 import { ingredientsOf, removalLabel, type ItemOptionsResult } from "@/lib/pos/itemOptions";
+import {
+  reconcileMaterialRemovals,
+  toggleMaterialRemoval,
+  type RecipeRemovable,
+  type RemovedMaterial,
+} from "@/lib/pos/recipeRemovals";
 import type { MenuItem, ModifierGroup, ModifierOption, SelectedModifier } from "@/types/pos";
 
 export type ModifierDialogProps = {
@@ -24,6 +30,13 @@ export type ModifierDialogProps = {
   rate: number | null;
   /** Show the Menu Builder ingredient list for this item so it can be edited. */
   ingredientCustomization?: boolean;
+  /**
+   * FT4 — the item's branch/OU-exact removable RECIPE materials. When present, the
+   * removal section offers THESE (material-linked, keyed by material id) so a
+   * removal drives inventory/COGS via the server. When empty, the descriptive
+   * `menu_items.ingredients` names are offered instead (text-only, unchanged).
+   */
+  removables?: RecipeRemovable[];
   onCancel: () => void;
   onConfirm: (input: ItemOptionsResult) => void;
 };
@@ -33,8 +46,10 @@ export function ModifierDialog(props: ModifierDialogProps) {
   const [quantity, setQuantity] = useState(1);
   const [note, setNote] = useState("");
   const [showErrors, setShowErrors] = useState(false);
-  /** Menu Builder ingredients the cashier has switched OFF for this line. */
+  /** Menu Builder ingredient NAMES the cashier switched OFF (text-only channel). */
   const [removed, setRemoved] = useState<string[]>([]);
+  /** FT4 — material-linked removals the cashier switched OFF (Cost Control channel). */
+  const [removedMaterials, setRemovedMaterials] = useState<RemovedMaterial[]>([]);
 
   // Reset whenever a different item opens the dialog.
   const itemId = props.item?.id ?? null;
@@ -45,8 +60,21 @@ export function ModifierDialog(props: ModifierDialogProps) {
     setQuantity(1);
     setNote("");
     setRemoved([]);
+    setRemovedMaterials([]);
     setShowErrors(false);
   }
+
+  /**
+   * FT4 — the item's removable RECIPE materials. When any exist we offer THESE
+   * (material-linked) instead of the descriptive names, matching the web POS.
+   */
+  const removables = useMemo(
+    () => (props.ingredientCustomization ? props.removables ?? [] : []),
+    [props.ingredientCustomization, props.removables],
+  );
+  const useMaterials = removables.length > 0;
+  const toggleMaterial = (r: RecipeRemovable) =>
+    setRemovedMaterials((cur) => toggleMaterialRemoval(cur, r, null));
 
   /**
    * The item's customer-facing ingredients, from `menu_items.ingredients`.
@@ -56,8 +84,8 @@ export function ModifierDialog(props: ModifierDialogProps) {
    * case the section does not render.
    */
   const ingredients = useMemo(
-    () => (props.ingredientCustomization && props.item ? ingredientsOf(props.item) : []),
-    [props.ingredientCustomization, props.item],
+    () => (props.ingredientCustomization && props.item && !useMaterials ? ingredientsOf(props.item) : []),
+    [props.ingredientCustomization, props.item, useMaterials],
   );
 
   const toggleIngredient = (name: string) =>
@@ -96,7 +124,10 @@ export function ModifierDialog(props: ModifierDialogProps) {
       note: note.trim() ? note.trim() : null,
       // Only ingredients this item actually offers can be removed, so a stale
       // selection left by a previous item can never reach an order line.
-      removedIngredients: removed.filter((name) => ingredients.includes(name)),
+      removedIngredients: useMaterials ? [] : removed.filter((name) => ingredients.includes(name)),
+      // FT4 — re-validate material removals against the current removable set so a
+      // stale selection can never reach an order line; keyed by material id.
+      removedMaterials: useMaterials ? reconcileMaterialRemovals(removedMaterials, removables, null) : [],
     });
   }
 
@@ -146,13 +177,58 @@ export function ModifierDialog(props: ModifierDialogProps) {
       )}
 
       <div className="space-y-4">
-        {props.groups.length === 0 && ingredients.length === 0 && (
+        {props.groups.length === 0 && ingredients.length === 0 && !useMaterials && (
           <p className="text-sm text-sub">This item has no options.</p>
         )}
 
-        {/* --- ingredients --------------------------------------------------
-            The Menu Builder list. Switching one off removes it from THIS line;
-            it changes no menu item, no recipe and no cost. */}
+        {/* --- removable RECIPE materials (FT4) ------------------------------
+            When the item has removable recipe materials, switching one off is a
+            MATERIAL-LINKED removal: it flows to `pos_order_item_removals` and
+            reduces inventory/COGS via the server. Keyed by material id. */}
+        {useMaterials && (
+          <fieldset className="rounded-xl border border-line p-3">
+            <legend className="px-1 text-sm font-bold text-ink">
+              Ingredients{" "}
+              <span className="text-xs font-semibold text-sub">
+                {removedMaterials.length > 0 ? `${removedMaterials.length} removed` : "Tap to remove"}
+              </span>
+            </legend>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {removables.map((r) => {
+                const off = removedMaterials.some((x) => x.materialId === r.materialId);
+                return (
+                  <button
+                    key={r.materialId}
+                    type="button"
+                    aria-pressed={!off}
+                    onClick={() => toggleMaterial(r)}
+                    className={cn(
+                      "flex min-h-[52px] items-center justify-between gap-2 rounded-xl border px-3 text-left text-sm font-semibold transition",
+                      off
+                        ? "border-red-300 bg-red-50 text-red-700 line-through"
+                        : "border-brand bg-brand-soft text-brand-dark",
+                    )}
+                  >
+                    <span className="truncate">{r.name}</span>
+                    <span aria-hidden className="shrink-0 text-xs font-bold">
+                      {off ? "✕" : "✓"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            {removedMaterials.length > 0 && (
+              <p className="mt-2 text-xs font-bold text-red-700">
+                {removedMaterials.map((x) => removalLabel(x.name)).join(" · ")}
+              </p>
+            )}
+          </fieldset>
+        )}
+
+        {/* --- descriptive ingredients (text-only fallback) -----------------
+            Only when the item has NO removable recipe materials. The Menu Builder
+            list; switching one off removes it from THIS line as kitchen/receipt
+            text — it changes no menu item, no recipe and no cost. Unchanged. */}
         {ingredients.length > 0 && (
           <fieldset className="rounded-xl border border-line p-3">
             <legend className="px-1 text-sm font-bold text-ink">
