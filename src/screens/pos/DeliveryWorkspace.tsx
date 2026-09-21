@@ -42,12 +42,21 @@ import {
 } from "@/components/pos/CustomerDialogs";
 import {
   canCancelOrders,
+  canCaptureDeliveryCost,
   canEditOrders,
   canManageCustomers,
   canViewCustomers,
   canViewDelivery,
   canViewOrders,
 } from "@/lib/pos/access";
+import { FEATURES, hasFeature } from "@/lib/features";
+import {
+  deliveryProviderFinalizeBlock,
+  loadOperationalProviders,
+  providerCaptureActive,
+  setDeliveryProvider,
+  type OperationalProvider,
+} from "@/lib/pos/deliveryProviderCapture";
 import { classifyError } from "@/lib/pos/errors";
 import {
   buildAddressPayload,
@@ -229,6 +238,9 @@ export function useDeliveryWorkspace(input: {
       RPCs server-side. */
   manageDelivery: Gate;
   viewDeliveryReport: Gate;
+  /** Post-close cost reconciliation (pos.delivery.settlements.manage); re-enforced by
+      pos_delivery_resolve_cost server-side. Gates the "Resolve cost" action in the report. */
+  reconcileDeliverySettlements: Gate;
   /** Tenant USD->LBP rate. LBP is refused without one - never guessed. */
   rate: number | null;
   /**
@@ -329,6 +341,15 @@ export function useDeliveryWorkspace(input: {
   const [opsBusy, setOpsBusy] = useState(false);
   const [opsError, setOpsError] = useState<string | null>(null);
   const opsLatch = useRef(createMutationLatch());
+  // Advanced Delivery Providers (WS6.3): the operational provider/cost capture on
+  // the order detail. `providers` is the branch's ACTIVE operational list; its
+  // presence (with the feature on) is what turns provider mode on — mirroring the
+  // server's zero-provider preservation.
+  const [providers, setProviders] = useState<OperationalProvider[]>([]);
+  const [provEditing, setProvEditing] = useState(false);
+  const [provBusy, setProvBusy] = useState(false);
+  const [provError, setProvError] = useState<string | null>(null);
+  const provLatch = useRef(createMutationLatch());
   /** Which history row is assembling a receipt, so only that one shows busy. */
   const [receiptBusyId, setReceiptBusyId] = useState<string | null>(null);
   /**
@@ -340,6 +361,65 @@ export function useDeliveryWorkspace(input: {
   const voidLatch = useRef(createMutationLatch());
 
   const branchId = pos.branch.id;
+
+  // --- Advanced Delivery Providers (WS6.3) -----------------------------------
+  //
+  // Provider mode is live only when the canonical `pos.delivery_providers` feature
+  // is on AND the branch has at least one ACTIVE operational provider. With zero
+  // active providers the server intentionally preserves legacy delivery (finalize
+  // is a no-op), so the client must not switch surfaces or block payment — this
+  // mirrors _pos_finalize_delivery_settlement exactly.
+  const providersFeatureOn = hasFeature(pos.access.features, FEATURES.POS_DELIVERY_PROVIDERS);
+  const costCaptureGate = useMemo(() => canCaptureDeliveryCost(pos.access), [pos.access]);
+  const providerModeOn = providerCaptureActive({ featureOn: providersFeatureOn, providers });
+
+  // Load the ACTIVE operational providers for this branch through the canonical
+  // operational RPC (active-only, minimal fields — never the delivery_providers
+  // table). Only when the advanced feature is on; the server re-checks the feature,
+  // the permission and exact-OU access. A branch switch reloads.
+  useEffect(() => {
+    if (!active || !providersFeatureOn || !branchId) {
+      setProviders([]);
+      return;
+    }
+    let cancelled = false;
+    void loadOperationalProviders(branchId)
+      .then((rows) => {
+        if (!cancelled) setProviders(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setProviders([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active, providersFeatureOn, branchId]);
+
+  // The friendly, UX-only pre-pay guard for the order on the detail panel and for
+  // the just-sent summary. It mirrors the server rule; the server stays the sole
+  // authority (pos_pay_order / pos_complete_on_account re-check and reject).
+  const detailFinalizeBlock = useMemo(
+    () =>
+      detail
+        ? deliveryProviderFinalizeBlock({
+            providerModeOn,
+            providerId: detail.delivery_provider_id ?? null,
+            deliveryCost: detail.delivery_cost ?? null,
+            providers,
+          })
+        : null,
+    [detail, providerModeOn, providers],
+  );
+  // A just-sent order carries no provider yet (it is captured on the order detail),
+  // so in provider mode the quick Pay on the summary directs the operator to Orders.
+  const summaryFinalizeBlock = useMemo(
+    () =>
+      providerModeOn && submitted?.order
+        ? "Select a delivery provider in Orders before completing this delivery order."
+        : null,
+    [providerModeOn, submitted?.order],
+  );
+  const activePayBlock = view === "orders" ? detailFinalizeBlock : summaryFinalizeBlock;
 
   // --- gates -----------------------------------------------------------------
 
@@ -918,6 +998,8 @@ export function useDeliveryWorkspace(input: {
       setVoidError(null);
       setOpsEditing(false);
       setOpsError(null);
+      setProvEditing(false);
+      setProvError(null);
       void refreshDetail(order.id);
     },
     [refreshDetail],
@@ -958,6 +1040,38 @@ export function useDeliveryWorkspace(input: {
       }
     },
     [detail, input.manageDelivery, refreshDetail, refreshQueue, toast],
+  );
+
+  // Save the order's advanced settlement PROVIDER + delivery cost through the ONE
+  // server authority (`pos_delivery_set_provider`), then re-read the order so the
+  // panel shows what the server stored. Never a direct `pos_orders` update, never a
+  // settlement write, never a drawer/payable computation. A latch keeps a double-tap
+  // to one write. NULL != 0 is carried through in `values.cost` unchanged.
+  const saveProvider = useCallback(
+    async (values: { providerId: string; cost: { value: number | null; provided: boolean } }) => {
+      const target = detail;
+      if (!target) return;
+      if (!costCaptureGate.allowed) {
+        setProvError(costCaptureGate.reason ?? "You do not have permission to set the delivery provider or cost.");
+        return;
+      }
+      if (!provLatch.current.acquire()) return;
+      setProvBusy(true);
+      setProvError(null);
+      try {
+        await setDeliveryProvider({ orderId: target.id, providerId: values.providerId, cost: values.cost });
+        setProvEditing(false);
+        await refreshDetail(target.id);
+        void refreshQueue();
+        toast.push({ tone: "success", message: "Delivery provider saved" });
+      } catch (e) {
+        setProvError(classifyError(e).message);
+      } finally {
+        setProvBusy(false);
+        provLatch.current.release();
+      }
+    },
+    [detail, costCaptureGate, refreshDetail, refreshQueue, toast],
   );
 
   // Load the queue when Orders is opened, and whenever the shift changes under
@@ -1047,9 +1161,17 @@ export function useDeliveryWorkspace(input: {
   /** Opens the dialog. Never charges - F4 and the button share this exactly. */
   const requestPay = useCallback(() => {
     if (!payGate.allowed) return;
+    // Friendly, UX-only settlement guard: in provider mode the order must carry a
+    // provider (and a required cost) before it can be finalized. The server
+    // re-enforces this; here it stops the dialog opening on a blocked order and
+    // tells the operator why (F4 has no visible disabled state of its own).
+    if (activePayBlock) {
+      toast.push({ tone: "warning", message: activePayBlock });
+      return;
+    }
     setPayError(null);
     setPayOpen(true);
-  }, [payGate.allowed]);
+  }, [payGate.allowed, activePayBlock, toast]);
 
   const settle = useCallback(
     async (confirm: {
@@ -1846,7 +1968,7 @@ export function useDeliveryWorkspace(input: {
     ) : view === "report" ? (
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {viewSwitch}
-        <DeliveryReport gate={input.viewDeliveryReport} currency={input.currency} branchId={branchId || null} />
+        <DeliveryReport gate={input.viewDeliveryReport} currency={input.currency} branchId={branchId || null} canReconcile={input.reconcileDeliverySettlements.allowed} />
       </div>
     ) : (
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -1951,6 +2073,22 @@ export function useDeliveryWorkspace(input: {
               setOpsEditing(false);
             }}
             onSaveOps={(values) => void saveOps(values)}
+            providerModeOn={providerModeOn}
+            providers={providers}
+            costCaptureGate={costCaptureGate}
+            provEditing={provEditing}
+            provBusy={provBusy}
+            provError={provError}
+            finalizeBlock={detailFinalizeBlock}
+            onEditProvider={() => {
+              setProvError(null);
+              setProvEditing(true);
+            }}
+            onCancelProvider={() => {
+              setProvError(null);
+              setProvEditing(false);
+            }}
+            onSaveProvider={(values) => void saveProvider(values)}
           />
         ) : (
           <EmptyState
@@ -1968,8 +2106,11 @@ export function useDeliveryWorkspace(input: {
           recovered={submitted.recovered}
           onStartNewOrder={startNewOrder}
           /* The SAME gate F4 uses. The component renders Pay only while the
-             order is unpaid, so a settled order has nothing to press again. */
-          payGate={payGate}
+             order is unpaid, so a settled order has nothing to press again. In
+             provider mode a just-sent order has no provider captured yet, so Pay is
+             disabled here with a reason that points to Orders (the server would
+             otherwise reject the finalize). */
+          payGate={summaryFinalizeBlock ? { allowed: false, reason: summaryFinalizeBlock } : payGate}
           onPay={requestPay}
         />
       ) : view === "add_items" ? (

@@ -87,6 +87,25 @@ export const POS_PERMISSIONS = {
   // are two separate authorities - the server treats them so, and so does this.
   RECEIVABLES_VIEW: "pos.receivables.view",
   RECEIVABLES_COLLECT: "pos.receivables.collect",
+  // Advanced Delivery Providers & Settlement configuration (Delivery Settlement WS3).
+  // The key delivery_provider_upsert / _set_active / _admin_list check for themselves,
+  // alongside the canonical `pos.delivery_providers` feature and exact-OU access. This
+  // is the SUBSCRIPTION-permission namespace and stays three-segment (the feature key
+  // is the two-segment `pos.delivery_providers`).
+  DELIVERY_PROVIDERS_MANAGE: "pos.delivery.providers.manage",
+  // OPERATIONAL provider/cost capture at the POS (Delivery Settlement WS6). The
+  // cashier-default key `delivery_providers_operational` and `pos_delivery_set_provider`
+  // check for themselves. DELIBERATELY SEPARATE from providers.manage: selecting a
+  // provider and recording its cost on an order is a cashier's operational act, while
+  // configuring the provider catalogue is a manager's. A cashier holds this and not
+  // the manage key.
+  DELIVERY_COST_CAPTURE: "pos.delivery.cost.capture",
+  // Post-close delivery-cost reconciliation + settlement management (Delivery Settlement
+  // WS7B). The key pos_delivery_resolve_cost checks for itself, alongside the canonical
+  // pos.delivery_providers feature and exact-OU access. A back-office/manager authority,
+  // DELIBERATELY SEPARATE from the cashier's cost.capture: owner/admin default ON,
+  // manager/cashier OFF (tenants may grant it to a custom role).
+  DELIVERY_SETTLEMENTS_MANAGE: "pos.delivery.settlements.manage",
 } as const;
 
 /** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
@@ -164,6 +183,82 @@ export function canManageDelivery(ctx: PosAccessContext): Gate {
     return { allowed: false, reason: "Delivery is not enabled for this plan." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_MANAGE), "You do not have permission to manage delivery details.");
+}
+
+/**
+ * Managing the advanced Delivery Providers & Settlement configuration (Settings).
+ *
+ * A SETTINGS/admin surface, not an operational-POS action: unlike `canOperatePOS` it
+ * does NOT block owners — owners legitimately hold `pos.delivery.providers.manage` and
+ * the provider RPCs admit them. The order the server would refuse in: active membership,
+ * the canonical `pos.delivery_providers` feature (which itself requires the `pos` module),
+ * then the `pos.delivery.providers.manage` permission the provider RPCs check for
+ * themselves. Base Delivery / Delivery Fee / Delivery Ops / Delivery Report are never
+ * gated on this, and this is never a security boundary: the RPCs re-enforce every rule.
+ */
+export function canManageDeliveryProviders(ctx: PosAccessContext): Gate {
+  const m = ctx.membership;
+  if (!m || !isActiveMember(m.status)) {
+    return { allowed: false, reason: "Your membership is not active for this tenant." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS) || !hasFeature(ctx.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+    return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.DELIVERY_PROVIDERS_MANAGE), "You do not have permission to manage delivery providers.");
+}
+
+/**
+ * Post-close delivery-cost reconciliation (Delivery Settlement WS7B).
+ *
+ * A back-office/settlement-management authority, modelled exactly on
+ * canManageDeliveryProviders (NOT an operational-POS action, so owners are NOT blocked —
+ * owner/admin legitimately hold pos.delivery.settlements.manage). The order the server
+ * (pos_delivery_resolve_cost) would refuse in: active membership, the canonical
+ * pos.delivery_providers feature, then the pos.delivery.settlements.manage permission the
+ * RPC checks for itself. Never a security boundary; the RPC re-enforces every rule — this
+ * only decides whether the "Resolve cost" control is offered. No role-name check.
+ */
+export function canReconcileDeliverySettlements(ctx: PosAccessContext): Gate {
+  const m = ctx.membership;
+  if (!m || !isActiveMember(m.status)) {
+    return { allowed: false, reason: "Your membership is not active for this tenant." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS) || !hasFeature(ctx.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+    return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
+  }
+  return gate(
+    perm(ctx, POS_PERMISSIONS.DELIVERY_SETTLEMENTS_MANAGE),
+    "You do not have permission to reconcile delivery settlement costs.",
+  );
+}
+
+/**
+ * Capturing the advanced Delivery PROVIDER + delivery cost on a delivery order
+ * (Delivery Settlement WS6 operational surface).
+ *
+ * The order the server would refuse in: POS access (carrying the owner block,
+ * mirroring `pos_assert_operator`), the base `pos.delivery` sub-feature, the
+ * canonical `pos.delivery_providers` feature (dark unless the tenant is entitled),
+ * then the `pos.delivery.cost.capture` permission the operational RPCs check for
+ * themselves — NEVER `pos.delivery.providers.manage`, which is the manager's
+ * configuration authority. STRICTER than a bare lookup, never looser; not a
+ * security boundary (the RPCs re-enforce every rule). It exists so the provider /
+ * cost editor is offered only where the server would honour a write.
+ */
+export function canCaptureDeliveryCost(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY)) {
+    return { allowed: false, reason: "Delivery is not enabled for this plan." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+    return { allowed: false, reason: "Advanced Delivery Providers is not enabled for this plan." };
+  }
+  return gate(
+    perm(ctx, POS_PERMISSIONS.DELIVERY_COST_CAPTURE),
+    "You do not have permission to set the delivery provider or cost.",
+  );
 }
 
 /**

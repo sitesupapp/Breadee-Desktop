@@ -14,7 +14,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, GatedButton, Input, Skeleton, type Gate } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
-import { loadDeliveryReport, type DeliveryReport as Report } from "@/lib/pos/deliveryOrderManagement";
+import {
+  loadDeliveryReport,
+  canResolveDeliveryRow,
+  parseResolveDeliveryCost,
+  resolveDeliveryCost,
+  type DeliveryReport as Report,
+  type DeliveryReportRow,
+} from "@/lib/pos/deliveryOrderManagement";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const fmtDay = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -41,7 +48,8 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; branchId: string | null }) {
+export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; branchId: string | null; canReconcile?: boolean }) {
+  const canReconcile = props.canReconcile ?? false;
   const [from, setFrom] = useState(todayStr());
   const [to, setTo] = useState(todayStr());
   const [applied, setApplied] = useState<{ from: string; to: string }>({ from: todayStr(), to: todayStr() });
@@ -49,6 +57,11 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rangeError, setRangeError] = useState<string | null>(null);
+  // Post-close cost resolution modal state.
+  const [resolveRow, setResolveRow] = useState<DeliveryReportRow | null>(null);
+  const [resolveCost, setResolveCost] = useState("");
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const [resolveErr, setResolveErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!props.gate.allowed) {
@@ -87,6 +100,37 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
     setTo(t);
     setRangeError(null);
     setApplied({ from: t, to: t });
+  }
+
+  function openResolve(r: DeliveryReportRow) {
+    setResolveRow(r);
+    setResolveCost("");
+    setResolveErr(null);
+  }
+  function closeResolve() {
+    setResolveRow(null);
+    setResolveCost("");
+    setResolveErr(null);
+  }
+  async function submitResolve() {
+    if (!resolveRow) return;
+    const parsed = parseResolveDeliveryCost(resolveCost);
+    if (!parsed.valid || parsed.value == null) {
+      setResolveErr(parsed.reason);
+      return;
+    }
+    setResolveBusy(true);
+    setResolveErr(null);
+    try {
+      // Canonical RPC only; server owns status/payable/drawer. Never a raw write.
+      await resolveDeliveryCost(resolveRow.order_id, parsed.value);
+      closeResolve();
+      await load(); // refresh authoritative server truth
+    } catch (e) {
+      setResolveErr(e instanceof Error ? e.message : "Could not resolve the delivery cost.");
+    } finally {
+      setResolveBusy(false);
+    }
   }
 
   const s = report?.summary;
@@ -198,7 +242,16 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
                         )}
                       </td>
                       <td className="whitespace-nowrap border-b border-slate-50 px-2 py-2 text-right text-sub">
-                        {r.delivery_cost == null ? <span className="text-slate-400">-</span> : money(r.currency, r.delivery_cost)}
+                        {r.delivery_cost != null ? (
+                          money(r.currency, r.delivery_cost)
+                        ) : canResolveDeliveryRow(r, canReconcile) ? (
+                          <button
+                            onClick={() => openResolve(r)}
+                            className="rounded-lg border border-brand/40 bg-brand-soft px-2 py-0.5 text-[10px] font-bold text-brand hover:bg-brand-soft/70"
+                          >Resolve</button>
+                        ) : (
+                          <span className="text-slate-400">-</span>
+                        )}
                       </td>
                       <td className="whitespace-nowrap border-b border-slate-50 px-2 py-2 text-right font-extrabold text-ink">
                         {r.delivery_margin == null ? (
@@ -231,6 +284,40 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
           <GatedButton gate={props.gate} size="md" className="w-full" onClick={() => void load()}>
             Reload report
           </GatedButton>
+        </div>
+      )}
+
+      {resolveRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-2xl border border-line bg-white p-5">
+            <p className="text-base font-extrabold text-ink">Resolve delivery cost</p>
+            <p className="mt-1 text-[12px] leading-relaxed text-sub">
+              This delivery was completed before the provider cost was known. Enter the final delivery cost to complete the settlement record. This does not change the customer total or the cash drawer.
+            </p>
+            <dl className="mt-3 space-y-1 rounded-xl border border-line bg-slate-50 p-3 text-[12px]">
+              <div className="flex justify-between gap-2"><dt className="text-slate-400">Order</dt><dd className="font-semibold text-ink">{resolveRow.order_number ?? "-"}</dd></div>
+              <div className="flex justify-between gap-2"><dt className="text-slate-400">Delivered by</dt><dd className="text-ink">{resolveRow.delivered_by ?? "-"}</dd></div>
+              <div className="flex justify-between gap-2"><dt className="text-slate-400">Current delivery cost</dt><dd className="text-ink">Not provided</dd></div>
+            </dl>
+            <label className="mt-3 block">
+              <span className="block text-[12px] font-semibold text-sub">Delivery cost{resolveRow.currency ? ` (${resolveRow.currency})` : ""}</span>
+              <Input
+                type="number" inputMode="decimal" min={0} step="any" autoFocus
+                value={resolveCost}
+                onChange={(e) => { setResolveCost(e.target.value); setResolveErr(null); }}
+                placeholder="Enter the final cost — 0 for free delivery"
+                className="mt-1"
+              />
+              <span className="mt-1 block text-[11px] text-sub">Leave nothing and this cannot be submitted. 0 means free delivery.</span>
+            </label>
+            {resolveErr && <p className="mt-2 rounded bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700">{resolveErr}</p>}
+            <div className="mt-4 flex gap-2">
+              <Button variant="primary" size="md" className="flex-1" disabled={resolveBusy} onClick={() => void submitResolve()}>
+                {resolveBusy ? "Saving…" : "Save cost"}
+              </Button>
+              <Button variant="ghost" size="md" className="flex-1" disabled={resolveBusy} onClick={closeResolve}>Cancel</Button>
+            </div>
+          </div>
         </div>
       )}
     </section>
