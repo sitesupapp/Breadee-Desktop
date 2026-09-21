@@ -139,15 +139,27 @@ export type PosRpcName =
   // published-revision CAS key; `floor_autosave_draft` persists geometry (lease-
   // held + CAS-guarded, never publishing); the four lease RPCs run the single-
   // editor lifecycle; `floor_unplaced_tables` lists tables not on the draft.
-  // PUBLISH (`floor_publish`) is deliberately ABSENT — Phase 3A edits a draft and
-  // never publishes, so the Service Floor read above is never affected by an edit.
   | "floor_draft"
   | "floor_autosave_draft"
   | "floor_acquire_lease"
   | "floor_heartbeat"
   | "floor_release_lease"
   | "floor_takeover_lease"
-  | "floor_unplaced_tables";
+  | "floor_unplaced_tables"
+  // Dine-In Floor DESIGNER — Phase 4 PUBLISH lifecycle. The three server RPCs that
+  // turn a draft into an operational layout, gated on `pos.tables.floor_publish`
+  // (history/restore also need it; restore, like publish, writes a DRAFT and never
+  // flips the published pointer on its own). `floor_publish` is the ONE atomic
+  // publish (validate → open-bill block → materialize staged create/rename →
+  // immutable revision → pointer flip → draft rebase, all in one transaction), CAS-
+  // guarded on the base revision the editor started from; `floor_history` lists the
+  // immutable revisions (metadata only, never the geometry doc); `floor_restore_revision`
+  // loads a past revision back into the DRAFT for the operator to review and then
+  // explicitly Publish. The Service Floor read still fetches the published revision
+  // only — a draft edit or a restore never affects it until a publish succeeds.
+  | "floor_publish"
+  | "floor_history"
+  | "floor_restore_revision";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

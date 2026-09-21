@@ -29,7 +29,7 @@ const SHELL = "src/components/pos/floor/designer/FloorDesigner.tsx";
 
 // --- Phase 3A edits a DRAFT and NEVER publishes ------------------------------
 
-test("the designer uses the draft/lease RPCs and never publishes", () => {
+test("the designer uses the draft/lease RPCs plus the Phase-4 publish lifecycle", () => {
   const lib = ts(LIB);
   for (const rpc of [
     "floor_draft",
@@ -39,16 +39,20 @@ test("the designer uses the draft/lease RPCs and never publishes", () => {
     "floor_release_lease",
     "floor_takeover_lease",
     "floor_unplaced_tables",
+    // Phase 4 — the publish lifecycle RPCs the designer now drives.
+    "floor_publish",
+    "floor_history",
+    "floor_restore_revision",
   ]) {
     assert.ok(lib.includes(rpc), `floorDesigner.ts must call ${rpc}`);
   }
-  // Phase 3A does not publish, and the designer never reads the published service
-  // layout — that is the Service Floor's job, on the other side of the boundary.
-  assert.ok(!lib.includes("floor_publish"), "Phase 3A must not publish");
+  // Even publishing, the designer edits a DRAFT and reads the DRAFT — it never reads
+  // the published service layout, which stays the Service Floor's job. Preview reuses
+  // the service RENDERER (floorPreview.ts), not the published-read RPC.
   assert.ok(!lib.includes("floor_service_layout"), "the designer edits a draft, not the published read");
 });
 
-test("the RPC union adds the six draft/lease RPCs but NOT floor_publish", () => {
+test("the RPC union adds the draft/lease RPCs AND the Phase-4 publish lifecycle", () => {
   const rpc = ts("src/lib/pos/rpc.ts");
   for (const name of [
     "floor_draft",
@@ -58,10 +62,12 @@ test("the RPC union adds the six draft/lease RPCs but NOT floor_publish", () => 
     "floor_release_lease",
     "floor_takeover_lease",
     "floor_unplaced_tables",
+    "floor_publish",
+    "floor_history",
+    "floor_restore_revision",
   ]) {
     assert.match(rpc, new RegExp(`"${name}"`), `${name} is in the union`);
   }
-  assert.ok(!rpc.includes('"floor_publish"'), "no publish RPC is wired in Phase 3A");
 });
 
 test("every autosave echoes the published-revision CAS key", () => {
@@ -170,16 +176,18 @@ test("the metadata adapter projects {id, name, seats} and carries nothing operat
   }
 });
 
-test("every designer surface stays clear of the operational POS engine and of canonical writes", () => {
+test("every designer surface stays clear of the operational POS engine and never touches the DB directly", () => {
   for (const rel of [LIB, STORE, CANVAS, NODE, SHELL, INSPECTOR, TRAY, ADD_DIALOG, SECTIONS_DIALOG]) {
     const src = ts(rel);
+    // Publishing is a Phase-4 capability (the client asks the atomic server RPC to
+    // create/rename canonical tables — it never writes them itself), so `floor_publish`
+    // is allowed. What stays forbidden: the operational engine and any direct DB access.
     for (const forbidden of [
       "useTables",
       "useCart",
       "TableBillPanel",
       "pos_open_table",
       "pos_configure_tables",
-      "floor_publish",
       "supabase",
     ]) {
       assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
@@ -357,12 +365,15 @@ test("the automation engine REUSES the collision geometry — no second SAT/obb 
   assert.ok(!src.includes("obbsOverlap") && !src.toLowerCase().includes("separating axis"), "no re-implemented SAT");
 });
 
-test("bulk create and duplicate stage TEMP intents only — nothing canonical before Publish", () => {
+test("bulk create and duplicate stage TEMP intents only — canonical rows appear only at Publish", () => {
   const store = ts(STORE);
   assert.match(store, /bulkCreate:\s*\(spec\)/, "bulk create exists");
   assert.match(store, /duplicateTable:\s*\(id\)/, "duplicate exists");
   assert.match(store, /makeTempTableElement\(/, "new tables are temp intents, not canonical rows");
-  assert.ok(!store.includes("floor_publish"), "the designer still never publishes");
+  // Phase 4: the store publishes through the atomic server RPC (floorPublish) — the
+  // ONLY path that materializes a canonical table, and never from bulk/duplicate.
+  assert.match(store, /floorPublish\(/, "publishing goes through the server RPC wrapper");
+  assert.ok(!store.includes("pos_tables"), "the store still never writes the canonical table store itself");
 });
 
 test("Quick Setup is Bulk Create — one compound mutation, not a second table engine", () => {
@@ -475,4 +486,94 @@ test("the palette adds to the active section and speaks plain restaurant languag
   assert.match(shell, /DesignerObjectPalette/, "the palette is mounted");
   assert.match(shell, /d\.addStructure/, "add-structure is wired");
   assert.match(shell, /d\.duplicateStructure/, "duplicate-structure is wired");
+});
+
+// --- Phase 4: Preview / Publish / History / Restore --------------------------
+
+const PREVIEW_LIB = "src/lib/pos/floorPreview.ts";
+const PREVIEW = "src/components/pos/floor/designer/DesignerPreview.tsx";
+const PUBLISH_DIALOG = "src/components/pos/floor/designer/PublishDialog.tsx";
+const HISTORY_DIALOG = "src/components/pos/floor/designer/HistoryDialog.tsx";
+
+test("the SERVICE floor still reads the PUBLISHED revision only — never a draft or a preview", () => {
+  // The service read side and its store keep fetching floor_service_layout. They
+  // must not learn about the draft, the preview projection, or the publish surfaces.
+  for (const rel of ["src/components/pos/floor/ServiceFloor.tsx", "src/state/floor.ts", "src/lib/pos/floor.ts"]) {
+    const src = ts(rel);
+    for (const forbidden of [
+      "floor_draft",
+      "floor_publish",
+      "floorLoadDraft",
+      "buildPreviewModel",
+      "DesignerPreview",
+      "PublishDialog",
+      "HistoryDialog",
+    ]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+  assert.match(ts("src/lib/pos/floor.ts"), /floor_service_layout/, "the service reader still reads the published layout");
+});
+
+test("the preview model is PURE and reuses the service renderer with draft data", () => {
+  const lib = ts(PREVIEW_LIB);
+  for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+    assert.ok(!lib.includes(forbidden), `${PREVIEW_LIB} must not reference ${forbidden}`);
+  }
+  const prev = jsx(PREVIEW);
+  assert.match(prev, /buildPreviewModel/, "preview projects the draft into the service model");
+  assert.match(prev, /FloorCanvas/, "preview renders through the SAME canvas the service floor uses");
+  // Preview is READ-ONLY: an inert onSelect, no edit commit, no autosave, no publish.
+  assert.match(prev, /onSelect=\{\(\)\s*=>\s*\{\}\}/, "preview selection is inert");
+  for (const forbidden of ["floor_publish", "floorAutosave", "commitGeom", "d.publish", "onCommit"]) {
+    assert.ok(!prev.includes(forbidden), `${PREVIEW} must not reference ${forbidden}`);
+  }
+});
+
+test("the store publish is ATOMIC-safe from the client: flush, one-in-flight, reload, draft preserved", () => {
+  const store = ts(STORE);
+  assert.match(store, /publish:\s*async/, "publish action exists");
+  assert.match(store, /floorPublish\(/, "publish calls the single server RPC");
+  // Double-submit safety (§31): a publish already in flight is refused.
+  assert.match(store, /if\s*\(s\.publishing\)\s*return/, "one publish at a time");
+  // Flush any pending autosave BEFORE publishing so the server sees the latest draft.
+  assert.match(store, /publish:[\s\S]{0,900}floorAutosaveDraft\(/, "publish flushes the pending draft first");
+  // On success, RELOAD from the server-rebased draft rather than trusting local state.
+  assert.match(store, /publish:[\s\S]{0,1600}get\(\)\.enter\(/, "publish reloads the rebased draft");
+  // A rejection preserves the draft and only a lease/stale/permission failure goes read-only.
+  assert.match(store, /publishError:\s*err/, "a rejection is surfaced, not swallowed");
+});
+
+test("restore loads a DRAFT and never publishes — Service stays on the live revision", () => {
+  const store = ts(STORE);
+  assert.match(store, /restore:\s*async/, "restore action exists");
+  assert.match(store, /floorRestoreRevision\(/, "restore calls the restore RPC");
+  // restore is NOT publish: it must not call floorPublish, and it reloads the draft.
+  assert.ok(!/restore:\s*async[\s\S]{0,1200}floorPublish\(/.test(store), "restore never publishes");
+  assert.match(store, /restore:[\s\S]{0,1200}get\(\)\.enter\(/, "restore reloads the restored draft");
+  assert.match(store, /if\s*\(s\.restoring\)\s*return/, "one restore at a time");
+});
+
+test("history is READ-ONLY and restore is confirmed before it replaces the draft", () => {
+  const store = ts(STORE);
+  assert.match(store, /loadHistory:\s*async/, "history loads");
+  assert.match(store, /floorHistory\(/, "history calls the read RPC");
+  const hist = jsx(HISTORY_DIALOG);
+  assert.ok(!hist.includes("floor_publish") && !hist.includes("d.publish"), "history never publishes");
+  assert.match(hist, /replaces your current draft/i, "restore warns it replaces the draft (§27)");
+  assert.match(hist, /Restore to draft/, "restore loads a draft, it does not go live");
+});
+
+test("the publish dialog is busy-locked (no double submit) and separates warnings from blockers", () => {
+  const dlg = jsx(PUBLISH_DIALOG);
+  assert.match(dlg, /disabled=\{disabled\}/, "the confirm button is disabled while publishing");
+  assert.match(dlg, /publishing\s*\|\|\s*!canPublish/, "busy or unpermitted disables confirm");
+  // Advisory spacing is amber "worth a look", never a red blocker.
+  assert.match(dlg, /you can still publish/i, "advisory warnings do not block");
+  assert.match(dlg, /Publish couldn’t continue/, "a server rejection is shown as a blocker");
+  const shell = jsx(SHELL);
+  assert.match(shell, /Publish Changes/, "the top bar exposes a distinct Publish action");
+  assert.match(shell, /d\.canPublish/, "publish is gated on the publish permission");
+  assert.match(shell, /DesignerPreview/, "preview is mounted");
+  assert.match(shell, /HistoryDialog/, "history is mounted");
 });

@@ -117,9 +117,11 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // expected set grows by exactly one more reviewed name.
 // RETARGETED BY FLOOR DESIGNER (Phase 3A): 25 -> 32, for the six draft/lease RPCs
 // (floor_draft / floor_autosave_draft / floor_acquire_lease / floor_heartbeat /
-// floor_release_lease / floor_takeover_lease) and floor_unplaced_tables. NO
-// floor_publish is added — Phase 3A edits a draft and never publishes.
-test("the RPC allow-list contains exactly the thirty-two expected names", () => {
+// floor_release_lease / floor_takeover_lease) and floor_unplaced_tables.
+// AND BY FLOOR DESIGNER (Phase 4): 32 -> 35, for the publish lifecycle —
+// floor_publish, floor_history and floor_restore_revision. Publishing materializes
+// canonical tables through one atomic server RPC; the client never writes them.
+test("the RPC allow-list contains exactly the thirty-five expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -136,7 +138,11 @@ test("the RPC allow-list contains exactly the thirty-two expected names", () => 
       "floor_autosave_draft",
       "floor_draft",
       "floor_heartbeat",
+      // Phase 4 publish lifecycle (gated on pos.tables.floor_publish).
+      "floor_history",
+      "floor_publish",
       "floor_release_lease",
+      "floor_restore_revision",
       "floor_service_layout",
       "floor_takeover_lease",
       "floor_unplaced_tables",
@@ -173,7 +179,7 @@ test("the RPC allow-list contains exactly the thirty-two expected names", () => 
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 32);
+  assert.equal(members.length, 35);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

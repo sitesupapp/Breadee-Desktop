@@ -30,6 +30,7 @@ import {
   asRecord,
   bool,
   callPosRpc,
+  num,
   numOrNull,
   str,
   strOrNull,
@@ -136,6 +137,41 @@ export type DraftLoad = {
   unplaced: UnplacedTable[];
   lease: LeaseInfo | null;
 };
+
+// --- Phase 4 PUBLISH lifecycle types -----------------------------------------
+
+/** One canonical table the server CREATED at publish, mapped from its temp intent. */
+export type PublishedCreate = { tempId: string; tableId: string };
+/** One canonical table the server RENAMED at publish. */
+export type PublishedRename = { tableId: string; name: string };
+
+/** The `floor_publish` result — what the server actually did, materialized. */
+export type PublishResult = {
+  ok: boolean;
+  revisionId: string | null;
+  revisionNo: number | null;
+  created: PublishedCreate[];
+  renamed: PublishedRename[];
+};
+
+/** One immutable published revision, as `floor_history` reports it (metadata only). */
+export type HistoryEntry = {
+  revisionId: string;
+  revisionNo: number;
+  publishedAt: string | null;
+  publishedBy: string | null;
+  /** Server change summary: table count, and how many were created / renamed. */
+  tables: number | null;
+  createdCount: number | null;
+  renamedCount: number | null;
+  /** Set when this revision was published from a restore of an earlier one. */
+  restoredFromRevisionId: string | null;
+  /** True for the revision the Service Floor is currently serving. */
+  isCurrent: boolean;
+};
+
+/** The `floor_restore_revision` result — a DRAFT was loaded, nothing published. */
+export type RestoreResult = { ok: boolean; restoredFrom: string | null; revisionNo: number | null };
 
 const EMPTY_DOC: Record<string, unknown> = { v: "1", sections: [], elements: [] };
 
@@ -554,6 +590,12 @@ export type FloorDesignerErrorKind =
   | "permission" // FLOOR_PERMISSION_DENIED / FLOOR_PUBLISH_PERMISSION_DENIED
   | "entitlement" // FLOOR_ENTITLEMENT_DISABLED — feature turned off
   | "invalid" // FLOOR_MALFORMED_DOC / validation
+  // Phase 4 publish rejections — ACTIONABLE, and the draft is fully preserved
+  // (the whole publish transaction rolled back on the server). The operator fixes
+  // the named problem and publishes again; none of these drop to read-only.
+  | "noop" // FLOOR_NOOP_PUBLISH — the draft already matches the published floor
+  | "openBill" // FLOOR_OPEN_BILL_BLOCK — an open-bill table would leave the map
+  | "nameTaken" // FLOOR_NAME_TAKEN — a new/renamed table collides with a canonical name
   | "network" // no response / offline
   | "unknown";
 
@@ -570,6 +612,9 @@ const ERROR_MESSAGES: Record<FloorDesignerErrorKind, string> = {
   permission: "You do not have permission to edit this floor.",
   entitlement: "Floor editing is not enabled for this plan.",
   invalid: "That change couldn’t be saved — the floor layout was rejected.",
+  noop: "There’s nothing new to publish — the draft already matches the live floor.",
+  openBill: "A table with an open bill would be taken off the map. Keep it on the floor, or close its bill first.",
+  nameTaken: "A table name is already in use. Rename it and publish again.",
   network: "Couldn’t reach the server. Your changes are kept locally.",
   unknown: "Something went wrong while editing the floor.",
 };
@@ -590,7 +635,17 @@ function kindOf(raw: string): FloorDesignerErrorKind {
   if (raw.includes("FLOOR_STALE_REVISION")) return "stale";
   if (raw.includes("FLOOR_PUBLISH_PERMISSION_DENIED") || raw.includes("FLOOR_PERMISSION_DENIED")) return "permission";
   if (raw.includes("FLOOR_ENTITLEMENT_DISABLED")) return "entitlement";
-  if (raw.includes("FLOOR_MALFORMED_DOC") || raw.includes("FLOOR_VALIDATION") || raw.includes("FLOOR_NOOP")) {
+  // Phase 4 publish rejections — checked before the generic "invalid" so the
+  // operator gets the specific, fixable message the server actually raised.
+  if (raw.includes("FLOOR_OPEN_BILL_BLOCK")) return "openBill";
+  if (raw.includes("FLOOR_NAME_TAKEN")) return "nameTaken";
+  if (raw.includes("FLOOR_NOOP")) return "noop";
+  if (
+    raw.includes("FLOOR_MALFORMED_DOC") ||
+    raw.includes("FLOOR_VALIDATION") ||
+    raw.includes("FLOOR_INVALID_TABLE_REFERENCE") ||
+    raw.includes("FLOOR_CROSS_OU_REFERENCE")
+  ) {
     return "invalid";
   }
   if (raw === "" || /network|fetch|timeout|Failed to fetch|offline/i.test(raw)) return "network";
@@ -722,4 +777,100 @@ export async function floorAutosaveDraft(
     await callPosRpc("floor_autosave_draft", { p_branch: b, p_doc: doc, p_base_revision_id: baseRevisionId }),
   );
   return { ok: bool(r.ok), draftHash: strOrNull(r.draft_hash) };
+}
+
+// --- Phase 4 PUBLISH lifecycle RPCs ------------------------------------------
+
+export function parsePublishResult(raw: unknown): PublishResult {
+  const r = asRecord(raw);
+  const created: PublishedCreate[] = [];
+  if (Array.isArray(r.created)) {
+    for (const item of r.created) {
+      const c = asRecord(item);
+      const tempId = strOrNull(c.temp_id);
+      const tableId = strOrNull(c.table_id);
+      if (tempId && tableId) created.push({ tempId, tableId });
+    }
+  }
+  const renamed: PublishedRename[] = [];
+  if (Array.isArray(r.renamed)) {
+    for (const item of r.renamed) {
+      const c = asRecord(item);
+      const tableId = strOrNull(c.table_id);
+      const name = strOrNull(c.name);
+      if (tableId && name) renamed.push({ tableId, name });
+    }
+  }
+  return {
+    ok: bool(r.ok),
+    revisionId: strOrNull(r.revision_id),
+    revisionNo: numOrNull(r.revision_no),
+    created,
+    renamed,
+  };
+}
+
+/**
+ * floor_publish — the ONE atomic publish. Echoes the base-revision CAS key the
+ * editor started from (`p_base_revision_id`), so a floor that advanced elsewhere
+ * is rejected rather than overwritten. On success the SERVER has, in a single
+ * transaction: validated the draft, blocked any open-bill table leaving the map,
+ * created the staged new tables, applied the staged renames, written an immutable
+ * revision, flipped the published pointer and rebased the draft onto it. On any
+ * rejection nothing changed — the draft is intact and the operator can fix and
+ * retry. This client never materializes a canonical table itself.
+ */
+export async function floorPublish(
+  branchId: string | null,
+  baseRevisionId: string | null,
+): Promise<PublishResult> {
+  const b = requireBranch(branchId);
+  return parsePublishResult(
+    await callPosRpc("floor_publish", { p_branch: b, p_base_revision_id: baseRevisionId }),
+  );
+}
+
+/** Parse the `floor_history` payload — a metadata-only revision list, newest first. */
+export function parseHistoryEntries(raw: unknown): HistoryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: HistoryEntry[] = [];
+  for (const item of raw) {
+    const r = asRecord(item);
+    const revisionId = strOrNull(r.revision_id);
+    if (!revisionId) continue;
+    const summary = asRecord(r.change_summary);
+    out.push({
+      revisionId,
+      revisionNo: num(r.revision_no),
+      publishedAt: strOrNull(r.published_at),
+      publishedBy: strOrNull(r.published_by),
+      tables: numOrNull(summary.tables),
+      createdCount: numOrNull(summary.created),
+      renamedCount: numOrNull(summary.renamed),
+      restoredFromRevisionId: strOrNull(r.restored_from_revision_id),
+      isCurrent: bool(r.is_current),
+    });
+  }
+  return out;
+}
+
+/** floor_history — the immutable revision list (metadata only, never the doc). */
+export async function floorHistory(branchId: string | null): Promise<HistoryEntry[]> {
+  const b = requireBranch(branchId);
+  return parseHistoryEntries(await callPosRpc("floor_history", { p_branch: b }));
+}
+
+/**
+ * floor_restore_revision — load a past revision back into the DRAFT. This is NOT
+ * a publish: the Service Floor keeps serving the current published revision, and
+ * the operator must explicitly Publish afterwards to make the restored layout
+ * live. It REPLACES the current draft, so the caller confirms first.
+ */
+export async function floorRestoreRevision(
+  branchId: string | null,
+  revisionId: string,
+): Promise<RestoreResult> {
+  const b = requireBranch(branchId);
+  const r = asRecord(await callPosRpc("floor_restore_revision", { p_branch: b, p_revision_id: revisionId }));
+  return { ok: bool(r.ok), restoredFrom: strOrNull(r.restored_from), revisionNo: numOrNull(r.revision_no) };
 }
