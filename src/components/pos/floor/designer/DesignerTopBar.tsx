@@ -35,6 +35,7 @@ export function DesignerTopBar({
   unplacedCount,
   onBack,
   onRetrySave,
+  actions,
 }: {
   saveStatus: SaveStatus;
   dirty: boolean;
@@ -42,6 +43,8 @@ export function DesignerTopBar({
   unplacedCount: number;
   onBack: () => void;
   onRetrySave: () => void;
+  /** Phase 3B editing actions (Add table, Sections) — rendered beside the title. */
+  actions?: React.ReactNode;
 }) {
   const p = pill(saveStatus, dirty, readOnly);
   return (
@@ -59,6 +62,7 @@ export function DesignerTopBar({
           <Glyph name="edit" size={16} />
           Floor Designer
         </span>
+        {actions}
       </div>
 
       <div className="flex items-center gap-2">

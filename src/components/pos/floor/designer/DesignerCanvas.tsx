@@ -1,4 +1,4 @@
-// The editable floor plane for one section (Phase 3A).
+// The editable floor plane for one section (Phases 3A + 3B).
 //
 // It reuses the SAME intrinsic-coordinate model and the SAME pure geometry as the
 // read-only Service canvas (`lib/pos/floorGeometry.ts`): one section plane with a
@@ -11,6 +11,10 @@
 // the background (pan / deselect). Screen deltas are turned into LOGICAL edits by
 // the pure `applyDrag/applyResize/applyRotate` helpers and persisted through the
 // store's `commitGeom`; nothing viewport-shaped is ever written to the draft.
+//
+// IDENTITY (Phase 3B): each table's shown name comes from the read-only
+// `labelFor` projection the shell provides (canonical name, staged draft name,
+// or a new-table name) — never from operational state.
 
 import { useEffect, useMemo, useRef } from "react";
 import { FloorObject } from "@/components/pos/floor/FloorObject";
@@ -30,10 +34,11 @@ import {
   applyResize,
   applyRotate,
   geomOf,
+  type DesignerElement,
   type ElementGeom,
   type ResizeHandle,
 } from "@/lib/pos/floorDesigner";
-import type { FloorElement, FloorSection } from "@/lib/pos/floor";
+import type { FloorSection } from "@/lib/pos/floor";
 
 const TAP_THRESHOLD_PX = 4;
 
@@ -43,21 +48,26 @@ type Gesture =
   | { kind: "resize"; id: string; handle: ResizeHandle; startX: number; startY: number; base: ElementGeom; scale: number }
   | { kind: "rotate"; id: string; base: ElementGeom; centerScreen: { x: number; y: number } };
 
+export type DesignerLabel = { label: string; renamed: boolean; isNew: boolean };
+
 export function DesignerCanvas({
   section,
   elements,
   selectedId,
   editable,
   transform,
+  labelFor,
   onTransform,
   onSelect,
   onCommit,
 }: {
   section: FloorSection | null;
-  elements: FloorElement[];
+  elements: DesignerElement[];
   selectedId: string | null;
   editable: boolean;
   transform: Transform | null;
+  /** Read-only identity projection for a table element. */
+  labelFor: (el: DesignerElement) => DesignerLabel;
   onTransform: (t: Transform) => void;
   onSelect: (id: string | null) => void;
   onCommit: (id: string, geom: ElementGeom) => void;
@@ -230,15 +240,21 @@ export function DesignerCanvas({
         {structures.map((el) => (
           <FloorObject key={el.id} element={el} />
         ))}
-        {tableEls.map((el) => (
-          <DesignerTableNode
-            key={el.id}
-            element={el}
-            selected={el.id === selectedId}
-            editable={editable}
-            scale={scale}
-          />
-        ))}
+        {tableEls.map((el) => {
+          const id = labelFor(el);
+          return (
+            <DesignerTableNode
+              key={el.id}
+              element={el}
+              label={id.label}
+              renamed={id.renamed}
+              isNew={id.isNew}
+              selected={el.id === selectedId}
+              editable={editable}
+              scale={scale}
+            />
+          );
+        })}
       </div>
     </div>
   );
