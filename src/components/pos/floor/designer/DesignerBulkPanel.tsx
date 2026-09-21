@@ -24,6 +24,8 @@ export function DesignerBulkPanel({
   onAlign,
   onDistribute,
   onSameSize,
+  onAutoNumber,
+  onAutoArrange,
   onClear,
 }: {
   /** How many TABLES are in the selection (bulk tools operate on tables). */
@@ -36,6 +38,10 @@ export function DesignerBulkPanel({
   onAlign: (mode: AlignMode) => void;
   onDistribute: (axis: "h" | "v") => void;
   onSameSize: (mode: SizeMode) => void;
+  /** Phase 3D-A — open the auto-number dialog for this selection. */
+  onAutoNumber: () => void;
+  /** Phase 3D-A — deterministically arrange this selection into a grid. */
+  onAutoArrange: () => void;
   onClear: () => void;
 }) {
   const canAlign = !readOnly && count >= 2;
@@ -96,6 +102,21 @@ export function DesignerBulkPanel({
         <p className="mt-1 text-xs text-sub">
           Matches <span className="font-bold">{referenceName || "the last-selected table"}</span>.
         </p>
+      </div>
+
+      {/* Phase 3D-A — automation on the selection. Auto-number renumbers in
+          physical reading order; Auto-arrange lays the selection out in a grid.
+          Both are ONE draft mutation through the same autosave. */}
+      <div>
+        <span className="text-xs font-bold uppercase tracking-wide text-sub">Number &amp; arrange</span>
+        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+          <button type="button" className={btn} disabled={readOnly || count < 1} onClick={onAutoNumber}>
+            Auto-number…
+          </button>
+          <button type="button" className={btn} disabled={readOnly || count < 2} onClick={onAutoArrange}>
+            Auto-arrange
+          </button>
+        </div>
       </div>
 
       <p className="mt-auto text-xs text-sub">

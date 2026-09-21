@@ -311,3 +311,89 @@ test("inspector steppers meet the 44px touch floor", () => {
   const insp = jsx(INSPECTOR);
   assert.match(insp, /h-11 w-11/, "44px stepper hit targets");
 });
+
+// --- Phase 3D-A: creation & layout automation stays Designer-owned -----------
+
+const AUTOMATE_LIB = "src/lib/pos/floorAutomate.ts";
+const QUICK_DIALOG = "src/components/pos/floor/designer/QuickSetupDialog.tsx";
+const AUTONUMBER_DIALOG = "src/components/pos/floor/designer/AutoNumberDialog.tsx";
+
+test("the SERVICE floor and Open Tables know nothing about the automation engine", () => {
+  for (const rel of [
+    "src/components/pos/floor/ServiceFloor.tsx",
+    "src/components/pos/floor/FloorCanvas.tsx",
+    "src/components/pos/floor/FloorTableNode.tsx",
+    "src/lib/pos/floor.ts",
+    "src/state/floor.ts",
+    "src/components/pos/OpenTablesModal.tsx",
+    "src/lib/pos/openTables.ts",
+  ]) {
+    const src = ts(rel);
+    for (const forbidden of [
+      "floorAutomate",
+      "QuickSetupDialog",
+      "AutoNumberDialog",
+      "bulkCreate",
+      "quickSetup",
+      "autoNumber",
+      "duplicateTable",
+      "autoArrange",
+    ]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("the automation engine is pure: no network, no store, no React", () => {
+  const src = ts(AUTOMATE_LIB);
+  for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+    assert.ok(!src.includes(forbidden), `${AUTOMATE_LIB} must not reference ${forbidden}`);
+  }
+});
+
+test("the automation engine REUSES the collision geometry — no second SAT/obb implementation", () => {
+  const src = ts(AUTOMATE_LIB);
+  assert.match(src, /from "@\/lib\/pos\/floorCollision"/, "reuses orientedExtent + SOLID_STRUCTURES");
+  assert.ok(!src.includes("obbsOverlap") && !src.toLowerCase().includes("separating axis"), "no re-implemented SAT");
+});
+
+test("bulk create and duplicate stage TEMP intents only — nothing canonical before Publish", () => {
+  const store = ts(STORE);
+  assert.match(store, /bulkCreate:\s*\(spec\)/, "bulk create exists");
+  assert.match(store, /duplicateTable:\s*\(id\)/, "duplicate exists");
+  assert.match(store, /makeTempTableElement\(/, "new tables are temp intents, not canonical rows");
+  assert.ok(!store.includes("floor_publish"), "the designer still never publishes");
+});
+
+test("Quick Setup is Bulk Create — one compound mutation, not a second table engine", () => {
+  const store = ts(STORE);
+  assert.match(store, /quickSetup:\s*\(spec\)\s*=>\s*get\(\)\.bulkCreate/, "quick setup delegates to bulk create");
+});
+
+test("every 3D-A action exists and auto-number renames only through the STAGED model", () => {
+  const store = ts(STORE);
+  for (const action of ["bulkCreate", "quickSetup", "autoNumber", "duplicateTable", "autoArrange"]) {
+    assert.match(store, new RegExp(`\\b${action}:`), `${action} is wired in the store`);
+  }
+  // Auto-number reuses the same staged rename map — never an immediate canonical rename.
+  assert.match(store, /autoNumber:[\s\S]{0,1200}edits\.renames\.set/, "auto-number stages rename_to");
+  // Auto-arrange writes geometry only, through the same edits.geom the drags use.
+  assert.match(store, /autoArrange:[\s\S]{0,1600}edits\.geom\.set/, "auto-arrange writes geometry only");
+});
+
+test("the shell mounts Quick Setup + Auto-number and shares the physical reading-order engine", () => {
+  const shell = jsx(SHELL);
+  assert.match(shell, /QuickSetupDialog/, "quick setup dialog mounted");
+  assert.match(shell, /AutoNumberDialog/, "auto-number dialog mounted");
+  assert.match(shell, /readingOrder/, "the preview uses the same physical order the store applies");
+  assert.match(shell, /d\.duplicateTable/, "duplicate wired");
+  assert.match(shell, /d\.autoArrange/, "auto-arrange wired");
+});
+
+test("the automation dialogs never publish and speak draft language", () => {
+  for (const rel of [QUICK_DIALOG, AUTONUMBER_DIALOG]) {
+    const src = jsx(rel);
+    assert.ok(!src.includes("floor_publish") && !src.includes("Publish floor"), `${rel} must not publish`);
+    assert.match(src, /published/, `${rel} tells the operator changes land at publish`);
+  }
+});

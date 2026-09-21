@@ -93,6 +93,7 @@ export function DesignerInspector({
   onShape,
   onSize,
   onRotate,
+  onDuplicate,
   onRemove,
 }: {
   element: DesignerElement;
@@ -108,6 +109,8 @@ export function DesignerInspector({
   onShape: (shape: FloorTableShape) => void;
   onSize: (w: number, h: number) => void;
   onRotate: (rotation: number) => void;
+  /** Phase 3D-A — copy this table into a NEW staged table nearby (draft-only). */
+  onDuplicate: () => void;
   onRemove: () => void;
 }) {
   const isTable = element.type === "table";
@@ -279,6 +282,17 @@ export function DesignerInspector({
       </Row>
 
       <div className="mt-auto pt-3">
+        {isTable && (
+          <button
+            type="button"
+            disabled={readOnly}
+            onClick={onDuplicate}
+            className="mb-2 flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-lg border border-line bg-white px-3 py-2.5 text-sm font-bold text-ink hover:bg-canvas disabled:opacity-40"
+          >
+            <Glyph name="layers" size={15} />
+            Duplicate table
+          </button>
+        )}
         <button
           type="button"
           disabled={readOnly}

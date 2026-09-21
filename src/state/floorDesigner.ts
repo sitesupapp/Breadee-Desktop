@@ -25,6 +25,7 @@ import { create } from "zustand";
 import {
   applySize,
   classifyFloorDesignerError,
+  DEFAULT_TABLE_GEOM,
   draftEditsCount,
   effectiveDraft,
   emptyDraftEdits,
@@ -55,6 +56,19 @@ import {
   type TableMeta,
   type UnplacedTable,
 } from "@/lib/pos/floorDesigner";
+import {
+  ARRANGE_GAP,
+  autoArrange as arrangeGrid,
+  bulkLayout,
+  DUPLICATE_OFFSET,
+  generateNames,
+  nameKeySet,
+  proposeCopyName,
+  readingOrder,
+  sectionObstacles,
+  validateNameBatch,
+  type OrderItem,
+} from "@/lib/pos/floorAutomate";
 import { resolveActiveSection } from "@/lib/pos/floorSections";
 import { sectionPlane } from "@/lib/pos/floorGeometry";
 import type { FloorSection, FloorTableShape } from "@/lib/pos/floor";
@@ -73,6 +87,22 @@ export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 /** The answer to an operation the UI must explain when refused. */
 export type OpResult = { ok: boolean; reason: string | null };
+
+/** Bulk Create / Quick Setup input — all draft-only. */
+export type BulkCreateSpec = {
+  count: number;
+  prefix: string;
+  start: number;
+  /** Zero-padding width (0 = none). */
+  pad: number;
+  seats: number;
+  shape: FloorTableShape;
+  /** Defaults to the active section. */
+  sectionId?: string | null;
+};
+
+/** Auto-number input for the current table selection. */
+export type AutoNumberSpec = { prefix: string; start: number; pad: number };
 
 const OK: OpResult = { ok: true, reason: null };
 const refuse = (reason: string): OpResult => ({ ok: false, reason });
@@ -145,6 +175,26 @@ type DesignerState = {
   placeTable: (tableId: string) => OpResult;
   /** Stage a NEW table intent (draft-only; created canonically at publish). */
   addTable: (name: string, seats: number) => OpResult;
+  /**
+   * Phase 3D-A — Bulk Create: stage MANY new-table intents in a deterministic
+   * grid as ONE draft mutation. Never creates a canonical table.
+   */
+  bulkCreate: (spec: BulkCreateSpec) => OpResult;
+  /** Quick Setup — Bulk Create's grid layout, one compound mutation. */
+  quickSetup: (spec: BulkCreateSpec) => OpResult;
+  /**
+   * Auto-number the current table selection in physical reading order —
+   * `new_name` for staged tables, staged `rename_to` for existing ones. ONE
+   * mutation; never an immediate canonical rename.
+   */
+  autoNumber: (spec: AutoNumberSpec) => OpResult;
+  /**
+   * Duplicate a single table into a NEW temp intent at a small offset — never a
+   * second reference to the same canonical id. ONE mutation.
+   */
+  duplicateTable: (id: string) => OpResult;
+  /** Deterministically arrange the selected tables into a grid. ONE mutation. */
+  autoArrange: () => OpResult;
   addSection: (name: string) => OpResult;
   renameSection: (sectionId: string, name: string) => OpResult;
   /** Safe delete: refused (with the reason) unless the section is empty. */
@@ -246,6 +296,44 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
   const elementById = (id: string): DesignerElement | undefined => get().elements.find((e) => e.id === id);
   const addedRecordById = (id: string): Record<string, unknown> | undefined =>
     edits.added.find((r) => r.id === id);
+
+  /** A table's effective name: staged new name, staged rename, or canonical. */
+  const nameOf = (el: DesignerElement): string => {
+    if (el.tempId !== null) return el.newName ?? "";
+    const canonical = el.tableId ? get().tableMeta.get(el.tableId)?.name ?? null : null;
+    return el.renameTo ?? canonical ?? el.label ?? "";
+  };
+
+  /**
+   * The ONE name-uniqueness model (Phase 3D-A §8): every name currently taken on
+   * this branch — canonical table names, staged renames and staged new-table
+   * names — as normalized keys, so a bulk/auto-number/duplicate batch can be
+   * refused for an obvious duplicate BEFORE the autosave. `excludeElementIds`
+   * drops the elements being renamed (and their own canonical names), so
+   * auto-numbering a set never conflicts with itself. Not a substitute for the
+   * server's authoritative PUBLISH check.
+   */
+  const existingNameKeys = (excludeElementIds: ReadonlySet<string> = new Set()): Set<string> => {
+    const s = get();
+    const excludedTableIds = new Set<string>();
+    for (const el of s.elements) {
+      if (excludeElementIds.has(el.id) && el.tableId) excludedTableIds.add(el.tableId);
+    }
+    const names: (string | null)[] = [];
+    for (const m of s.tableMeta.values()) if (!excludedTableIds.has(m.id)) names.push(m.name);
+    for (const el of s.elements) {
+      if (excludeElementIds.has(el.id)) continue;
+      if (el.tempId !== null) names.push(el.newName);
+      else if (el.renameTo !== null) names.push(el.renameTo);
+    }
+    return nameKeySet(names);
+  };
+
+  /** The tables in the current multi-selection, in the active elements. */
+  const selectedTableEls = (): DesignerElement[] =>
+    get()
+      .selectedIds.map((id) => elementById(id))
+      .filter((e): e is DesignerElement => !!e && e.type === "table");
 
   return {
     ctx: { tenantId: null, branchId: null },
@@ -550,6 +638,167 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
         edits.added.push(record);
       });
       if (applied) set({ selectedElementId: String(record.id), selectedIds: [String(record.id)] });
+      return applied ? OK : refuse("Editing is paused.");
+    },
+
+    bulkCreate: (spec) => {
+      const s = get();
+      const sectionId = spec.sectionId ?? s.activeSectionId;
+      if (!sectionId) return refuse("Choose a section first.");
+      const count = Math.trunc(spec.count);
+      if (count <= 0) return refuse("Choose how many tables to create.");
+      if (s.elements.length + count > MAX_ELEMENTS) {
+        return refuse(`That would pass this floor’s ${MAX_ELEMENTS}-element limit.`);
+      }
+      const badSeats = validateSeats(spec.seats);
+      if (badSeats) return refuse(badSeats);
+
+      const names = generateNames({ prefix: spec.prefix, start: spec.start, count, pad: spec.pad });
+      const verdict = validateNameBatch(names, existingNameKeys());
+      if (!verdict.ok) return refuse(verdict.reason);
+
+      // Deterministic grid, anchored BELOW existing section content so a populated
+      // section is never rearranged (§18). One placement engine, shared with
+      // auto-arrange; the whole batch is baked into the records before the single
+      // mutation, so bulk creation is ONE compound autosave.
+      const section = s.sections.find((sec) => sec.id === sectionId) ?? null;
+      const sectionEls = s.elements.filter((e) => e.sectionId === sectionId);
+      const plane = sectionPlane(section, sectionEls);
+      const cell = { w: DEFAULT_TABLE_GEOM.w, h: DEFAULT_TABLE_GEOM.h };
+      let anchorX = plane.x + 8;
+      let anchorY = plane.y + 8;
+      if (sectionEls.length > 0) {
+        let bottom = -Infinity;
+        let left = Infinity;
+        for (const e of sectionEls) {
+          bottom = Math.max(bottom, e.y + e.h);
+          left = Math.min(left, e.x);
+        }
+        anchorX = left;
+        anchorY = bottom + ARRANGE_GAP;
+      }
+      const geoms = bulkLayout(count, cell, {
+        anchorX,
+        anchorY,
+        planeW: plane.w,
+        obstacles: sectionObstacles(sectionEls, new Set()),
+      });
+      const records = names.map((name, i) =>
+        makeTempTableElement(
+          name,
+          spec.seats,
+          sectionId,
+          geoms[i] ?? { x: anchorX, y: anchorY, w: cell.w, h: cell.h, rotation: 0 },
+          spec.shape,
+        ),
+      );
+      const applied = mutate(() => {
+        for (const r of records) edits.added.push(r);
+      });
+      if (applied) {
+        const ids = records.map((r) => String(r.id));
+        set({ selectedIds: ids, selectedElementId: ids[ids.length - 1] ?? null });
+      }
+      return applied ? OK : refuse("Editing is paused.");
+    },
+
+    // Quick Setup IS Bulk Create's grid layout — one thin orchestration, one
+    // compound mutation, one save. No second table engine.
+    quickSetup: (spec) => get().bulkCreate(spec),
+
+    autoNumber: (spec) => {
+      const selected = selectedTableEls();
+      if (selected.length === 0) return refuse("Select one or more tables to number.");
+      const ordered = readingOrder(selected.map((el) => ({ id: el.id, geom: geomOf(el) })));
+      const orderedIds = ordered.map((o) => o.id);
+      const names = generateNames({ prefix: spec.prefix, start: spec.start, count: orderedIds.length, pad: spec.pad });
+      const verdict = validateNameBatch(names, existingNameKeys(new Set(orderedIds)));
+      if (!verdict.ok) return refuse(verdict.reason);
+
+      const byId = new Map(selected.map((el) => [el.id, el] as const));
+      const applied = mutate(() => {
+        orderedIds.forEach((id, i) => {
+          const el = byId.get(id);
+          if (!el) return;
+          const name = names[i];
+          const added = addedRecordById(id);
+          if (added && el.tempId) {
+            // Staged NEW table: the name IS `new_name`.
+            added.new_name = name;
+            return;
+          }
+          // Existing table: stage `rename_to`; clear it if it equals the canonical
+          // name. Never an immediate canonical rename.
+          const canonical = el.tableId ? get().tableMeta.get(el.tableId)?.name ?? null : null;
+          if (canonical !== null && canonical.trim().toLowerCase() === name.trim().toLowerCase()) {
+            if (el.renameTo !== null) edits.renames.set(id, null);
+            else edits.renames.delete(id);
+          } else {
+            edits.renames.set(id, name);
+          }
+        });
+      });
+      return applied ? OK : refuse("Editing is paused.");
+    },
+
+    duplicateTable: (id) => {
+      const s = get();
+      const el = elementById(id);
+      if (!el || el.type !== "table") return refuse("Select a table to duplicate.");
+      if (s.elements.length >= MAX_ELEMENTS) return refuse("This floor has reached its element limit.");
+
+      const base = nameOf(el) || "Table";
+      const proposed = proposeCopyName(base, existingNameKeys());
+      const metaSeats = el.tableId ? s.tableMeta.get(el.tableId)?.seats ?? null : null;
+      const rawSeats = el.tempId !== null ? el.seats ?? 4 : metaSeats ?? 4;
+      const seats = validateSeats(rawSeats) === null ? rawSeats : 4;
+      // A duplicate is always a NEW temp intent — never a second placement of the
+      // same canonical `table_id`, and never any operational/published state.
+      const geom: ElementGeom = {
+        x: el.x + DUPLICATE_OFFSET,
+        y: el.y + DUPLICATE_OFFSET,
+        w: el.w,
+        h: el.h,
+        rotation: el.rotation,
+      };
+      const record = makeTempTableElement(proposed, seats, el.sectionId, geom, el.shape ?? "sq");
+      const applied = mutate(() => {
+        edits.added.push(record);
+      });
+      if (applied) set({ selectedElementId: String(record.id), selectedIds: [String(record.id)] });
+      return applied ? OK : refuse("Editing is paused.");
+    },
+
+    autoArrange: () => {
+      const s = get();
+      const selected = selectedTableEls();
+      if (selected.length < 2) return refuse("Select two or more tables to arrange.");
+      const sectionId = selected[0].sectionId;
+      const section = s.sections.find((sec) => sec.id === sectionId) ?? null;
+      const sectionEls = s.elements.filter((e) => e.sectionId === sectionId);
+      const plane = sectionPlane(section, sectionEls);
+
+      const entries: OrderItem[] = selected.map((el) => ({ id: el.id, geom: geomOf(el) }));
+      // Anchor at the selection's own top-left so the arranged block stays where
+      // the operator put it — independent of viewport pan/zoom (§15).
+      let minX = Infinity;
+      let minY = Infinity;
+      for (const e of entries) {
+        minX = Math.min(minX, e.geom.x);
+        minY = Math.min(minY, e.geom.y);
+      }
+      const arrangingIds = new Set(selected.map((el) => el.id));
+      const result = arrangeGrid(entries, {
+        anchorX: minX,
+        anchorY: minY,
+        planeW: plane.w,
+        order: readingOrder(entries).map((o) => o.id),
+        obstacles: sectionObstacles(sectionEls, arrangingIds),
+      });
+      if (result.size === 0) return refuse("Nothing to arrange.");
+      const applied = mutate(() => {
+        for (const [eid, g] of result) edits.geom.set(eid, g);
+      });
       return applied ? OK : refuse("Editing is paused.");
     },
 
