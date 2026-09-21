@@ -1,10 +1,11 @@
-// The Floor Designer top bar (Phase 3A).
+// The Floor Designer top bar.
 //
-// Follows the frozen lifecycle: a single "Back to Service" affordance on the left,
-// the draft STATUS on the right, and nothing that publishes — Phase 3A never
-// publishes, so there is no Save button (autosave owns persistence) and no
-// Publish/Preview control. Everything the operator does here lives in a draft and
-// is labelled as such, which is exactly what "Unpublished changes" means.
+// A single "Back to Service" affordance on the left, the caller's editing/publish
+// actions beside it (the `actions` slot), and the draft STATUS on the right. There
+// is still no Save button — autosave owns draft persistence, and the right-hand pill
+// distinguishes the private DRAFT ("Saving…"/"Saved") from PUBLISH, which is a
+// deliberate, separate action the caller places in `actions` (Phase 4). "Not
+// published" stays visible so the draft/live distinction is never blurred.
 
 import { cn } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";

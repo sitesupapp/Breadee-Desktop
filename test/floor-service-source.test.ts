@@ -24,20 +24,21 @@ const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const read = (rel: string) => readFileSync(join(srcRoot, rel), "utf8");
 const code = (rel: string) => stripJsxComments(read(rel));
 
-test("the RPC allow-list exposes the floor read (and the 3A draft/lease) but never a PUBLISH path", () => {
+test("the RPC allow-list exposes the floor read, the draft/lease, and the Phase-4 publish lifecycle", () => {
   const rpc = code("lib/pos/rpc.ts");
   assert.match(rpc, /"floor_service_layout"/);
-  // Phase 3A adds the DRAFT designer (autosave + the lease RPCs) to this shared
-  // union — that is expected and is asserted in floor-designer-source.test.ts. What
-  // must STILL be absent is any publish/restore/history path: Phase 3A edits a
-  // draft and never publishes, so the Service Floor read stays unaffected by edits.
-  assert.doesNotMatch(rpc, /"floor_publish"|"floor_restore_revision"|"floor_history"/);
+  // Phase 4 adds the publish lifecycle (publish/history/restore) to this shared
+  // union — expected, and asserted in floor-designer-source.test.ts. The guarantee
+  // THIS file protects is that the SERVICE READ side never uses them: publish is a
+  // draft→live action, and the Service Floor read stays unaffected until it lands
+  // (verified by the next test against floor.ts).
+  assert.match(rpc, /"floor_publish"/);
 });
 
-test("the reader calls floor_service_layout and performs no write", () => {
+test("the reader calls floor_service_layout and performs no write or publish", () => {
   const floor = code("lib/pos/floor.ts");
   assert.match(floor, /callPosRpc\(\s*"floor_service_layout"/);
-  assert.doesNotMatch(floor, /floor_publish|floor_autosave|floor_acquire_lease/);
+  assert.doesNotMatch(floor, /floor_publish|floor_history|floor_restore_revision|floor_autosave|floor_acquire_lease/);
 });
 
 test("the floor store owns geometry only — no bill/order/shift/selection duplication", () => {

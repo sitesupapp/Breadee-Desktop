@@ -37,8 +37,12 @@ import { QuickSetupDialog } from "@/components/pos/floor/designer/QuickSetupDial
 import { AutoNumberDialog } from "@/components/pos/floor/designer/AutoNumberDialog";
 import { DesignerObjectPalette } from "@/components/pos/floor/designer/DesignerObjectPalette";
 import { SectionsDialog } from "@/components/pos/floor/designer/SectionsDialog";
+import { DesignerPreview } from "@/components/pos/floor/designer/DesignerPreview";
+import { PublishDialog } from "@/components/pos/floor/designer/PublishDialog";
+import { HistoryDialog } from "@/components/pos/floor/designer/HistoryDialog";
 import { useFloorDesigner, FLOOR_HEARTBEAT_MS } from "@/state/floorDesigner";
-import { geomOf, MAX_ELEMENTS, type DesignerElement, type ElementGeom } from "@/lib/pos/floorDesigner";
+import { geomOf, MAX_ELEMENTS, type DesignerElement, type ElementGeom, type PublishResult } from "@/lib/pos/floorDesigner";
+import { summarizePendingPublish } from "@/lib/pos/floorPreview";
 import { analyzeCollisions, type CollisionStatus } from "@/lib/pos/floorCollision";
 import { alignGeoms, distributeGeoms, sameSize, type AlignMode, type ArrangeEntry, type SizeMode } from "@/lib/pos/floorArrange";
 import { readingOrder } from "@/lib/pos/floorAutomate";
@@ -65,6 +69,11 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
   const [objectsOpen, setObjectsOpen] = useState(false);
   const [sectionsOpen, setSectionsOpen] = useState(false);
   const [trayNotice, setTrayNotice] = useState<string | null>(null);
+  // Phase 4 — publish lifecycle surfaces.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [publishedNotice, setPublishedNotice] = useState<PublishResult | null>(null);
 
   const enter = useFloorDesigner((s) => s.enter);
   const release = useFloorDesigner((s) => s.release);
@@ -79,6 +88,10 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     setAutoNumberOpen(false);
     setObjectsOpen(false);
     setSectionsOpen(false);
+    setPreviewOpen(false);
+    setPublishOpen(false);
+    setHistoryOpen(false);
+    setPublishedNotice(null);
     setTrayNotice(null);
     void enter(ctx);
     return () => {
@@ -101,19 +114,24 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (addOpen || quickOpen || autoNumberOpen || objectsOpen || sectionsOpen) {
+      // A publish in flight must not be interrupted by Escape.
+      if (d.publishing || d.restoring) return;
+      if (addOpen || quickOpen || autoNumberOpen || objectsOpen || sectionsOpen || previewOpen || publishOpen || historyOpen) {
         setAddOpen(false);
         setQuickOpen(false);
         setAutoNumberOpen(false);
         setObjectsOpen(false);
         setSectionsOpen(false);
+        setPreviewOpen(false);
+        setPublishOpen(false);
+        setHistoryOpen(false);
         return;
       }
       onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, addOpen, quickOpen, autoNumberOpen, objectsOpen, sectionsOpen]);
+  }, [open, onClose, addOpen, quickOpen, autoNumberOpen, objectsOpen, sectionsOpen, previewOpen, publishOpen, historyOpen, d.publishing, d.restoring]);
 
   const activeSection = useMemo(
     () => d.sections.find((s) => s.id === d.activeSectionId) ?? null,
@@ -145,6 +163,56 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
   // (drag, bulk action, resize…). Never blocks anything.
   const collisionReport = useMemo(() => analyzeCollisions(sectionElements), [sectionElements]);
   const warnFor = (el: DesignerElement): CollisionStatus => collisionReport.statusById.get(el.id) ?? "clear";
+
+  // Whole-floor advisory counts for the publish summary (per section, summed) —
+  // the top-bar chip is per-section, but a publish covers every section.
+  const floorWarnings = useMemo(() => {
+    let overlaps = 0;
+    let tight = 0;
+    for (const sec of d.sections) {
+      const rep = analyzeCollisions(d.elements.filter((e) => e.sectionId === sec.id));
+      overlaps += rep.collisions;
+      tight += rep.tight;
+    }
+    return { overlaps, tight };
+  }, [d.elements, d.sections]);
+
+  const publishSummary = useMemo(
+    () =>
+      summarizePendingPublish({
+        elements: d.elements,
+        meta: d.tableMeta,
+        unplacedNames: d.unplaced.map((u) => u.name),
+        overlaps: floorWarnings.overlaps,
+        tight: floorWarnings.tight,
+      }),
+    [d.elements, d.tableMeta, d.unplaced, floorWarnings],
+  );
+
+  const openPublish = () => {
+    d.clearPublishError();
+    setPreviewOpen(false);
+    setPublishOpen(true);
+  };
+  const onConfirmPublish = async () => {
+    const r = await d.publish();
+    if (r.ok) {
+      setPublishOpen(false);
+      setPublishedNotice(useFloorDesigner.getState().lastPublish);
+    }
+    // On failure the store holds publishError; the dialog stays open and shows it.
+  };
+  const openHistory = () => {
+    setHistoryOpen(true);
+    void d.loadHistory();
+  };
+  const onRestore = async (revisionId: string) => {
+    const r = await d.restore(revisionId);
+    if (r.ok) {
+      setHistoryOpen(false);
+      setPublishedNotice(null);
+    }
+  };
 
   /** One bulk action → ONE draft mutation through the store's single save path. */
   const arrangeEntries = (): ArrangeEntry[] => selectedTables.map((el) => ({ id: el.id, geom: geomOf(el) }));
@@ -242,6 +310,27 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
                 <Glyph name="layers" size={15} />
                 Sections
               </button>
+
+              <span aria-hidden className="mx-0.5 h-6 w-px bg-line" />
+
+              <button type="button" className={actionBtn} onClick={() => setPreviewOpen(true)}>
+                <Glyph name="search" size={15} />
+                Preview
+              </button>
+              <button type="button" className={actionBtn} onClick={openHistory}>
+                <Glyph name="history" size={15} />
+                History
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-sm font-bold text-onbrand hover:opacity-90 disabled:opacity-40"
+                disabled={!editable || !d.canPublish || d.publishing}
+                title={d.canPublish ? undefined : "Publishing needs the floor-publish permission"}
+                onClick={openPublish}
+              >
+                <Glyph name="check" size={15} />
+                {d.publishing ? "Publishing…" : "Publish Changes"}
+              </button>
               {(collisionReport.collisions > 0 || collisionReport.tight > 0) && (
                 <span
                   className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-bold text-amber-800"
@@ -269,6 +358,22 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
               Take over editing
             </Button>
           )}
+        </div>
+      )}
+
+      {publishedNotice && (
+        <div className="flex items-center justify-between gap-2 border-b border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+          <span className="flex items-center gap-1.5">
+            <Glyph name="check" size={16} />
+            Floor published{publishedNotice.revisionNo ? ` — version ${publishedNotice.revisionNo} is now live` : ""}.
+            {publishedNotice.created.length > 0 &&
+              ` ${publishedNotice.created.length} new table${publishedNotice.created.length === 1 ? "" : "s"} created.`}
+            {publishedNotice.renamed.length > 0 &&
+              ` ${publishedNotice.renamed.length} renamed.`}
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => setPublishedNotice(null)}>
+            Dismiss
+          </Button>
         </div>
       )}
 
@@ -464,6 +569,36 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
         onAdd={(name) => d.addSection(name)}
         onRename={(id, name) => d.renameSection(id, name)}
         onDelete={(id) => d.deleteSection(id)}
+      />
+
+      {/* Phase 4 — read-only preview, publish confirmation, history + restore. */}
+      <DesignerPreview
+        open={previewOpen && d.phase === "ready"}
+        sections={d.sections}
+        elements={d.elements}
+        tableMeta={d.tableMeta}
+        onClose={() => setPreviewOpen(false)}
+        onPublish={editable && d.canPublish ? openPublish : undefined}
+      />
+      <PublishDialog
+        open={publishOpen}
+        summary={publishSummary}
+        canPublish={d.canPublish}
+        publishing={d.publishing}
+        error={d.publishError}
+        onCancel={() => setPublishOpen(false)}
+        onConfirm={() => void onConfirmPublish()}
+      />
+      <HistoryDialog
+        open={historyOpen}
+        entries={d.history}
+        loading={d.historyLoading}
+        error={d.historyError}
+        restoring={d.restoring}
+        canPublish={d.canPublish}
+        onCancel={() => setHistoryOpen(false)}
+        onRestore={(revisionId) => void onRestore(revisionId)}
+        onRetry={() => void d.loadHistory()}
       />
     </div>
   );

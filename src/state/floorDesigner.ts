@@ -32,10 +32,13 @@ import {
   floorAcquireLease,
   floorAutosaveDraft,
   floorHeartbeat,
+  floorHistory,
   floorLoadDraft,
   floorLoadTableMeta,
   floorLoadUnplaced,
+  floorPublish,
   floorReleaseLease,
+  floorRestoreRevision,
   floorTakeoverLease,
   geomOf,
   makePlacedElement,
@@ -52,7 +55,9 @@ import {
   type DraftEdits,
   type ElementGeom,
   type FloorDesignerError,
+  type HistoryEntry,
   type ParsedDraft,
+  type PublishResult,
   type TableMeta,
   type UnplacedTable,
 } from "@/lib/pos/floorDesigner";
@@ -154,6 +159,19 @@ type DesignerState = {
 
   leaseExpiresAt: string | null;
 
+  /** Phase 4 — publish lifecycle. A publish is in flight (blocks a second one). */
+  publishing: boolean;
+  /** The last publish rejection, surfaced for the operator to fix and retry. */
+  publishError: FloorDesignerError | null;
+  /** The last successful publish result (created/renamed materialization). */
+  lastPublish: PublishResult | null;
+  /** The immutable revision history, newest first (loaded on demand). */
+  history: HistoryEntry[];
+  historyLoading: boolean;
+  historyError: FloorDesignerError | null;
+  /** A restore is in flight (blocks a second one). */
+  restoring: boolean;
+
   enter: (ctx: Ctx) => Promise<void>;
   setActiveSection: (sectionId: string) => void;
   setTransform: (t: Transform) => void;
@@ -225,6 +243,25 @@ type DesignerState = {
   retrySave: () => void;
   release: () => Promise<void>;
   reset: () => void;
+
+  /**
+   * Phase 4 — PUBLISH the draft as the live operational floor. Flushes any
+   * pending autosave first (so the server publishes the latest draft), then calls
+   * the single atomic `floor_publish`, then reloads the server-rebased draft. A
+   * second call while one is in flight is ignored (double-submit safety). On a
+   * server rejection nothing changed and the draft is preserved.
+   */
+  publish: () => Promise<OpResult>;
+  /** Load the immutable revision history (read-only, metadata only). */
+  loadHistory: () => Promise<void>;
+  /**
+   * Restore a past revision INTO the draft for review. Never flips the published
+   * pointer — the Service Floor stays on the current revision until an explicit
+   * Publish. Reloads the restored draft on success.
+   */
+  restore: (revisionId: string) => Promise<OpResult>;
+  /** Dismiss a surfaced publish error without leaving the designer. */
+  clearPublishError: () => void;
 };
 
 // Session-scoped mutable context. Module-level because the store is a singleton
@@ -376,6 +413,13 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
     saveError: null,
     dirty: false,
     leaseExpiresAt: null,
+    publishing: false,
+    publishError: null,
+    lastPublish: null,
+    history: [],
+    historyLoading: false,
+    historyError: null,
+    restoring: false,
 
     enter: async (ctx) => {
       clearSaveTimer();
@@ -395,6 +439,8 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
         saveError: null,
         dirty: false,
         tableMeta: new Map(),
+        publishError: null,
+        lastPublish: null,
       });
 
       try {
@@ -1010,8 +1056,97 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
         saveError: null,
         dirty: false,
         leaseExpiresAt: null,
+        publishing: false,
+        publishError: null,
+        lastPublish: null,
+        history: [],
+        historyLoading: false,
+        historyError: null,
+        restoring: false,
       });
     },
+
+    publish: async () => {
+      const s = get();
+      // Double-submit safety (§31): one publish at a time.
+      if (s.publishing) return refuse("A publish is already in progress.");
+      if (s.phase !== "ready" || s.readOnly) return refuse("Editing is paused.");
+      if (!s.canPublish) return refuse("You do not have permission to publish this floor.");
+      if (!currentDraft || !s.ctx.branchId) return refuse("Nothing to publish.");
+
+      // Flush any pending draft edit BEFORE publishing, so the server publishes the
+      // latest draft rather than the last debounced autosave. A failed flush aborts
+      // the publish (the server would otherwise publish stale geometry).
+      clearSaveTimer();
+      if (s.dirty) {
+        try {
+          await floorAutosaveDraft(s.ctx.branchId, serializeDraftDoc(currentDraft, edits), s.baseRevisionId);
+          set({ saveStatus: "saved", dirty: false });
+        } catch (e) {
+          const err = classifyFloorDesignerError(e);
+          set({ saveStatus: "error", saveError: err, readOnly: get().readOnly || err.readOnly });
+          return refuse(err.message);
+        }
+      }
+
+      set({ publishing: true, publishError: null });
+      try {
+        const result = await floorPublish(s.ctx.branchId, s.baseRevisionId);
+        // The server rebased the draft onto the new revision (canonical ids, cleared
+        // temp/rename intents, new base). Reload everything from the server so the
+        // editor continues on the exact rebased draft — never stale local state.
+        await get().enter(s.ctx);
+        set({ publishing: false, lastPublish: result });
+        return OK;
+      } catch (e) {
+        const err = classifyFloorDesignerError(e);
+        // Nothing was published (the whole transaction rolled back) — keep the draft
+        // and surface the specific, fixable reason. Only a lease/stale/permission
+        // failure drops to read-only.
+        set({
+          publishing: false,
+          publishError: err,
+          readOnly: get().readOnly || err.readOnly,
+          error: err.readOnly ? err : get().error,
+        });
+        return refuse(err.message);
+      }
+    },
+
+    loadHistory: async () => {
+      const s = get();
+      if (!s.ctx.branchId) return;
+      set({ historyLoading: true, historyError: null });
+      try {
+        const rows = await floorHistory(s.ctx.branchId);
+        set({ history: rows, historyLoading: false });
+      } catch (e) {
+        set({ historyLoading: false, historyError: classifyFloorDesignerError(e) });
+      }
+    },
+
+    restore: async (revisionId) => {
+      const s = get();
+      if (s.restoring) return refuse("A restore is already in progress.");
+      if (s.phase !== "ready" || s.readOnly) return refuse("Editing is paused.");
+      if (!s.canPublish) return refuse("You do not have permission to restore this floor.");
+      if (!s.ctx.branchId) return refuse("Nothing to restore.");
+      set({ restoring: true, publishError: null });
+      try {
+        // Restore REPLACES the draft with the chosen revision; it never publishes.
+        await floorRestoreRevision(s.ctx.branchId, revisionId);
+        // Reload the restored draft; Service still serves the current published rev.
+        await get().enter(s.ctx);
+        set({ restoring: false });
+        return OK;
+      } catch (e) {
+        const err = classifyFloorDesignerError(e);
+        set({ restoring: false, publishError: err, readOnly: get().readOnly || err.readOnly });
+        return refuse(err.message);
+      }
+    },
+
+    clearPublishError: () => set({ publishError: null }),
   };
 });
 
