@@ -62,8 +62,10 @@ function Stepper({
   incrementLabel: string;
   disabled?: boolean;
 }) {
+  // 44px hit targets (the approved touch floor) — visually compact, physically
+  // generous. Phase-3B follow-up #3.
   const btn =
-    "grid h-9 w-9 place-items-center rounded-lg border border-line bg-white text-ink hover:bg-canvas disabled:opacity-40";
+    "grid h-11 w-11 place-items-center rounded-lg border border-line bg-white text-ink hover:bg-canvas disabled:opacity-40";
   return (
     <div className="flex items-center gap-1">
       <button type="button" className={btn} aria-label={decrementLabel} disabled={disabled} onClick={() => onChange(value - step)}>
@@ -86,6 +88,7 @@ export function DesignerInspector({
   sectionName,
   readOnly,
   onRename,
+  onDiscardRename,
   onSeats,
   onShape,
   onSize,
@@ -98,6 +101,8 @@ export function DesignerInspector({
   sectionName: string | null;
   readOnly: boolean;
   onRename: (name: string) => OpResult;
+  /** Clear a staged rename without needing the canonical name (legacy safety). */
+  onDiscardRename: () => void;
   /** Staged NEW tables only — existing-table seats are read-only by contract. */
   onSeats: (seats: number) => void;
   onShape: (shape: FloorTableShape) => void;
@@ -107,6 +112,11 @@ export function DesignerInspector({
 }) {
   const isTable = element.type === "table";
   const isNew = isTable && element.tempId !== null;
+  // A LEGACY placement: an existing table whose canonical name is unavailable
+  // (hidden from the metadata read). Renaming it is refused — typing the
+  // canonical name back would be impossible, so a staged rename could never be
+  // undone by name. Identity is shown honestly instead (Phase-3B follow-up #1).
+  const isLegacy = isTable && !isNew && meta === null;
   const shownName = isNew ? element.newName ?? "" : element.renameTo ?? meta?.name ?? element.label ?? "";
 
   const [nameInput, setNameInput] = useState(shownName);
@@ -137,7 +147,29 @@ export function DesignerInspector({
         {sectionName && <span className="truncate text-xs font-semibold text-sub">{sectionName}</span>}
       </div>
 
-      {isTable && (
+      {isLegacy && (
+        <div className="pt-1">
+          <span className="text-xs font-bold uppercase tracking-wide text-sub">Identity</span>
+          <p className="mt-1 rounded-lg border border-line bg-canvas px-3 py-2.5 text-sm font-bold text-sub">
+            Legacy table
+          </p>
+          <p className="mt-1 text-xs text-sub">
+            This placement points at a table that is hidden from today’s table list, so it can’t be renamed here.
+          </p>
+          {element.renameTo !== null && (
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={onDiscardRename}
+              className="mt-2 flex min-h-[44px] w-full items-center justify-center rounded-lg border border-line bg-white px-3 text-sm font-bold text-ink hover:bg-canvas disabled:opacity-40"
+            >
+              Discard draft rename (“{element.renameTo}”)
+            </button>
+          )}
+        </div>
+      )}
+
+      {isTable && !isLegacy && (
         <div className="pt-1">
           <label className="text-xs font-bold uppercase tracking-wide text-sub" htmlFor="designer-table-name">
             Table name
@@ -201,7 +233,7 @@ export function DesignerInspector({
                 onClick={() => onShape(s)}
                 aria-pressed={(element.shape ?? "sq") === s}
                 className={cn(
-                  "rounded-lg border px-1 py-1.5 text-[11px] font-bold capitalize disabled:opacity-40",
+                  "min-h-[40px] rounded-lg border px-1 py-1.5 text-[11px] font-bold capitalize disabled:opacity-40",
                   (element.shape ?? "sq") === s
                     ? "border-brand bg-brand-soft text-brand-dark"
                     : "border-line bg-white text-sub hover:text-ink",
@@ -251,7 +283,7 @@ export function DesignerInspector({
           type="button"
           disabled={readOnly}
           onClick={onRemove}
-          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2.5 text-sm font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-40"
+          className="flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2.5 text-sm font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-40"
         >
           <Glyph name="trash" size={15} />
           {isTable ? (isNew ? "Remove new table" : "Remove from floor") : "Remove from floor"}

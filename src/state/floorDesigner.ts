@@ -87,7 +87,13 @@ type DesignerState = {
   activeSectionId: string | null;
   /** The draft WITH the operator's edits applied — the render source. */
   elements: DesignerElement[];
+  /** The PRIMARY selection (last selected) — the Inspector's subject. */
   selectedElementId: string | null;
+  /**
+   * Multi-selection (Phase 3C), in selection ORDER; the last entry is the
+   * primary/reference element. Bulk tools operate on the TABLE members.
+   */
+  selectedIds: string[];
   /** Canonical tables not currently placed on the draft (derived). */
   unplaced: UnplacedTable[];
   /** Read-only canonical identity: table id → {name, seats}. */
@@ -116,9 +122,15 @@ type DesignerState = {
   setTransform: (t: Transform) => void;
   requestFit: () => void;
   selectElement: (id: string | null) => void;
+  /** Ctrl/Cmd+click: toggle a TABLE in the multi-selection (structures single-select). */
+  toggleSelect: (id: string) => void;
 
   /** Persist an absolute geometry for one element (the canvas computes it). */
   commitGeom: (id: string, geom: ElementGeom) => void;
+  /** Persist geometries for SEVERAL elements as ONE mutation → ONE autosave. */
+  commitGeoms: (entries: [string, ElementGeom][]) => void;
+  /** Discard a staged rename without needing the canonical name (legacy safety). */
+  discardRename: (id: string) => void;
   /** Inspector size steppers — explicit logical dimensions. */
   setElementSize: (id: string, w: number, h: number) => void;
   setElementRotation: (id: string, rotation: number) => void;
@@ -244,6 +256,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
     activeSectionId: null,
     elements: [],
     selectedElementId: null,
+    selectedIds: [],
     unplaced: [],
     tableMeta: new Map(),
     transform: null,
@@ -266,6 +279,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
         phase: "loading",
         error: null,
         selectedElementId: null,
+        selectedIds: [],
         transform: null,
         readOnly: false,
         canTakeover: false,
@@ -362,7 +376,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
     setActiveSection: (sectionId) => {
       if (sectionId === get().activeSectionId) return;
       // A new section is a new plane — drop the transform to re-fit, clear select.
-      set({ activeSectionId: sectionId, transform: null, selectedElementId: null });
+      set({ activeSectionId: sectionId, transform: null, selectedElementId: null, selectedIds: [] });
     },
 
     setTransform: (t) => set({ transform: t }),
@@ -370,14 +384,47 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
 
     // Selection is allowed even read-only (to inspect a table); it is the edit
     // COMMIT that `readOnly` freezes, not the highlight.
-    selectElement: (id) => set({ selectedElementId: id }),
+    selectElement: (id) => set({ selectedElementId: id, selectedIds: id === null ? [] : [id] }),
+
+    toggleSelect: (id) => {
+      const el = elementById(id);
+      if (!el) return;
+      // Multi-selection is a TABLE tool; toggling a structure single-selects it.
+      if (el.type !== "table") {
+        set({ selectedElementId: id, selectedIds: [id] });
+        return;
+      }
+      const cur = get().selectedIds.filter((s) => get().elements.some((e) => e.id === s));
+      const next = cur.includes(id) ? cur.filter((s) => s !== id) : [...cur, id];
+      set({ selectedIds: next, selectedElementId: next.length > 0 ? next[next.length - 1] : null });
+    },
 
     commitGeom: (id, geom) => {
       if (!elementById(id)) return;
       mutate(() => {
         edits.geom.set(id, geom);
       });
-      set({ selectedElementId: id });
+      const cur = get().selectedIds;
+      set({ selectedElementId: id, selectedIds: cur.includes(id) ? cur : [id] });
+    },
+
+    commitGeoms: (entries) => {
+      const valid = entries.filter(([id]) => elementById(id));
+      if (valid.length === 0) return;
+      // ONE mutation for the whole group → one recompute, one debounced autosave.
+      mutate(() => {
+        for (const [id, geom] of valid) edits.geom.set(id, geom);
+      });
+    },
+
+    discardRename: (id) => {
+      const el = elementById(id);
+      if (!el || el.type !== "table" || el.renameTo === null) return;
+      mutate(() => {
+        const raw = currentDraft?.rawElements.find((r) => r.id === id);
+        if (raw && "rename_to" in raw) edits.renames.set(id, null);
+        else edits.renames.delete(id);
+      });
     },
 
     setElementSize: (id, w, h) => {
@@ -464,7 +511,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
       });
       // An existing canonical table returns to the tray via the derived
       // unplaced list; the canonical row itself is NEVER touched.
-      set({ selectedElementId: null });
+      set({ selectedElementId: null, selectedIds: [] });
     },
 
     placeTable: (tableId) => {
@@ -481,7 +528,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
       const applied = mutate(() => {
         edits.added.push(record);
       });
-      if (applied) set({ selectedElementId: String(record.id) });
+      if (applied) set({ selectedElementId: String(record.id), selectedIds: [String(record.id)] });
       return applied ? OK : refuse("Editing is paused.");
     },
 
@@ -502,7 +549,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
       const applied = mutate(() => {
         edits.added.push(record);
       });
-      if (applied) set({ selectedElementId: String(record.id) });
+      if (applied) set({ selectedElementId: String(record.id), selectedIds: [String(record.id)] });
       return applied ? OK : refuse("Editing is paused.");
     },
 
@@ -621,6 +668,7 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
         activeSectionId: null,
         elements: [],
         selectedElementId: null,
+        selectedIds: [],
         unplaced: [],
         tableMeta: new Map(),
         transform: null,
