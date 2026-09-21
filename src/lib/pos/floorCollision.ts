@@ -87,6 +87,28 @@ function obbOf(x: number, y: number, w: number, h: number, rotationDeg: number, 
   return { corners, axes: [ax, ay] };
 }
 
+/**
+ * The axis-aligned bounding EXTENT (w×h) of a rectangle once rotated — the same
+ * oriented-box math the collision test uses, exposed so layout automation can
+ * size grid cells around a rotated table's real footprint without a second
+ * geometry implementation. A 0°/180° table returns {w,h}; a 90°/270° one swaps
+ * them; an in-between angle returns the enclosing box.
+ */
+export function orientedExtent(w: number, h: number, rotationDeg: number): { w: number; h: number } {
+  const { corners } = obbOf(0, 0, w, h, rotationDeg);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const c of corners) {
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
+  }
+  return { w: maxX - minX, h: maxY - minY };
+}
+
 function project(corners: { x: number; y: number }[], axis: { x: number; y: number }): [number, number] {
   let min = Infinity;
   let max = -Infinity;

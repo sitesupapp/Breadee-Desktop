@@ -33,11 +33,14 @@ import { DesignerInspector } from "@/components/pos/floor/designer/DesignerInspe
 import { DesignerBulkPanel } from "@/components/pos/floor/designer/DesignerBulkPanel";
 import { UnplacedTray } from "@/components/pos/floor/designer/UnplacedTray";
 import { AddTableDialog } from "@/components/pos/floor/designer/AddTableDialog";
+import { QuickSetupDialog } from "@/components/pos/floor/designer/QuickSetupDialog";
+import { AutoNumberDialog } from "@/components/pos/floor/designer/AutoNumberDialog";
 import { SectionsDialog } from "@/components/pos/floor/designer/SectionsDialog";
 import { useFloorDesigner, FLOOR_HEARTBEAT_MS } from "@/state/floorDesigner";
-import { geomOf, type DesignerElement, type ElementGeom } from "@/lib/pos/floorDesigner";
+import { geomOf, MAX_ELEMENTS, type DesignerElement, type ElementGeom } from "@/lib/pos/floorDesigner";
 import { analyzeCollisions, type CollisionStatus } from "@/lib/pos/floorCollision";
 import { alignGeoms, distributeGeoms, sameSize, type AlignMode, type ArrangeEntry, type SizeMode } from "@/lib/pos/floorArrange";
+import { readingOrder } from "@/lib/pos/floorAutomate";
 import { panToReveal } from "@/lib/pos/floorSnap";
 import {
   clampPan,
@@ -56,6 +59,8 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
   const d = useFloorDesigner();
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [autoNumberOpen, setAutoNumberOpen] = useState(false);
   const [sectionsOpen, setSectionsOpen] = useState(false);
   const [trayNotice, setTrayNotice] = useState<string | null>(null);
 
@@ -68,6 +73,8 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
   useEffect(() => {
     if (!open) return;
     setAddOpen(false);
+    setQuickOpen(false);
+    setAutoNumberOpen(false);
     setSectionsOpen(false);
     setTrayNotice(null);
     void enter(ctx);
@@ -91,8 +98,10 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (addOpen || sectionsOpen) {
+      if (addOpen || quickOpen || autoNumberOpen || sectionsOpen) {
         setAddOpen(false);
+        setQuickOpen(false);
+        setAutoNumberOpen(false);
         setSectionsOpen(false);
         return;
       }
@@ -100,7 +109,7 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, addOpen, sectionsOpen]);
+  }, [open, onClose, addOpen, quickOpen, autoNumberOpen, sectionsOpen]);
 
   const activeSection = useMemo(
     () => d.sections.find((s) => s.id === d.activeSectionId) ?? null,
@@ -149,6 +158,17 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
       isNew: false,
     };
   };
+
+  // The selected tables' current names in PHYSICAL reading order — the exact
+  // order Auto-number applies them in, so the dialog's preview matches the result.
+  const autoNumberFromNames = useMemo(() => {
+    const byId = new Map(selectedTables.map((el) => [el.id, el] as const));
+    return readingOrder(selectedTables.map((el) => ({ id: el.id, geom: geomOf(el) })))
+      .map((o) => byId.get(o.id))
+      .filter((el): el is DesignerElement => !!el)
+      .map((el) => labelFor(el).label);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTables, d.tableMeta]);
 
   const viewport = (): Viewport => ({
     width: wrapRef.current?.clientWidth ?? 0,
@@ -205,6 +225,10 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
               <button type="button" className={actionBtn} disabled={!editable} onClick={() => setAddOpen(true)}>
                 <span aria-hidden className="text-base leading-none">+</span>
                 Add table
+              </button>
+              <button type="button" className={actionBtn} disabled={!editable} onClick={() => setQuickOpen(true)}>
+                <Glyph name="grid" size={15} />
+                Quick setup
               </button>
               <button type="button" className={actionBtn} disabled={!editable} onClick={() => setSectionsOpen(true)}>
                 <Glyph name="layers" size={15} />
@@ -346,6 +370,11 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
                     const ref = selectedTables[selectedTables.length - 1];
                     if (ref) applyArrange(sameSize(arrangeEntries(), ref.id, mode));
                   }}
+                  onAutoNumber={() => setAutoNumberOpen(true)}
+                  onAutoArrange={() => {
+                    const r = d.autoArrange();
+                    if (!r.ok) setTrayNotice(r.reason);
+                  }}
                   onClear={() => d.selectElement(null)}
                 />
               ) : selectedElement ? (
@@ -360,6 +389,10 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
                   onShape={(shape) => d.setElementShape(selectedElement.id, shape)}
                   onSize={(w, h) => d.setElementSize(selectedElement.id, w, h)}
                   onRotate={(rotation) => d.setElementRotation(selectedElement.id, rotation)}
+                  onDuplicate={() => {
+                    const r = d.duplicateTable(selectedElement.id);
+                    if (!r.ok) setTrayNotice(r.reason);
+                  }}
                   onRemove={() => d.removeElement(selectedElement.id)}
                 />
               ) : null}
@@ -375,6 +408,27 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
         onConfirm={(name, seats) => {
           const r = d.addTable(name, seats);
           if (r.ok) setAddOpen(false);
+          return r;
+        }}
+      />
+      <QuickSetupDialog
+        open={quickOpen}
+        sectionName={activeSection?.name ?? null}
+        remainingCapacity={MAX_ELEMENTS - d.elements.length}
+        onCancel={() => setQuickOpen(false)}
+        onConfirm={(spec) => {
+          const r = d.quickSetup(spec);
+          if (r.ok) setQuickOpen(false);
+          return r;
+        }}
+      />
+      <AutoNumberDialog
+        open={autoNumberOpen}
+        fromNames={autoNumberFromNames}
+        onCancel={() => setAutoNumberOpen(false)}
+        onConfirm={(spec) => {
+          const r = d.autoNumber(spec);
+          if (r.ok) setAutoNumberOpen(false);
           return r;
         }}
       />
