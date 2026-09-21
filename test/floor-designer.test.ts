@@ -1,4 +1,5 @@
-// Floor DESIGNER foundation (Phase 3A) — the rules the editor must never break.
+// Floor DESIGNER foundation (Phase 3A, updated for the 3B edits model) — the
+// rules the editor must never break.
 //
 // No DOM, no network: pure functions over the draft document and the geometry of
 // an edit. The invariants pinned here are the ones a later phase, a refactor, or a
@@ -13,8 +14,10 @@ import {
   applyDrag,
   applyResize,
   applyRotate,
+  applySize,
   classifyFloorDesignerError,
   draftHasContent,
+  emptyDraftEdits,
   geomOf,
   MIN_ELEMENT_LOGICAL,
   normalizeRotation,
@@ -45,30 +48,36 @@ test("parseDraftDoc renders real tables and structures, and drops orphans", () =
   assert.equal(d.sections.length, 1);
 });
 
-test("parseDraftDoc keeps EVERY raw element for lossless serialization", () => {
+test("the DESIGNER renders staged new-table intents the service reader refuses", () => {
   const d = parseDraftDoc(
     doc([
-      { id: "a", type: "table", section_id: "s1", x: 10, y: 10, w: 40, h: 40, table_id: "T1" },
-      // a staged create intent from a FUTURE phase (no table_id) — not renderable
-      // in 3A, but must survive a round-trip untouched.
-      { id: "s", type: "table", section_id: "s1", x: 0, y: 0, w: 40, h: 40, temp_id: "tmp", new_name: "New" },
+      { id: "a", type: "table", section_id: "s1", x: 10, y: 10, w: 40, h: 40, table_id: "T1", rename_to: "VIP 9" },
+      { id: "s", type: "table", section_id: "s1", x: 0, y: 0, w: 40, h: 40, temp_id: "temp:abc", new_name: "New 1", seats: 4 },
     ]),
   );
-  assert.equal(d.elements.length, 1, "only the real table renders");
+  assert.equal(d.elements.length, 2, "the staged table renders in the editor");
   assert.equal(d.rawElements.length, 2, "both raw elements are retained");
+  const staged = d.elements.find((e) => e.id === "s")!;
+  assert.equal(staged.tempId, "temp:abc");
+  assert.equal(staged.newName, "New 1");
+  assert.equal(staged.seats, 4);
+  assert.equal(staged.tableId, null);
+  const real = d.elements.find((e) => e.id === "a")!;
+  assert.equal(real.renameTo, "VIP 9", "a staged rename is visible to the editor");
 });
 
 // --- serialize (the lossless guarantee) --------------------------------------
 
-test("serializeDraftDoc applies overrides ONLY to edited elements and preserves the rest verbatim", () => {
+test("serializeDraftDoc applies edits ONLY to edited elements and preserves the rest verbatim", () => {
   const d = parseDraftDoc(
     doc([
       { id: "a", type: "table", section_id: "s1", x: 10, y: 10, w: 40, h: 40, table_id: "T1", seats: 4, extra: "keep" },
-      { id: "s", type: "table", section_id: "s1", x: 0, y: 0, w: 40, h: 40, temp_id: "tmp", new_name: "New" },
+      { id: "s", type: "table", section_id: "s1", x: 0, y: 0, w: 40, h: 40, temp_id: "temp:tmp", new_name: "New" },
     ]),
   );
-  const overrides = new Map<string, ElementGeom>([["a", { x: 111, y: 222, w: 50, h: 60, rotation: 90 }]]);
-  const out = serializeDraftDoc(d, overrides) as { elements: Record<string, unknown>[]; v: string };
+  const edits = emptyDraftEdits();
+  edits.geom.set("a", { x: 111, y: 222, w: 50, h: 60, rotation: 90 });
+  const out = serializeDraftDoc(d, edits) as { elements: Record<string, unknown>[]; v: string };
 
   const a = out.elements.find((e) => e.id === "a")!;
   assert.deepEqual([a.x, a.y, a.w, a.h, a.rotation], [111, 222, 50, 60, 90], "edited geometry is written");
@@ -76,7 +85,7 @@ test("serializeDraftDoc applies overrides ONLY to edited elements and preserves 
   assert.equal(a.extra, "keep", "an unknown field on an edited element survives");
 
   const s = out.elements.find((e) => e.id === "s")!;
-  assert.equal(s.temp_id, "tmp", "a staged intent is never dropped by a round-trip");
+  assert.equal(s.temp_id, "temp:tmp", "a staged intent is never dropped by a round-trip");
   assert.equal(s.new_name, "New");
   assert.equal(out.v, "1", "the document version is preserved");
 });
@@ -116,6 +125,12 @@ test("applyResize clamps to the minimum size without moving the anchor", () => {
   assert.equal(r.h, MIN_ELEMENT_LOGICAL);
   assert.equal(r.x, 100, "NW anchor stays put under clamp");
   assert.equal(r.y, 100);
+});
+
+test("applySize clamps explicit dimensions to the same rails", () => {
+  assert.deepEqual(applySize(G(), 10, 999999).w, MIN_ELEMENT_LOGICAL);
+  assert.equal(applySize(G(), 10, 999999).h, 20000);
+  assert.equal(applySize(G(), 120, 90).w, 120);
 });
 
 test("rotation normalizes to 0–359 and snaps to a clean angle", () => {

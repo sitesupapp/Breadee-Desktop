@@ -151,3 +151,67 @@ test("the store runs the full lease lifecycle with a read-only fallback", () => 
   assert.match(store, /readOnly:\s*true/, "a lost lease drops to read-only rather than losing work");
   assert.match(store, /FLOOR_HEARTBEAT_MS\s*=\s*45_000/, "heartbeat is well under the 150s server TTL");
 });
+
+// --- Phase 3B: identity is a one-way, read-only metadata projection ----------
+
+const INSPECTOR = "src/components/pos/floor/designer/DesignerInspector.tsx";
+const TRAY = "src/components/pos/floor/designer/UnplacedTray.tsx";
+const ADD_DIALOG = "src/components/pos/floor/designer/AddTableDialog.tsx";
+const SECTIONS_DIALOG = "src/components/pos/floor/designer/SectionsDialog.tsx";
+
+test("the metadata adapter projects {id, name, seats} and carries nothing operational", () => {
+  const lib = ts(LIB);
+  assert.match(lib, /floorLoadTableMeta/, "the adapter exists");
+  assert.match(lib, /loadTableMap/, "it reuses the canonical pos_table_map read");
+  // Once comments are stripped, no operational field of TableSummary survives
+  // into this module — the projection happens inside the adapter, immediately.
+  for (const forbidden of ["mixed_currency", "opened_at", "order_number", "occupied", "total", "currency"]) {
+    assert.ok(!lib.includes(forbidden), `floorDesigner.ts must not carry the operational field ${forbidden}`);
+  }
+});
+
+test("every designer surface stays clear of the operational POS engine and of canonical writes", () => {
+  for (const rel of [LIB, STORE, CANVAS, NODE, SHELL, INSPECTOR, TRAY, ADD_DIALOG, SECTIONS_DIALOG]) {
+    const src = ts(rel);
+    for (const forbidden of [
+      "useTables",
+      "useCart",
+      "TableBillPanel",
+      "pos_open_table",
+      "pos_configure_tables",
+      "floor_publish",
+      "supabase",
+    ]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("a rename stays rename_to and a new table stays a temp: intent — no canonical create/rename path", () => {
+  const lib = ts(LIB);
+  assert.match(lib, /rename_to/, "renames are staged in the draft");
+  assert.match(lib, /`temp:\$\{/, "temp identities use the server's temp: namespace");
+  const store = ts(STORE);
+  assert.ok(!store.includes("pos_tables"), "the store never names the canonical table store");
+  assert.ok(!store.includes("rename_to"), "the store stages renames through the edits model, not ad-hoc fields");
+});
+
+test("the inspector and dialogs speak restaurant language — no developer identifiers", () => {
+  for (const rel of [INSPECTOR, TRAY, ADD_DIALOG, SECTIONS_DIALOG]) {
+    const src = ts(rel);
+    for (const forbidden of ['"temp_id"', '"table_id"', "JSON.stringify", "layout_id"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not surface ${forbidden}`);
+    }
+  }
+});
+
+test("the shell keeps the section nav in a fixed ROW so the canvas dominates (the 3A gap fix)", () => {
+  const shell = jsx(SHELL);
+  assert.match(
+    shell,
+    /flex shrink-0 items-center[\s\S]{0,200}<FloorSectionNav/,
+    "FloorSectionNav sits in a fixed-height row, not loose in the column",
+  );
+  assert.match(shell, /UnplacedTray/, "the unplaced tray is mounted");
+  assert.match(shell, /DesignerInspector/, "the inspector is mounted");
+});

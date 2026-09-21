@@ -1,24 +1,30 @@
-// The Dine-In Floor DESIGNER foundation (Phase 3A), against the Phase-1 staging
+// The Dine-In Floor DESIGNER (Phases 3A + 3B), against the Phase-1 staging
 // contract. This is the EDIT side of the floor; `lib/pos/floor.ts` is the read
 // side. The two never share state.
 //
 // WHAT THIS OWNS (pure, testable, no React, no DOM):
 //   * the DRAFT document contract — load, parse for rendering, and serialize back
-//     WITHOUT losing anything the reader does not model (a future phase's staged
-//     `temp_id`/`rename_to` table intent, an unknown element kind, an extra field
-//     on a known element). Editing a floor must never silently drop part of it,
-//     so the raw element objects are preserved verbatim and only the geometry of
-//     the elements the operator actually moved is overwritten on save.
+//     WITHOUT losing anything this build does not model (an unknown element kind,
+//     an extra field on a known element). Editing a floor must never silently
+//     drop part of it, so raw element/section records are preserved verbatim and
+//     only the fields the operator actually edited are overwritten on save.
+//   * the EDITS model (Phase 3B): geometry, staged table RENAME (`rename_to`),
+//     shape, placing an existing table, removing an element from the layout,
+//     staged NEW-TABLE intents (`temp:` + `new_name` + `seats`), and section
+//     add / rename / safe-delete. All of it is draft-only; the server materializes
+//     renames and creations only at a future PUBLISH, which this phase never calls.
 //   * the geometry of an edit — drag / resize / rotate — as plain transforms of
-//     numbers in intrinsic LOGICAL units. Screen deltas are converted to logical
-//     by dividing by the view scale; nothing viewport-shaped is ever persisted.
-//   * the server error → friendly state mapping the Designer surfaces.
-//   * the thin RPC boundary for the six Phase-1 draft/lease RPCs.
+//     numbers in intrinsic LOGICAL units.
+//   * the read-only TABLE METADATA adapter: canonical `{id, name, seats}` from
+//     `pos_table_map`, projected immediately so no operational state (bills,
+//     orders, payments, elapsed) ever enters the Designer.
+//   * the server error → friendly state mapping, and the thin RPC boundary for
+//     the Phase-1 draft/lease RPCs.
 //
 // WHAT THIS DOES NOT OWN: orders, bills, payments, shifts, table operational
 // status, the canonical table selection. Those belong to `useTables` and the POS
-// stores, and this module imports none of them. A Designer edit changes geometry
-// in a draft; it can never open, pay, move or close a table.
+// stores, and this module imports none of them. A Designer edit changes a draft;
+// it can never open, pay, move, close, create or rename a canonical table.
 
 import {
   asRecord,
@@ -33,16 +39,28 @@ import {
   sortSections,
   type FloorElement,
   type FloorSection,
+  type FloorTableShape,
 } from "@/lib/pos/floor";
+import { loadTableMap } from "@/lib/pos/tables";
 
 /** The smallest a table may be resized to, in intrinsic LOGICAL units. */
 export const MIN_ELEMENT_LOGICAL = 24;
 /** Rotation snaps to this increment — a clean angle without a protractor UI. */
 export const ROTATE_SNAP_DEG = 15;
 
+// Server contract limits (recertified 2026-09-21 from `_floor_validate_doc` /
+// `_floor_apply_create`): mirrored here so the UI can refuse gently BEFORE an
+// autosave round-trip. The server re-enforces every one of them.
+export const TABLE_NAME_MAX = 40;
+export const SECTION_NAME_MAX = 60;
+export const SEATS_MIN = 1;
+export const SEATS_MAX = 50;
+export const MAX_SECTIONS = 40;
+export const MAX_ELEMENTS = 1000;
+
 // --- The draft document ------------------------------------------------------
 
-/** The mutable geometry of one element — the only thing Phase 3A edits. */
+/** The mutable geometry of one element. */
 export type ElementGeom = {
   x: number;
   y: number;
@@ -53,18 +71,33 @@ export type ElementGeom = {
 };
 
 /**
- * A parsed draft: the sections and the renderable elements (reusing the reader's
- * defensive element parse), PLUS the untouched raw element objects so a save can
- * round-trip everything this build does not model. `rawElements` is the source of
- * truth for serialization; `elements` is the source of truth for rendering.
+ * A DESIGNER element — the reader's `FloorElement` plus the draft-only fields the
+ * editor must see. Unlike the Service reader (which drops a table with no
+ * canonical id), the Designer KEEPS staged new-table intents: `tempId` carries
+ * the `temp:` identity, `newName`/`seats` the staged creation, and `renameTo`
+ * the staged rename of an existing table.
+ */
+export type DesignerElement = FloorElement & {
+  tempId: string | null;
+  newName: string | null;
+  seats: number | null;
+  renameTo: string | null;
+};
+
+/**
+ * A parsed draft: sections and renderable elements PLUS the untouched raw
+ * records so a save can round-trip everything this build does not model.
+ * `rawDoc`/`rawElements`/`rawSections` are the source of truth for
+ * serialization; the parsed views are the source of truth for rendering.
  */
 export type ParsedDraft = {
   version: string;
   sections: FloorSection[];
-  elements: FloorElement[];
+  elements: DesignerElement[];
   /** The document exactly as received, kept for lossless serialization. */
   rawDoc: Record<string, unknown>;
   rawElements: Record<string, unknown>[];
+  rawSections: Record<string, unknown>[];
 };
 
 /** The lease state as `floor_draft` reports it. */
@@ -77,6 +110,13 @@ export type LeaseInfo = {
 
 /** One unplaced table — a canonical table not present on the draft floor. */
 export type UnplacedTable = {
+  id: string;
+  name: string;
+  seats: number | null;
+};
+
+/** Canonical table metadata, projected read-only for the editor. */
+export type TableMeta = {
   id: string;
   name: string;
   seats: number | null;
@@ -99,37 +139,49 @@ export type DraftLoad = {
 
 const EMPTY_DOC: Record<string, unknown> = { v: "1", sections: [], elements: [] };
 
-/** Parse a raw draft document into a lossless, renderable `ParsedDraft`. */
-export function parseDraftDoc(docRaw: unknown): ParsedDraft {
-  const doc = asRecord(docRaw);
-  const version = str(doc.v, "1");
-  const rawSections = Array.isArray(doc.sections) ? doc.sections : [];
-  const rawElements = Array.isArray(doc.elements) ? doc.elements : [];
-
-  const sections = sortSections(
-    rawSections
-      .map(parseDraftSection)
-      .filter((s): s is FloorSection => s !== null),
-  );
-  const validSectionIds = new Set(sections.map((s) => s.id));
-  const elements = rawElements
-    .map(parseFloorElement)
-    .filter((e): e is FloorElement => e !== null)
-    .filter((e) => validSectionIds.has(e.sectionId));
-
-  // Keep the raw element objects verbatim (only records survive; a non-object
-  // entry could never be edited or serialized meaningfully and is dropped, which
-  // matches what the parser already refuses to render).
-  const keptRaw = rawElements.filter(
-    (e): e is Record<string, unknown> => !!e && typeof e === "object" && !Array.isArray(e),
-  );
-
+/** Parse one draft element for the DESIGNER — keeps staged temp tables. */
+export function parseDesignerElement(raw: unknown): DesignerElement | null {
+  const r = asRecord(raw);
+  const base = parseFloorElement(raw);
+  if (base) {
+    return {
+      ...base,
+      tempId: null,
+      newName: null,
+      seats: numOrNull(r.seats),
+      renameTo: strOrNull(r.rename_to),
+    };
+  }
+  // The reader refuses a table with no canonical id; the Designer keeps it WHEN
+  // it is a well-formed staged intent (`temp:` identity + geometry). Anything
+  // else stays unrenderable (and untouched in the raw records).
+  if (str(r.type) !== "table") return null;
+  const id = strOrNull(r.id);
+  const sectionId = strOrNull(r.section_id);
+  const tempId = strOrNull(r.temp_id);
+  const x = numOrNull(r.x);
+  const y = numOrNull(r.y);
+  const w = numOrNull(r.w);
+  const h = numOrNull(r.h);
+  if (!id || !sectionId || !tempId || x === null || y === null || w === null || h === null) return null;
+  if (w <= 0 || h <= 0) return null;
+  const shapeRaw = strOrNull(r.shape);
   return {
-    version,
-    sections,
-    elements,
-    rawDoc: { ...EMPTY_DOC, ...doc },
-    rawElements: keptRaw,
+    id,
+    sectionId,
+    type: "table",
+    x,
+    y,
+    w,
+    h,
+    rotation: normalizeRotation(numOrNull(r.rotation) ?? 0),
+    shape: (shapeRaw as FloorTableShape | null) ?? null,
+    tableId: null,
+    label: strOrNull(r.label),
+    tempId,
+    newName: strOrNull(r.new_name),
+    seats: numOrNull(r.seats),
+    renameTo: null,
   };
 }
 
@@ -149,38 +201,256 @@ function parseDraftSection(raw: unknown): FloorSection | null {
   };
 }
 
+/** Parse a raw draft document into a lossless, renderable `ParsedDraft`. */
+export function parseDraftDoc(docRaw: unknown): ParsedDraft {
+  const doc = asRecord(docRaw);
+  const version = str(doc.v, "1");
+  const rawSectionsIn = Array.isArray(doc.sections) ? doc.sections : [];
+  const rawElementsIn = Array.isArray(doc.elements) ? doc.elements : [];
+
+  const rawSections = rawSectionsIn.filter(
+    (s): s is Record<string, unknown> => !!s && typeof s === "object" && !Array.isArray(s),
+  );
+  const rawElements = rawElementsIn.filter(
+    (e): e is Record<string, unknown> => !!e && typeof e === "object" && !Array.isArray(e),
+  );
+
+  const sections = sortSections(
+    rawSections.map(parseDraftSection).filter((s): s is FloorSection => s !== null),
+  );
+  const validSectionIds = new Set(sections.map((s) => s.id));
+  const elements = rawElements
+    .map(parseDesignerElement)
+    .filter((e): e is DesignerElement => e !== null)
+    .filter((e) => validSectionIds.has(e.sectionId));
+
+  return {
+    version,
+    sections,
+    elements,
+    rawDoc: { ...EMPTY_DOC, ...doc },
+    rawElements,
+    rawSections,
+  };
+}
+
+// --- The edits model (Phase 3B) ----------------------------------------------
+
 /**
- * Serialize a draft back to a document, applying ONLY the geometry overrides the
- * operator produced and preserving every other element and field byte-for-byte.
- *
- * This is the safety guarantee that lets Phase 3A edit a floor a later phase's
- * document format can carry more of: an element with no override is emitted
- * exactly as it arrived, so a staged table intent, an unknown element kind or an
- * extra field is never lost by a round-trip through the editor.
+ * Every change the operator has made on top of the loaded draft, applied at
+ * serialization time. ONE edits object, ONE serializer, ONE autosave path — a
+ * rename, a placement, a removal and a new-table intent all ride the same
+ * debounced, lease-held, CAS-guarded `floor_autosave_draft` that Phase 3A
+ * shipped. Removals win over field edits; `added` records are full raw element
+ * records (they were created by this build, so there is nothing unknown in
+ * them to lose).
  */
-export function serializeDraftDoc(
-  draft: ParsedDraft,
-  overrides: Map<string, ElementGeom>,
-): Record<string, unknown> {
-  const elements = draft.rawElements.map((raw) => {
+export type DraftEdits = {
+  geom: Map<string, ElementGeom>;
+  /** element id → staged rename (null clears a staged rename). Existing tables only. */
+  renames: Map<string, string | null>;
+  shapes: Map<string, FloorTableShape>;
+  /** Full raw records created this session: temp intents and placed existing tables. */
+  added: Record<string, unknown>[];
+  removed: Set<string>;
+  sectionAdds: Record<string, unknown>[];
+  sectionRenames: Map<string, string>;
+  sectionRemoves: Set<string>;
+};
+
+export function emptyDraftEdits(): DraftEdits {
+  return {
+    geom: new Map(),
+    renames: new Map(),
+    shapes: new Map(),
+    added: [],
+    removed: new Set(),
+    sectionAdds: [],
+    sectionRenames: new Map(),
+    sectionRemoves: new Set(),
+  };
+}
+
+export function draftEditsCount(e: DraftEdits): number {
+  return (
+    e.geom.size + e.renames.size + e.shapes.size + e.added.length + e.removed.size +
+    e.sectionAdds.length + e.sectionRenames.size + e.sectionRemoves.size
+  );
+}
+
+function applyElementEdits(raw: Record<string, unknown>, edits: DraftEdits): Record<string, unknown> {
+  const id = strOrNull(raw.id);
+  if (!id) return raw;
+  let out = raw;
+  const geom = edits.geom.get(id);
+  if (geom) out = { ...out, x: geom.x, y: geom.y, w: geom.w, h: geom.h, rotation: geom.rotation };
+  const shape = edits.shapes.get(id);
+  if (shape) out = { ...out, shape };
+  if (edits.renames.has(id)) {
+    const to = edits.renames.get(id) ?? null;
+    if (to === null) {
+      out = { ...out };
+      delete (out as Record<string, unknown>).rename_to;
+    } else {
+      out = { ...out, rename_to: to };
+    }
+  }
+  return out;
+}
+
+/**
+ * Serialize the loaded draft + the operator's edits back to a document,
+ * preserving every element, section and field this build does not model.
+ */
+export function serializeDraftDoc(draft: ParsedDraft, edits: DraftEdits): Record<string, unknown> {
+  const keep = (raw: Record<string, unknown>) => {
     const id = strOrNull(raw.id);
-    const geom = id ? overrides.get(id) : undefined;
-    if (!geom) return raw;
-    return {
-      ...raw,
-      x: geom.x,
-      y: geom.y,
-      w: geom.w,
-      h: geom.h,
-      rotation: geom.rotation,
-    };
-  });
-  return { ...draft.rawDoc, sections: draft.rawDoc.sections ?? [], elements };
+    return !(id && edits.removed.has(id));
+  };
+  const elements = [...draft.rawElements.filter(keep), ...edits.added.filter(keep)].map((raw) =>
+    applyElementEdits(raw, edits),
+  );
+
+  const keepSection = (raw: Record<string, unknown>) => {
+    const id = strOrNull(raw.id);
+    return !(id && edits.sectionRemoves.has(id));
+  };
+  const sections = [...draft.rawSections.filter(keepSection), ...edits.sectionAdds.filter(keepSection)].map(
+    (raw) => {
+      const id = strOrNull(raw.id);
+      const name = id ? edits.sectionRenames.get(id) : undefined;
+      return name === undefined ? raw : { ...raw, name };
+    },
+  );
+
+  return { ...draft.rawDoc, sections, elements };
+}
+
+/** The parsed render view of the draft WITH the edits applied — one source. */
+export function effectiveDraft(draft: ParsedDraft, edits: DraftEdits): ParsedDraft {
+  return parseDraftDoc(serializeDraftDoc(draft, edits));
 }
 
 /** True when a draft carries at least one renderable element to edit. */
 export function draftHasContent(draft: ParsedDraft | null): boolean {
   return !!draft && draft.elements.length > 0;
+}
+
+// --- Element / section factories ---------------------------------------------
+
+function randomToken(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** A fresh element id — unique within the doc, ≤64 chars. */
+export function newElementId(): string {
+  return `e-${randomToken()}`;
+}
+
+/** A fresh staged-table identity, matching the server's `^temp:[0-9a-zA-Z_-]{1,64}$`. */
+export function newTempId(): string {
+  return `temp:${randomToken()}`;
+}
+
+/** A fresh section id. */
+export function newSectionId(): string {
+  return `s-${randomToken()}`;
+}
+
+/** Place an EXISTING canonical table onto the draft. Same id, one element. */
+export function makePlacedElement(
+  tableId: string,
+  sectionId: string,
+  geom: ElementGeom,
+  shape: FloorTableShape = "sq",
+): Record<string, unknown> {
+  return {
+    id: newElementId(),
+    type: "table",
+    section_id: sectionId,
+    table_id: tableId,
+    shape,
+    x: geom.x,
+    y: geom.y,
+    w: geom.w,
+    h: geom.h,
+    rotation: geom.rotation,
+  };
+}
+
+/** A staged NEW-TABLE intent. Draft-only; the server creates the canonical row at PUBLISH. */
+export function makeTempTableElement(
+  name: string,
+  seats: number,
+  sectionId: string,
+  geom: ElementGeom,
+  shape: FloorTableShape = "sq",
+): Record<string, unknown> {
+  return {
+    id: newElementId(),
+    type: "table",
+    section_id: sectionId,
+    temp_id: newTempId(),
+    new_name: name,
+    seats,
+    shape,
+    x: geom.x,
+    y: geom.y,
+    w: geom.w,
+    h: geom.h,
+    rotation: geom.rotation,
+  };
+}
+
+export function makeSection(name: string, sort: number): Record<string, unknown> {
+  return { id: newSectionId(), name, sort };
+}
+
+/** Default footprint for a newly placed table, in logical units. */
+export const DEFAULT_TABLE_GEOM = { w: 100, h: 100, rotation: 0 } as const;
+
+/**
+ * A sensible spot for the next placed table: near the section's centre, stepped
+ * diagonally per existing element so consecutive placements never stack.
+ */
+export function nextPlacementGeom(
+  sectionElements: DesignerElement[],
+  plane: { x: number; y: number; w: number; h: number },
+): ElementGeom {
+  const step = 36;
+  const n = sectionElements.length;
+  const cx = plane.x + plane.w / 2 - DEFAULT_TABLE_GEOM.w / 2;
+  const cy = plane.y + plane.h / 2 - DEFAULT_TABLE_GEOM.h / 2;
+  return {
+    x: cx + (n % 5) * step,
+    y: cy + (Math.floor(n / 5) % 5) * step,
+    w: DEFAULT_TABLE_GEOM.w,
+    h: DEFAULT_TABLE_GEOM.h,
+    rotation: DEFAULT_TABLE_GEOM.rotation,
+  };
+}
+
+// --- Client-side validation (server limits, refused gently before the wire) --
+
+export function validateTableName(name: string): string | null {
+  const n = name.trim();
+  if (n.length === 0) return "Give the table a name.";
+  if (n.length > TABLE_NAME_MAX) return `Table names can be at most ${TABLE_NAME_MAX} characters.`;
+  return null;
+}
+
+export function validateSeats(seats: number): string | null {
+  if (!Number.isInteger(seats) || seats < SEATS_MIN || seats > SEATS_MAX) {
+    return `Seats must be between ${SEATS_MIN} and ${SEATS_MAX}.`;
+  }
+  return null;
+}
+
+export function validateSectionName(name: string): string | null {
+  const n = name.trim();
+  if (n.length === 0) return "Give the section a name.";
+  if (n.length > SECTION_NAME_MAX) return `Section names can be at most ${SECTION_NAME_MAX} characters.`;
+  return null;
 }
 
 // --- Geometry of an edit (pure) ----------------------------------------------
@@ -217,8 +487,9 @@ export type ResizeHandle = "nw" | "ne" | "sw" | "se";
 
 /**
  * Resize an element from one corner, keeping the OPPOSITE corner fixed, by a
- * screen delta at the current scale. Sizes are clamped to `MIN_ELEMENT_LOGICAL`;
- * when a clamp bites, the fixed corner still does not move.
+ * screen delta at the current scale. Sizes are SIGNED against the anchor and
+ * clamped to `min` — dragging a corner past its anchor pins the size at `min`
+ * rather than flipping the rectangle inside out.
  */
 export function applyResize(
   base: ElementGeom,
@@ -236,10 +507,6 @@ export function applyResize(
   const top = base.y;
   const bottom = base.y + base.h;
 
-  // Which edges the handle drives, and therefore which OPPOSITE edge is the fixed
-  // anchor. Widths are SIGNED against the anchor and clamped to `min`, never taken
-  // as an absolute — so dragging a corner past its anchor pins the size at `min`
-  // rather than flipping the rectangle inside out.
   const east = handle === "se" || handle === "ne";
   const south = handle === "se" || handle === "sw";
 
@@ -254,6 +521,15 @@ export function applyResize(
 /** Rotate to an absolute angle (already computed by the caller from the pointer). */
 export function applyRotate(base: ElementGeom, deg: number, snap = true): ElementGeom {
   return { ...base, rotation: snap ? snapRotation(deg) : normalizeRotation(deg) };
+}
+
+/** Resize to explicit logical dimensions (the Inspector's steppers). */
+export function applySize(base: ElementGeom, w: number, h: number, min = MIN_ELEMENT_LOGICAL): ElementGeom {
+  return {
+    ...base,
+    w: Math.min(20000, Math.max(min, Math.round(w))),
+    h: Math.min(20000, Math.max(min, Math.round(h))),
+  };
 }
 
 // --- Server error mapping ----------------------------------------------------
@@ -307,7 +583,23 @@ function kindOf(raw: string): FloorDesignerErrorKind {
   return "unknown";
 }
 
-// --- The RPC boundary (the six Phase-1 draft/lease RPCs) ---------------------
+// --- Read-only canonical table metadata (the identity boundary) --------------
+
+/**
+ * Canonical table names/seats for the editor, from the SAME `pos_table_map`
+ * read the List uses — projected IMMEDIATELY to `{id, name, seats}` so nothing
+ * operational (bills, orders, totals, elapsed, payment state) survives the
+ * call. This is deliberately a one-way, read-only adapter: the Designer knows
+ * what a table is CALLED, and nothing about what it is DOING.
+ */
+export async function floorLoadTableMeta(branchId: string | null): Promise<Map<string, TableMeta>> {
+  const map = await loadTableMap(branchId);
+  const out = new Map<string, TableMeta>();
+  for (const t of map.tables) out.set(t.id, { id: t.id, name: t.name, seats: t.seats });
+  return out;
+}
+
+// --- The RPC boundary (the Phase-1 draft/lease RPCs) -------------------------
 
 /** A short device tag for the lease, so "edited on another device" can be honest. */
 export function draftDeviceTag(): string {
@@ -403,9 +695,8 @@ export async function floorTakeoverLease(branchId: string | null, device = draft
 }
 
 /**
- * floor_autosave_draft — persist the draft geometry. Lease-protected and CAS-
- * guarded on the server (`p_base_revision_id` must equal the live published
- * revision); the caller passes the `publishedRevisionId` from the load.
+ * floor_autosave_draft — persist the draft. Lease-protected and CAS-guarded on
+ * the server (`p_base_revision_id` must equal the live published revision).
  */
 export async function floorAutosaveDraft(
   branchId: string | null,
