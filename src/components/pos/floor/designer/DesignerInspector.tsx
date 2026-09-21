@@ -22,6 +22,7 @@ import {
   type DesignerElement,
   type TableMeta,
 } from "@/lib/pos/floorDesigner";
+import { isRotatable, STRUCTURE_LABEL_MAX } from "@/lib/pos/floorObjects";
 import type { OpResult } from "@/state/floorDesigner";
 
 const SHAPES: FloorTableShape[] = ["sq", "round", "r4", "r6", "rect", "rect6", "rect8", "oval", "high", "bar", "lounge"];
@@ -93,6 +94,7 @@ export function DesignerInspector({
   onShape,
   onSize,
   onRotate,
+  onLabel,
   onDuplicate,
   onRemove,
 }: {
@@ -109,11 +111,17 @@ export function DesignerInspector({
   onShape: (shape: FloorTableShape) => void;
   onSize: (w: number, h: number) => void;
   onRotate: (rotation: number) => void;
-  /** Phase 3D-A — copy this table into a NEW staged table nearby (draft-only). */
+  /** Phase 3D-B — a STRUCTURE's label / text content (draft-only). */
+  onLabel: (label: string) => void;
+  /** Phase 3D-A/3D-B — copy this table or structure nearby (draft-only). */
   onDuplicate: () => void;
   onRemove: () => void;
 }) {
   const isTable = element.type === "table";
+  const isStructure = !isTable;
+  const isText = element.type === "text";
+  // Non-rotatable structures (a symmetric plant) hide the rotation control.
+  const canRotate = isTable || isRotatable(element.type);
   const isNew = isTable && element.tempId !== null;
   // A LEGACY placement: an existing table whose canonical name is unavailable
   // (hidden from the metadata read). Renaming it is refused — typing the
@@ -124,18 +132,27 @@ export function DesignerInspector({
 
   const [nameInput, setNameInput] = useState(shownName);
   const [nameError, setNameError] = useState<string | null>(null);
-  // Re-sync the field when the selection (or its staged name) changes.
+  // A structure's own label / text content (Phase 3D-B).
+  const [labelInput, setLabelInput] = useState(element.label ?? "");
+  // Re-sync the fields when the selection (or its staged name/label) changes.
   useEffect(() => {
     setNameInput(shownName);
     setNameError(null);
+    setLabelInput(element.label ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [element.id, shownName]);
+  }, [element.id, shownName, element.label]);
 
   const commitName = () => {
     if (readOnly) return;
     if (nameInput.trim() === shownName.trim() && nameInput.trim() !== "") return;
     const r = onRename(nameInput);
     setNameError(r.ok ? null : r.reason);
+  };
+
+  const commitLabel = () => {
+    if (readOnly) return;
+    if (labelInput === (element.label ?? "")) return;
+    onLabel(labelInput);
   };
 
   const renamePending = isTable && !isNew && element.renameTo !== null;
@@ -204,6 +221,27 @@ export function DesignerInspector({
         </div>
       )}
 
+      {isStructure && (
+        <div className="pt-1">
+          <label className="text-xs font-bold uppercase tracking-wide text-sub" htmlFor="designer-object-label">
+            {isText ? "Text" : "Label"}
+          </label>
+          <input
+            id="designer-object-label"
+            value={labelInput}
+            maxLength={STRUCTURE_LABEL_MAX}
+            disabled={readOnly}
+            placeholder={isText ? "Label text" : "Optional label"}
+            onChange={(e) => setLabelInput(e.target.value)}
+            onBlur={commitLabel}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+            }}
+            className="mt-1 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-ink outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-50"
+          />
+        </div>
+      )}
+
       {isTable && (
         <Row label="Seats">
           {isNew ? (
@@ -269,30 +307,30 @@ export function DesignerInspector({
           disabled={readOnly}
         />
       </Row>
-      <Row label="Rotation">
-        <Stepper
-          value={element.rotation}
-          step={15}
-          unit="°"
-          onChange={(n) => onRotate(n)}
-          decrementLabel="Rotate left"
-          incrementLabel="Rotate right"
-          disabled={readOnly}
-        />
-      </Row>
+      {canRotate && (
+        <Row label="Rotation">
+          <Stepper
+            value={element.rotation}
+            step={15}
+            unit="°"
+            onChange={(n) => onRotate(n)}
+            decrementLabel="Rotate left"
+            incrementLabel="Rotate right"
+            disabled={readOnly}
+          />
+        </Row>
+      )}
 
       <div className="mt-auto pt-3">
-        {isTable && (
-          <button
-            type="button"
-            disabled={readOnly}
-            onClick={onDuplicate}
-            className="mb-2 flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-lg border border-line bg-white px-3 py-2.5 text-sm font-bold text-ink hover:bg-canvas disabled:opacity-40"
-          >
-            <Glyph name="layers" size={15} />
-            Duplicate table
-          </button>
-        )}
+        <button
+          type="button"
+          disabled={readOnly}
+          onClick={onDuplicate}
+          className="mb-2 flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-lg border border-line bg-white px-3 py-2.5 text-sm font-bold text-ink hover:bg-canvas disabled:opacity-40"
+        >
+          <Glyph name="layers" size={15} />
+          {isTable ? "Duplicate table" : "Duplicate object"}
+        </button>
         <button
           type="button"
           disabled={readOnly}

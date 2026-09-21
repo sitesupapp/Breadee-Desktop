@@ -250,7 +250,9 @@ export type DraftEdits = {
   /** element id → staged rename (null clears a staged rename). Existing tables only. */
   renames: Map<string, string | null>;
   shapes: Map<string, FloorTableShape>;
-  /** Full raw records created this session: temp intents and placed existing tables. */
+  /** element id → structure label/text edit (Phase 3D-B). Applied verbatim. */
+  labels: Map<string, string>;
+  /** Full raw records created this session: temp intents, placed existing tables, structures. */
   added: Record<string, unknown>[];
   removed: Set<string>;
   sectionAdds: Record<string, unknown>[];
@@ -263,6 +265,7 @@ export function emptyDraftEdits(): DraftEdits {
     geom: new Map(),
     renames: new Map(),
     shapes: new Map(),
+    labels: new Map(),
     added: [],
     removed: new Set(),
     sectionAdds: [],
@@ -273,7 +276,7 @@ export function emptyDraftEdits(): DraftEdits {
 
 export function draftEditsCount(e: DraftEdits): number {
   return (
-    e.geom.size + e.renames.size + e.shapes.size + e.added.length + e.removed.size +
+    e.geom.size + e.renames.size + e.shapes.size + e.labels.size + e.added.length + e.removed.size +
     e.sectionAdds.length + e.sectionRenames.size + e.sectionRemoves.size
   );
 }
@@ -286,6 +289,17 @@ function applyElementEdits(raw: Record<string, unknown>, edits: DraftEdits): Rec
   if (geom) out = { ...out, x: geom.x, y: geom.y, w: geom.w, h: geom.h, rotation: geom.rotation };
   const shape = edits.shapes.get(id);
   if (shape) out = { ...out, shape };
+  // Structure label/text edit (Phase 3D-B): an empty string clears the label so
+  // it is not serialized as a stray field.
+  if (edits.labels.has(id)) {
+    const label = edits.labels.get(id) ?? "";
+    if (label.length === 0) {
+      out = { ...out };
+      delete (out as Record<string, unknown>).label;
+    } else {
+      out = { ...out, label };
+    }
+  }
   if (edits.renames.has(id)) {
     const to = edits.renames.get(id) ?? null;
     if (to === null) {

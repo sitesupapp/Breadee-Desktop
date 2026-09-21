@@ -23,7 +23,7 @@
 // blocking an edit, never leaving the Designer.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FloorObject } from "@/components/pos/floor/FloorObject";
+import { DesignerStructureNode } from "@/components/pos/floor/designer/DesignerStructureNode";
 import { DesignerTableNode } from "@/components/pos/floor/designer/DesignerTableNode";
 import {
   clampPan,
@@ -131,7 +131,9 @@ export function DesignerCanvas({
 
   const t: Transform = transform ?? { scale: 1, tx: 0, ty: 0 };
 
-  const elementById = (id: string) => tableEls.find((e) => e.id === id) ?? null;
+  // Any element can be the primary selection now (Phase 3D-B makes structures
+  // editable), so resize/rotate must resolve tables AND structures.
+  const elementById = (id: string) => elements.find((e) => e.id === id) ?? null;
 
   /** Snap targets: every element in the section EXCEPT the ones being moved. */
   const snapTargets = (excluded: Set<string>): SnapTarget[] =>
@@ -311,7 +313,13 @@ export function DesignerCanvas({
         style={{ transform: `translate(${t.tx}px, ${t.ty}px) scale(${t.scale})` }}
       >
         {structures.map((el) => (
-          <FloorObject key={el.id} element={el} />
+          <DesignerStructureNode
+            key={el.id}
+            element={el}
+            selected={selectedIds.includes(el.id)}
+            editable={editable}
+            scale={scale}
+          />
         ))}
         {tableEls.map((el) => {
           const id = labelFor(el);
