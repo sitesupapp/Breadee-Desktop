@@ -16,6 +16,7 @@ import { PosStatusBar } from "@/components/pos/PosStatusBar";
 import { CategoryNavigation } from "@/components/pos/CategoryNavigation";
 import { ALL_CATEGORIES, stepCategory } from "@/lib/pos/categories";
 import { MenuItemGrid } from "@/components/pos/MenuItemGrid";
+import { CategoryPicker, type CategoryPickerEntry } from "@/components/pos/CategoryPicker";
 import { CustomGrid } from "@/components/pos/grid/CustomGrid";
 import { readLayout } from "@/lib/pos/grid/storage";
 import { isUsableLayout } from "@/lib/pos/grid/model";
@@ -127,6 +128,12 @@ function PosWorkspaceInner() {
   const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  // Categorized cashier view drill state: false shows the category cards, true
+  // shows the chosen category's items. Read ONLY when `categorizedActive` (a
+  // terminal-local, default-OFF choice computed below); the default and
+  // customized layouts never consult it, so with the switch off nothing here
+  // changes what the till renders.
+  const [menuDrilled, setMenuDrilled] = useState(false);
 
   const tenantId = pos.tenantId;
 
@@ -244,6 +251,17 @@ function PosWorkspaceInner() {
     }
     return counts;
   }, [menu.items]);
+  // The category cards for the categorized view. Built from the SAME
+  // `categories`/`categoryCounts` the default strip uses - the "All items" card
+  // mirrors the strip's leading "All items" chip - so the drill-down can never
+  // present a category the strip would not, nor in a different order.
+  const categoryPickerEntries = useMemo<CategoryPickerEntry[]>(
+    () => [
+      { id: ALL_CATEGORIES, name: "All items", count: categoryCounts[ALL_CATEGORIES] ?? menu.items.length },
+      ...categories.map((c) => ({ id: c.id, name: c.name, count: categoryCounts[c.id] ?? 0 })),
+    ],
+    [categories, categoryCounts, menu.items.length],
+  );
   const optionsByGroup = useMemo(() => {
     const map: Record<string, ModifierOption[]> = {};
     for (const o of menu.options) (map[o.modifier_group_id] ??= []).push(o);
@@ -858,6 +876,24 @@ function PosWorkspaceInner() {
   // Settings and coming back remounts this component and re-reads, which is the
   // right cadence for a decision nobody makes mid-service.
   const features = useMemo(() => readPosFeatures(), []);
+
+  // Categorized cashier view (terminal-local, default OFF). It is a NAVIGATION
+  // layer over the DEFAULT menu, so it is ignored while the customized grid is
+  // active - that layout has its own category keys. When off, every menu branch
+  // below renders exactly as it does today.
+  const categorizedActive = features.categorizedMenu && !customLayoutActive;
+  // Open a category from the picker: reuse the EXISTING `category` state (so the
+  // same `filterItems`/`visibleItems` path drives the grid, and Alt+Left/Right
+  // keep working) and switch the drill view to the items.
+  const pickCategory = useCallback((id: string) => {
+    setCategory(id);
+    setMenuDrilled(true);
+  }, []);
+  // The open category's name for the Back bar. Derived from `category` (the
+  // single source of truth), so a keyboard step of the category updates the
+  // label and the items together.
+  const drilledCategoryLabel =
+    category === ALL_CATEGORIES ? "All items" : categories.find((c) => c.id === category)?.name ?? "Category";
 
   const addItem = useCallback(
     (item: SearchableItem, price: number) => {
@@ -1802,10 +1838,28 @@ function PosWorkspaceInner() {
               {/* The category strip belongs to the DEFAULT presentation. In the
                   customized layout the operator's own category keys are the
                   navigation, and a second row of categories above them would be
-                  two ways to mean one thing. */}
-              {!customLayoutActive && (
+                  two ways to mean one thing. It is also stood down in the
+                  categorized view, where the category CARDS are the navigation. */}
+              {!customLayoutActive && !categorizedActive && (
                 <div className="mb-3">
                   <CategoryNavigation categories={categories} counts={categoryCounts} selected={category} onSelect={setCategory} />
+                </div>
+              )}
+
+              {/* Categorized view: a Back control returns from a category's items
+                  to the category cards. Shown only while a category is open; on
+                  the cards themselves the cards ARE the navigation. */}
+              {categorizedActive && menuDrilled && (
+                <div className="mb-3 flex shrink-0 items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setMenuDrilled(false)}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-line bg-white px-4 text-sm font-semibold text-ink transition hover:border-brand/40 hover:bg-brand-soft/40"
+                  >
+                    <span aria-hidden className="text-base leading-none rtl:rotate-180">←</span>
+                    Categories
+                  </button>
+                  <span className="text-sm font-bold text-ink">{drilledCategoryLabel}</span>
                 </div>
               )}
 
@@ -1843,6 +1897,11 @@ function PosWorkspaceInner() {
                     itemsNeedingChoice={itemsNeedingChoice}
                     onPick={addItem}
                   />
+                ) : categorizedActive && !menuDrilled && query.trim() === "" ? (
+                  /* Categorized view, first screen: the category cards. Choosing
+                     one sets the existing `category` and drills into the SAME
+                     item grid every other presentation uses. */
+                  <CategoryPicker entries={categoryPickerEntries} onPick={pickCategory} />
                 ) : visibleItems.length === 0 ? (
                   <EmptyState title="No items match" hint="Try a different category, or clear the search." />
                 ) : (

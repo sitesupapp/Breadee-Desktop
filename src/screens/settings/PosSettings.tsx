@@ -548,12 +548,18 @@ export function PosSettings() {
           <Badge tone="slate">This terminal</Badge>
         </div>
 
-        <div className="mt-2">
+        <div className="mt-2 divide-y divide-line">
           <Switch
             checked={features.ingredientCustomization}
             onChange={(next) => setFeature("ingredientCustomization", next)}
             label="Ingredient customization"
             hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Onion”. It changes only that line: the menu item, its recipe and its cost are untouched."
+          />
+          <Switch
+            checked={features.categorizedMenu}
+            onChange={(next) => setFeature("categorizedMenu", next)}
+            label="Categorized menu"
+            hint="The ordering screen opens on your menu categories; tapping one shows that category’s items, with a Back button to the categories. It only changes how the menu is browsed — the items, prices, options, cart and printing are unchanged. Applies to the Default layout; the Customized grid keeps its own keys."
           />
         </div>
       </Card>

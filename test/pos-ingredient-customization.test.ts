@@ -182,7 +182,7 @@ test("removing an ingredient changes NO canonical record and no price", () => {
 // --- the terminal switch -----------------------------------------------------
 
 test("the terminal switch defaults OFF", () => {
-  assert.deepEqual(POS_FEATURE_DEFAULTS, { ingredientCustomization: false });
+  assert.deepEqual(POS_FEATURE_DEFAULTS, { ingredientCustomization: false, categorizedMenu: false });
 });
 
 test("a stored choice survives; only an ABSENT or non-boolean key gets the default", () => {

@@ -25,10 +25,22 @@ export const POS_FEATURES_KEY = "breadee.desktop.posFeatures";
 export type PosFeatures = {
   /** Offer a Menu Builder ingredient list when an item is tapped. */
   ingredientCustomization: boolean;
+  /**
+   * Present the DEFAULT cashier menu as a category drill-down: the ordering
+   * screen opens on the menu's categories, and choosing one reveals that
+   * category's items with a Back control. Per-terminal, default OFF, so a till
+   * that has never chosen keeps today's category-strip-plus-grid exactly. It is
+   * purely a navigation/layout choice over the SAME OU-isolated menu the till
+   * already loads - the items, prices, options, cart and every downstream flow
+   * are untouched. Ignored while the Customized grid is active, which carries
+   * its own category keys.
+   */
+  categorizedMenu: boolean;
 };
 
 export const POS_FEATURE_DEFAULTS: PosFeatures = {
   ingredientCustomization: false,
+  categorizedMenu: false,
 };
 
 /**
@@ -52,6 +64,7 @@ export function parsePosFeatures(raw: unknown): PosFeatures {
     typeof r[key] === "boolean" ? (r[key] as boolean) : POS_FEATURE_DEFAULTS[key];
   return {
     ingredientCustomization: pick("ingredientCustomization"),
+    categorizedMenu: pick("categorizedMenu"),
   };
 }
 
