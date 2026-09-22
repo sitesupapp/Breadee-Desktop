@@ -63,7 +63,7 @@ import { MENU_CHANGED_EVENT } from "@/lib/menu/events";
 import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { readPosFeatures } from "@/lib/pos/posFeatures";
-import { buildSubmitPayload, submitOrder } from "@/lib/pos/orders";
+import { buildSubmitPayload, cartSubtotal, submitOrder, submitPayloadToCartLines, type SubmitOrderPayload } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
@@ -85,6 +85,11 @@ import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
+import { isBackendReachable } from "@/lib/offline/reachability";
+import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
+import { syncPosTxns } from "@/lib/offline/posTxnSync";
+import { getDeviceIdentity } from "@/lib/device";
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
 import type { CartLine, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
@@ -120,7 +125,13 @@ function PosWorkspaceInner() {
 
   const currency: CurrencyCode = session.currency.primary;
   const rate = session.currency.rate;
-  const online = session.online && !session.offlineMode;
+  // Backend REACHABILITY, not navigator.onLine, is what "online" must mean here:
+  // a physical Wi-Fi drop on Windows/WebView2 leaves navigator.onLine === true, so
+  // it can never be the deciding authority. Optimistic until the first probe so a
+  // healthy terminal never flickers offline on mount; corrected within a probe on
+  // a real outage. Gates the Online badge and every server-only affordance.
+  const [backendReachable, setBackendReachable] = useState(true);
+  const online = session.online && !session.offlineMode && backendReachable;
 
   // --- menu ------------------------------------------------------------------
   const [menu, setMenu] = useState<MenuData>(EMPTY_MENU);
@@ -194,6 +205,85 @@ function PosWorkspaceInner() {
   }, [pos.allowed, tenantId, userId]);
 
   const shiftId = requireOpenShiftId(shiftStore.shift);
+
+  // --- offline: backend reachability probe (qualifies the Online badge) -------
+  // A short, non-mutating probe is the deciding authority for connectivity, never
+  // navigator.onLine. Runs on mount, on a slow interval, and on the browser's own
+  // online/offline transitions (the latter only as a hint that triggers a probe).
+  useEffect(() => {
+    let live = true;
+    const probe = () => {
+      void isBackendReachable().then((r) => {
+        if (live) setBackendReachable(r);
+      });
+    };
+    probe();
+    const id = window.setInterval(probe, 20_000);
+    const onOnline = () => probe();
+    const onOffline = () => {
+      if (live) setBackendReachable(false);
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
+  // --- offline: durable POS-session snapshot writer ---------------------------
+  // Persist the last-known-valid POS session whenever we hold an AUTHORITATIVE
+  // online context: a server-confirmed open shift and a resolved, named branch.
+  // This is the ONLY writer and it only ever runs online, so the snapshot can
+  // never contain anything the server did not confirm. An offline restart then
+  // restores exactly this - same shift id, same branch - and nothing else; the
+  // shift store drops it again the moment a live read shows no open shift.
+  useEffect(() => {
+    if (!online) return;
+    const shift = shiftStore.shift;
+    if (!shift || shift.status !== "open") return;
+    if (!tenantId || !userId || !pos.branch.id) return;
+    if (!isPersistableBranchName(pos.branch.name)) return;
+    savePosSessionSnapshot({
+      version: 1,
+      source: "server",
+      savedAt: Date.now(),
+      device_id: getDeviceIdentity().device_id,
+      tenant_id: tenantId,
+      cashier_user_id: userId,
+      branch_id: pos.branch.id,
+      branch_name: pos.branch.name,
+      currency,
+      shift: {
+        id: shift.id,
+        status: "open",
+        opened_at: shift.opened_at,
+        opening_cash_amount: shift.opening_cash_amount,
+        branch_id: shift.branch_id,
+      },
+    });
+  }, [online, shiftStore.shift, tenantId, userId, pos.branch.id, pos.branch.name, currency]);
+
+  // --- offline: queue state + reconnect replay --------------------------------
+  const [offlinePending, setOfflinePending] = useState(0);
+  const [resumable, setResumable] = useState<PosOfflineTxn[]>([]);
+  const refreshOfflineQueue = useCallback(async () => {
+    setOfflinePending(await pendingPosTxnCount().catch(() => 0));
+    setResumable(await listResumablePosTxns(tenantId, pos.branch.id, userId).catch(() => []));
+  }, [tenantId, pos.branch.id, userId]);
+  useEffect(() => {
+    void refreshOfflineQueue();
+    const run = () => {
+      if (!tenantId || !userId) return;
+      void syncPosTxns({ tenantId, branchId: pos.branch.id, cashierUserId: userId, online: true }, "reconnect").then(() =>
+        refreshOfflineQueue(),
+      );
+    };
+    window.addEventListener("online", run);
+    return () => window.removeEventListener("online", run);
+  }, [tenantId, userId, pos.branch.id, refreshOfflineQueue]);
 
   // --- window ----------------------------------------------------------------
   useEffect(() => {
@@ -1094,6 +1184,166 @@ function PosWorkspaceInner() {
     [shiftId, tenantId],
   );
 
+  // --- offline service layer (adapter) ---------------------------------------
+  // These are the ONLY offline entry points the Takeaway handlers call. They keep
+  // Send and a later Pay as ONE logical order (upsert by the cart's stable
+  // client_op_id), commit durably BEFORE the cart is cleared, and show a
+  // provisional OFF- reference - never a fabricated server number. Replay
+  // (posTxnSync) settles them exactly-once against the canonical server path.
+
+  /** A provisional order stand-in for the LOCAL kitchen ticket only (never the server's). */
+  const provisionalResult = useCallback(
+    (localId: string, ref: string, total: number): SubmitOrderResult => ({
+      order_id: localId,
+      order_number: ref,
+      subtotal: total,
+      total,
+      batch_no: 1,
+      appended: false,
+      idempotent: false,
+    }),
+    [],
+  );
+
+  const buildOfflinePayload = useCallback(
+    (opId: string, lines: CartLine[]): SubmitOrderPayload =>
+      buildSubmitPayload({
+        branchId: pos.branch.id,
+        shiftId: shiftId as string,
+        orderType: "takeaway",
+        clientOpId: opId,
+        lines,
+        orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
+      }),
+    [pos.branch.id, shiftId],
+  );
+
+  /** Offline Send to kitchen: one durable txn (sent, unpaid) + a local ticket; cart kept. */
+  const saveOfflineSend = useCallback(
+    async (lines: CartLine[]) => {
+      if (!shiftId || !tenantId || !userId) {
+        toast.push({ tone: "warning", message: "Open a shift before sending an order." });
+        return;
+      }
+      const opId = useCart.getState().ensureOpId();
+      const dev = getDeviceIdentity();
+      const payload = buildOfflinePayload(opId, lines);
+      const total = cartSubtotal(lines);
+      const existing = await getPosOfflineTxnByOp(opId);
+      const localId = existing?.local_txn_id ?? crypto.randomUUID();
+      if (existing) {
+        await updatePosOfflineTxn(existing.local_txn_id, { sent_to_kitchen: true, order_payload: payload, total, status: "queued" });
+      } else {
+        await addPosOfflineTxn({
+          local_txn_id: localId,
+          client_op_id: opId,
+          tenant_id: tenantId,
+          branch_id: pos.branch.id,
+          device_id: dev.device_id,
+          terminal_id: dev.terminal_id,
+          cashier_user_id: userId,
+          cashier_user_name: pos.userName,
+          shift_id: shiftId,
+          created_at: new Date().toISOString(),
+          order_payload: payload,
+          payment_intent: null,
+          sent_to_kitchen: true,
+          currency,
+          total,
+          status: "queued",
+          attempts: 0,
+        });
+      }
+      const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
+      // Local kitchen ticket is best-effort: an offline print hiccup must never
+      // undo a durably-committed sale.
+      try {
+        await ticketForOrder(provisionalResult(localId, ref, total), lines);
+      } catch {
+        /* offline print is non-fatal */
+      }
+      void refreshOfflineQueue();
+      toast.push({ tone: "success", message: "Saved offline - sent to kitchen", detail: `Ref ${ref}. It will sync when the connection returns.` });
+      // Cart is kept so the operator can Pay the SAME order next.
+    },
+    [buildOfflinePayload, currency, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, shiftId, tenantId, ticketForOrder, toast, userId],
+  );
+
+  /** Offline Cash Pay of a draft: upsert the SAME txn with the payment intent; cart cleared. */
+  const saveOfflineCashPayment = useCallback(
+    async (lines: CartLine[], input: { currency: CurrencyCode; discount: Record<string, unknown> }) => {
+      if (!shiftId || !tenantId || !userId) {
+        toast.push({ tone: "warning", message: "Open a shift before taking payment." });
+        return;
+      }
+      if (lines.length === 0) return;
+      const opId = useCart.getState().ensureOpId();
+      const dev = getDeviceIdentity();
+      const payload = buildOfflinePayload(opId, lines);
+      const total = cartSubtotal(lines);
+      const intent = {
+        method: "cash" as const,
+        currency: input.currency,
+        ...(input.discount && Object.keys(input.discount).length > 0 ? { discount: input.discount } : {}),
+      };
+      const existing = await getPosOfflineTxnByOp(opId);
+      const localId = existing?.local_txn_id ?? crypto.randomUUID();
+      if (existing) {
+        await updatePosOfflineTxn(existing.local_txn_id, { payment_intent: intent, order_payload: payload, total, sent_to_kitchen: true, status: "queued", paid: false });
+      } else {
+        await addPosOfflineTxn({
+          local_txn_id: localId,
+          client_op_id: opId,
+          tenant_id: tenantId,
+          branch_id: pos.branch.id,
+          device_id: dev.device_id,
+          terminal_id: dev.terminal_id,
+          cashier_user_id: userId,
+          cashier_user_name: pos.userName,
+          shift_id: shiftId,
+          created_at: new Date().toISOString(),
+          order_payload: payload,
+          payment_intent: intent,
+          sent_to_kitchen: true,
+          currency,
+          total,
+          status: "queued",
+          attempts: 0,
+        });
+      }
+      const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
+      // Takeaway pay still tells the kitchen; the ticket is latched so a prior
+      // offline Send for the same order never double-prints.
+      try {
+        await ticketForOrder(provisionalResult(localId, ref, total), lines);
+      } catch {
+        /* offline print is non-fatal */
+      }
+      void refreshOfflineQueue();
+      // Durable commit is done; only now clear the cart and close the dialog.
+      setPayIntent(null);
+      newOrder();
+      toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
+    },
+    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, shiftId, tenantId, ticketForOrder, toast, userId],
+  );
+
+  /** Resume an offline order that was sent to the kitchen but not yet paid. */
+  const resumeOfflineOrder = useCallback(
+    (txn: PosOfflineTxn) => {
+      const payload = txn.order_payload as SubmitOrderPayload;
+      useCart.getState().restore({
+        lines: submitPayloadToCartLines(payload.items),
+        selectedKey: null,
+        clientOpId: txn.client_op_id,
+        savedOrder: null,
+        owner: { kind: "takeaway" },
+      });
+      toast.push({ tone: "info", message: `Resumed offline order OFF-${txn.local_txn_id.slice(0, 6).toUpperCase()}`, detail: "Press Pay to settle it. It will sync when the connection returns." });
+    },
+    [toast],
+  );
+
   const sendToKitchen = useCallback(async () => {
     if (inFlight.current || cart.lines.length === 0) return;
     inFlight.current = true;
@@ -1101,6 +1351,14 @@ function PosWorkspaceInner() {
     // Snapshotted BEFORE the await, so a reset cannot empty the ticket.
     const submitted = useCart.getState().lines;
     try {
+      // Offline gate: a known-unreachable backend (probed, never navigator.onLine)
+      // means the order is committed DURABLY to the SAME offline transaction a
+      // later Pay settles, with a local kitchen ticket - never an online submit
+      // that would fail with "Failed to fetch".
+      if (!(await isBackendReachable())) {
+        await saveOfflineSend(submitted);
+        return;
+      }
       const saved = await ensureOrder();
       if (saved) {
         toast.push({
@@ -1128,7 +1386,7 @@ function PosWorkspaceInner() {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [adoptCreatedOrder, cart.lines.length, ensureOrder, ticketForOrder, toast]);
+  }, [adoptCreatedOrder, cart.lines.length, ensureOrder, saveOfflineSend, ticketForOrder, toast]);
 
   /**
    * Clearing the cart, with one question when money is at stake.
@@ -1302,6 +1560,14 @@ function PosWorkspaceInner() {
       const lines = useCart.getState().lines;
       const existing = intent.kind === "order";
       try {
+        // Offline gate (DRAFT + CASH only): a known-unreachable backend means the
+        // sale is committed DURABLY offline under the cart's stable op id (shared
+        // with any prior offline Send), never an online submit/pay. An EXISTING
+        // server order is never rerouted offline - it settles online or not at all.
+        if (intent.kind === "draft" && input.method === "cash" && !(await isBackendReachable())) {
+          await saveOfflineCashPayment(lines, { currency: input.currency, discount: input.discount });
+          return;
+        }
         // ONE settlement, whichever the target was. A draft has its order
         // created first (under the cart's own `client_op_id`, so a retry never
         // makes a second one); an existing order is already identified, and
@@ -1387,6 +1653,7 @@ function PosWorkspaceInner() {
       pos.userName,
       presentReceipt,
       rate,
+      saveOfflineCashPayment,
       shiftId,
       shiftStore,
       ticketForOrder,
@@ -1814,7 +2081,7 @@ function PosWorkspaceInner() {
             cashBox={shiftStore.cashBox}
             currency={currency}
             online={online}
-            offlineMode={session.offlineMode}
+            offlineMode={session.offlineMode || shiftStore.offlineRestored || !backendReachable}
             pendingSync={pending}
             layout={layout}
             onOpenShift={() => setOpenShiftOpen(true)}
@@ -1881,13 +2148,29 @@ function PosWorkspaceInner() {
                 </div>
                 {!online && (
                   <span className="rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-900">
-                    Offline - ordering needs a connection
+                    Offline - Takeaway cash sales are saved here and sync when the connection returns
+                    {offlinePending > 0 ? ` (${offlinePending} pending)` : ""}
                   </span>
                 )}
                 {menuStale && (
                   <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-sub">
                     Cached menu from {new Date(menuStale).toLocaleTimeString()}
                   </span>
+                )}
+                {/* Offline orders sent to the kitchen but not yet paid, resumable
+                    after a restart (the in-memory cart is gone, the order is
+                    durable). Offered only when the cart is empty so it never
+                    competes with an order being built. */}
+                {resumable.length > 0 && cart.lines.length === 0 && (
+                  <button
+                    type="button"
+                    onClick={() => resumeOfflineOrder(resumable[0])}
+                    className="rounded-lg bg-brand-soft px-3 py-2 text-xs font-bold text-brand-dark hover:bg-brand-soft/80"
+                    title="Rebuild this offline order in the cart so you can take payment"
+                  >
+                    Resume &amp; pay offline order OFF-{resumable[0].local_txn_id.slice(0, 6).toUpperCase()}
+                    {resumable.length > 1 ? ` (+${resumable.length - 1} more)` : ""}
+                  </button>
                 )}
               </div>
 
