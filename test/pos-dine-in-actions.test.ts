@@ -258,8 +258,12 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // read-only report). Neither moves customer money.
   // AND AGAIN BY DELIVERY SETTLEMENT 1.0.23: 23 -> 24, for `pos_delivery_resolve_cost`
   // (post-close cost resolution, cash-inert, pos.delivery.settlements.manage). Bumped
-  // by exactly one reviewed name; floor-map RPCs are not part of this release.
-  assert.equal(members.length, 24, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // by exactly one reviewed name.
+  // AND AGAIN BY DINE-IN FLOOR MAP + DESIGNER (this candidate): 24 -> 35, for the eleven
+  // floor RPCs (floor_service_layout READ + the draft/lease surface + the publish
+  // lifecycle). All ship-dark, gated server-side on pos.floor_map (+ floor_manage /
+  // floor_publish); none moves customer money.
+  assert.equal(members.length, 35, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:

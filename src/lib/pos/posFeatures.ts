@@ -36,11 +36,20 @@ export type PosFeatures = {
    * its own category keys.
    */
   categorizedMenu: boolean;
+  /**
+   * Prefer the Dine-In Floor MAP over the List when a published floor exists and
+   * the tenant is entitled. Per-terminal, like every other switch here. Default
+   * OFF: a till that has never chosen keeps today's List. Ignored entirely when
+   * the `pos.floor_map` feature is off, so it can never surface a Map a tenant
+   * is not entitled to.
+   */
+  preferFloorView: boolean;
 };
 
 export const POS_FEATURE_DEFAULTS: PosFeatures = {
   ingredientCustomization: false,
   categorizedMenu: false,
+  preferFloorView: false,
 };
 
 /**
@@ -65,6 +74,7 @@ export function parsePosFeatures(raw: unknown): PosFeatures {
   return {
     ingredientCustomization: pick("ingredientCustomization"),
     categorizedMenu: pick("categorizedMenu"),
+    preferFloorView: pick("preferFloorView"),
   };
 }
 

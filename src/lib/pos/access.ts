@@ -54,6 +54,12 @@ export const POS_PERMISSIONS = {
   TABLES_MOVE: "pos.tables.move",
   TABLES_CLEAR: "pos.tables.clear",
   TABLES_CLOSE: "pos.tables.close",
+  // Dine-In Floor DESIGNER (Phase 3A). `floor_manage` is the key every draft/lease
+  // RPC checks for itself (floor_draft / autosave / acquire / heartbeat / takeover
+  // / unplaced). `floor_publish` gates PUBLISHING, which Phase 3A does not do — the
+  // key is declared here so it lives in one place, but nothing in 3A calls it.
+  TABLES_FLOOR_MANAGE: "pos.tables.floor_manage",
+  TABLES_FLOOR_PUBLISH: "pos.tables.floor_publish",
   // Delivery customers (Level 3A). Delivery ORDER-TAKING has no key of its own -
   // it is gated by the ordinary POS permissions plus the `pos.delivery`
   // sub-feature - and only the CUSTOMER record and, now, the internal DELIVERY
@@ -446,6 +452,42 @@ export function canCloseTable(ctx: PosAccessContext): Gate {
  */
 export function canClearTable(ctx: PosAccessContext): Gate {
   return tableOpGate(ctx, POS_PERMISSIONS.TABLES_CLEAR, "You do not have permission to clear tables.");
+}
+
+/**
+ * Viewing the Dine-In SERVICE FLOOR MAP (Phase 2).
+ *
+ * Exactly the shape `floor_service_layout` demands server-side: the `pos.floor_map`
+ * entitlement ON TOP OF everything `canViewTables` already requires (POS access +
+ * `pos.dine_in` + `pos.tables.view`). No new PERMISSION key: viewing a floor is
+ * viewing tables by another presentation, so a cashier who can see the List can
+ * see the Map. When the feature is off this returns not-allowed and the Dine-in
+ * workspace simply never offers the Map toggle — the List is unaffected.
+ */
+export function canViewFloor(ctx: PosAccessContext): Gate {
+  const view = canViewTables(ctx);
+  if (!view.allowed) return view;
+  if (!hasFeature(ctx.features, FEATURES.POS_FLOOR_MAP)) {
+    return { allowed: false, reason: "Floor map is not enabled for this plan." };
+  }
+  return { allowed: true, reason: null };
+}
+
+/**
+ * Editing the Dine-In floor in the DESIGNER (Phase 3A).
+ *
+ * Everything `canViewFloor` requires (POS access + `pos.dine_in` + `pos.tables.view`
+ * + the `pos.floor_map` entitlement) PLUS the `pos.tables.floor_manage` permission
+ * — which is exactly the key `floor_draft`, `floor_autosave_draft` and the four
+ * lease RPCs each check for themselves. STRICTER than the bare server check (it
+ * also insists on view + dine-in), never looser, and not a security boundary: the
+ * RPCs re-enforce entitlement, OU, permission and the editor lease. It exists so
+ * the "Edit floor" control is offered only where the server would honour an edit.
+ */
+export function canManageFloor(ctx: PosAccessContext): Gate {
+  const floor = canViewFloor(ctx);
+  if (!floor.allowed) return floor;
+  return gate(perm(ctx, POS_PERMISSIONS.TABLES_FLOOR_MANAGE), "You do not have permission to edit the floor map.");
 }
 
 // --- Delivery (Level 3A) -----------------------------------------------------

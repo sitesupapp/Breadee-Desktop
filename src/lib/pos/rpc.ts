@@ -127,7 +127,39 @@ export type PosRpcName =
   // `pos.delivery.settlements.manage` permission + the cost lifecycle, preserves
   // NULL != 0, is idempotent, audits, and stays cash-inert (no drawer/GL). Never a
   // client settlement/order write. Online-only; not enqueued to the offline outbox.
-  | "pos_delivery_resolve_cost";
+  | "pos_delivery_resolve_cost"
+  // Dine-In Floor Map — Phase 1 server foundation (ship-dark). The published-floor
+  // READ for the Service Floor Map; gated server-side on pos.floor_map + pos.tables.view;
+  // operational table state still comes from pos_table_map. No floor WRITE RPC here —
+  // Phase 2 is read-only and the Designer (draft/publish) is a later phase.
+  | "floor_service_layout"
+  // Dine-In Floor DESIGNER — Phase 3A foundation. The DRAFT/lease surface the
+  // editor uses, all gated server-side on the `pos.floor_map` entitlement +
+  // `pos.tables.floor_manage`. `floor_draft` loads the draft, its lease and the
+  // published-revision CAS key; `floor_autosave_draft` persists geometry (lease-
+  // held + CAS-guarded, never publishing); the four lease RPCs run the single-
+  // editor lifecycle; `floor_unplaced_tables` lists tables not on the draft.
+  | "floor_draft"
+  | "floor_autosave_draft"
+  | "floor_acquire_lease"
+  | "floor_heartbeat"
+  | "floor_release_lease"
+  | "floor_takeover_lease"
+  | "floor_unplaced_tables"
+  // Dine-In Floor DESIGNER — Phase 4 PUBLISH lifecycle. The three server RPCs that
+  // turn a draft into an operational layout, gated on `pos.tables.floor_publish`
+  // (history/restore also need it; restore, like publish, writes a DRAFT and never
+  // flips the published pointer on its own). `floor_publish` is the ONE atomic
+  // publish (validate → open-bill block → materialize staged create/rename →
+  // immutable revision → pointer flip → draft rebase, all in one transaction), CAS-
+  // guarded on the base revision the editor started from; `floor_history` lists the
+  // immutable revisions (metadata only, never the geometry doc); `floor_restore_revision`
+  // loads a past revision back into the DRAFT for the operator to review and then
+  // explicitly Publish. The Service Floor read still fetches the published revision
+  // only — a draft edit or a restore never affects it until a publish succeeds.
+  | "floor_publish"
+  | "floor_history"
+  | "floor_restore_revision";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

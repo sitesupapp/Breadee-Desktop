@@ -29,7 +29,12 @@ import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
-import { canClearTable, canCloseTable, canMoveTable, canOpenTable } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canManageFloor, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
+import { ServiceFloor } from "@/components/pos/floor/ServiceFloor";
+import { FloorDesigner } from "@/components/pos/floor/designer/FloorDesigner";
+import { MapListToggle, type DineInFloorView } from "@/components/pos/floor/MapListToggle";
+import { Glyph } from "@/components/Glyph";
+import { readPosFeatures, writePosFeatures } from "@/lib/pos/posFeatures";
 import { ClearTableDialog, CloseTableDialog, MoveTableDialog } from "@/components/pos/TableOpsDialogs";
 import {
   clearOutcomeMessage,
@@ -172,6 +177,35 @@ export function useDineInWorkspace(input: {
 
   const [query, setQuery] = useState("");
   const [focusedId, setFocusedId] = useState<string | null>(null);
+
+  // Service Floor Map (Phase 2). Gated on `pos.floor_map`; when off, the Map|List
+  // control never renders and Dine-in is exactly today's List. The preferred view
+  // is a per-terminal switch (like every other `posFeatures` field), defaulting to
+  // List. Losing entitlement (a context change) can never strand the operator on
+  // a Map they may no longer see.
+  const floorGate = useMemo(() => canViewFloor(pos.access), [pos.access]);
+  // Floor DESIGNER (Phase 3A). A distinct authority from viewing the Map: editing
+  // needs `pos.tables.floor_manage`. The overlay is launched from the Map and owns
+  // its own lease/draft; the Dine-In flows behind it are untouched.
+  const floorManageGate = useMemo(() => canManageFloor(pos.access), [pos.access]);
+  const [editingFloor, setEditingFloor] = useState(false);
+  const [floorView, setFloorViewState] = useState<DineInFloorView>(() =>
+    canViewFloor(pos.access).allowed && readPosFeatures().preferFloorView ? "floor" : "list",
+  );
+  const setFloorView = useCallback((next: DineInFloorView) => {
+    setFloorViewState(next);
+    const current = readPosFeatures();
+    writePosFeatures({ ...current, preferFloorView: next === "floor" });
+  }, []);
+  useEffect(() => {
+    if (!floorGate.allowed && floorView === "floor") setFloorViewState("list");
+  }, [floorGate.allowed, floorView]);
+  // Leave the designer if the operator loses edit permission or Dine-in is no
+  // longer the active mode — a full-screen overlay must never sit over a screen it
+  // no longer belongs to.
+  useEffect(() => {
+    if (editingFloor && (!floorManageGate.allowed || !active)) setEditingFloor(false);
+  }, [editingFloor, floorManageGate.allowed, active]);
   const [seatOpen, setSeatOpen] = useState(false);
   /**
    * The open dialog is naming a NEW table rather than opening a mapped one.
@@ -1027,38 +1061,82 @@ export function useDineInWorkspace(input: {
   );
 
   const work = useCallback(
-    (layout: LayoutSpec) => (
-      <TableMap
-        ref={searchRef}
-        map={tables.map}
-        visible={visible}
-        layout={layout}
-        selectedTableId={tables.selectedTableId}
-        focusedTableId={focusedId}
-        loading={tables.loading}
-        refreshing={tables.refreshing}
-        stale={stale}
-        error={tables.error}
-        query={query}
-        now={now}
-        onQueryChange={setQuery}
-        onSelect={(id) => {
-          select(id);
-          if (layout.cartAsDrawer) input.onBillDrawerOpen();
-        }}
-        onRetry={() => void tables.refresh(ctx)}
-        canOpenTable={openGate.allowed}
-        onOpenTable={() => {
-          // No card to select, so this is the free-text path the server allows
-          // only on a branch with no configured tables.
-          setManualOpen(true);
-          setSeatOpen(true);
-        }}
-        onConfigureTables={input.onConfigureTables}
-      />
-    ),
+    (layout: LayoutSpec) => {
+      const onSelectTable = (id: string) => {
+        select(id);
+        if (layout.cartAsDrawer) input.onBillDrawerOpen();
+      };
+      // The List (today's card grid) is always the fallback and stays exactly as
+      // it was; the Map is an ADDITIVE view over the same store selection.
+      const list = (
+        <TableMap
+          ref={searchRef}
+          map={tables.map}
+          visible={visible}
+          layout={layout}
+          selectedTableId={tables.selectedTableId}
+          focusedTableId={focusedId}
+          loading={tables.loading}
+          refreshing={tables.refreshing}
+          stale={stale}
+          error={tables.error}
+          query={query}
+          now={now}
+          onQueryChange={setQuery}
+          onSelect={onSelectTable}
+          onRetry={() => void tables.refresh(ctx)}
+          canOpenTable={openGate.allowed}
+          onOpenTable={() => {
+            // No card to select, so this is the free-text path the server allows
+            // only on a branch with no configured tables.
+            setManualOpen(true);
+            setSeatOpen(true);
+          }}
+          onConfigureTables={input.onConfigureTables}
+        />
+      );
+      const showFloor = floorGate.allowed && floorView === "floor";
+      const renderer = showFloor ? (
+        <ServiceFloor
+          ctx={ctx}
+          tables={tables.map.tables}
+          selectedTableId={tables.selectedTableId}
+          focusedTableId={focusedId}
+          now={now}
+          onSelect={onSelectTable}
+          onSwitchToList={() => setFloorView("list")}
+          onRefreshTables={() => void tables.refresh(ctx)}
+        />
+      ) : (
+        list
+      );
+      // With the feature off there is no toggle at all — the List fills the work
+      // region as it does today.
+      if (!floorGate.allowed) return list;
+      return (
+        <div className="flex h-full min-h-0 flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <MapListToggle view={floorView} onChange={setFloorView} />
+            {/* Edit floor — only on the Map, only for `pos.tables.floor_manage`.
+                Never a dead control: it is absent (not disabled) without the
+                permission, and the List view never shows it. */}
+            {showFloor && floorManageGate.allowed && (
+              <button
+                type="button"
+                onClick={() => setEditingFloor(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-white px-3 py-2 text-sm font-bold text-ink hover:bg-canvas"
+              >
+                <Glyph name="edit" size={16} />
+                Edit floor
+              </button>
+            )}
+          </div>
+          <div className="min-h-0 flex-1">{renderer}</div>
+        </div>
+      );
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select],
+    [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select, floorGate.allowed, floorView, setFloorView, floorManageGate.allowed],
   );
 
   // --- print the current bill BEFORE payment ---------------------------------
@@ -1286,6 +1364,13 @@ export function useDineInWorkspace(input: {
           Discarding removes it - nothing was sent to the kitchen either way.
         </p>
       </Modal>
+
+      {/* Floor DESIGNER overlay (Phase 3A). A self-contained editing surface that
+          owns its own lease and draft; it never touches the Dine-In flows behind
+          it. Mounted here (in the always-present dialogs) so the launching button
+          lives in the Map header while the overlay is stable across layout ticks.
+          Closing simply returns to the Service Map — Phase 3A publishes nothing. */}
+      <FloorDesigner open={editingFloor} ctx={ctx} onClose={() => setEditingFloor(false)} />
     </>
   );
 
