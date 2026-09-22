@@ -45,10 +45,65 @@ export interface AuditRecord {
   detail?: unknown;
 }
 
+/** Operator-facing lifecycle of an offline-originated sale. */
+export type PosOfflineTxnStatus = "queued" | "syncing" | "synced" | "needs_attention";
+
+/**
+ * A durable, offline-ORIGINATED Takeaway + Cash sale (offline POS).
+ *
+ * One logical sale created while fully offline, carrying BOTH the exact order
+ * payload AND the cash payment intent as one immutable, replayable unit. Replay is
+ * `pos_submit_order` (idempotent on `client_op_id`) then `pos_pay_order`
+ * (state-based `already paid` dedup) - exactly the online path, deferred. A row is
+ * retained until it is `synced`; it is never dropped silently.
+ */
+export interface PosOfflineTxn {
+  /** Stable client-generated identity, created BEFORE any network request. PK. */
+  local_txn_id: string;
+  /** Immutable operation id reused on every replay - the server idempotency key. */
+  client_op_id: string;
+  tenant_id: string;
+  branch_id: string | null;
+  device_id: string;
+  terminal_id: string;
+  cashier_user_id: string;
+  cashier_user_name: string;
+  /** The open shift captured while online; frozen, never re-attributed. */
+  shift_id: string;
+  created_at: string; // client ISO, at offline capture
+  /** Immutable exact `pos_submit_order` payload (SubmitOrderPayload). */
+  order_payload: unknown;
+  /**
+   * Cash payment intent for `pos_pay_order`, or null. A transaction created by an
+   * offline "Send to kitchen" starts with `payment_intent: null` (sent, unpaid);
+   * a later offline Cash Pay UPDATES the same transaction (matched by
+   * `client_op_id`) to fill this in. Replay pays only when it is present.
+   */
+  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown> } | null;
+  /** True once this order has been sent to the kitchen (online or offline). */
+  sent_to_kitchen?: boolean;
+  currency: string;
+  /** Local provisional total (display only); the authoritative total is the server's. */
+  total: number;
+  status: PosOfflineTxnStatus;
+  attempts: number;
+  last_attempt_at?: string | null;
+  /** Filled once the order is created on the server during replay. */
+  server_order_id?: string | null;
+  server_order_number?: string | null;
+  /** Set once the cash payment is confirmed settled on the server. */
+  paid?: boolean;
+  /** Why the transaction needs a human (shift closed, permission, validation...). */
+  review_reason?: string | null;
+  last_error?: string | null;
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
   audit!: Table<AuditRecord, number>;
+  // Added in schema version 2 (see below). Keyed by local_txn_id.
+  posOfflineTxns!: Table<PosOfflineTxn, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -56,6 +111,14 @@ class BreadeeDB extends Dexie {
       outbox: "++id, kind, status, tenant_id, branch_id, created_at",
       snapshots: "key, tenant_id, branch_id",
       audit: "++id, action, tenant_id, at, sync_status",
+    });
+    // Version 2 - ADDITIVE. Dexie carries every unmentioned store (outbox,
+    // snapshots, audit) forward untouched; this only ADDS the posOfflineTxns store
+    // for offline-originated Takeaway + Cash sales. An existing v1 database upgrades
+    // in place with ALL prior data preserved - nothing is cleared, recreated or
+    // migrated destructively.
+    this.version(2).stores({
+      posOfflineTxns: "local_txn_id, client_op_id, tenant_id, branch_id, status, created_at, cashier_user_id",
     });
   }
 }
@@ -93,4 +156,73 @@ export async function purgeForeignSnapshots(tenantId: string | null, branchId: s
 // call unsyncedOutboxCount() first if the UI needs to warn about pending items.
 export async function clearSnapshotCache(): Promise<void> {
   await localdb.snapshots.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Offline Takeaway + Cash transactions
+// ---------------------------------------------------------------------------
+
+/**
+ * Durably commit an offline-originated sale BEFORE the UI reports success. The
+ * returned promise resolves only once the row is written, so the caller can
+ * safely clear the cart afterwards (never before).
+ */
+export async function addPosOfflineTxn(txn: PosOfflineTxn): Promise<string> {
+  await localdb.posOfflineTxns.add(txn);
+  return txn.local_txn_id;
+}
+
+/** Every offline sale, newest first - for the Sync Center queue. */
+export async function listPosOfflineTxns(): Promise<PosOfflineTxn[]> {
+  return localdb.posOfflineTxns.orderBy("created_at").reverse().toArray();
+}
+
+/** Offline sales that still hold unsynced work (must never be dropped silently). */
+export async function pendingPosTxnCount(): Promise<number> {
+  return localdb.posOfflineTxns.where("status").anyOf("queued", "syncing", "needs_attention").count();
+}
+
+/** Patch one offline transaction by its local id. */
+export async function updatePosOfflineTxn(localTxnId: string, patch: Partial<PosOfflineTxn>): Promise<void> {
+  await localdb.posOfflineTxns.update(localTxnId, patch);
+}
+
+/**
+ * The offline transaction for a given cart operation id, if one exists. Used to
+ * keep "Send to kitchen" and a later "Pay" as ONE logical order: both carry the
+ * cart's stable `client_op_id`, so the second action updates the first row rather
+ * than opening a second sale. A row that already synced is still returned so the
+ * caller can decide (e.g. pay it online instead).
+ */
+export async function getPosOfflineTxnByOp(clientOpId: string): Promise<PosOfflineTxn | undefined> {
+  return localdb.posOfflineTxns.where("client_op_id").equals(clientOpId).first();
+}
+
+/**
+ * Offline orders that were SENT to the kitchen but not yet paid, for the given
+ * live session (tenant + branch + cashier). These are the orders a cashier can
+ * RESUME and pay after a restart - the in-memory cart is gone, but the order is
+ * durable. Scoped so another context's order is never offered here.
+ */
+export async function listResumablePosTxns(
+  tenantId: string | null,
+  branchId: string | null,
+  cashierUserId: string | null,
+): Promise<PosOfflineTxn[]> {
+  const all = await localdb.posOfflineTxns.toArray();
+  return all
+    .filter(
+      (t) =>
+        t.sent_to_kitchen === true &&
+        !t.paid &&
+        !t.payment_intent &&
+        // Only orders still held locally. Once SYNCED, the order exists on the
+        // server (unpaid) and is paid through the normal shift-orders flow, so it
+        // must not linger here after an online payment.
+        t.status === "queued" &&
+        t.tenant_id === tenantId &&
+        (t.branch_id ?? null) === (branchId ?? null) &&
+        t.cashier_user_id === cashierUserId,
+    )
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }

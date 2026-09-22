@@ -10,6 +10,8 @@
 // the branch the cashier believes they are working in.
 
 import { supabase } from "@/lib/supabase";
+import { getDeviceIdentity } from "@/lib/device";
+import { readPosSessionSnapshot, restoreBranchNameFromSnapshot } from "@/lib/offline/posSession";
 import type { Membership, Tenant } from "@/lib/types";
 
 export type BranchContext = {
@@ -45,7 +47,20 @@ export async function loadBranchContext(
     .eq("id", id)
     .eq("tenant_id", tenant.id)
     .maybeSingle();
-  if (error || !data) return { id, name: "Branch unavailable", pinned };
+  if (error || !data) {
+    // Offline (or the name row is momentarily unreadable): fall back to the last
+    // server-confirmed name from the durable POS-session snapshot, but ONLY for
+    // the SAME device+tenant+branch. The id above is already the authority; this
+    // just spares the cashier a "Branch unavailable" label for a branch they are
+    // validly operating in. A foreign, absent or mismatched snapshot yields the
+    // honest fallback - it can never widen or rename access.
+    const cached = restoreBranchNameFromSnapshot(readPosSessionSnapshot(), {
+      branchId: id,
+      tenantId: tenant.id,
+      deviceId: getDeviceIdentity().device_id,
+    });
+    return { id, name: cached ?? "Branch unavailable", pinned };
+  }
   const name = typeof data.name === "string" && data.name.trim() !== "" ? data.name.trim() : "Unnamed branch";
   return { id, name, pinned };
 }

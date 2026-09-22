@@ -220,6 +220,30 @@ export function cartSubtotal(lines: CartLine[]): number {
   return lines.reduce((sum, l) => sum + lineTotals(l.base_price, l.modifiers, l.quantity).lineTotal, 0);
 }
 
+/**
+ * Reverse of `buildSubmitPayload`'s item mapping: rebuild displayable cart lines
+ * from a durable offline order payload, so a cashier can RESUME an offline order
+ * after a restart (the in-memory cart is gone, the payload is durable) and pay it
+ * under the SAME client_op_id. Prices/quantities/modifiers are restored so the
+ * recomputed subtotal matches; removed-ingredient names are restored for display.
+ * The authoritative order is still the stored payload replayed verbatim - this
+ * only reconstitutes the on-screen cart.
+ */
+export function submitPayloadToCartLines(items: SubmitOrderItem[]): CartLine[] {
+  return items.map((it, i) => ({
+    key: `resume-${i + 1}`,
+    menu_item_id: it.menu_item_id,
+    name: it.name,
+    base_price: it.base_price,
+    quantity: it.quantity,
+    kitchen_note: it.kitchen_note,
+    modifiers: it.modifiers.map((m) => ({ ...m })),
+    ...(it.customization_json?.removed_menu_ingredients && it.customization_json.removed_menu_ingredients.length > 0
+      ? { removed_ingredients: it.customization_json.removed_menu_ingredients }
+      : {}),
+  }));
+}
+
 export async function submitOrder(payload: SubmitOrderPayload): Promise<SubmitOrderResult> {
   const row = asRecord(await callPosRpc("pos_submit_order", { p_payload: payload }));
   return {
