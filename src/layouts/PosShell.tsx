@@ -53,6 +53,13 @@ export type PosRoute = {
    */
   onSelect?: () => void;
   active?: boolean;
+  /**
+   * A small count bubble on the glyph (e.g. how many tables are outstanding).
+   * A COUNT ONLY, never money, and rendered only when positive - an absent or
+   * zero badge draws nothing. Fed from state already in memory, so it never
+   * causes a fetch of its own.
+   */
+  badge?: number | null;
 };
 
 export type PosShellProps = {
@@ -156,9 +163,20 @@ export function PosShell(props: PosShellProps) {
 
         <div className="flex-1 space-y-1 px-2 pt-2">
           {props.routes.map((r) => {
+            const badge = typeof r.badge === "number" && r.badge > 0 ? r.badge : null;
             const inner = (
               <>
-                <Glyph name={r.icon} size={20} className="shrink-0" />
+                <span className="relative shrink-0">
+                  <Glyph name={r.icon} size={20} className="shrink-0" />
+                  {badge !== null && (
+                    <span
+                      className="absolute -right-2 -top-2 min-w-[16px] rounded-full bg-brand-dark px-1 text-center text-[10px] font-bold leading-4 text-white"
+                      aria-hidden
+                    >
+                      {badge > 99 ? "99+" : badge}
+                    </span>
+                  )}
+                </span>
                 {expanded && <span className="truncate">{r.label}</span>}
               </>
             );

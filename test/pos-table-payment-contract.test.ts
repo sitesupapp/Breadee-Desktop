@@ -118,7 +118,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // RETARGETED BY DELIVERY SETTLEMENT 1.0.23: `pos_delivery_resolve_cost` (post-close
 // cost resolution, cash-inert) was added, so the expected set grows by exactly one
 // more reviewed name. (Floor-map RPCs are deliberately NOT part of this release.)
-test("the RPC allow-list contains exactly the twenty-four expected names", () => {
+test("the RPC allow-list contains exactly the thirty-five expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -127,6 +127,21 @@ test("the RPC allow-list contains exactly the twenty-four expected names", () =>
   assert.deepEqual(
     [...members].sort(),
     [
+      // Dine-In Floor Map + Designer (Phase 2/3A/4): the published-floor READ,
+      // the draft/lease surface and the publish lifecycle. All ship-dark, gated
+      // server-side on pos.floor_map (+ floor_manage / floor_publish). Sort before
+      // the pos_* names.
+      "floor_acquire_lease",
+      "floor_autosave_draft",
+      "floor_draft",
+      "floor_heartbeat",
+      "floor_history",
+      "floor_publish",
+      "floor_release_lease",
+      "floor_restore_revision",
+      "floor_service_layout",
+      "floor_takeover_lease",
+      "floor_unplaced_tables",
       "pos_cash_box_shift",
       "pos_clear_table",
       "pos_close_table",
@@ -160,7 +175,7 @@ test("the RPC allow-list contains exactly the twenty-four expected names", () =>
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 24);
+  assert.equal(members.length, 35);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

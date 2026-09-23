@@ -1,0 +1,579 @@
+// Floor DESIGNER (Phase 3A) — the wiring, asserted against the source itself.
+//
+// The logic tests prove the edit math and the lossless save; these prove the
+// STRUCTURE the preservation gate depends on: the designer edits a DRAFT and never
+// publishes, it owns a lease but touches none of the operational Dine-In engine
+// (no bill, no payment, no order, no `useTables`), its selection never invokes the
+// bill panel, and the whole feature is gated on `pos.tables.floor_manage` on top
+// of everything viewing the floor already requires.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+import { stripComments, stripJsxComments } from "./source-helpers.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, "..");
+const read = (rel: string) => readFileSync(join(root, rel), "utf8");
+const jsx = (rel: string) => stripJsxComments(read(rel));
+const ts = (rel: string) => stripComments(read(rel));
+
+const LIB = "src/lib/pos/floorDesigner.ts";
+const STORE = "src/state/floorDesigner.ts";
+const CANVAS = "src/components/pos/floor/designer/DesignerCanvas.tsx";
+const NODE = "src/components/pos/floor/designer/DesignerTableNode.tsx";
+const SHELL = "src/components/pos/floor/designer/FloorDesigner.tsx";
+
+// --- Phase 3A edits a DRAFT and NEVER publishes ------------------------------
+
+test("the designer uses the draft/lease RPCs plus the Phase-4 publish lifecycle", () => {
+  const lib = ts(LIB);
+  for (const rpc of [
+    "floor_draft",
+    "floor_autosave_draft",
+    "floor_acquire_lease",
+    "floor_heartbeat",
+    "floor_release_lease",
+    "floor_takeover_lease",
+    "floor_unplaced_tables",
+    // Phase 4 — the publish lifecycle RPCs the designer now drives.
+    "floor_publish",
+    "floor_history",
+    "floor_restore_revision",
+  ]) {
+    assert.ok(lib.includes(rpc), `floorDesigner.ts must call ${rpc}`);
+  }
+  // Even publishing, the designer edits a DRAFT and reads the DRAFT — it never reads
+  // the published service layout, which stays the Service Floor's job. Preview reuses
+  // the service RENDERER (floorPreview.ts), not the published-read RPC.
+  assert.ok(!lib.includes("floor_service_layout"), "the designer edits a draft, not the published read");
+});
+
+test("the RPC union adds the draft/lease RPCs AND the Phase-4 publish lifecycle", () => {
+  const rpc = ts("src/lib/pos/rpc.ts");
+  for (const name of [
+    "floor_draft",
+    "floor_autosave_draft",
+    "floor_acquire_lease",
+    "floor_heartbeat",
+    "floor_release_lease",
+    "floor_takeover_lease",
+    "floor_unplaced_tables",
+    "floor_publish",
+    "floor_history",
+    "floor_restore_revision",
+  ]) {
+    assert.match(rpc, new RegExp(`"${name}"`), `${name} is in the union`);
+  }
+});
+
+test("every autosave echoes the published-revision CAS key", () => {
+  const lib = ts(LIB);
+  assert.match(lib, /p_base_revision_id/, "autosave is CAS-guarded on the base revision");
+});
+
+// --- the draft store touches NONE of the operational POS engine --------------
+
+test("the designer store never imports or names the canonical POS engine", () => {
+  const store = ts(STORE);
+  for (const forbidden of [
+    "useTables",
+    "useCart",
+    "TableBillPanel",
+    "loadBill",
+    "pos_pay",
+    "pos_open_table",
+    "pos_move_table",
+    "pos_close_table",
+    "pos_clear_table",
+    "pos_submit_order",
+  ]) {
+    assert.ok(!store.includes(forbidden), `the designer store must not reference ${forbidden}`);
+  }
+});
+
+test("the designer state is separate from the service floor store", () => {
+  const store = ts(STORE);
+  // It reuses the pure geometry/section helpers, but not the read-only service
+  // store — the two must not share editing state.
+  assert.ok(!store.includes('from "@/state/floor"'), "the draft store is not the service store");
+  assert.match(store, /create<DesignerState>/, "a dedicated designer state boundary");
+});
+
+// --- the canvas selection is designer-only, never the bill panel -------------
+
+test("the designer canvas and node never reach the bill/operational surface", () => {
+  for (const rel of [CANVAS, NODE, SHELL]) {
+    const src = ts(rel);
+    for (const forbidden of ["useTables", "useCart", "TableBillPanel", "onSelectTable", "pos_pay", "requestPay"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("selection routes to the designer store, not the table selection channel", () => {
+  const shell = jsx(SHELL);
+  assert.match(shell, /d\.selectElement/, "selection is the designer's own element selection");
+  assert.ok(!shell.includes("tables.select"), "never the canonical table selection");
+});
+
+// --- editing stays in intrinsic logical coordinates --------------------------
+
+test("edits are computed in logical units from a screen delta over the view scale", () => {
+  const lib = ts(LIB);
+  // Screen deltas are divided by scale; nothing viewport-shaped is persisted.
+  assert.match(lib, /screenDx\s*\/\s*s/, "drag converts screen px to logical by the scale");
+  // No text-direction / RTL flipping of coordinates — the plane is physical.
+  assert.ok(!/\brtl\b/i.test(lib) && !lib.includes('dir="rtl"'), "coordinates are physical, not RTL-relative");
+});
+
+// --- permission gating -------------------------------------------------------
+
+test("editing is gated on pos.tables.floor_manage, on top of viewing the floor", () => {
+  const access = ts("src/lib/pos/access.ts");
+  assert.match(access, /TABLES_FLOOR_MANAGE:\s*"pos\.tables\.floor_manage"/);
+  assert.match(access, /export function canManageFloor/);
+  assert.match(access, /canManageFloor[\s\S]{0,220}canViewFloor\(ctx\)[\s\S]{0,220}TABLES_FLOOR_MANAGE/);
+});
+
+test("the Edit-floor entry is offered only on the Map and only with the manage permission", () => {
+  const dw = jsx("src/screens/pos/DineInWorkspace.tsx");
+  assert.match(dw, /canManageFloor\(pos\.access\)/, "the manage gate is computed");
+  assert.match(dw, /showFloor && floorManageGate\.allowed/, "the button needs the Map view AND the permission");
+  assert.match(dw, /<FloorDesigner\b/, "the overlay is mounted");
+  assert.match(dw, /setEditingFloor\(true\)/, "the button opens the designer");
+});
+
+// --- the lease lifecycle is present ------------------------------------------
+
+test("the store runs the full lease lifecycle with a read-only fallback", () => {
+  const store = ts(STORE);
+  for (const fn of ["floorAcquireLease", "floorHeartbeat", "floorReleaseLease", "floorTakeoverLease"]) {
+    assert.ok(store.includes(fn), `the store must use ${fn}`);
+  }
+  assert.match(store, /readOnly:\s*true/, "a lost lease drops to read-only rather than losing work");
+  assert.match(store, /FLOOR_HEARTBEAT_MS\s*=\s*45_000/, "heartbeat is well under the 150s server TTL");
+});
+
+// --- Phase 3B: identity is a one-way, read-only metadata projection ----------
+
+const INSPECTOR = "src/components/pos/floor/designer/DesignerInspector.tsx";
+const TRAY = "src/components/pos/floor/designer/UnplacedTray.tsx";
+const ADD_DIALOG = "src/components/pos/floor/designer/AddTableDialog.tsx";
+const SECTIONS_DIALOG = "src/components/pos/floor/designer/SectionsDialog.tsx";
+
+test("the metadata adapter projects {id, name, seats} and carries nothing operational", () => {
+  const lib = ts(LIB);
+  assert.match(lib, /floorLoadTableMeta/, "the adapter exists");
+  assert.match(lib, /loadTableMap/, "it reuses the canonical pos_table_map read");
+  // Once comments are stripped, no operational field of TableSummary survives
+  // into this module — the projection happens inside the adapter, immediately.
+  for (const forbidden of ["mixed_currency", "opened_at", "order_number", "occupied", "total", "currency"]) {
+    assert.ok(!lib.includes(forbidden), `floorDesigner.ts must not carry the operational field ${forbidden}`);
+  }
+});
+
+test("every designer surface stays clear of the operational POS engine and never touches the DB directly", () => {
+  for (const rel of [LIB, STORE, CANVAS, NODE, SHELL, INSPECTOR, TRAY, ADD_DIALOG, SECTIONS_DIALOG]) {
+    const src = ts(rel);
+    // Publishing is a Phase-4 capability (the client asks the atomic server RPC to
+    // create/rename canonical tables — it never writes them itself), so `floor_publish`
+    // is allowed. What stays forbidden: the operational engine and any direct DB access.
+    for (const forbidden of [
+      "useTables",
+      "useCart",
+      "TableBillPanel",
+      "pos_open_table",
+      "pos_configure_tables",
+      "supabase",
+    ]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("a rename stays rename_to and a new table stays a temp: intent — no canonical create/rename path", () => {
+  const lib = ts(LIB);
+  assert.match(lib, /rename_to/, "renames are staged in the draft");
+  assert.match(lib, /`temp:\$\{/, "temp identities use the server's temp: namespace");
+  const store = ts(STORE);
+  assert.ok(!store.includes("pos_tables"), "the store never names the canonical table store");
+  assert.match(store, /edits\.renames/, "renames flow through the edits model");
+  // Inspecting a loaded raw field ("rename_to" in raw) is fine — WRITING one
+  // directly would not be. The serializer is the only writer.
+  assert.ok(!/\.rename_to\s*=/.test(store), "the store never writes rename_to directly");
+});
+
+test("the inspector and dialogs speak restaurant language — no developer identifiers", () => {
+  for (const rel of [INSPECTOR, TRAY, ADD_DIALOG, SECTIONS_DIALOG]) {
+    const src = ts(rel);
+    for (const forbidden of ['"temp_id"', '"table_id"', "JSON.stringify", "layout_id"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not surface ${forbidden}`);
+    }
+  }
+});
+
+test("the shell keeps the section nav in a fixed ROW so the canvas dominates (the 3A gap fix)", () => {
+  const shell = jsx(SHELL);
+  assert.match(
+    shell,
+    /flex shrink-0 items-center[\s\S]{0,200}<FloorSectionNav/,
+    "FloorSectionNav sits in a fixed-height row, not loose in the column",
+  );
+  assert.match(shell, /UnplacedTray/, "the unplaced tray is mounted");
+  assert.match(shell, /DesignerInspector/, "the inspector is mounted");
+});
+
+// --- Phase 3C: precision tools stay Designer-owned ---------------------------
+
+const SNAP_LIB = "src/lib/pos/floorSnap.ts";
+const COLLISION_LIB = "src/lib/pos/floorCollision.ts";
+const ARRANGE_LIB = "src/lib/pos/floorArrange.ts";
+const BULK_PANEL = "src/components/pos/floor/designer/DesignerBulkPanel.tsx";
+
+test("the SERVICE floor and Open Tables know nothing about snap/collision/multi-select", () => {
+  for (const rel of [
+    "src/components/pos/floor/ServiceFloor.tsx",
+    "src/components/pos/floor/FloorCanvas.tsx",
+    "src/components/pos/floor/FloorTableNode.tsx",
+    "src/lib/pos/floor.ts",
+    "src/state/floor.ts",
+    "src/components/pos/OpenTablesModal.tsx",
+    "src/lib/pos/openTables.ts",
+  ]) {
+    const src = ts(rel);
+    for (const forbidden of ["floorSnap", "floorCollision", "floorArrange", "analyzeCollisions", "computeMoveSnap", "selectedIds", "DesignerBulkPanel"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("the 3C geometry libs are pure: no network, no store, no React", () => {
+  for (const rel of [SNAP_LIB, COLLISION_LIB, ARRANGE_LIB]) {
+    const src = ts(rel);
+    for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("collision is ADVISORY: nothing gates the autosave path on a collision result", () => {
+  const store = ts(STORE);
+  assert.ok(!store.includes("analyzeCollisions"), "the store never consults collision before saving");
+  assert.ok(!store.includes("floorCollision"), "collision feedback lives in the render layer only");
+});
+
+test("group operations flow through ONE mutation: commitGeoms in the store, onCommitGroup from the canvas", () => {
+  const store = ts(STORE);
+  assert.match(store, /commitGeoms:\s*\(entries\)/, "the store exposes the single group commit");
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /onCommitGroup\(/, "the canvas commits a group as one call");
+  assert.ok(!canvas.includes("forEach(onCommit"), "never a per-table commit loop");
+  const shell = jsx(SHELL);
+  assert.match(shell, /d\.commitGeoms/, "bulk tools apply through the same single path");
+});
+
+test("snapping is zoom-normalised and bypassable, and guides are gesture-scoped", () => {
+  const snap = ts(SNAP_LIB);
+  assert.match(snap, /SNAP_THRESHOLD_PX\s*\/\s*Math\.max\(scale/, "screen threshold ÷ scale");
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /bypass:\s*e\.altKey/, "Alt bypasses snapping during a gesture");
+  assert.match(canvas, /setGuides\(\[\]\)/, "guides are cleared when the gesture ends");
+});
+
+test("multi-select is Ctrl/Cmd+click on tables; structures stay single-select", () => {
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /e\.ctrlKey \|\| e\.metaKey/, "the toggle modifier");
+  const store = ts(STORE);
+  assert.match(store, /el\.type !== "table"/, "toggling a structure demotes to single-select");
+});
+
+test("the bulk panel never offers a cross-table rename and speaks restaurant language", () => {
+  const bulk = ts(BULK_PANEL);
+  assert.ok(!bulk.includes("onRename") && !bulk.includes("TABLE NAME"), "no rename across canonical tables");
+  assert.match(bulk, /tables selected/, "an honest count");
+  assert.match(bulk, /min-h-\[44px\]/, "44px touch targets on bulk actions");
+});
+
+// --- Phase-3B follow-ups pinned ----------------------------------------------
+
+test("meta-less legacy placements cannot be renamed, and a staged rename is always discardable", () => {
+  const insp = jsx(INSPECTOR);
+  assert.match(insp, /isLegacy/, "the legacy branch exists");
+  assert.match(insp, /Legacy table/, "honest identity, nothing fabricated");
+  assert.match(insp, /Discard draft rename/, "the narrow escape hatch");
+  const store = ts(STORE);
+  assert.match(store, /discardRename:\s*\(id\)/, "the store clears a rename without the canonical name");
+});
+
+test("the inspector reveals the selection instead of re-fitting (zoom preserved)", () => {
+  const shell = jsx(SHELL);
+  assert.match(shell, /panToReveal/, "minimal reveal, not Fit");
+  assert.ok(!/selectedElementId[\s\S]{0,200}requestFit\(\)/.test(shell), "selection never triggers a full Fit");
+});
+
+test("inspector steppers meet the 44px touch floor", () => {
+  const insp = jsx(INSPECTOR);
+  assert.match(insp, /h-11 w-11/, "44px stepper hit targets");
+});
+
+// --- Phase 3D-A: creation & layout automation stays Designer-owned -----------
+
+const AUTOMATE_LIB = "src/lib/pos/floorAutomate.ts";
+const QUICK_DIALOG = "src/components/pos/floor/designer/QuickSetupDialog.tsx";
+const AUTONUMBER_DIALOG = "src/components/pos/floor/designer/AutoNumberDialog.tsx";
+
+test("the SERVICE floor and Open Tables know nothing about the automation engine", () => {
+  for (const rel of [
+    "src/components/pos/floor/ServiceFloor.tsx",
+    "src/components/pos/floor/FloorCanvas.tsx",
+    "src/components/pos/floor/FloorTableNode.tsx",
+    "src/lib/pos/floor.ts",
+    "src/state/floor.ts",
+    "src/components/pos/OpenTablesModal.tsx",
+    "src/lib/pos/openTables.ts",
+  ]) {
+    const src = ts(rel);
+    for (const forbidden of [
+      "floorAutomate",
+      "QuickSetupDialog",
+      "AutoNumberDialog",
+      "bulkCreate",
+      "quickSetup",
+      "autoNumber",
+      "duplicateTable",
+      "autoArrange",
+    ]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("the automation engine is pure: no network, no store, no React", () => {
+  const src = ts(AUTOMATE_LIB);
+  for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+    assert.ok(!src.includes(forbidden), `${AUTOMATE_LIB} must not reference ${forbidden}`);
+  }
+});
+
+test("the automation engine REUSES the collision geometry — no second SAT/obb implementation", () => {
+  const src = ts(AUTOMATE_LIB);
+  assert.match(src, /from "@\/lib\/pos\/floorCollision"/, "reuses orientedExtent + SOLID_STRUCTURES");
+  assert.ok(!src.includes("obbsOverlap") && !src.toLowerCase().includes("separating axis"), "no re-implemented SAT");
+});
+
+test("bulk create and duplicate stage TEMP intents only — canonical rows appear only at Publish", () => {
+  const store = ts(STORE);
+  assert.match(store, /bulkCreate:\s*\(spec\)/, "bulk create exists");
+  assert.match(store, /duplicateTable:\s*\(id\)/, "duplicate exists");
+  assert.match(store, /makeTempTableElement\(/, "new tables are temp intents, not canonical rows");
+  // Phase 4: the store publishes through the atomic server RPC (floorPublish) — the
+  // ONLY path that materializes a canonical table, and never from bulk/duplicate.
+  assert.match(store, /floorPublish\(/, "publishing goes through the server RPC wrapper");
+  assert.ok(!store.includes("pos_tables"), "the store still never writes the canonical table store itself");
+});
+
+test("Quick Setup is Bulk Create — one compound mutation, not a second table engine", () => {
+  const store = ts(STORE);
+  assert.match(store, /quickSetup:\s*\(spec\)\s*=>\s*get\(\)\.bulkCreate/, "quick setup delegates to bulk create");
+});
+
+test("every 3D-A action exists and auto-number renames only through the STAGED model", () => {
+  const store = ts(STORE);
+  for (const action of ["bulkCreate", "quickSetup", "autoNumber", "duplicateTable", "autoArrange"]) {
+    assert.match(store, new RegExp(`\\b${action}:`), `${action} is wired in the store`);
+  }
+  // Auto-number reuses the same staged rename map — never an immediate canonical rename.
+  assert.match(store, /autoNumber:[\s\S]{0,1200}edits\.renames\.set/, "auto-number stages rename_to");
+  // Auto-arrange writes geometry only, through the same edits.geom the drags use.
+  assert.match(store, /autoArrange:[\s\S]{0,1600}edits\.geom\.set/, "auto-arrange writes geometry only");
+});
+
+test("the shell mounts Quick Setup + Auto-number and shares the physical reading-order engine", () => {
+  const shell = jsx(SHELL);
+  assert.match(shell, /QuickSetupDialog/, "quick setup dialog mounted");
+  assert.match(shell, /AutoNumberDialog/, "auto-number dialog mounted");
+  assert.match(shell, /readingOrder/, "the preview uses the same physical order the store applies");
+  assert.match(shell, /d\.duplicateTable/, "duplicate wired");
+  assert.match(shell, /d\.autoArrange/, "auto-arrange wired");
+});
+
+test("the automation dialogs never publish and speak draft language", () => {
+  for (const rel of [QUICK_DIALOG, AUTONUMBER_DIALOG]) {
+    const src = jsx(rel);
+    assert.ok(!src.includes("floor_publish") && !src.includes("Publish floor"), `${rel} must not publish`);
+    assert.match(src, /published/, `${rel} tells the operator changes land at publish`);
+  }
+});
+
+// --- Phase 3D-B: structures / object palette stay Designer-owned & draft-only --
+
+const OBJECTS_LIB = "src/lib/pos/floorObjects.ts";
+const STRUCT_NODE = "src/components/pos/floor/designer/DesignerStructureNode.tsx";
+const PALETTE = "src/components/pos/floor/designer/DesignerObjectPalette.tsx";
+
+test("the SERVICE floor and Open Tables know nothing about the object palette", () => {
+  for (const rel of [
+    "src/components/pos/floor/ServiceFloor.tsx",
+    "src/components/pos/floor/FloorCanvas.tsx",
+    "src/components/pos/floor/FloorTableNode.tsx",
+    "src/lib/pos/floor.ts",
+    "src/state/floor.ts",
+    "src/components/pos/OpenTablesModal.tsx",
+    "src/lib/pos/openTables.ts",
+  ]) {
+    const src = ts(rel);
+    for (const forbidden of ["floorObjects", "DesignerStructureNode", "DesignerObjectPalette", "addStructure", "duplicateStructure"]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+});
+
+test("the object catalog is pure and offers only contract types (never a bar structure)", () => {
+  const src = ts(OBJECTS_LIB);
+  for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+    assert.ok(!src.includes(forbidden), `${OBJECTS_LIB} must not reference ${forbidden}`);
+  }
+  // No SAT/geometry engine is reimplemented here — collision stays in floorCollision.
+  assert.ok(!src.includes("obbsOverlap") && !src.toLowerCase().includes("separating axis"), "no second collision engine");
+  // "bar" only ever appears as a table shape elsewhere, never as a structure here.
+  assert.ok(!/type:\s*"bar"/.test(src), "no bar structure type");
+});
+
+test("structures are made interactive on the DESIGNER canvas only, never on the service FloorObject", () => {
+  const canvas = ts(CANVAS);
+  assert.match(canvas, /DesignerStructureNode/, "the designer renders structures through its own interactive node");
+  assert.ok(!canvas.includes("FloorObject"), "the designer no longer uses the inert service object");
+  // The service object stays read-only: pointer-events off, no element-id marker.
+  const floorObj = ts("src/components/pos/floor/FloorObject.tsx");
+  assert.match(floorObj, /pointer-events-none/, "service structures stay inert");
+  assert.ok(!floorObj.includes("data-designer-element-id"), "service structures are not selectable");
+  // The designer structure node carries the gesture marker + resize handles.
+  const node = jsx(STRUCT_NODE);
+  assert.match(node, /data-designer-element-id/, "structures are selectable in the designer");
+  assert.match(node, /data-designer-handle/, "structures resize");
+  // elementById resolves any element (tables AND structures) for resize/rotate.
+  assert.match(canvas, /elementById\s*=\s*\(id: string\)\s*=>\s*elements\.find/, "gestures resolve structures too");
+});
+
+test("adding/duplicating a structure is a DRAFT layout object — no canonical entity, no temp id", () => {
+  const store = ts(STORE);
+  assert.match(store, /addStructure:\s*\(type\)/, "addStructure exists");
+  assert.match(store, /duplicateStructure:\s*\(id\)/, "duplicateStructure exists");
+  assert.match(store, /makeStructureElement\(/, "structures use the ordinary draft element factory");
+  const lib = ts(OBJECTS_LIB);
+  // A structure never borrows table identity semantics.
+  assert.ok(!lib.includes("temp_id") && !lib.includes("table_id"), "structures are not pending tables");
+  assert.match(lib, /newElementId\(\)/, "structures use the e- element id convention");
+});
+
+test("the inspector edits a structure's label and duplicates it, with no developer surfaces", () => {
+  const insp = jsx(INSPECTOR);
+  assert.match(insp, /onLabel/, "structure label editing is wired");
+  assert.match(insp, /Duplicate object/, "a structure can be duplicated");
+  // No raw coordinates, ids or JSON are ever exposed.
+  assert.ok(!/\bx:\s*element\.x\b/.test(insp) && !insp.includes("JSON.stringify"), "no raw x/y or JSON editor");
+});
+
+test("the palette adds to the active section and speaks plain restaurant language", () => {
+  const pal = jsx(PALETTE);
+  assert.match(pal, /onAdd/, "the palette adds an object");
+  assert.ok(!pal.includes("floor_publish"), "the palette never publishes");
+  const shell = jsx(SHELL);
+  assert.match(shell, /DesignerObjectPalette/, "the palette is mounted");
+  assert.match(shell, /d\.addStructure/, "add-structure is wired");
+  assert.match(shell, /d\.duplicateStructure/, "duplicate-structure is wired");
+});
+
+// --- Phase 4: Preview / Publish / History / Restore --------------------------
+
+const PREVIEW_LIB = "src/lib/pos/floorPreview.ts";
+const PREVIEW = "src/components/pos/floor/designer/DesignerPreview.tsx";
+const PUBLISH_DIALOG = "src/components/pos/floor/designer/PublishDialog.tsx";
+const HISTORY_DIALOG = "src/components/pos/floor/designer/HistoryDialog.tsx";
+
+test("the SERVICE floor still reads the PUBLISHED revision only — never a draft or a preview", () => {
+  // The service read side and its store keep fetching floor_service_layout. They
+  // must not learn about the draft, the preview projection, or the publish surfaces.
+  for (const rel of ["src/components/pos/floor/ServiceFloor.tsx", "src/state/floor.ts", "src/lib/pos/floor.ts"]) {
+    const src = ts(rel);
+    for (const forbidden of [
+      "floor_draft",
+      "floor_publish",
+      "floorLoadDraft",
+      "buildPreviewModel",
+      "DesignerPreview",
+      "PublishDialog",
+      "HistoryDialog",
+    ]) {
+      assert.ok(!src.includes(forbidden), `${rel} must not reference ${forbidden}`);
+    }
+  }
+  assert.match(ts("src/lib/pos/floor.ts"), /floor_service_layout/, "the service reader still reads the published layout");
+});
+
+test("the preview model is PURE and reuses the service renderer with draft data", () => {
+  const lib = ts(PREVIEW_LIB);
+  for (const forbidden of ["callPosRpc", "supabase", "zustand", "useFloorDesigner", 'from "react"', "floor_autosave", "floor_publish"]) {
+    assert.ok(!lib.includes(forbidden), `${PREVIEW_LIB} must not reference ${forbidden}`);
+  }
+  const prev = jsx(PREVIEW);
+  assert.match(prev, /buildPreviewModel/, "preview projects the draft into the service model");
+  assert.match(prev, /FloorCanvas/, "preview renders through the SAME canvas the service floor uses");
+  // Preview is READ-ONLY: an inert onSelect, no edit commit, no autosave, no publish.
+  assert.match(prev, /onSelect=\{\(\)\s*=>\s*\{\}\}/, "preview selection is inert");
+  for (const forbidden of ["floor_publish", "floorAutosave", "commitGeom", "d.publish", "onCommit"]) {
+    assert.ok(!prev.includes(forbidden), `${PREVIEW} must not reference ${forbidden}`);
+  }
+});
+
+test("the store publish is ATOMIC-safe from the client: flush, one-in-flight, reload, draft preserved", () => {
+  const store = ts(STORE);
+  assert.match(store, /publish:\s*async/, "publish action exists");
+  assert.match(store, /floorPublish\(/, "publish calls the single server RPC");
+  // Double-submit safety (§31): a publish already in flight is refused.
+  assert.match(store, /if\s*\(s\.publishing\)\s*return/, "one publish at a time");
+  // Flush any pending autosave BEFORE publishing so the server sees the latest draft.
+  assert.match(store, /publish:[\s\S]{0,900}floorAutosaveDraft\(/, "publish flushes the pending draft first");
+  // On success, RELOAD from the server-rebased draft rather than trusting local state.
+  assert.match(store, /publish:[\s\S]{0,1600}get\(\)\.enter\(/, "publish reloads the rebased draft");
+  // A rejection preserves the draft and only a lease/stale/permission failure goes read-only.
+  assert.match(store, /publishError:\s*err/, "a rejection is surfaced, not swallowed");
+});
+
+test("restore loads a DRAFT and never publishes — Service stays on the live revision", () => {
+  const store = ts(STORE);
+  assert.match(store, /restore:\s*async/, "restore action exists");
+  assert.match(store, /floorRestoreRevision\(/, "restore calls the restore RPC");
+  // restore is NOT publish: it must not call floorPublish, and it reloads the draft.
+  assert.ok(!/restore:\s*async[\s\S]{0,1200}floorPublish\(/.test(store), "restore never publishes");
+  assert.match(store, /restore:[\s\S]{0,1200}get\(\)\.enter\(/, "restore reloads the restored draft");
+  assert.match(store, /if\s*\(s\.restoring\)\s*return/, "one restore at a time");
+});
+
+test("history is READ-ONLY and restore is confirmed before it replaces the draft", () => {
+  const store = ts(STORE);
+  assert.match(store, /loadHistory:\s*async/, "history loads");
+  assert.match(store, /floorHistory\(/, "history calls the read RPC");
+  const hist = jsx(HISTORY_DIALOG);
+  assert.ok(!hist.includes("floor_publish") && !hist.includes("d.publish"), "history never publishes");
+  assert.match(hist, /replaces your current draft/i, "restore warns it replaces the draft (§27)");
+  assert.match(hist, /Restore to draft/, "restore loads a draft, it does not go live");
+});
+
+test("the publish dialog is busy-locked (no double submit) and separates warnings from blockers", () => {
+  const dlg = jsx(PUBLISH_DIALOG);
+  assert.match(dlg, /disabled=\{disabled\}/, "the confirm button is disabled while publishing");
+  assert.match(dlg, /publishing\s*\|\|\s*!canPublish/, "busy or unpermitted disables confirm");
+  // Advisory spacing is amber "worth a look", never a red blocker.
+  assert.match(dlg, /you can still publish/i, "advisory warnings do not block");
+  assert.match(dlg, /Publish couldn’t continue/, "a server rejection is shown as a blocker");
+  const shell = jsx(SHELL);
+  assert.match(shell, /Publish Changes/, "the top bar exposes a distinct Publish action");
+  assert.match(shell, /d\.canPublish/, "publish is gated on the publish permission");
+  assert.match(shell, /DesignerPreview/, "preview is mounted");
+  assert.match(shell, /HistoryDialog/, "history is mounted");
+});

@@ -182,7 +182,7 @@ test("removing an ingredient changes NO canonical record and no price", () => {
 // --- the terminal switch -----------------------------------------------------
 
 test("the terminal switch defaults OFF", () => {
-  assert.deepEqual(POS_FEATURE_DEFAULTS, { ingredientCustomization: false, categorizedMenu: false });
+  assert.deepEqual(POS_FEATURE_DEFAULTS, { ingredientCustomization: false, categorizedMenu: false, preferFloorView: false });
 });
 
 test("a stored choice survives; only an ABSENT or non-boolean key gets the default", () => {
@@ -197,6 +197,13 @@ test("writing then reading round-trips through storage", () => {
   const store = memoryStorage();
   writePosFeatures({ ingredientCustomization: true }, store);
   assert.equal(readPosFeatures(store).ingredientCustomization, true);
+});
+
+test("the floor-view preference defaults OFF and round-trips per field (Floor Map Phase 2)", () => {
+  // Per-terminal Map|List preference; default List, ignored when pos.floor_map is off.
+  assert.equal(parsePosFeatures("{}").preferFloorView, false);
+  assert.equal(parsePosFeatures(JSON.stringify({ preferFloorView: true })).preferFloorView, true);
+  assert.equal(parsePosFeatures(JSON.stringify({ preferFloorView: "yes" })).preferFloorView, false);
 });
 
 // --- prod-native menu enrichment (OU isolation preserved) --------------------
