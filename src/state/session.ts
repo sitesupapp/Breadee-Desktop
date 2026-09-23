@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { supabase } from "@/lib/supabase";
 import { getDeviceIdentity } from "@/lib/device";
-import { purgeForeignSnapshots, clearSnapshotCache } from "@/lib/offline/db";
+import { purgeForeignSnapshots, clearSnapshotCache, purgeForeignCachedCustomers, clearCachedCustomers } from "@/lib/offline/db";
 import { clearPosSessionSnapshot } from "@/lib/offline/posSession";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
@@ -153,6 +153,9 @@ export const useSession = create<SessionState>((set, get) => ({
     // Cache-scope hardening: drop any cached snapshots that don't belong to this
     // tenant/branch before continuing, so a previous session's cache can't leak.
     await purgeForeignSnapshots(tenant?.id ?? null, (membership as Membership)?.branch_id ?? null).catch(() => {});
+    // Same hardening for the delivery customer cache (phones/addresses): a
+    // previous session's callers must never surface for a different tenant/branch.
+    await purgeForeignCachedCustomers(tenant?.id ?? null, (membership as Membership)?.branch_id ?? null).catch(() => {});
 
     const next = {
       userId: user.id,
@@ -192,6 +195,9 @@ export const useSession = create<SessionState>((set, get) => ({
     // Drop the read-only snapshot cache so no cached data survives into the next login.
     // The durable outbox (unsynced work) is preserved by design — never dropped here.
     await clearSnapshotCache().catch(() => {});
+    // The delivery customer cache holds personal data (names, phones, addresses);
+    // drop it entirely on sign-out so it never outlives the session that cached it.
+    await clearCachedCustomers().catch(() => {});
     set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false });
   },
 

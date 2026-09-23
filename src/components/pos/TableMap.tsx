@@ -20,6 +20,8 @@ export type TableMapProps = {
   loading: boolean;
   refreshing: boolean;
   stale: boolean;
+  /** The map shown was restored from the local cache (backend unreachable). */
+  offline: boolean;
   error: string | null;
   query: string;
   now: number;
@@ -60,13 +62,19 @@ export const TableMap = forwardRef<HTMLInputElement, TableMapProps>(function Tab
         <Badge tone="slate">{map.available} free</Badge>
         <Badge tone="amber">{map.occupied} occupied</Badge>
         <Badge tone="blue">{map.configured} configured</Badge>
+        {props.offline && (
+          <Badge tone="amber" title="Showing the last synced table map. Reconnect to open, pay, move or close a table.">
+            <StatusDot tone="amber" />
+            Offline — last synced tables
+          </Badge>
+        )}
         {props.refreshing && (
           <Badge tone="slate">
             <StatusDot tone="slate" />
             Refreshing
           </Badge>
         )}
-        {props.stale && !props.refreshing && (
+        {props.stale && !props.refreshing && !props.offline && (
           <Badge tone="amber" title="This map may be out of date">
             <StatusDot tone="amber" />
             May be out of date
