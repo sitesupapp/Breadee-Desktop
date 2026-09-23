@@ -41,6 +41,7 @@ import {
   floorRestoreRevision,
   floorTakeoverLease,
   geomOf,
+  makeInitialDraft,
   makePlacedElement,
   makeSection,
   makeTempTableElement,
@@ -93,7 +94,11 @@ export const FLOOR_AUTOSAVE_DEBOUNCE_MS = 900;
 
 type Ctx = { tenantId: string | null; branchId: string | null };
 
-/** Where the session is. `empty` = this branch has no floor document at all. */
+/**
+ * Where the session is. (`empty` is legacy and no longer entered — a branch with
+ * no floor document now BOOTSTRAPS an editable first-floor draft via the ready
+ * path; see `enter`. The value is kept in the union harmlessly.)
+ */
 export type DesignerPhase = "idle" | "loading" | "ready" | "empty" | "busy" | "error";
 export type SaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -445,24 +450,18 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
 
       try {
         const load = await floorLoadDraft(ctx.branchId);
-        // No draft document at all → nothing to edit yet (a branch that never
-        // published). A draft WITH sections but no tables is editable: the tray
-        // is exactly how tables get onto it.
-        if (load.draft === null) {
-          set({
-            phase: "empty",
-            layoutId: load.layoutId,
-            sections: [],
-            activeSectionId: null,
-            elements: [],
-            unplaced: load.unplaced,
-            baseRevisionId: load.publishedRevisionId,
-            canPublish: load.canPublish,
-          });
-          return;
-        }
+        // First-floor bootstrap: a branch with canonical tables but no draft and
+        // no published revision returns draft=null. Synthesize a minimal editable
+        // draft (one default section, no elements) and enter the SAME ready path,
+        // so the operator can place existing tables, autosave and FIRST-publish.
+        // The server already accepts base_revision_id=null; its validator requires
+        // >=1 section, which `makeInitialDraft()` provides. Canonical tables are
+        // still created/renamed ONLY by the atomic server PUBLISH — never here.
+        // A draft WITH sections but no tables was already editable: the tray is
+        // exactly how tables get onto it.
+        const draft = load.draft ?? makeInitialDraft();
 
-        currentDraft = load.draft;
+        currentDraft = draft;
         // Take the single editor lease. BUSY means another device holds it.
         try {
           const lease = await floorAcquireLease(ctx.branchId);
@@ -470,13 +469,12 @@ export const useFloorDesigner = create<DesignerState>((set, get) => {
         } catch (e) {
           const err = classifyFloorDesignerError(e);
           if (err.kind === "busy") {
-            set({ phase: "busy", error: err, canTakeover: true, sections: load.draft.sections });
+            set({ phase: "busy", error: err, canTakeover: true, sections: draft.sections });
             return;
           }
           throw e;
         }
 
-        const draft = load.draft;
         const activeSectionId = resolveActiveSection(draft.sections, null);
 
         // Read-only canonical identity + the authoritative unplaced list. Both
