@@ -79,6 +79,7 @@ import { useCustomerPicker } from "@/state/customerPicker";
 import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
+import { useFloor } from "@/state/floor";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
@@ -1370,7 +1371,20 @@ export function useDineInWorkspace(input: {
           it. Mounted here (in the always-present dialogs) so the launching button
           lives in the Map header while the overlay is stable across layout ticks.
           Closing simply returns to the Service Map — Phase 3A publishes nothing. */}
-      <FloorDesigner open={editingFloor} ctx={ctx} onClose={() => setEditingFloor(false)} />
+      {/* Returning from the Designer re-reads the PUBLISHED Service Floor so a
+          just-published layout is live immediately — no List↔Map toggle, branch
+          switch, restart or 60s wait. Reuses the existing floor.load(ctx): the
+          ServiceFloor stays mounted behind the overlay, so its own mount effect
+          does not re-run on close. One harmless read on any close is acceptable;
+          no polling, no second cache. */}
+      <FloorDesigner
+        open={editingFloor}
+        ctx={ctx}
+        onClose={() => {
+          setEditingFloor(false);
+          if (ctx.branchId) void useFloor.getState().load(ctx);
+        }}
+      />
     </>
   );
 
