@@ -151,6 +151,9 @@ import { addressLine } from "@/components/pos/CustomerCard";
 import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
+import { isBackendReachable } from "@/lib/offline/reachability";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn } from "@/lib/offline/db";
+import { getDeviceIdentity } from "@/lib/device";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -506,7 +509,13 @@ export function useDeliveryWorkspace(input: {
         deliveryAccess: accessGate,
         createOrders: input.createOrders,
         hasOpenShift: Boolean(input.shiftId),
-        online,
+        // Offline is allowed for an ALREADY-CACHED customer + address: the order is
+        // queued durably (idempotent pos_submit_order on reconnect), never a live
+        // submit. The customer/address/lines/shift checks still apply above; only
+        // the connection requirement is satisfied by the offline-queue capability.
+        // (A customer can only be selected from cache offline, so it always has a
+        // real server id - offline customer CREATION stays blocked.)
+        online: online || (Boolean(customerId) && Boolean(addressId)),
         customerId,
         addressId,
         lineCount: deliveryLines.length,
@@ -772,6 +781,120 @@ export function useDeliveryWorkspace(input: {
       return;
     }
 
+    // OFFLINE delivery order (cached customer only): the backend-reachability
+    // probe is the deciding authority. The order is committed DURABLY (UNPAID,
+    // sent to kitchen) with the cart's stable client_op_id and replayed exactly
+    // once via pos_submit_order on reconnect - the same engine and guarantees as
+    // the accepted Takeaway offline path. No payment is taken offline (delivery
+    // settlement stays online). The customer/address are a real server identity
+    // from the local cache; offline customer creation is not possible here.
+    if (!(await isBackendReachable())) {
+      if (!snapshot.customerId || !snapshot.addressId) return;
+      setSendError(null);
+      setSending(true);
+      completionDone.current = false;
+      try {
+        const custName = state.selected?.name ?? null;
+        const payload = buildDeliveryPayload({
+          branchId: snapshot.branchId,
+          shiftId: snapshot.shiftId,
+          clientOpId: snapshot.clientOpId,
+          lines: snapshot.lines,
+          customerId: snapshot.customerId,
+          addressId: snapshot.addressId,
+          orderNote: snapshot.note,
+          deliveryFee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
+        });
+        const dev = getDeviceIdentity();
+        const feeValue = snapshot.deliveryFee.provided ? (snapshot.deliveryFee.value ?? 0) : 0;
+        const subtotal = cartSubtotal(snapshot.lines);
+        const total = subtotal + feeValue;
+        const existing = await getPosOfflineTxnByOp(snapshot.clientOpId);
+        const localId = existing?.local_txn_id ?? crypto.randomUUID();
+        if (existing) {
+          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued" });
+        } else {
+          await addPosOfflineTxn({
+            local_txn_id: localId,
+            client_op_id: snapshot.clientOpId,
+            tenant_id: pos.tenantId as string,
+            branch_id: snapshot.branchId,
+            device_id: dev.device_id,
+            terminal_id: dev.terminal_id,
+            cashier_user_id: pos.userId as string,
+            cashier_user_name: pos.userName,
+            shift_id: snapshot.shiftId as string,
+            created_at: new Date().toISOString(),
+            order_payload: payload,
+            // No payment offline - the delivery order syncs UNPAID, exactly as an
+            // online delivery send produces. Settlement stays online.
+            payment_intent: null,
+            sent_to_kitchen: true,
+            currency: input.currency,
+            total,
+            status: "queued",
+            attempts: 0,
+          });
+        }
+        const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
+        completionDone.current = true;
+        setSubmitted({
+          order: {
+            id: localId,
+            order_number: ref,
+            status: "sent_to_kitchen",
+            payment_status: "unpaid",
+            subtotal,
+            delivery_fee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
+            total_amount: total,
+            currency: null,
+            customer_id: snapshot.customerId,
+            address_id: snapshot.addressId,
+            notes: snapshot.note,
+            created_at: new Date().toISOString(),
+          },
+          recovered: false,
+        });
+        // Local kitchen ticket, best-effort: an offline print hiccup must never
+        // undo a durably-committed order. Latched on the local id, so a resend
+        // cannot double-print.
+        try {
+          await input.onKitchenBatch({
+            source: "delivery",
+            orderId: localId,
+            orderNumber: ref,
+            batchNo: 1,
+            customerName: custName,
+            orderNote: snapshot.note,
+            lines: snapshot.lines.map((l) => ({
+              name: l.name,
+              qty: l.quantity,
+              modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
+              note: l.kitchen_note,
+              menuItemId: l.menu_item_id,
+            })),
+          });
+        } catch {
+          /* offline print is non-fatal */
+        }
+        useCart.getState().reset();
+        setOrderNote("");
+        setOrderDeliveryFee("");
+        setView("customer");
+        toast.push({
+          tone: "success",
+          message: "Delivery order saved offline",
+          detail: `Ref ${ref}. It will sync when the connection returns.`,
+        });
+      } catch (e) {
+        const classified = classifyError(e);
+        setSendError(classified.hint ? `${classified.message} ${classified.hint}` : classified.message);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
     setSendError(null);
     setSending(true);
     completionDone.current = false;
@@ -896,7 +1019,7 @@ export function useDeliveryWorkspace(input: {
     } finally {
       setSending(false);
     }
-  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, branchId, orderNote, orderDeliveryFee, pos.branch.id, pos.tenantId, toast]);
+  }, [sendGate.allowed, input.shiftId, input.onKitchenBatch, input.currency, branchId, orderNote, orderDeliveryFee, pos.branch.id, pos.tenantId, pos.userId, pos.userName, toast]);
 
   const requestSend = useCallback(() => void send(), [send]);
 

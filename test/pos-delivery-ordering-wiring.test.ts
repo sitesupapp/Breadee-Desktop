@@ -173,10 +173,17 @@ test("the payload is built from the snapshot, never from live state", () => {
   assert.match(build, /clientOpId: snapshot\.clientOpId/);
 });
 
-test("the customer and address are revalidated before every send", () => {
+test("the customer and address are revalidated before the ONLINE send builds its payload", () => {
   const code = stripComments(deliverySrc);
   const send = code.slice(code.indexOf("const send = useCallback"), code.indexOf("const requestSend"));
-  assert.ok(send.indexOf("revalidateTarget") < send.indexOf("buildDeliveryPayload"));
+  // An OFFLINE send (backend unreachable) builds a payload to QUEUE it and returns
+  // before the online path - it cannot revalidate against a server it cannot reach,
+  // and creation is exactly-once via the idempotent pos_submit_order on reconnect.
+  // The invariant that still matters: the ONLINE path revalidates the target before
+  // building the payload it live-submits. The online build is the LAST one in `send`.
+  const onlineBuild = send.lastIndexOf("buildDeliveryPayload");
+  const revalidate = send.indexOf("revalidateTarget");
+  assert.ok(revalidate > 0 && revalidate < onlineBuild);
 });
 
 test("recovery is scoped to the SUBMITTED customer, not the selected one", () => {
