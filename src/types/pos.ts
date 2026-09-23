@@ -5,6 +5,7 @@
 // already selects, or to a key `pos_submit_order` / `pos_pay_order` already parse.
 
 import type { CurrencyCode } from "@/lib/currency";
+import type { RecipeRemovable, RemovedMaterial } from "@/lib/pos/recipeRemovals";
 
 export type OrderType = "takeaway" | "dine_in" | "delivery";
 
@@ -82,6 +83,13 @@ export type CartLine = {
    * kept apart from Cost Control's `removed_ingredients` channel.
    */
   removed_ingredients?: string[];
+  /**
+   * FT4 — material-linked removals for THIS line, captured branch/OU-exact against
+   * the recipe removables (never derived from a menu name). Present only when the
+   * item exposes recipe removables; serialized to the canonical
+   * `customization_json.removed_ingredients` channel the server trigger reads.
+   */
+  removed_materials?: RemovedMaterial[];
 };
 
 /** The full menu payload a POS route needs, loaded once per tenant/branch. */
@@ -92,6 +100,11 @@ export type MenuData = {
   options: ModifierOption[];
   /** menu_item_id -> attached modifier_group_id[] */
   groupsByItem: Record<string, string[]>;
+  /**
+   * FT4 — menu_item_id -> branch/OU-exact recipe removables (is_removable lines),
+   * material-keyed. Optional/absent when no removables loaded (text fallback).
+   */
+  removablesByItem?: Record<string, RecipeRemovable[]>;
 };
 
 // --- Shifts -----------------------------------------------------------------
