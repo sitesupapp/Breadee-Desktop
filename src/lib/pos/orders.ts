@@ -20,7 +20,7 @@
 
 import { asRecord, bool, callPosRpc, num, requireId, str } from "@/lib/pos/rpc";
 import { lineTotals } from "@/lib/pos/modifiers";
-import { buildCustomization, type LineCustomization } from "@/lib/pos/itemOptions";
+import { buildLineCustomization, type LineCustomization } from "@/lib/pos/itemOptions";
 import type { CartLine, OrderType, SubmitOrderResult } from "@/types/pos";
 
 /** Exactly the item shape `pos_save_order` iterates over. */
@@ -36,8 +36,9 @@ export type SubmitOrderItem = {
    *
    * Omitted entirely when there is nothing to say, so an order with no
    * customization produces byte-for-byte the payload it did before this
-   * existed. Carries ONLY `removed_menu_ingredients` (the menu channel) - never
-   * Cost Control's `removed_ingredients`. See `lib/pos/itemOptions.ts`.
+   * existed. Carries `removed_menu_ingredients` (the menu/kitchen text channel)
+   * and, since FT4, `removed_ingredients` (the material-linked Cost Control
+   * channel) — the two never collide. See `lib/pos/itemOptions.ts`.
    */
   customization_json?: LineCustomization;
   modifiers: {
@@ -187,7 +188,10 @@ export function buildSubmitPayload(input: {
       ? { delivery_fee: input.deliveryFee }
       : {}),
     items: input.lines.map((l) => {
-      const customization = buildCustomization(l.removed_ingredients ?? []);
+      const customization = buildLineCustomization({
+        removedNames: l.removed_ingredients ?? [],
+        removedMaterials: l.removed_materials ?? [],
+      });
       return {
         menu_item_id: l.menu_item_id,
         name: l.name,
@@ -240,6 +244,23 @@ export function submitPayloadToCartLines(items: SubmitOrderItem[]): CartLine[] {
     modifiers: it.modifiers.map((m) => ({ ...m })),
     ...(it.customization_json?.removed_menu_ingredients && it.customization_json.removed_menu_ingredients.length > 0
       ? { removed_ingredients: it.customization_json.removed_menu_ingredients }
+      : {}),
+    // FT4 — also restore the material-linked removal channel so a resumed offline
+    // order re-submits with `customization_json.removed_ingredients` intact and the
+    // server subtracts the same materials. Display name is not carried in the
+    // payload (kitchen text already lives in `kitchen_note`); `toRemovedIngredientsPayload`
+    // drops it on the way back out, so re-submit is byte-identical.
+    ...(it.customization_json?.removed_ingredients && it.customization_json.removed_ingredients.length > 0
+      ? {
+          removed_materials: it.customization_json.removed_ingredients.map((m) => ({
+            materialId: m.material_id,
+            name: "",
+            quantity: m.quantity,
+            unitId: m.unit_id,
+            wastePercent: m.waste_percent,
+            modifierOptionId: m.modifier_option_id,
+          })),
+        }
       : {}),
   }));
 }

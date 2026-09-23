@@ -1079,8 +1079,15 @@ function PosWorkspaceInner() {
         // carried structurally on the line, which is what reaches the order
         // payload. The note is what a cook reads; the array is what the system
         // stores.
-        note: kitchenNoteFor({ removed: input.removedIngredients, note: input.note }),
+        note: kitchenNoteFor({
+          removed: [...input.removedIngredients, ...input.removedMaterials.map((m) => m.name)],
+          note: input.note,
+        }),
         removedIngredients: input.removedIngredients,
+        // FT4 — material-linked removals travel structurally on the line to the
+        // canonical server channel; their display names are unioned into the
+        // kitchen note above so a cook sees "NO <MATERIAL>" the same as a text removal.
+        removedMaterials: input.removedMaterials,
       });
       setPickerItem(null);
     },
@@ -2519,6 +2526,7 @@ function PosWorkspaceInner() {
         currency={currency}
         rate={rate}
         ingredientCustomization={features.ingredientCustomization}
+        removables={pickerItem ? menu.removablesByItem?.[pickerItem.item.id] ?? [] : []}
         onCancel={() => setPickerItem(null)}
         onConfirm={confirmPicker}
       />
