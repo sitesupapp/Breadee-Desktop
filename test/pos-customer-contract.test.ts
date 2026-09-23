@@ -192,7 +192,13 @@ test("customer tables are never written directly - only read", () => {
 test("customer writes are never queued offline", () => {
   // A queued customer is a customer whose duplicate check ran against a stale
   // world. The write gate refuses while offline instead.
-  for (const src of deliverySources) {
+  //
+  // Scoped to the CUSTOMER modules. The delivery workspace now legitimately queues
+  // an offline DELIVERY ORDER (a different, idempotent capability that replays via
+  // pos_submit_order on the cart's stable client_op_id) - so it imports offline/db
+  // for the ORDER path. That is not a customer write, and customer creation stays
+  // blocked offline by the write gate, asserted below and in the offline-order tests.
+  for (const src of [customersSrc, stateSrc]) {
     const code = stripComments(src);
     assert.equal(/enqueue|outbox|offline\/db|pendingCount/.test(code), false);
   }

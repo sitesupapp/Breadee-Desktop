@@ -262,8 +262,12 @@ export function useDineInWorkspace(input: {
     if (!base.allowed) return base;
     if (!selected) return { allowed: false, reason: "Select a table first." };
     if (!isOpenable(selected)) return { allowed: false, reason: "This table already has an open bill." };
+    // Opening a table is a non-idempotent server write (pos_open_table) with no
+    // offline queue in this hotfix - Dine-In offline is READ continuity only. Block
+    // it with a clear reason rather than letting a click surface "Failed to fetch".
+    if (!input.online) return { allowed: false, reason: "Opening a table needs a connection." };
     return { allowed: true, reason: null };
-  }, [pos.access, hasOpenShift, selected]);
+  }, [pos.access, hasOpenShift, selected, input.online]);
 
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
@@ -1038,6 +1042,7 @@ export function useDineInWorkspace(input: {
         loading={tables.loading}
         refreshing={tables.refreshing}
         stale={stale}
+        offline={tables.offline}
         error={tables.error}
         query={query}
         now={now}
@@ -1058,7 +1063,7 @@ export function useDineInWorkspace(input: {
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.error, query, now, ctx, select],
+    [tables.map, visible, tables.selectedTableId, focusedId, tables.loading, tables.refreshing, stale, tables.offline, tables.error, query, now, ctx, select],
   );
 
   // --- print the current bill BEFORE payment ---------------------------------

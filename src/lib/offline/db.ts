@@ -98,12 +98,37 @@ export interface PosOfflineTxn {
   last_error?: string | null;
 }
 
+/**
+ * A compact, tenant+branch-scoped Delivery customer record cached while online so
+ * the caller can be found again offline. Keyed by the SERVER customer id - never a
+ * local id, because offline customer CREATION is not supported in this hotfix.
+ * `addresses` is present only once the full profile has been opened online (a
+ * plain search caches identity fields only); an offline order needs a cached
+ * address, so a compact-only record cannot yet be ordered against offline.
+ */
+export interface CachedCustomer {
+  id: string; // server customer id (PK)
+  tenant_id: string;
+  branch_id: string | null;
+  name: string | null;
+  phone: string | null;
+  phone_e164: string | null;
+  /** Full addresses, cached only when the profile was opened online. */
+  addresses: unknown[] | null;
+  notes: string | null;
+  /** True once the full profile (with addresses) was cached, not just a match. */
+  has_profile: boolean;
+  cached_at: string;
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
   audit!: Table<AuditRecord, number>;
   // Added in schema version 2 (see below). Keyed by local_txn_id.
   posOfflineTxns!: Table<PosOfflineTxn, string>;
+  // Added in schema version 3 (see below). Keyed by the server customer id.
+  posCustomers!: Table<CachedCustomer, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -119,6 +144,12 @@ class BreadeeDB extends Dexie {
     // migrated destructively.
     this.version(2).stores({
       posOfflineTxns: "local_txn_id, client_op_id, tenant_id, branch_id, status, created_at, cashier_user_id",
+    });
+    // Version 3 - ADDITIVE. Adds ONLY the posCustomers cache for offline Delivery
+    // customer lookup. Every prior store carries forward untouched; a v1/v2
+    // database upgrades in place with all data preserved.
+    this.version(3).stores({
+      posCustomers: "id, tenant_id, branch_id, phone_e164, name",
     });
   }
 }
@@ -156,6 +187,87 @@ export async function purgeForeignSnapshots(tenantId: string | null, branchId: s
 // call unsyncedOutboxCount() first if the UI needs to warn about pending items.
 export async function clearSnapshotCache(): Promise<void> {
   await localdb.snapshots.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Dine-In table map cache (read continuity) - reuses the generic snapshot store.
+// ---------------------------------------------------------------------------
+
+const tableMapKey = (branchId: string | null) => `tables:${branchId ?? "none"}`;
+
+/**
+ * Cache the last successfully-loaded table map for a branch. Called ONLY after a
+ * successful online load, so a failed/empty network response can never overwrite
+ * a valid snapshot. Branch/tenant scoped.
+ */
+export async function cacheTableMap(map: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({
+    key: tableMapKey(branchId),
+    tenant_id: tenantId,
+    branch_id: branchId,
+    data: map,
+    cached_at: new Date().toISOString(),
+  });
+}
+
+/** The cached table map for a branch, or null. Scope-checked so it can never
+ *  serve another tenant/branch's map. */
+export async function readCachedTableMap(
+  tenantId: string | null,
+  branchId: string | null,
+): Promise<{ map: unknown; cachedAt: number } | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(tableMapKey(branchId));
+  if (!row) return null;
+  if (row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { map: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
+// ---------------------------------------------------------------------------
+// Delivery customer cache (offline lookup) - posCustomers store (v3).
+// ---------------------------------------------------------------------------
+
+/** Upsert one or more cached customers (identity match, or full profile). */
+export async function cacheCustomers(records: CachedCustomer[]): Promise<void> {
+  if (records.length === 0) return;
+  await localdb.posCustomers.bulkPut(records);
+}
+
+/** Every cached customer for a tenant+branch scope (for local search). */
+export async function listCachedCustomers(tenantId: string | null, branchId: string | null): Promise<CachedCustomer[]> {
+  if (!tenantId) return [];
+  const all = await localdb.posCustomers.where("tenant_id").equals(tenantId).toArray();
+  return all.filter((c) => (c.branch_id ?? null) === (branchId ?? null));
+}
+
+/** One cached customer by server id, scope-checked. */
+export async function getCachedCustomer(
+  id: string,
+  tenantId: string | null,
+  branchId: string | null,
+): Promise<CachedCustomer | undefined> {
+  const c = await localdb.posCustomers.get(id);
+  if (!c) return undefined;
+  if (c.tenant_id !== tenantId || (c.branch_id ?? null) !== (branchId ?? null)) return undefined;
+  return c;
+}
+
+/**
+ * Drop cached customers that do NOT belong to the current tenant/branch, so a
+ * previous session's callers can never surface for a different tenant/branch.
+ */
+export async function purgeForeignCachedCustomers(tenantId: string | null, branchId: string | null): Promise<number> {
+  const all = await localdb.posCustomers.toArray();
+  const foreign = all.filter((c) => c.tenant_id !== tenantId || (branchId != null && (c.branch_id ?? null) !== branchId));
+  await Promise.all(foreign.map((c) => localdb.posCustomers.delete(c.id)));
+  return foreign.length;
+}
+
+/** Sign-out cleanup: drop the whole customer cache (privacy - phones/addresses). */
+export async function clearCachedCustomers(): Promise<void> {
+  await localdb.posCustomers.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +328,10 @@ export async function listResumablePosTxns(
         t.sent_to_kitchen === true &&
         !t.paid &&
         !t.payment_intent &&
+        // TAKEAWAY only: the Resume banner rebuilds a takeaway cart. A queued
+        // offline DELIVERY order carries its own customer/address and syncs on
+        // reconnect without a cart resume, so it must never appear here.
+        (t.order_payload as { order_type?: string } | null)?.order_type === "takeaway" &&
         // Only orders still held locally. Once SYNCED, the order exists on the
         // server (unpaid) and is paid through the normal shift-orders flow, so it
         // must not linger here after an online payment.

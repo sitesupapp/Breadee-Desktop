@@ -13,13 +13,12 @@
 import { create } from "zustand";
 import {
   createCustomerLatch,
-  loadCustomerProfile,
-  searchCustomers,
   type CustomerAddress,
   type CustomerLatch,
   type CustomerMatch,
   type CustomerProfile,
 } from "@/lib/pos/customers";
+import { loadCustomerProfileOfflineAware, searchCustomersOfflineAware } from "@/lib/offline/customerCache";
 
 /** How long typing settles before a search runs. Matches the web behaviour. */
 export const SEARCH_DEBOUNCE_MS = 250;
@@ -103,7 +102,7 @@ export const useCustomers = create<CustomerState>((set, get) => ({
     }
     set({ searching: true, searchError: null });
     try {
-      const results = await searchCustomers(term);
+      const results = await searchCustomersOfflineAware(term);
       // The query may have moved on while this read was in flight.
       if (get().query.trim() !== term) return;
       set({ results, searching: false });
@@ -117,7 +116,7 @@ export const useCustomers = create<CustomerState>((set, get) => ({
   select: async (customerId) => {
     set({ loadingProfile: true, profileError: null, results: null });
     try {
-      const profile = await loadCustomerProfile(customerId);
+      const profile = await loadCustomerProfileOfflineAware(customerId);
       set({
         selected: profile,
         selectedAddressId: preferredAddressId(profile.addresses),
@@ -133,7 +132,7 @@ export const useCustomers = create<CustomerState>((set, get) => ({
     if (!current) return;
     set({ loadingProfile: true, profileError: null });
     try {
-      const profile = await loadCustomerProfile(current.id);
+      const profile = await loadCustomerProfileOfflineAware(current.id);
       set({
         selected: profile,
         // Keep the operator's explicit choice when it still exists; otherwise
