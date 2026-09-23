@@ -1,0 +1,11 @@
+{
+  "version": "1.0.35",
+  "notes": "Breadee Staging 1.0.35",
+  "pub_date": "2026-09-23T12:04:43Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNXFrRFo4elhGRVZHOFZ6M25TN3NWTGdST0p0STRPSTZKeVI1Y0V3MCtUaVdKS2crZHhWSFQzcUhGYnJ6akNCeEl0NGJFNmxNSXFIVVNkODA2cUNLRGd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMTY1MDc1CWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC4zNV94NjQtc2V0dXAuZXhlCm5ISmJOOXJtcXBJSnRnL3BNK0k0UmJkRTlWQ0F4cHpyUlhJUkhrenAveW9wbzBxV3d4d2hQbTFZYkR4WXJ1R1JKNzJFUGNOYnhqRHBLdjBja2NPZ0FnPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.35/Breadee_Staging_1.0.35_x64-setup.exe"
+    }
+  }
+}
