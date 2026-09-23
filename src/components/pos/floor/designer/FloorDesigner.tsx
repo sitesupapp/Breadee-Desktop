@@ -411,16 +411,6 @@ export function FloorDesigner({ open, ctx, onClose }: { open: boolean; ctx: Ctx;
         </div>
       )}
 
-      {d.phase === "empty" && (
-        <div className="grid min-h-0 flex-1 place-items-center p-4">
-          <EmptyState
-            title="Nothing to edit yet"
-            hint="This branch has no floor document to adjust yet. Publishing a first floor is coming in a later step; the table List and Service Map are unaffected."
-            action={<Button variant="ghost" onClick={onClose}>Back to Service</Button>}
-          />
-        </div>
-      )}
-
       {d.phase === "ready" && (
         <div className="flex min-h-0 flex-1">
           {/* Canvas column — the workspace. The nav sits in a FIXED row so its

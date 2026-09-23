@@ -456,6 +456,22 @@ export function makeSection(name: string, sort: number): Record<string, unknown>
   return { id: newSectionId(), name, sort };
 }
 
+/** The default name for a brand-new floor's first (and only) section. */
+export const FIRST_FLOOR_SECTION_NAME = "Main";
+
+/**
+ * The minimal editable draft for a branch that has canonical tables but has
+ * never drafted or published a floor. Exactly ONE default section and no
+ * elements — the smallest document the server's autosave/publish validator
+ * accepts (it requires >=1 section; `EMPTY_DOC` has none). First-floor bootstrap
+ * enters the ordinary editing path with this so existing tables can be placed
+ * and FIRST-published against `base_revision_id = null`; canonical tables are
+ * still created only by the atomic server PUBLISH, never by opening the editor.
+ */
+export function makeInitialDraft(): ParsedDraft {
+  return parseDraftDoc({ v: "1", sections: [makeSection(FIRST_FLOOR_SECTION_NAME, 0)], elements: [] });
+}
+
 /** Default footprint for a newly placed table, in logical units. */
 export const DEFAULT_TABLE_GEOM = { w: 100, h: 100, rotation: 0 } as const;
 
