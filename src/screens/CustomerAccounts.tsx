@@ -24,6 +24,7 @@ import { Modal } from "@/components/overlays";
 import { Glyph } from "@/components/Glyph";
 import { formatMoney, parseAmount, roundUsd, type CurrencyCode } from "@/lib/currency";
 import { PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
+import { paymentMethodLabel } from "@/lib/pos/paymentMethods";
 import {
   assertCollectionAmount,
   collectReceivable,
@@ -606,7 +607,7 @@ function OrderRow({
               <span className="text-sub">{formatDateTime(p.paidAt)}</span>
               <span className="flex items-center gap-2">
                 <span className="font-semibold text-ink">{formatMoney(p.amount, p.currency)}</span>
-                {p.method && <Badge tone="slate">{p.method}</Badge>}
+                {p.method && <Badge tone="slate">{paymentMethodLabel(useSession.getState().paymentMethods, p.method)}</Badge>}
                 {p.collector && <span className="text-sub">by {p.collector}</span>}
                 {p.shiftId && <span className="text-sub">· shift {p.shiftId.slice(0, 8)}</span>}
               </span>
@@ -724,7 +725,7 @@ function ConfirmationView({ confirmation }: { confirmation: ReceivableConfirmati
         <Row label="Customer" value={c.customerName || "—"} />
         <Row label="Order" value={`#${c.orderNumber}`} />
         <Row label="Paid" value={formatMoney(c.paidAmount, c.paidCurrency)} />
-        <Row label="Method" value={c.method || "—"} />
+        <Row label="Method" value={c.method ? paymentMethodLabel(useSession.getState().paymentMethods, c.method) : "—"} />
         <Row label="Balance before (USD)" value={formatMoney(c.previousBalanceUsd, "USD")} />
         <Row label="Balance now (USD)" value={formatMoney(c.remainingBalanceUsd, "USD")} strong />
         <Row label="Branch" value={c.branchName} />
