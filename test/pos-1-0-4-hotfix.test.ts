@@ -426,7 +426,9 @@ test("every payment control survives the compact layout", () => {
   ]) {
     assert.ok(paymentDialog.includes(control), `${control} must still be in the payment dialog`);
   }
-  assert.match(paymentDialog, /PAYMENT_METHODS\.map/);
+  // Phase B: the Method chooser now renders the dynamic tenant catalog (activePaymentChoices)
+  // instead of the hard-coded PAYMENT_METHODS constant. The chooser is still present.
+  assert.match(paymentDialog, /methodChoices\.map/);
   assert.match(paymentDialog, /\["USD", "LBP"\]/);
   assert.match(paymentDialog, /\["none", "percent", "amount"\]/);
   assert.match(keypad, /"7", "8", "9", "4", "5", "6", "1", "2", "3", "0", "00", "\."/);
