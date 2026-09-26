@@ -75,3 +75,21 @@ test("wiring: PaymentMethod is a dynamic stable-key string; cash remains the fal
   assert.match(p, /export type PaymentMethod = string;/);
   assert.match(p, /value: "cash", label: "Cash"/);
 });
+
+test("receipt: on-screen + printed receipt resolve the friendly label via the catalog (key untouched)", () => {
+  const rp = read("screens/pos/ReceiptPreview.tsx");
+  // resolves stored key -> label via the synchronized catalog
+  assert.match(rp, /const methodLabel = data\.method \? paymentMethodLabel\(catalog, data\.method\) : "cash"/);
+  assert.match(rp, /Paid - \$\{methodLabel\}/);
+  assert.match(rp, /Partial - \$\{methodLabel\}/);
+  // the printed doc carries the resolved label, not the raw key
+  assert.match(rp, /method: data\.method \? paymentMethodLabel\(catalog, data\.method\) : data\.method/);
+  // the raw key is no longer rendered on the receipt line
+  assert.doesNotMatch(rp, /Paid - \$\{data\.method \?\? "cash"\}/);
+});
+
+test("payment review: customer-account history + confirmation resolve labels via the catalog", () => {
+  const ca = read("screens/CustomerAccounts.tsx");
+  const hits = ca.split("paymentMethodLabel(useSession.getState().paymentMethods").length - 1;
+  assert.ok(hits >= 2, `both payment-review spots resolve the label (found ${hits})`);
+});

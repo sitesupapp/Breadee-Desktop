@@ -22,6 +22,8 @@ import { formatMoney } from "@/lib/currency";
 import { Badge, Button, GatedButton } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { usePosContext } from "@/state/pos";
+import { useSession } from "@/state/session";
+import { paymentMethodLabel } from "@/lib/pos/paymentMethods";
 import { canPrintReceipts } from "@/lib/pos/access";
 import {
   ACCEPTED_MESSAGE,
@@ -66,6 +68,11 @@ import {
  */
 export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: ReceiptRenderOptions }) {
   const show = (key: string) => !render?.sections || render.sections.includes(key);
+  // Phase B: show the tenant's friendly payment-method label (resolved from the synchronized
+  // catalog by the stored stable key), never the raw key. Resolves inactive/renamed methods;
+  // falls back to the key slug when the catalog is unavailable. The stored key is untouched.
+  const catalog = useSession((s) => s.paymentMethods);
+  const methodLabel = data.method ? paymentMethodLabel(catalog, data.method) : "cash";
   return (
     <div className="mx-auto w-[320px] rounded-lg border border-paper-line bg-paper p-4 font-mono text-[12px] leading-tight text-paper-ink">
       <div className="text-center">
@@ -216,9 +223,9 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
         <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
           <span>
             {data.paid
-              ? `Paid - ${data.method ?? "cash"}`
+              ? `Paid - ${methodLabel}`
               : data.paymentStatus === "partial"
-                ? `Partial - ${data.method ?? "cash"}`
+                ? `Partial - ${methodLabel}`
                 : data.paymentStatus === "unpaid"
                   ? "On account"
                   : "Unpaid"}
@@ -248,6 +255,9 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
 
 export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: () => void }) {
   const pos = usePosContext();
+  // Phase B: the printed receipt shows the friendly payment-method label (resolved from the
+  // synchronized catalog by the stored key). Display only — the stored key is unchanged.
+  const catalog = useSession((s) => s.paymentMethods);
   const native = isNativeAvailable();
 
   const [resolution, setResolution] = useState<CashierResolution | null>(null);
@@ -353,7 +363,7 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
       copies: target.copies,
       // The SAME options the panel above is rendering. What the operator
       // approved on screen is what leaves the spooler.
-      receipt: { ...data, ...(render ?? {}) },
+      receipt: { ...data, ...(render ?? {}), method: data.method ? paymentMethodLabel(catalog, data.method) : data.method },
     });
     if (result.ok) setOutcome(result.value);
     else setError(result.error);
