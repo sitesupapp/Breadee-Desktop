@@ -17,8 +17,10 @@ import { CustomerSearch, type CustomerSearchProps } from "@/components/pos/Custo
 import { useShortcuts } from "@/lib/keyboard/provider";
 import { convertCurrency, formatMoney, hasValidRate, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { computeDiscount, discountPayload, fixedDiscountToPrimary, type DiscountType } from "@/lib/pos/discounts";
-import { computeChange, paymentBlockedReason, PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
+import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
+import { activePaymentChoices } from "@/lib/pos/paymentMethods";
 import { parseDeliveryFee } from "@/lib/pos/deliverySettlement";
+import { useSession } from "@/state/session";
 
 /**
  * How a sale is being settled.
@@ -136,6 +138,11 @@ export type PaymentDialogProps = {
 };
 
 export function PaymentDialog(props: PaymentDialogProps) {
+  // Phase B: the active tender methods come from the synchronized tenant catalog
+  // (falls back to cash-only when the catalog is unsynced/offline). The stable KEY is
+  // what is submitted/stored; the label is display only. No is_cash editing lives here.
+  const catalog = useSession((s) => s.paymentMethods);
+  const methodChoices = useMemo(() => activePaymentChoices(catalog), [catalog]);
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [currency, setCurrency] = useState<CurrencyCode>(props.primaryCurrency);
   const [discountType, setDiscountType] = useState<DiscountType>("none");
@@ -396,8 +403,8 @@ export function PaymentDialog(props: PaymentDialogProps) {
               to occupy two full-width blocks between them. */}
           <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
             <Field label="Method">
-              <div className="flex gap-2">
-                {PAYMENT_METHODS.map((m) => (
+              <div className="flex flex-wrap gap-2">
+                {methodChoices.map((m) => (
                   <Choice key={m.value} active={method === m.value} onClick={() => setMethod(m.value)}>
                     {m.label}
                   </Choice>

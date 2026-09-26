@@ -5,6 +5,7 @@ import { purgeForeignSnapshots, clearSnapshotCache } from "@/lib/offline/db";
 import { clearPosSessionSnapshot } from "@/lib/offline/posSession";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
+import type { PaymentMethodDef } from "@/lib/pos/paymentMethods";
 import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
 
 // Read-only tenant currency settings for display (dual USD/LBP). Never used for POS math.
@@ -27,6 +28,8 @@ type CachedContext = {
   features: FeatureMap;
   permissions: Record<string, boolean>;
   currency: CurrencySettings;
+  /** Phase B: tenant payment-method catalog, cached for offline checkout + label display. */
+  paymentMethods: PaymentMethodDef[];
   cachedAt: number;
 };
 
@@ -42,6 +45,7 @@ type SessionState = {
   features: FeatureMap;
   permissions: Record<string, boolean>;
   currency: CurrencySettings;
+  paymentMethods: PaymentMethodDef[];
   init: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signInWithGoogle: () => Promise<{ error: string | null }>;
@@ -75,6 +79,7 @@ export const useSession = create<SessionState>((set, get) => ({
   features: {},
   permissions: {},
   currency: DEFAULT_CURRENCY,
+  paymentMethods: [],
 
   init: async () => {
     getDeviceIdentity(); // ensure device identity exists early
@@ -103,6 +108,7 @@ export const useSession = create<SessionState>((set, get) => ({
         features: cache.features,
         permissions: cache.permissions,
         currency: cache.currency ?? DEFAULT_CURRENCY,
+        paymentMethods: cache.paymentMethods ?? [],
       });
       return;
     }
@@ -132,13 +138,18 @@ export const useSession = create<SessionState>((set, get) => ({
     let features: FeatureMap = {};
     let permissions: Record<string, boolean> = {};
     let currency: CurrencySettings = DEFAULT_CURRENCY;
+    let paymentMethods: PaymentMethodDef[] = [];
     if (membership?.tenant_id) {
-      const [{ data: t }, { data: feat }, { data: perms }, { data: cur }] = await Promise.all([
+      const [{ data: t }, { data: feat }, { data: perms }, { data: cur }, { data: pmethods }] = await Promise.all([
         supabase.from("tenants").select("id, business_name, tenant_status, verification_status, selected_plan_id, main_branch_id").eq("id", membership.tenant_id).maybeSingle(),
         supabase.rpc("get_tenant_effective_features", { p_tenant: membership.tenant_id }),
         supabase.rpc("current_user_permissions", { p_tenant: membership.tenant_id }),
         // Read-only display setting (dual USD/LBP). If RLS blocks it, we fall back to USD.
         supabase.from("tenant_currency_settings").select("primary_currency, usd_to_lbp_rate").eq("tenant_id", membership.tenant_id).maybeSingle(),
+        // Phase B: tenant payment-method catalog (RLS-scoped to this tenant). Cached for
+        // offline checkout + label resolution. If RLS/absence yields nothing, the checkout
+        // falls back to cash-only (PAYMENT_METHODS), preserving current behavior.
+        supabase.from("pos_payment_methods").select("key, label, is_cash, is_active, sort_order").eq("tenant_id", membership.tenant_id).order("sort_order", { ascending: true }).order("label", { ascending: true }),
       ]);
       tenant = (t as Tenant) ?? null;
       features = (feat as unknown as FeatureMap) ?? {};
@@ -148,6 +159,7 @@ export const useSession = create<SessionState>((set, get) => ({
         primary: isCurrencyCode(curRow?.primary_currency) ? curRow.primary_currency : "USD",
         rate: typeof curRow?.usd_to_lbp_rate === "number" ? curRow.usd_to_lbp_rate : null,
       };
+      paymentMethods = (pmethods as PaymentMethodDef[] | null) ?? [];
     }
 
     // Cache-scope hardening: drop any cached snapshots that don't belong to this
@@ -163,6 +175,7 @@ export const useSession = create<SessionState>((set, get) => ({
       features,
       permissions,
       currency,
+      paymentMethods,
     };
     set({ ...next, offlineMode: false, online: true });
     writeCache({ ...next, cachedAt: Date.now() });
@@ -192,7 +205,7 @@ export const useSession = create<SessionState>((set, get) => ({
     // Drop the read-only snapshot cache so no cached data survives into the next login.
     // The durable outbox (unsynced work) is preserved by design — never dropped here.
     await clearSnapshotCache().catch(() => {});
-    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false });
+    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, paymentMethods: [], offlineMode: false });
   },
 
   can: (perm) => Boolean(get().permissions[perm]),
