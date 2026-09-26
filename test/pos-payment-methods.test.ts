@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { activePaymentChoices, paymentMethodLabel, type PaymentMethodDef } from "@/lib/pos/paymentMethods";
+import { paymentLabel } from "@/lib/pos/orderActions";
+import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const read = (rel: string) => readFileSync(join(srcRoot, rel), "utf8");
@@ -76,20 +78,74 @@ test("wiring: PaymentMethod is a dynamic stable-key string; cash remains the fal
   assert.match(p, /value: "cash", label: "Cash"/);
 });
 
-test("receipt: on-screen + printed receipt resolve the friendly label via the catalog (key untouched)", () => {
+test("receipt: friendly label via catalog; NEVER null-defaults to cash; empty method → plain Paid (D2)", () => {
   const rp = read("screens/pos/ReceiptPreview.tsx");
-  // resolves stored key -> label via the synchronized catalog
-  assert.match(rp, /const methodLabel = data\.method \? paymentMethodLabel\(catalog, data\.method\) : "cash"/);
-  assert.match(rp, /Paid - \$\{methodLabel\}/);
-  assert.match(rp, /Partial - \$\{methodLabel\}/);
+  // resolves stored key -> label via the synchronized catalog, with NO "cash" default
+  assert.match(rp, /const methodLabel = paymentMethodLabel\(catalog, data\.method\);/);
+  // the old `data.method ? ... : "cash"` default that mislabelled non-cash tenders is gone
+  assert.doesNotMatch(rp, /paymentMethodLabel\(catalog, data\.method\) : "cash"/);
+  // paid renders the label, or a plain "Paid" when there is genuinely no method (never "cash")
+  assert.match(rp, /methodLabel[\s\S]*?`Paid - \$\{methodLabel\}`[\s\S]*?"Paid"/);
+  assert.match(rp, /methodLabel[\s\S]*?`Partial - \$\{methodLabel\}`[\s\S]*?"Partial"/);
   // the printed doc carries the resolved label, not the raw key
   assert.match(rp, /method: data\.method \? paymentMethodLabel\(catalog, data\.method\) : data\.method/);
-  // the raw key is no longer rendered on the receipt line
-  assert.doesNotMatch(rp, /Paid - \$\{data\.method \?\? "cash"\}/);
 });
 
-test("payment review: customer-account history + confirmation resolve labels via the catalog", () => {
+test("reprint (D2 root cause): both reprint builders carry the STORED method key, not null/cash", () => {
+  const cop = read("components/pos/CurrentOrderPanel.tsx");
+  // The order-summary reprint carries the order's stored key (resolved to a label at display),
+  // replacing the `method: null` that fell back to "cash".
+  assert.match(cop, /method: order\.payment_method \?\? null/);
+  // status chip resolves the label from the catalog
+  assert.match(cop, /paymentLabel\(order, catalog\)/);
+
+  const pw = read("screens/pos/PosWorkspace.tsx");
+  // The Orders/Delivery-modal shared reprint path carries the stored key too.
+  assert.match(pw, /method: order\.payment_method \?\? null/);
+});
+
+test("status chip (D3): paid method resolves to the friendly label; key preserved; never cash", () => {
+  type PayPick = Pick<ShiftOpenOrder, "payment_status" | "payment_method">;
+  const ord = (status: PayPick["payment_status"], method: string | null): PayPick => ({
+    payment_status: status,
+    payment_method: method,
+  });
+  assert.equal(paymentLabel(ord("paid", "whish"), catalog), "paid · Whish");
+  assert.equal(paymentLabel(ord("paid", "card"), catalog), "paid · Card");
+  assert.equal(paymentLabel(ord("paid", "cash"), catalog), "paid · Cash");
+  // inactive/renamed method still resolves for a historical order (E)
+  assert.equal(paymentLabel(ord("paid", "old_wallet"), catalog), "paid · Old Wallet");
+  // unknown key falls back to the readable key, NEVER to cash (F)
+  assert.equal(paymentLabel(ord("paid", "gone_method"), catalog), "paid · gone_method");
+  // no catalog available → raw readable key, never cash
+  assert.equal(paymentLabel(ord("paid", "whish")), "paid · whish");
+  // no method / non-paid states unchanged
+  assert.equal(paymentLabel(ord("paid", null), catalog), "paid");
+  assert.equal(paymentLabel(ord("unpaid", null), catalog), "unpaid");
+  assert.equal(paymentLabel(ord("refunded", "card"), catalog), "refunded");
+});
+
+test("financial invariant (H): the submitted/stored method is the stable key, unchanged by display", () => {
+  // PaymentDialog value IS the stable key (activePaymentChoices maps m.key -> value)
+  const pm = read("lib/pos/paymentMethods.ts");
+  assert.match(pm, /value: m\.key, label: m\.label/);
+  // the display helper never writes back to the stored field
+  const oa = read("lib/pos/orderActions.ts");
+  assert.doesNotMatch(oa, /payment_method\s*=[^=]/);
+});
+
+test("payment review + delivery detail (D3): POS history surfaces resolve labels via the catalog", () => {
   const ca = read("screens/CustomerAccounts.tsx");
   const hits = ca.split("paymentMethodLabel(useSession.getState().paymentMethods").length - 1;
   assert.ok(hits >= 2, `both payment-review spots resolve the label (found ${hits})`);
+  const dod = read("components/pos/DeliveryOrderDetail.tsx");
+  assert.match(dod, /paymentMethodLabel\(useSession\.getState\(\)\.paymentMethods, o\.payment_method\)/);
+  assert.doesNotMatch(dod, /value=\{o\.payment_method\}/); // raw key no longer rendered
+});
+
+test("order lists (D3): Orders + Delivery modals resolve the chip label via the catalog", () => {
+  for (const rel of ["components/pos/OrdersModal.tsx", "components/pos/DeliveryModal.tsx"]) {
+    const src = read(rel);
+    assert.match(src, /paymentLabel\(o, useSession\.getState\(\)\.paymentMethods\)/);
+  }
 });

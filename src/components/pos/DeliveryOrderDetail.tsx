@@ -38,6 +38,8 @@ import {
 import { DeliveryOpsEditor } from "@/components/pos/DeliveryOpsEditor";
 import { DeliveryProviderEditor } from "@/components/pos/DeliveryProviderEditor";
 import type { OperationalProvider } from "@/lib/pos/deliveryProviderCapture";
+import { useSession } from "@/state/session";
+import { paymentMethodLabel } from "@/lib/pos/paymentMethods";
 
 export type DeliveryOrderDetailProps = {
   order: DeliveryQueueOrder;
@@ -219,7 +221,10 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
         <p className="text-xs font-extrabold text-ink">Payment</p>
         <div className="mt-2 space-y-1">
           <Row label="Status" value={paymentStateLabel(o.payment_status)} />
-          {o.payment_method && <Row label="Method" value={o.payment_method} />}
+          {/* Phase B: friendly catalog label for the stored method key (never the raw key). */}
+          {o.payment_method && (
+            <Row label="Method" value={paymentMethodLabel(useSession.getState().paymentMethods, o.payment_method)} />
+          )}
           <Row label="Currency" value={currency} />
           {o.shift_id && <Row label="Shift" value={o.shift_id.slice(0, 8)} />}
         </div>

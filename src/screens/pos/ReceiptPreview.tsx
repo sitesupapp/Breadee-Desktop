@@ -72,7 +72,11 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
   // catalog by the stored stable key), never the raw key. Resolves inactive/renamed methods;
   // falls back to the key slug when the catalog is unavailable. The stored key is untouched.
   const catalog = useSession((s) => s.paymentMethods);
-  const methodLabel = data.method ? paymentMethodLabel(catalog, data.method) : "cash";
+  // Resolve the stored key to the tenant's friendly label. NEVER defaults a missing method
+  // to "cash": an unknown key falls back to the readable key slug (paymentMethodLabel), and
+  // an absent method (empty) renders as just "Paid"/"Partial" below — a cash default would
+  // mislabel a card/whish tender as cash.
+  const methodLabel = paymentMethodLabel(catalog, data.method);
   return (
     <div className="mx-auto w-[320px] rounded-lg border border-paper-line bg-paper p-4 font-mono text-[12px] leading-tight text-paper-ink">
       <div className="text-center">
@@ -223,9 +227,13 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
         <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
           <span>
             {data.paid
-              ? `Paid - ${methodLabel}`
+              ? methodLabel
+                ? `Paid - ${methodLabel}`
+                : "Paid"
               : data.paymentStatus === "partial"
-                ? `Partial - ${methodLabel}`
+                ? methodLabel
+                  ? `Partial - ${methodLabel}`
+                  : "Partial"
                 : data.paymentStatus === "unpaid"
                   ? "On account"
                   : "Unpaid"}

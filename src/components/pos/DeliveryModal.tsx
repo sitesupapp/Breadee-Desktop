@@ -22,6 +22,7 @@ import { Modal } from "@/components/overlays";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { orderLifecycleLabel, orderLifecycleTone, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { canEditOrder, canSettleOrder, paymentLabel, reversalActionFor } from "@/lib/pos/orderActions";
+import { useSession } from "@/state/session";
 
 export function DeliveryModal(props: {
   open: boolean;
@@ -86,7 +87,7 @@ export function DeliveryModal(props: {
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-extrabold text-ink">#{o.order_number ?? o.id.slice(0, 8)}</span>
                       <Badge tone={o.payment_status === "paid" ? "green" : o.payment_status === "refunded" ? "red" : "amber"}>
-                        {paymentLabel(o)}
+                        {paymentLabel(o, useSession.getState().paymentMethods)}
                       </Badge>
                       <Badge tone={orderLifecycleTone(o)}>{orderLifecycleLabel(o)}</Badge>
                     </div>

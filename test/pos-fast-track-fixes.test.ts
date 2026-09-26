@@ -264,10 +264,11 @@ test("Print presents the manual preview and can never auto-print", () => {
 });
 
 test("printing an open order fabricates nothing", () => {
-  // Unpaid stays unpaid: paid comes from the stored payment_status, the method
-  // is null, and no tendered/change key exists anywhere in the build.
+  // Unpaid stays unpaid: paid comes from the stored payment_status, and the
+  // method is the order's OWN stored key (null for an unpaid order — Phase B),
+  // never invented; no tendered/change key exists anywhere in the build.
   assert.match(panel, /paid: order\.payment_status === "paid"/);
-  assert.match(panel, /method: null/);
+  assert.match(panel, /method: order\.payment_method \?\? null/);
   for (const invented of ["tendered:", "change:", "tenderCurrency:", "tenderTotal:"]) {
     assert.equal(panel.includes(invented), false, `${invented} must not be invented for an open order`);
   }

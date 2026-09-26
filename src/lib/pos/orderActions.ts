@@ -17,6 +17,7 @@
 
 import { voidActionFor, type VoidAction } from "@/lib/pos/deliveryOrderManagement";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import { paymentMethodLabel, type PaymentMethodDef } from "@/lib/pos/paymentMethods";
 
 /** States from which nothing further can be done. */
 export const TERMINAL_STATUSES = ["voided", "cancelled", "refunded"] as const;
@@ -118,11 +119,24 @@ export function canPrintOrder(): boolean {
 
 // --- display helpers ---------------------------------------------------------
 
-/** The payment cell. An unpaid order shows no method, because it has none. */
-export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method">): string {
+/**
+ * The payment cell. An unpaid order shows no method, because it has none.
+ *
+ * Phase B: a paid order shows the tenant's FRIENDLY payment-method label,
+ * resolved from the synchronized catalog by the stored stable key (so
+ * `whish_qa_test` reads as "Whish QA Renamed"). The stored key is never
+ * changed. When the catalog is not passed (or the key is not in it), it falls
+ * back to the stable readable key — never to "cash".
+ */
+export function paymentLabel(
+  order: Pick<ShiftOpenOrder, "payment_status" | "payment_method">,
+  methods?: PaymentMethodDef[] | null,
+): string {
   if (order.payment_status === "refunded") return "refunded";
   if (order.payment_status !== "paid") return order.payment_status || "unpaid";
-  return order.payment_method ? `paid · ${order.payment_method}` : "paid";
+  if (!order.payment_method) return "paid";
+  const label = methods ? paymentMethodLabel(methods, order.payment_method) : order.payment_method;
+  return `paid · ${label}`;
 }
 
 /** The type cell: the route, plus the table when a dine-in order names one. */

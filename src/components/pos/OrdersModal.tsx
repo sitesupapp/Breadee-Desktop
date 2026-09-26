@@ -28,6 +28,7 @@ import {
   type ShiftOpenOrder,
 } from "@/lib/pos/shiftOrderSummary";
 import { canEditOrder, paymentLabel, reversalActionFor, typeLabel } from "@/lib/pos/orderActions";
+import { useSession } from "@/state/session";
 
 /** The lifecycle values the desktop can actually be shown, plus "everything". */
 const STATUS_FILTERS = [
@@ -241,7 +242,7 @@ export function OrdersModal(props: {
                       </td>
                       <td className="px-2 py-2">
                         <Badge tone={o.payment_status === "paid" ? "green" : o.payment_status === "refunded" ? "red" : "amber"}>
-                          {paymentLabel(o)}
+                          {paymentLabel(o, useSession.getState().paymentMethods)}
                         </Badge>
                       </td>
                       <td className="px-2 py-2">

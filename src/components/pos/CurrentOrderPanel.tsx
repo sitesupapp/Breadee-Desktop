@@ -42,6 +42,7 @@ import {
   reversalActionFor,
   reversalLabel,
 } from "@/lib/pos/orderActions";
+import { useSession } from "@/state/session";
 
 export function CurrentOrderPanel(props: {
   order: ShiftOpenOrder | null;
@@ -87,6 +88,9 @@ export function CurrentOrderPanel(props: {
   const [preparing, setPreparing] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
   const order = props.order;
+  // Phase B: the tenant payment-method catalog, to show the friendly label for the
+  // paid-method chip and to carry the stored key onto the reprint receipt. Display only.
+  const catalog = useSession((s) => s.paymentMethods);
 
   if (!props.hasShift) {
     return (
@@ -129,7 +133,10 @@ export function CurrentOrderPanel(props: {
           orderNumber: order.order_number ?? order.id.slice(0, 8),
           at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
           paid: order.payment_status === "paid",
-          method: null,
+          // Phase B: carry the order's STORED stable method key. The receipt layer resolves
+          // it to the friendly catalog label at display; an unpaid order has none (null),
+          // which prints as Unpaid/On account. Never null-defaulted to "cash".
+          method: order.payment_method ?? null,
           // The order's OWN currency snapshot - the same source-of-truth rule
           // the delivery receipt fix establishes. Never a display currency.
           currency,
@@ -182,7 +189,7 @@ export function CurrentOrderPanel(props: {
                 every action below is gated on, so it must never be something
                 the operator has to infer from the lifecycle word beside it. */}
             <Badge tone={order.payment_status === "paid" ? "green" : order.payment_status === "refunded" ? "red" : "amber"}>
-              {paymentLabel(order)}
+              {paymentLabel(order, catalog)}
             </Badge>
           </div>
           <p className="mt-1 text-[11px] text-sub">

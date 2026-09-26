@@ -504,7 +504,9 @@ function PosWorkspaceInner() {
             orderNumber: order.order_number ?? order.id.slice(0, 8),
             at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
             paid: order.payment_status === "paid",
-            method: null,
+            // Phase B: carry the order's STORED stable method key; the receipt layer resolves
+            // it to the friendly catalog label at display. Never null-defaulted to "cash".
+            method: order.payment_method ?? null,
             currency: (order.currency ?? currency) as CurrencyCode,
             lines,
             subtotal: order.subtotal ?? order.total_amount ?? 0,
