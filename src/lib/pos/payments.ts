@@ -16,9 +16,20 @@ import { callPosRpc, asRecord, bool, num, numOrNull, requireId, str } from "@/li
 import { hasValidRate, roundForCurrency, type CurrencyCode } from "@/lib/currency";
 import type { PayOrderResult } from "@/types/pos";
 
-/** The only method the current POS contract exercises; kept as a field, not a literal. */
-export type PaymentMethod = "cash";
+/**
+ * A payment-method STABLE KEY. Phase B: methods are tenant-defined, so this is the
+ * catalog key string ("cash", "card", "whish", ...) — never a display label and never a
+ * UUID. The key is what is submitted to and stored by pos_pay_order; the label is display
+ * only (resolved from the tenant catalog, see lib/pos/paymentMethods.ts).
+ */
+export type PaymentMethod = string;
 
+/**
+ * Fallback method list used only when the tenant payment-method catalog is unavailable
+ * (fresh login not yet synced, or offline). Cash is always present and always valid, so
+ * offline Takeaway+Cash keeps working exactly as before. The live runtime list comes from
+ * the synchronized catalog via usePaymentMethodChoices().
+ */
 export const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [{ value: "cash", label: "Cash" }];
 
 export type PayOrderInput = {
