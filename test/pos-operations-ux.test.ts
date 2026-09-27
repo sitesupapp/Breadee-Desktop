@@ -351,7 +351,7 @@ test("the printed report is one document covering the whole shift", () => {
   // DRAWER carries its unit since the LBP hotfix: the drawer block is USD while
   // the sales block above it is in the order currency, and a printed page has no
   // tooltip to explain why the two differ by three orders of magnitude.
-  for (const section of ["SALES", "BY ROUTE", "REVERSED", "PAYMENTS", "DRAWER (USD)", "SALES BY ITEM", "NOTE"]) {
+  for (const section of ["SALES", "BY ROUTE", "REVERSED", "PAYMENTS (USD)", "DRAWER (USD)", "SALES BY ITEM", "NOTE"]) {
     assert.ok(labels.includes(section), `the report needs a ${section} section`);
   }
   // One title, one document - not one page per order.
