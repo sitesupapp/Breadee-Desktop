@@ -80,5 +80,66 @@ test("DineInRoundPanel: sent-line edit controls only render under canEditSent", 
 test("ModifierDialog pre-fill props are backward compatible (add flow unchanged by default)", () => {
   const s = src("components/pos/ModifierDialog.tsx");
   assert.match(s, /setSelected\(props\.initialModifiers \?\? \[\]\)/);
+  assert.match(s, /setQuantity\(props\.initialQuantity \?\? 1\)/);
   assert.match(s, /props\.confirmLabel \?\? "Add to order"/);
+});
+
+// --- modifier change (op=change_modifiers) ---------------------------------
+
+test("buildChangeModifiersPayload: exact line id + expected_version + mapped modifiers", () => {
+  const p = buildChangeModifiersPayload({
+    orderId: "ord-9", lineId: "line-42", quantity: 2,
+    modifiers: [
+      { group_id: "g1", option_id: "no-cheese", name: "No Cheese", price_delta: 0, quantity: 1 },
+      { group_id: "g2", option_id: "extra-bacon", name: "Extra Bacon", price_delta: 1.5, quantity: 2 },
+    ],
+    expectedVersion: 11, clientOpId: "op-xyz",
+  });
+  assert.equal(p.op, "change_modifiers");
+  assert.equal(p.target_item_id, "line-42");     // the EXACT persisted line id
+  assert.equal(p.order_id, "ord-9");
+  assert.equal(p.expected_version, 11);
+  assert.equal(p.client_op_id, "op-xyz");
+  assert.equal(p.quantity, 2);
+  assert.deepEqual(p.modifiers?.map((m) => m.option_id), ["no-cheese", "extra-bacon"]);
+  assert.equal(p.modifiers?.[1].price_delta, 1.5);
+  assert.equal("new_quantity" in p, false);
+});
+
+test("RoundMenu carries a read-only item lookup (for the sent-line modifier chooser)", () => {
+  const s = src("lib/pos/tableRounds.ts");
+  assert.match(s, /items:\s*MenuItem\[\]/);
+  const pw = src("screens/pos/PosWorkspace.tsx");
+  assert.match(pw, /items:\s*menu\.items/); // Dine-In roundMenu gains items; add flow untouched
+});
+
+test("DineInWorkspace modifier edit: prefill, exact line id, version, fresh op id, reloads", () => {
+  const s = src("screens/pos/DineInWorkspace.tsx");
+  // opens the chooser pre-filled from the sent line's own state
+  assert.match(s, /initialModifiers=\{editModLine\?\.modifiers \?\? \[\]\}/);
+  assert.match(s, /initialQuantity=\{editModLine\?\.quantity \?\? 1\}/);
+  assert.match(s, /confirmLabel="Save changes"/);
+  // ingredient customization off for a modifier-only edit
+  assert.match(s, /ingredientCustomization=\{false\}/);
+  // resolves the real MenuItem from the read-only lookup by the line's menu_item_id
+  assert.match(s, /input\.menu\.items\.find\(\(m\) => m\.id === editModLine\.menu_item_id\)/);
+  // confirm sends change_modifiers for the exact line id, with version + fresh op id
+  assert.match(s, /buildChangeModifiersPayload\(\{/);
+  assert.match(s, /lineId: line\.id/);
+  assert.match(s, /expectedVersion: order\.pos_entity_version/);
+  assert.match(s, /clientOpId: crypto\.randomUUID\(\)/);
+  // success AND failure (VERSION_CONFLICT) both re-read the authoritative bill
+  assert.equal((s.match(/await tables\.loadBill\(ctx\)/g) ?? []).length >= 4, true);
+});
+
+test("DineInRoundPanel: the Options button targets the concrete line and needs a menu_item_id", () => {
+  const s = src("components/pos/DineInRoundPanel.tsx");
+  assert.match(s, /props\.onEditSentModifiers && l\.menu_item_id/);
+  assert.match(s, /props\.onEditSentModifiers\?\.\(l\)/);
+});
+
+test("modifier edit is under the same pos.edit_orders gate as qty/remove", () => {
+  const s = src("screens/pos/DineInWorkspace.tsx");
+  // one gate (editSentGate = canEditOrders) drives canEditSent for all sent-line edits
+  assert.match(s, /canEditSent=\{editSentGate\.allowed\}/);
 });
