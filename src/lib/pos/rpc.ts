@@ -74,6 +74,15 @@ export type PosRpcName =
   // than riding along here.
   | "pos_edit_order"
   | "pos_void_order"
+  // Phase D — Open Dine-In line editing. Edits a SENT line on an OPEN, UNPAID
+  // dine-in bill (qty +/-, remove, modifier change) as ONE atomic server op:
+  // append-only for an increase; remove + append-replacement for a decrease /
+  // modifier change; full remove otherwise. It is fail-closed to exactly
+  // (dine_in, sent_to_kitchen, unpaid) + `pos.edit_orders`, so it never re-settles
+  // a paid order and writes NO refund/payment (unlike the still-absent
+  // `pos_remove_order_item`). IDEMPOTENT on a client-supplied `client_op_id` and
+  // optimistic-concurrency-guarded via `expected_version`. See `lib/pos/orders.ts`.
+  | "pos_edit_order_line"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by

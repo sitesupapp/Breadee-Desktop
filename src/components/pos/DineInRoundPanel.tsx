@@ -15,7 +15,7 @@ import { CartLineRow } from "@/components/pos/CartLineRow";
 import { billItemCount, linesByBatch } from "@/lib/pos/tableBill";
 import { preparingRoundLabel, sentRoundLabel } from "@/lib/pos/tableRounds";
 import type { CartLine } from "@/types/pos";
-import type { TableBill, TableSummary } from "@/types/tables";
+import type { BillLine, TableBill, TableSummary } from "@/types/tables";
 
 export type DineInRoundPanelProps = {
   table: TableSummary;
@@ -39,6 +39,17 @@ export type DineInRoundPanelProps = {
   onSubmitRound: () => void;
   onDiscardRound: () => void;
   onBackToMap: () => void;
+  // Phase D — edit an ALREADY-SENT bill line (server-authoritative, one atomic op each).
+  // Rendered only when the operator holds pos.edit_orders. Persisted sent/batch lines stay
+  // DISCRETE: each control targets its own concrete line id (no aggregation ambiguity).
+  canEditSent?: boolean;
+  /** The line id currently being edited, so its row disables while the server works. */
+  editingLineId?: string | null;
+  /** delta is +1 or -1; the server appends the +1 or removes+replaces for the -1. */
+  onEditSentQty?: (line: BillLine, delta: number) => void;
+  onRemoveSentLine?: (line: BillLine) => void;
+  /** Opens the item's modifier chooser for this sent line (change = cancel old + make new). */
+  onEditSentModifiers?: (line: BillLine) => void;
 };
 
 export function DineInRoundPanel(props: DineInRoundPanelProps) {
@@ -145,21 +156,68 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
                     </span>
                   </div>
                   <ul className="divide-y divide-line">
-                    {lines.map((l) => (
-                      <li key={l.id} className="px-3 py-1.5">
-                        <p className="truncate text-xs font-semibold text-ink">
-                          {l.quantity} x {l.name}
-                        </p>
-                        {l.modifiers.map((m) => (
-                          <p key={`${l.id}-${m.option_id}`} className="truncate pl-3 text-[11px] text-sub">
-                            + {m.name}
-                          </p>
-                        ))}
-                        {l.kitchen_note && (
-                          <p className="truncate pl-3 text-[11px] italic text-amber-700">{l.kitchen_note}</p>
-                        )}
-                      </li>
-                    ))}
+                    {lines.map((l) => {
+                      const editing = props.editingLineId === l.id;
+                      return (
+                        <li key={l.id} className="px-3 py-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="min-w-0 truncate text-xs font-semibold text-ink">
+                              {l.quantity} x {l.name}
+                            </p>
+                            {props.canEditSent && (
+                              <div className="flex shrink-0 items-center gap-1">
+                                <button
+                                  type="button"
+                                  aria-label={`Decrease ${l.name}`}
+                                  disabled={editing || l.quantity <= 1}
+                                  onClick={() => props.onEditSentQty?.(l, -1)}
+                                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-line bg-white text-sm font-bold text-ink disabled:opacity-40"
+                                >
+                                  -
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={`Increase ${l.name}`}
+                                  disabled={editing}
+                                  onClick={() => props.onEditSentQty?.(l, 1)}
+                                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-line bg-white text-sm font-bold text-ink disabled:opacity-40"
+                                >
+                                  +
+                                </button>
+                                {props.onEditSentModifiers && l.menu_item_id && (
+                                  <button
+                                    type="button"
+                                    aria-label={`Edit options for ${l.name}`}
+                                    disabled={editing}
+                                    onClick={() => props.onEditSentModifiers?.(l)}
+                                    className="flex h-7 items-center justify-center rounded-lg border border-line bg-white px-2 text-[11px] font-semibold text-ink disabled:opacity-40"
+                                  >
+                                    Options
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  aria-label={`Remove ${l.name}`}
+                                  disabled={editing}
+                                  onClick={() => props.onRemoveSentLine?.(l)}
+                                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-sm font-bold text-red-700 disabled:opacity-40"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          {l.modifiers.map((m) => (
+                            <p key={`${l.id}-${m.option_id}`} className="truncate pl-3 text-[11px] text-sub">
+                              + {m.name}
+                            </p>
+                          ))}
+                          {l.kitchen_note && (
+                            <p className="truncate pl-3 text-[11px] italic text-amber-700">{l.kitchen_note}</p>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               ))}

@@ -35,6 +35,7 @@ function toLine(raw: unknown): BillLine | null {
   if (!id) return null;
   return {
     id,
+    menu_item_id: strOrNull(r.menu_item_id),
     name: str(r.name_snapshot, "Item"),
     quantity: num(r.quantity),
     base_price: num(r.base_price),
@@ -62,6 +63,7 @@ function toOrder(raw: unknown): BillOrder | null {
     order_number: str(r.order_number),
     status: str(r.status),
     payment_status: str(r.payment_status),
+    pos_entity_version: num(r.pos_entity_version),
     shift_id: strOrNull(r.shift_id),
     branch_id: strOrNull(r.branch_id),
     tenant_id: str(r.tenant_id),
@@ -120,8 +122,8 @@ export async function loadTableBill(input: {
   const { data, error } = await supabase
     .from("pos_orders")
     .select(
-      "id, order_number, status, payment_status, shift_id, branch_id, tenant_id, subtotal, discount_amount, total_amount, primary_currency_snapshot, usd_to_lbp_rate_snapshot, created_at, " +
-        "pos_order_items(id, name_snapshot, quantity, base_price, modifiers_total, final_unit_price, line_total, kitchen_note, batch_no, " +
+      "id, order_number, status, payment_status, pos_entity_version, shift_id, branch_id, tenant_id, subtotal, discount_amount, total_amount, primary_currency_snapshot, usd_to_lbp_rate_snapshot, created_at, " +
+        "pos_order_items(id, menu_item_id, name_snapshot, quantity, base_price, modifiers_total, final_unit_price, line_total, kitchen_note, batch_no, " +
         "pos_order_item_modifiers(modifier_group_id, modifier_option_id, name_snapshot, price_delta, quantity))",
     )
     .eq("tenant_id", input.tenantId)

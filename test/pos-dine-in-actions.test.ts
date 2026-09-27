@@ -262,7 +262,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // AND AGAIN BY FLOOR DESIGNER (Phase 4): 32 -> 35 for the publish lifecycle —
   // floor_publish, floor_history and floor_restore_revision. Bumped by exactly the
   // three reviewed RPCs; publishing materializes canonical tables server-side only.
-  assert.equal(members.length, 35, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND BY PHASE D: 35 -> 36 for `pos_edit_order_line` (open/unpaid dine-in sent-line
+  // editing, gated on pos.edit_orders; writes no refund/payment).
+  assert.equal(members.length, 36, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:
