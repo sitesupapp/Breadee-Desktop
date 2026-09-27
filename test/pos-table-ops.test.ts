@@ -318,7 +318,8 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // floor_unplaced_tables (no floor_publish — 3A never publishes). AND FLOOR
   // DESIGNER (Phase 4): 32 -> 35 for the publish lifecycle — floor_publish,
   // floor_history, floor_restore_revision (exactly the three reviewed).
-  assert.equal(members.length, 35, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND PHASE D: 35 -> 36 for `pos_edit_order_line` (open/unpaid dine-in sent-line editing).
+  assert.equal(members.length, 36, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {
