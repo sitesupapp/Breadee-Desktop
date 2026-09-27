@@ -21,7 +21,7 @@
 
 import { buildSubmitPayload, submitOrder, ShiftRequiredError, TableRequiredError } from "@/lib/pos/orders";
 import { modifierViolations, groupsForItem } from "@/lib/pos/modifiers";
-import type { CartLine, ModifierGroup, ModifierOption, SubmitOrderResult } from "@/types/pos";
+import type { CartLine, MenuItem, ModifierGroup, ModifierOption, SubmitOrderResult } from "@/types/pos";
 import type { TableBill, TableSummary } from "@/types/tables";
 import type { Gate } from "@/components/ui";
 
@@ -70,6 +70,10 @@ export type RoundMenu = {
   groupsByItem: Record<string, string[]>;
   groups: ModifierGroup[];
   options: ModifierOption[];
+  // Phase D: read-only item lookup so the Dine-In flow can re-open the modifier
+  // chooser for an already-sent line (edit its options). Unused by the round-send
+  // path; adding it does not touch the Takeaway/Delivery add flow.
+  items: MenuItem[];
 };
 
 /**
