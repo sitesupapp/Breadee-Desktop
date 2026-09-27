@@ -123,6 +123,16 @@ export type ActiveShift = {
 };
 
 /** `pos_shift_expected` response. Server-authoritative - never recomputed here. */
+// Phase C: dynamic payment-breakdown line + block, merged additively by the shift
+// RPCs. All breakdown keys optional so pre-Phase-C payloads remain valid.
+export type ShiftPayMethod = { key: string; label: string; is_cash: boolean; amount: number };
+export type ShiftPayBreakdown = {
+  payment_methods?: ShiftPayMethod[] | null;
+  cash_total?: number | null;
+  non_cash_total?: number | null;
+  grand_payment_total?: number | null;
+};
+
 export type ShiftExpected = {
   expected: number;
   cash_sales: number;
@@ -132,7 +142,7 @@ export type ShiftExpected = {
   cash_lbp_original: number;
   cash_lbp_usd: number;
   exchange_rate: number | null;
-};
+} & ShiftPayBreakdown;
 
 /** `pos_cash_box_shift` response. Server-authoritative. */
 export type CashBox = {
@@ -175,7 +185,7 @@ export type ShiftReport = {
   exchange_rate: number | null;
   by_item: { item: string; qty: number; total: number }[];
   payments: Record<string, number>;
-};
+} & ShiftPayBreakdown;
 
 // --- Orders / payments -------------------------------------------------------
 
