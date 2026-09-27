@@ -29,7 +29,8 @@ import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
-import { canClearTable, canCloseTable, canManageFloor, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
+import { buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
 import { ServiceFloor } from "@/components/pos/floor/ServiceFloor";
 import { FloorDesigner } from "@/components/pos/floor/designer/FloorDesigner";
 import { MapListToggle, type DineInFloorView } from "@/components/pos/floor/MapListToggle";
@@ -87,7 +88,7 @@ import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import type { ReceiptData } from "@/lib/receipt";
 import type { CartLine } from "@/types/pos";
-import type { TableBill, TableSummary } from "@/types/tables";
+import type { BillLine, TableBill, TableSummary } from "@/types/tables";
 
 /** Which half of Dine-in is on screen. Add Items borrows the menu from the shell. */
 export type DineInView = "map" | "add_items";
@@ -630,6 +631,53 @@ export function useDineInWorkspace(input: {
     const s = useTables.getState();
     return { bill: s.bill, table: pickSelected(s) };
   }, []);
+
+  // --- Phase D: edit an already-SENT bill line (open, unpaid dine-in only) ----
+  // The SERVER owns the delta/kitchen/totals/version; the desktop only shapes the
+  // request and re-reads the authoritative bill afterwards. A fresh client_op_id per
+  // click makes a lost response replay rather than double-apply; expected_version is the
+  // order's pos_entity_version at edit time, so a concurrent change fails closed
+  // (VERSION_CONFLICT) and we re-read rather than overwrite. Gated on pos.edit_orders.
+  const editSentGate = useMemo(() => canEditOrders(pos.access), [pos.access]);
+  const [editingLineId, setEditingLineId] = useState<string | null>(null);
+
+  const editSentLine = useCallback(
+    async (line: BillLine, newQuantity: number) => {
+      const bill = useTables.getState().bill;
+      const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
+      if (!order) return;
+      setEditingLineId(line.id);
+      try {
+        await editOrderLine(
+          buildSetQuantityPayload({
+            orderId: order.id,
+            lineId: line.id,
+            newQuantity,
+            expectedVersion: order.pos_entity_version,
+            clientOpId: crypto.randomUUID(),
+          }),
+        );
+        await tables.loadBill(ctx);
+      } catch (e) {
+        // Any failure (including a fail-closed VERSION_CONFLICT) => re-read the server's
+        // bill so the operator sees the real state, then surface the reason.
+        await tables.loadBill(ctx);
+        toast.push({ tone: "warning", message: "The edit did not apply. The bill was reloaded.", detail: classifyError(e).message });
+      } finally {
+        setEditingLineId(null);
+      }
+    },
+    [tables, ctx, toast],
+  );
+
+  const onEditSentQty = useCallback(
+    (line: BillLine, delta: number) => {
+      // - is disabled at qty 1 in the UI; a decrease never crosses zero here.
+      void editSentLine(line, Math.max(0, line.quantity + delta));
+    },
+    [editSentLine],
+  );
+  const onRemoveSentLine = useCallback((line: BillLine) => void editSentLine(line, 0), [editSentLine]);
 
   /**
    * Open the payment dialog.
@@ -1243,6 +1291,10 @@ export function useDineInWorkspace(input: {
           onSubmitRound={() => void sendRound()}
           onDiscardRound={discardRound}
           onBackToMap={requestLeaveAddItems}
+          canEditSent={editSentGate.allowed}
+          editingLineId={editingLineId}
+          onEditSentQty={onEditSentQty}
+          onRemoveSentLine={onRemoveSentLine}
         />
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1250,6 +1302,7 @@ export function useDineInWorkspace(input: {
       selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
+      editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine,
     ],
   );
 
