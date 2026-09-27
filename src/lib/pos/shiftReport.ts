@@ -166,10 +166,15 @@ export function buildShiftReportLines(input: {
     difference: number;
   };
   detail: ShiftReportDetail;
+  // Phase C: dynamic, catalog-driven payment breakdown (cash + each non-cash
+  // tender) with Total non-cash and Total payments, in the CASH_CONTRACT_CURRENCY.
+  // Null/empty for a pre-Phase-C shift, which falls back to the cash-only view.
+  payments?: { rows: { label: string; is_cash: boolean; amount: number }[]; nonCashTotal: number; grandTotal: number } | null;
   note: string | null;
   fmt: (amount: number, currency: CurrencyCode) => string;
 }): ReportLine[] {
   const { fmt, currency, money, detail } = input;
+  const pay = input.payments && input.payments.rows.length ? input.payments : null;
   const lines: ReportLine[] = [
     { label: "END OF SHIFT REPORT", kind: "heading" },
     { label: input.businessName },
@@ -199,8 +204,24 @@ export function buildShiftReportLines(input: {
   lines.push({ label: "Refunded", value: String(detail.reversals.refunded) });
   lines.push({ label: "Not counted as sales", value: fmt(detail.reversals.amount, currency) });
 
-  lines.push({ label: "", kind: "rule" }, { label: "PAYMENTS", kind: "heading" });
-  lines.push({ label: "Cash sales", value: fmt(money.cashSales, CASH_CONTRACT_CURRENCY) });
+  // PAYMENTS — what was collected, by tender. Phase C makes this dynamic: cash
+  // first, then each non-cash method, then Total non-cash and Total payments. These
+  // are amounts COLLECTED, not the expected drawer cash (that is the DRAWER block
+  // below); a manager must be able to tell the two apart. Cash figures are the USD
+  // accounting base (CASH_CONTRACT_CURRENCY). A pre-Phase-C shift (no breakdown)
+  // keeps the previous cash-only view.
+  lines.push({ label: "", kind: "rule" }, { label: `PAYMENTS (${CASH_CONTRACT_CURRENCY})`, kind: "heading" });
+  if (pay) {
+    for (const m of pay.rows) {
+      lines.push({ label: m.is_cash ? m.label : `${m.label} (non-cash)`, value: fmt(m.amount, CASH_CONTRACT_CURRENCY) });
+    }
+    lines.push({ label: "Total non-cash", value: fmt(pay.nonCashTotal, CASH_CONTRACT_CURRENCY) });
+    lines.push({ label: "Total payments", value: fmt(pay.grandTotal, CASH_CONTRACT_CURRENCY), kind: "total" });
+  } else {
+    lines.push({ label: "Cash sales", value: fmt(money.cashSales, CASH_CONTRACT_CURRENCY) });
+  }
+  // Tender composition of the CASH portion (USD notes vs LBP notes) — kept for the
+  // dual-currency drawer regardless of the per-method breakdown above.
   lines.push({ label: "Cash USD", value: fmt(money.cashUsd, "USD") });
   if (money.cashLbpOriginal > 0) lines.push({ label: "Cash LBP", value: fmt(money.cashLbpOriginal, "LBP") });
 

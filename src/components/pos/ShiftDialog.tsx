@@ -12,6 +12,7 @@ import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { differenceLabel } from "@/lib/pos/shifts";
 import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { ShiftExpected, ShiftReport } from "@/types/pos";
 
@@ -176,6 +177,36 @@ export function EndShiftDialog({
             )}
           </div>
 
+          {/* Phase C — PAYMENTS this shift, DELIBERATELY separate from the drawer
+              box above. Amounts collected per tender (cash + each non-cash method);
+              Total payments is NOT the expected drawer cash, so the operator never
+              confuses the two. Dynamic + catalog-driven: any custom method appears
+              with no code change. */}
+          {expected && (() => {
+            const psum = paymentSummary(expected);
+            if (!psum.rows.length) return null;
+            return (
+              <div className="rounded-xl border border-line p-3">
+                <p className="mb-2 text-sm font-bold text-ink">Payments this shift ({CASH_CONTRACT_CURRENCY})</p>
+                {psum.rows.map((m) => (
+                  <SummaryRow
+                    key={m.key}
+                    label={m.is_cash ? m.label : `${m.label} (non-cash)`}
+                    value={formatMoney(m.amount, CASH_CONTRACT_CURRENCY)}
+                  />
+                ))}
+                <div className="mt-1 border-t border-line pt-1">
+                  <SummaryRow label="Total non-cash" value={formatMoney(psum.nonCashTotal, CASH_CONTRACT_CURRENCY)} />
+                </div>
+                <div className="flex items-baseline justify-between pt-0.5">
+                  <span className="text-sm font-bold text-ink">Total payments</span>
+                  <span className="text-base font-extrabold tabular-nums text-ink">{formatMoney(psum.grandTotal, CASH_CONTRACT_CURRENCY)}</span>
+                </div>
+                <p className="mt-1 text-[11px] text-sub">Includes card &amp; other non-cash tenders. Only cash is expected in the drawer.</p>
+              </div>
+            );
+          })()}
+
           <div>
             <label className="mb-1 block text-sm font-bold text-ink" htmlFor="closing-note">
               Closing note
@@ -303,15 +334,41 @@ export function ShiftReportDialog({
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        {/* Payments, by what was actually taken. LBP appears only when some
-            was, and in its own units - never converted for display. */}
+        {/* Payments, by what was actually taken. Phase C: dynamic, catalog-driven
+            per-tender breakdown (cash + each non-cash method) with Total non-cash
+            and Total payments — collected amounts, distinct from the expected drawer
+            cash on the left. Cash USD/LBP show the tender composition of the cash
+            portion (LBP only when some was taken, in its own units, never converted).
+            A pre-Phase-C report (no payment_methods) keeps the cash-only view. */}
         <div className="rounded-xl border border-line p-3">
-          <p className="mb-2 text-sm font-bold text-ink">Payments</p>
-          <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, CASH_CONTRACT_CURRENCY)} />
-          <SummaryRow label="Cash USD" value={formatMoney(report.cash_usd, "USD")} />
-          {report.cash_lbp_original > 0 && (
-            <SummaryRow label="Cash LBP" value={formatMoney(report.cash_lbp_original, "LBP")} />
-          )}
+          <p className="mb-2 text-sm font-bold text-ink">Payments ({CASH_CONTRACT_CURRENCY})</p>
+          {(() => {
+            const psum = paymentSummary(report);
+            if (psum.rows.length) {
+              return (
+                <>
+                  {psum.rows.map((m) => (
+                    <SummaryRow
+                      key={m.key}
+                      label={m.is_cash ? m.label : `${m.label} (non-cash)`}
+                      value={formatMoney(m.amount, CASH_CONTRACT_CURRENCY)}
+                    />
+                  ))}
+                  <div className="mt-1 border-t border-line pt-1">
+                    <SummaryRow label="Total non-cash" value={formatMoney(psum.nonCashTotal, CASH_CONTRACT_CURRENCY)} />
+                    <SummaryRow label="Total payments" value={formatMoney(psum.grandTotal, CASH_CONTRACT_CURRENCY)} />
+                  </div>
+                </>
+              );
+            }
+            return <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, CASH_CONTRACT_CURRENCY)} />;
+          })()}
+          <div className="mt-1 border-t border-line pt-1">
+            <SummaryRow label="Cash USD" value={formatMoney(report.cash_usd, "USD")} />
+            {report.cash_lbp_original > 0 && (
+              <SummaryRow label="Cash LBP" value={formatMoney(report.cash_lbp_original, "LBP")} />
+            )}
+          </div>
         </div>
 
         {/* Routes and reversals: derived from the shift's orders, which is

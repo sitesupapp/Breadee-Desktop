@@ -44,6 +44,7 @@ import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import { buildReceipt } from "@/lib/receipt";
 import { readOrderReceiptLines, readSettledOrder } from "@/lib/pos/deliverySettlement";
 import { isNativeAvailable, listPrinters, printReport } from "@/lib/nativePrinting";
@@ -583,6 +584,10 @@ function PosWorkspaceInner() {
               difference: report.difference,
             },
             detail,
+            // Phase C — dynamic payment breakdown for the printed PAYMENTS block
+            // (cash + each non-cash tender, with totals). Server-authoritative via
+            // paymentSummary; a pre-Phase-C report falls back to the cash-only view.
+            payments: paymentSummary(report),
             note: report.notes,
             fmt: formatMoney,
           }),
