@@ -703,7 +703,9 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // (post-close cost reconciliation), also called from the library layer.
   // 25 since Phase D added `pos_edit_order_line` (open/unpaid dine-in sent-line
   // editing), called from the Dine-In library layer - not from these screens.
-  assert.equal(names.length, 25);
+  // 27 since Phase E added `pos_split_settle` + `pos_split_state` (Split Bill),
+  // called from the Dine-In library layer - not from these screens.
+  assert.equal(names.length, 27);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));

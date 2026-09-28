@@ -554,7 +554,8 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // Delivery Settlement WS7B adds `pos_delivery_resolve_cost` (24th) - post-close
   // cost reconciliation, gated on pos.delivery.settlements.manage.
   // Phase D adds `pos_edit_order_line` (25th) - open/unpaid dine-in sent-line editing.
-  assert.equal(names.length, 25);
+  // Phase E adds `pos_split_settle` + `pos_split_state` (26th, 27th) - item/quantity Split Bill.
+  assert.equal(names.length, 27);
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));

@@ -42,6 +42,10 @@ export const POS_PERMISSIONS = {
   ACCESS: "pos.access",
   CREATE_ORDERS: "pos.create_orders",
   TAKE_PAYMENTS: "pos.take_payments",
+  // Phase E — item/quantity Split Bill. A DISTINCT authority from take_payments and
+  // edit_orders: settling part of a bill by item is its own permission, and
+  // `pos_split_settle` checks exactly this key for itself.
+  SPLIT_BILL: "pos.split_bill",
   APPLY_DISCOUNTS: "pos.apply_discounts",
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
@@ -169,6 +173,17 @@ export function canTakePayments(ctx: PosAccessContext): Gate {
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.APPLY_DISCOUNTS), "You do not have permission to apply discounts.");
+}
+
+/**
+ * Phase E — splitting a Dine-In bill by item/quantity. Its own permission key,
+ * NOT conflated with take_payments or edit_orders — exactly what `pos_split_settle`
+ * checks for itself. Not a security boundary; the RPC re-enforces operator, tenant,
+ * OU, version and available-qty. It exists so Split Bill is offered only where the
+ * server would honour it.
+ */
+export function canSplitBill(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.SPLIT_BILL), "You do not have permission to split bills.");
 }
 
 /**

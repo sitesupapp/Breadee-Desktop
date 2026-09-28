@@ -29,8 +29,18 @@ import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
-import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
 import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
+import { SplitBillPanel } from "@/components/pos/SplitBillPanel";
+import {
+  buildSplitSettlePayload,
+  loadSplitState,
+  loadSplitPaymentMethods,
+  settleSplit,
+  type SplitState,
+  type SplitPaymentMethod,
+  type SplitAllocationInput,
+} from "@/lib/pos/split";
 import { ModifierDialog } from "@/components/pos/ModifierDialog";
 import { groupsForItem } from "@/lib/pos/modifiers";
 import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
@@ -644,6 +654,76 @@ export function useDineInWorkspace(input: {
   // (VERSION_CONFLICT) and we re-read rather than overwrite. Gated on pos.edit_orders.
   const editSentGate = useMemo(() => canEditOrders(pos.access), [pos.access]);
   const [editingLineId, setEditingLineId] = useState<string | null>(null);
+
+  // --- Phase E: Split Bill (item/quantity settlement) ------------------------
+  // A split is a SETTLEMENT, never a new sale. The server (pos_split_settle) owns
+  // every figure; this screen re-reads pos_split_state after each split so PAID vs
+  // REMAINING is always the database's answer. Gated on pos.split_bill (its own key,
+  // separate from pay/edit). VERSION_CONFLICT and every other error re-read the bill.
+  const splitGate = useMemo(() => canSplitBill(pos.access), [pos.access]);
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [splitState, setSplitState] = useState<SplitState | null>(null);
+  const [splitMethods, setSplitMethods] = useState<SplitPaymentMethod[]>([]);
+  const [splitLoading, setSplitLoading] = useState(false);
+  const [splitBusy, setSplitBusy] = useState(false);
+  const [splitError, setSplitError] = useState<string | null>(null);
+  const [splitLastPaid, setSplitLastPaid] = useState<{ display_no: string; amount: number; method: string } | null>(null);
+
+  const openSplit = useCallback(async () => {
+    if (!splitGate.allowed) return;
+    const bill = useTables.getState().bill;
+    const order = bill?.orders.find((o) => o.payment_status !== "paid") ?? bill?.orders[0];
+    if (!order) return;
+    setSplitError(null);
+    setSplitLastPaid(null);
+    setSplitLoading(true);
+    setSplitOpen(true);
+    try {
+      const [state, methods] = await Promise.all([loadSplitState(order.id), loadSplitPaymentMethods(pos.tenantId)]);
+      setSplitState(state);
+      setSplitMethods(methods);
+    } catch (e) {
+      setSplitError(classifyError(e).message);
+    } finally {
+      setSplitLoading(false);
+    }
+  }, [splitGate.allowed, pos.tenantId]);
+
+  const paySplit = useCallback(
+    async (allocations: SplitAllocationInput[], method: string) => {
+      const st = splitState;
+      if (!st) return;
+      setSplitBusy(true);
+      setSplitError(null);
+      try {
+        const result = await settleSplit(
+          buildSplitSettlePayload({
+            orderId: st.order_id,
+            expectedVersion: st.pos_entity_version,
+            method,
+            currencyCode: st.currency,
+            clientOpId: crypto.randomUUID(),
+            allocations,
+          }),
+        );
+        setSplitLastPaid({ display_no: result.display_no, amount: result.amount, method: result.method });
+        setSplitState(await loadSplitState(st.order_id));
+        await tables.loadBill(ctx);
+      } catch (e) {
+        // Fail-closed: on ANY error (including VERSION_CONFLICT) re-read the server truth.
+        setSplitError(classifyError(e).message);
+        try {
+          setSplitState(await loadSplitState(st.order_id));
+          await tables.loadBill(ctx);
+        } catch {
+          /* keep the original error visible */
+        }
+      } finally {
+        setSplitBusy(false);
+      }
+    },
+    [splitState, tables, ctx],
+  );
 
   const editSentLine = useCallback(
     async (line: BillLine, newQuantity: number) => {
@@ -1322,12 +1402,14 @@ export function useDineInWorkspace(input: {
         onClear={() => requestOp("clear")}
         payGate={payGate}
         onPay={requestPay}
+        splitGate={splitGate}
+        onSplit={() => void openSplit()}
         onPrintBill={() => void printBill()}
         printBusy={printingBill}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, printBill, printingBill],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, printBill, printingBill],
   );
 
   const roundPanel = useCallback(
@@ -1435,6 +1517,21 @@ export function useDineInWorkspace(input: {
         error={opError}
         onCancel={() => setOpDialog(null)}
         onConfirm={confirmMove}
+      />
+
+      {/* Phase E — Split Bill. A settlement/allocation screen; every figure is the
+          server's, re-read after each split so PAID vs REMAINING is always the truth. */}
+      <SplitBillPanel
+        open={splitOpen}
+        state={splitState}
+        loading={splitLoading}
+        error={splitError}
+        busy={splitBusy}
+        methods={splitMethods}
+        currency={tables.bill?.currency ?? input.currency}
+        lastPaid={splitLastPaid}
+        onPaySelected={(allocations, method) => void paySplit(allocations, method)}
+        onClose={() => setSplitOpen(false)}
       />
 
       <CloseTableDialog

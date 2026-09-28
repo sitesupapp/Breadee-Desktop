@@ -156,10 +156,11 @@ test("every Pay surface renders from the SAME gate value, not its own computatio
 
 test("Pay and Clear are not adjacent - the collect and the void must not be mis-tapped", () => {
   const panel = read("components", "pos", "TableBillPanel.tsx");
-  const pay = panel.indexOf("Pay (F4)");
-  // The label gained the word "bill" in the approved design; the property this
-  // test protects - Pay above Clear, with the whole operations block between
-  // them - is unchanged and is what the assertions below still check.
+  const pay = panel.indexOf("Pay Full Bill");
+  // The label became "Pay Full Bill" in the Phase E design (the full-bill path, now
+  // paired with Split Bill directly beneath it); the property this test protects -
+  // Pay above Clear, with the whole operations block between them - is unchanged and
+  // is what the assertions below still check. (F4 still opens payment via the shortcut.)
   const clear = panel.indexOf("Clear bill (voids the bill)");
   assert.ok(pay > 0 && clear > 0, "the Pay/Clear controls could not be located");
   assert.ok(pay < clear, "Pay moved below Clear");
@@ -264,7 +265,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // three reviewed RPCs; publishing materializes canonical tables server-side only.
   // AND BY PHASE D: 35 -> 36 for `pos_edit_order_line` (open/unpaid dine-in sent-line
   // editing, gated on pos.edit_orders; writes no refund/payment).
-  assert.equal(members.length, 36, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND BY PHASE E: 36 -> 38 for `pos_split_settle` + `pos_split_state` (item/quantity
+  // Split Bill: settlement/allocation only, gated on pos.split_bill; no second sale).
+  assert.equal(members.length, 38, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:
