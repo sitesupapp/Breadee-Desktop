@@ -110,7 +110,7 @@ test("the F1 help sheet describes F4 honestly for both order types", () => {
 
 test("the bill panel's new Pay control is a full-size touch target", () => {
   const panel = read("components", "pos", "TableBillPanel.tsx");
-  const pay = panel.slice(panel.indexOf("gate={props.payGate}"), panel.indexOf("Pay (F4)"));
+  const pay = panel.slice(panel.indexOf("gate={props.payGate}"), panel.indexOf("Pay Full Bill"));
   assert.match(pay, /size="lg"/, "the Pay button is not a large control");
   assert.doesNotMatch(pay, /size="sm"/);
 });
