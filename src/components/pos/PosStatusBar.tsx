@@ -45,6 +45,9 @@ export type PosStatusBarProps = {
   onOpenOrders: () => void;
   /** Open delivery management for this shift. */
   onOpenDelivery: () => void;
+  /** Open the Payouts surface (Phase G). Offered only when the operator may view payouts. */
+  onOpenPayouts?: () => void;
+  canViewPayouts?: boolean;
 };
 
 function useClock(): Date {
@@ -141,6 +144,17 @@ export function PosStatusBar(props: PosStatusBarProps) {
             </span>
             Delivery
           </Button>
+
+          {/* PAYOUTS - cash paid out of the drawer this shift (Phase G). Offered only
+              when the operator holds pos.payouts.view; the RPCs re-enforce every rule. */}
+          {props.canViewPayouts && props.onOpenPayouts && (
+            <Button variant="ghost" onClick={props.onOpenPayouts} title="Cash paid out of the drawer">
+              <span aria-hidden className="mr-1">
+                💸
+              </span>
+              Payouts
+            </Button>
+          )}
 
           {/* SHIFT ORDERS - the count and the list are one collection.
               The badge counts the ACTIVE shift, which is what the quick list

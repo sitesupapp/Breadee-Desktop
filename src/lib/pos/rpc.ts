@@ -94,6 +94,22 @@ export type PosRpcName =
   // is the READ projection (per-line available qty + settlements). See `lib/pos/split.ts`.
   | "pos_split_settle"
   | "pos_split_state"
+  // Phase G — POS Payouts / Cash Drawer Outflows. A payout is a DRAWER-MOVEMENT
+  // layer LINKED to an EXISTING economic source (Expense / Purchase Invoice /
+  // Supplier Payment / Equipment Maintenance job); it NEVER creates a second
+  // economic event (no accounting/GL, AP, inventory or procurement posting). The
+  // server owns every figure: `pos_payout_create` validates the source, snapshots
+  // its label, records the cash-out and reduces the drawer expectation; it is gated
+  // on `pos.payouts.create`, fail-closed on a closed shift / non-cash currency /
+  // unknown source, and IDEMPOTENT on a client-supplied `client_op_id`.
+  // `pos_payout_reverse` (gated `pos.payouts.reverse`) reverses ONLY the drawer
+  // movement — never the linked source — and only while the shift is open.
+  // `pos_payout_list` is the READ projection (gated `pos.payouts.view`). Money-mover,
+  // so ONLINE-ONLY like on-account/receivables: never enqueued to the offline outbox
+  // (the source can only be validated against the live DB). See `lib/pos/payouts.ts`.
+  | "pos_payout_create"
+  | "pos_payout_reverse"
+  | "pos_payout_list"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by

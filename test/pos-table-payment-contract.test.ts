@@ -121,7 +121,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // AND BY FLOOR DESIGNER (Phase 4): 32 -> 35, for the publish lifecycle —
 // floor_publish, floor_history and floor_restore_revision. Publishing materializes
 // canonical tables through one atomic server RPC; the client never writes them.
-test("the RPC allow-list contains exactly the thirty-six expected names", () => {
+test("the RPC allow-list contains exactly the forty-one expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -166,6 +166,11 @@ test("the RPC allow-list contains exactly the thirty-six expected names", () => 
       "pos_open_table",
       "pos_pay_order",
       "pos_pay_table",
+      // Phase G: POS Payouts — cash drawer outflows linked to an existing economic
+      // source (pos.payouts.view/create/reverse). Never a second economic event.
+      "pos_payout_create",
+      "pos_payout_list",
+      "pos_payout_reverse",
       // Wave 3C: the Customer Accounts surface - two reads and one money write.
       "pos_receivable_collect",
       "pos_receivables_customer",
@@ -184,7 +189,7 @@ test("the RPC allow-list contains exactly the thirty-six expected names", () => 
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 38);
+  assert.equal(members.length, 41);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
@@ -193,7 +198,10 @@ test("pos_pay_table is present, and is the only new settlement name", () => {
     (m) => m[1],
   );
   assert.ok(members.includes("pos_pay_table"));
-  assert.equal(members.filter((m) => m.startsWith("pos_pay")).length, 2, "an unexpected pay RPC appeared");
+  // Settlement "pay" RPCs are `pos_pay_*` (pos_pay_order, pos_pay_table). The Phase G
+  // `pos_payout_*` names are a DIFFERENT family (drawer outflows) and must not be
+  // counted here — hence the trailing underscore, which `pos_payout_` does not match.
+  assert.equal(members.filter((m) => m.startsWith("pos_pay_")).length, 2, "an unexpected pay RPC appeared");
 });
 
 // --- the payload -------------------------------------------------------------

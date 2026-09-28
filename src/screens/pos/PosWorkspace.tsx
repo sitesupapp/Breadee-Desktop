@@ -37,6 +37,7 @@ import { Modal } from "@/components/overlays";
 import { CurrentOrderPanel } from "@/components/pos/CurrentOrderPanel";
 import { OrdersModal } from "@/components/pos/OrdersModal";
 import { OpenTablesModal } from "@/components/pos/OpenTablesModal";
+import { PayoutsModal } from "@/components/pos/PayoutsModal";
 import { selectOpenTables } from "@/lib/pos/openTables";
 import { loadFloorLayout, tableSectionMap } from "@/lib/pos/floor";
 import { DeliveryModal } from "@/components/pos/DeliveryModal";
@@ -468,6 +469,7 @@ function PosWorkspaceInner() {
   // only while the modal is open - no global timer.
   const [openTablesNow, setOpenTablesNow] = useState(() => Date.now());
   const [deliveryOpen, setDeliveryOpen] = useState(false);
+  const [payoutsOpen, setPayoutsOpen] = useState(false);
   /** The order a reversal was started for, and which reversal it is. */
   const [reversing, setReversing] = useState<{ order: ShiftOpenOrder; action: VoidAction } | null>(null);
   /** The just-closed shift's orders, kept so its report can describe it. */
@@ -579,6 +581,7 @@ function PosWorkspaceInner() {
               cashUsd: report.cash_usd,
               cashLbpOriginal: report.cash_lbp_original,
               openingCash: report.opening_cash,
+              cashPayouts: report.cash_payouts,
               expectedCash: report.expected_cash,
               actualCash: report.actual_cash,
               difference: report.difference,
@@ -2102,6 +2105,8 @@ function PosWorkspaceInner() {
             onSelectOrder={showSavedOrder}
             onOpenOrders={() => setOrdersOpen(true)}
             onOpenDelivery={() => setDeliveryOpen(true)}
+            onOpenPayouts={() => setPayoutsOpen(true)}
+            canViewPayouts={pos.gates.viewPayouts.allowed}
           />
         )}
         /* One menu implementation, used by Takeaway, Dine-in Add Items AND
@@ -2567,6 +2572,23 @@ function PosWorkspaceInner() {
             : undefined
         }
         onClose={() => shiftStore.clearReport()}
+      />
+
+      {/* Phase G — Cash Payouts. Records physical cash leaving the drawer, always
+          linked to an existing business record; NEVER a second economic event. A
+          change re-reads the authoritative cash box so the drawer figure and the
+          End-Shift expected reflect the payout immediately. */}
+      <PayoutsModal
+        open={payoutsOpen}
+        onClose={() => setPayoutsOpen(false)}
+        shiftId={shiftId}
+        tenantId={tenantId}
+        branchId={pos.branch.id}
+        currency={currency}
+        online={online}
+        canCreate={pos.gates.createPayout}
+        canReverse={pos.gates.reversePayout}
+        onChanged={() => void shiftStore.refreshCashBox()}
       />
 
     </>

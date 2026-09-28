@@ -320,7 +320,9 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // floor_history, floor_restore_revision (exactly the three reviewed).
   // AND PHASE D: 35 -> 36 for `pos_edit_order_line` (open/unpaid dine-in sent-line editing).
   // AND PHASE E: 36 -> 38 for `pos_split_settle` + `pos_split_state` (Split Bill).
-  assert.equal(members.length, 38, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND PHASE G: 38 -> 41 for `pos_payout_create` + `pos_payout_reverse` + `pos_payout_list`
+  // (cash drawer outflows linked to an existing source).
+  assert.equal(members.length, 41, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

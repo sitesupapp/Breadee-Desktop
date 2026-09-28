@@ -138,6 +138,9 @@ export type ShiftExpected = {
   cash_sales: number;
   orders: number;
   opening_cash: number;
+  // Phase G — active cash payouts already subtracted from `expected` by the server.
+  // 0 (or absent on a pre-Phase-G payload) means no cash was paid out this shift.
+  cash_payouts: number;
   cash_usd: number;
   cash_lbp_original: number;
   cash_lbp_usd: number;
@@ -176,6 +179,9 @@ export type ShiftReport = {
   expected_cash: number;
   actual_cash: number;
   difference: number;
+  // Phase G — active cash payouts subtracted from `expected_cash`. 0 (or absent on a
+  // pre-Phase-G report snapshot) means no cash was paid out of the drawer this shift.
+  cash_payouts: number;
   notes: string | null;
   opened_at: string | null;
   closed_at: string | null;

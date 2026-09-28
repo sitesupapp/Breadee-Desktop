@@ -46,6 +46,15 @@ export const POS_PERMISSIONS = {
   // edit_orders: settling part of a bill by item is its own permission, and
   // `pos_split_settle` checks exactly this key for itself.
   SPLIT_BILL: "pos.split_bill",
+  // Phase G — POS Payouts / Cash Drawer Outflows. THREE distinct authorities, exactly
+  // what the payout RPCs check for themselves — never piggybacked on take_payments or
+  // any other key. VIEW guards the Payouts surface (`pos_payout_list`); CREATE guards
+  // recording a cash-out (`pos_payout_create`); REVERSE guards reversing one
+  // (`pos_payout_reverse`). By default owner + manager hold all three; cashier holds
+  // none (a payout is a manager-authorized act).
+  PAYOUTS_VIEW: "pos.payouts.view",
+  PAYOUTS_CREATE: "pos.payouts.create",
+  PAYOUTS_REVERSE: "pos.payouts.reverse",
   APPLY_DISCOUNTS: "pos.apply_discounts",
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
@@ -184,6 +193,46 @@ export function canApplyDiscounts(ctx: PosAccessContext): Gate {
  */
 export function canSplitBill(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.SPLIT_BILL), "You do not have permission to split bills.");
+}
+
+/**
+ * POS Payouts — Cash Drawer Outflows (Phase G).
+ *
+ * A payout is an operational cash-drawer act, so these carry the owner block that
+ * `canOperatePOS` applies (mirroring `pos_assert_operator`, which every payout RPC
+ * runs), then the dedicated permission the RPC checks for itself. There is NO
+ * separate sub-feature — payouts are part of the core cash drawer, available
+ * wherever POS is. STRICTER than a bare permission lookup, never looser; not a
+ * security boundary — the RPCs and RLS re-enforce every rule — so the control is
+ * offered only where the server would honour it.
+ */
+export function canViewPayouts(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_VIEW), "You do not have permission to view cash payouts.");
+}
+
+export function canCreatePayout(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_CREATE), "You do not have permission to record a cash payout.");
+}
+
+/**
+ * Reversing a payout. A DISTINCT authority from creating one — a cashier who may
+ * record a cash-out is not thereby one who may reverse it, and `pos_payout_reverse`
+ * agrees. Built on the same POS-access prerequisite so a create-only operator finds
+ * Reverse refused, exactly as the server would refuse it. Connectivity is NOT part
+ * of this gate (a permission does not change when the network drops); the online-only
+ * rule is enforced at the call site, where the connection matters.
+ */
+export function canReversePayout(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_REVERSE), "You do not have permission to reverse a cash payout.");
 }
 
 /**
