@@ -557,7 +557,8 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // Phase E adds `pos_split_settle` + `pos_split_state` (26th, 27th) - item/quantity Split Bill.
   // Phase G adds `pos_payout_create` + `pos_payout_reverse` + `pos_payout_list` (28th-30th)
   // - cash drawer outflows linked to an existing source.
-  assert.equal(names.length, 30);
+  // Phase H adds `pos_analytics_summary` (31st) - one read-only analytics report.
+  assert.equal(names.length, 31);
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));

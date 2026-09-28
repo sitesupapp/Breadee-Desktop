@@ -203,11 +203,12 @@ test("shiftReport.ts: the printed DRAWER block prints Cash payouts when present"
 
 // --- The Payouts surface + launcher ------------------------------------------
 
-test("PosStatusBar: a Payouts launcher, offered only when the operator may view payouts", () => {
+test("PosStatusBar: the cashier Payouts launcher was RELOCATED out (Phase H) — Payouts is a main-dashboard module", () => {
+  // Phase H moved Payouts to the MAIN dashboard sidebar (see pos-phase-h-analytics),
+  // so the cashier status bar no longer launches it. The payout LOGIC is unchanged.
   const s = src("components/pos/PosStatusBar.tsx");
-  assert.match(s, /onOpenPayouts\?: \(\) => void/);
-  assert.match(s, /canViewPayouts\?: boolean/);
-  assert.match(s, /props\.canViewPayouts && props\.onOpenPayouts/);
+  assert.doesNotMatch(s, /onOpenPayouts/);
+  assert.doesNotMatch(s, /canViewPayouts/);
 });
 
 test("PayoutsModal: summary cards, guided New Payout, cash-leaving-drawer confirmation, reversal, online-only", () => {
@@ -231,10 +232,12 @@ test("PayoutsModal: summary cards, guided New Payout, cash-leaving-drawer confir
   assert.match(s, /opId\.current = crypto\.randomUUID\(\)/);
 });
 
-test("PosWorkspace: renders PayoutsModal and re-reads the cash box after a payout changes the drawer", () => {
-  const s = src("screens/pos/PosWorkspace.tsx");
-  assert.match(s, /<PayoutsModal/);
-  assert.match(s, /onChanged=\{\(\) => void shiftStore\.refreshCashBox\(\)\}/);
-  assert.match(s, /canCreate=\{pos\.gates\.createPayout\}/);
-  assert.match(s, /canReverse=\{pos\.gates\.reversePayout\}/);
+test("PayoutsModal is now rendered by the main-dashboard PayoutsPage (Phase H), not the cashier workspace", () => {
+  // The Phase G modal + business logic are reused UNCHANGED; only the entry point moved.
+  const page = src("screens/PayoutsPage.tsx");
+  assert.match(page, /<PayoutsModal/);
+  assert.match(page, /canCreate=\{pos\.gates\.createPayout\}/);
+  assert.match(page, /canReverse=\{pos\.gates\.reversePayout\}/);
+  // and the cashier workspace no longer renders it
+  assert.doesNotMatch(src("screens/pos/PosWorkspace.tsx"), /PayoutsModal/);
 });

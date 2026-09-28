@@ -121,7 +121,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // AND BY FLOOR DESIGNER (Phase 4): 32 -> 35, for the publish lifecycle —
 // floor_publish, floor_history and floor_restore_revision. Publishing materializes
 // canonical tables through one atomic server RPC; the client never writes them.
-test("the RPC allow-list contains exactly the forty-one expected names", () => {
+test("the RPC allow-list contains exactly the forty-two expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -146,6 +146,8 @@ test("the RPC allow-list contains exactly the forty-one expected names", () => {
       "floor_service_layout",
       "floor_takeover_lease",
       "floor_unplaced_tables",
+      // Phase H: POS Analytics — one server-aggregated report (pos.analytics.view).
+      "pos_analytics_summary",
       "pos_cash_box_shift",
       "pos_clear_table",
       "pos_close_table",
@@ -189,7 +191,7 @@ test("the RPC allow-list contains exactly the forty-one expected names", () => {
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 41);
+  assert.equal(members.length, 42);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

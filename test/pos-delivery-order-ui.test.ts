@@ -707,7 +707,8 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // called from the Dine-In library layer - not from these screens.
   // 30 since Phase G added `pos_payout_create` + `pos_payout_reverse` + `pos_payout_list`
   // (cash drawer outflows), called from the payouts library layer - not from these screens.
-  assert.equal(names.length, 30);
+  // 31 since Phase H added `pos_analytics_summary`, called from the analytics library layer.
+  assert.equal(names.length, 31);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));
