@@ -28,6 +28,7 @@ import { DineInRoundPanel } from "@/components/pos/DineInRoundPanel";
 import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
+import { loadAutoSeatDirectOpen, readCachedAutoSeat } from "@/lib/pos/autoSeat";
 import { classifyError } from "@/lib/pos/errors";
 import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
 import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
@@ -230,6 +231,9 @@ export function useDineInWorkspace(input: {
    * case `pos_open_table` accepts free text in.
    */
   const [manualOpen, setManualOpen] = useState(false);
+  // Phase F — Auto-Seat. Start from the last synchronized value (offline-safe) so the
+  // very first tap is correct, then refresh from the canonical settings row when online.
+  const [autoSeat, setAutoSeat] = useState<boolean>(() => readCachedAutoSeat(pos.branch.id));
   const [openError, setOpenError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -470,6 +474,34 @@ export function useDineInWorkspace(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selected, openGate.allowed, ctx, toast],
   );
+
+  // Phase F — refresh the branch's auto-seat setting from the canonical row when
+  // online; offline keeps the last synchronized value already in state. Never blocks.
+  useEffect(() => {
+    if (!input.online) return;
+    let live = true;
+    void loadAutoSeatDirectOpen(pos.tenantId, pos.branch.id).then((v) => {
+      if (live) setAutoSeat(v);
+    });
+    return () => {
+      live = false;
+    };
+  }, [input.online, pos.tenantId, pos.branch.id]);
+
+  // Opening the SELECTED free table. Auto-seat SKIPS the seat prompt only when the
+  // setting is ON and the table carries a published seat count (pos_tables.seats,
+  // the same canonical value Dine-In already shows); otherwise the existing seat
+  // modal appears — never a dead end, never an invented seat count.
+  const requestOpenSelected = useCallback(() => {
+    if (!openGate.allowed) return;
+    setOpenError(null);
+    if (autoSeat && selected && (selected.seats ?? 0) > 0) {
+      void confirmOpen(selected.seats);
+      return;
+    }
+    setManualOpen(false);
+    setSeatOpen(true);
+  }, [openGate.allowed, autoSeat, selected, confirmOpen]);
 
   // --- Level 2B: rounds -------------------------------------------------------
 
@@ -1206,7 +1238,7 @@ export function useDineInWorkspace(input: {
       tableOpen: () => {
         if (!focusedId) return;
         if (focusedId !== tables.selectedTableId) return select(focusedId);
-        if (openGate.allowed) setSeatOpen(true);
+        requestOpenSelected();
       },
       addItems: () => void enterAddItems(),
       // Level 2C. Each OPENS its confirmation - a chord never performs the
@@ -1389,10 +1421,7 @@ export function useDineInWorkspace(input: {
         addItemsGate={addItemsGate}
         shiftOpen={hasOpenShift}
         onAddItems={() => void enterAddItems()}
-        onOpenTable={() => {
-          setOpenError(null);
-          setSeatOpen(true);
-        }}
+        onOpenTable={requestOpenSelected}
         onOpenShift={input.onOpenShift}
         moveGate={opGates.move}
         closeGate={opGates.close}
@@ -1409,7 +1438,7 @@ export function useDineInWorkspace(input: {
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, printBill, printingBill],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
   );
 
   const roundPanel = useCallback(
