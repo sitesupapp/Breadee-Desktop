@@ -239,8 +239,10 @@ function money(v: unknown): string {
 const SOURCE_QUERIES: Record<PayoutSourceType, SourceQuery> = {
   expense: {
     table: "expenses",
-    cols: "id, description, category, amount, currency_code, expense_date, branch_id, tenant_id, deleted_at",
-    keep: (r) => r.deleted_at == null,
+    // NOTE: `expenses` has NO soft-delete column — it carries `status`, not `deleted_at`.
+    // The server validator accepts any expense in the tenant/branch, so the picker lists
+    // them all (most recent first) and the server re-validates + snapshots on create.
+    cols: "id, description, category, amount, currency_code, expense_date, branch_id, tenant_id",
     toSource: (r) => ({
       id: str(r.id),
       label: str(r.description) || str(r.category) || "Expense",
