@@ -703,6 +703,13 @@ export function useDineInWorkspace(input: {
   }, [input.menu.options]);
 
   const onEditSentModifiers = useCallback((line: BillLine) => setEditModLine(line), []);
+  // Only offer the sent-line "Options" action for items that actually have a modifier
+  // group in THIS menu — otherwise the chooser is a dead end ("This item has no options").
+  // Reuses the same menu/group lookup the chooser itself uses; no new source of truth.
+  const itemHasModifiers = useCallback(
+    (menuItemId: string) => groupsForItem(menuItemId, input.menu.groupsByItem, input.menu.groups).length > 0,
+    [input.menu.groupsByItem, input.menu.groups],
+  );
   const saveSentModifiers = useCallback(
     async (result: ItemOptionsResult) => {
       const line = editModLine;
@@ -1351,6 +1358,7 @@ export function useDineInWorkspace(input: {
           onEditSentQty={onEditSentQty}
           onRemoveSentLine={onRemoveSentLine}
           onEditSentModifiers={onEditSentModifiers}
+          itemHasModifiers={itemHasModifiers}
         />
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1358,7 +1366,7 @@ export function useDineInWorkspace(input: {
       selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
-      editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine, onEditSentModifiers,
+      editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine, onEditSentModifiers, itemHasModifiers,
     ],
   );
 

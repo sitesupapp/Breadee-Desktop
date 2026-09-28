@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { buildSetQuantityPayload, buildChangeModifiersPayload } from "@/lib/pos/orders";
+import { groupsForItem } from "@/lib/pos/modifiers";
+import type { ModifierGroup } from "@/types/pos";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = (p: string) => readFileSync(join(here, "..", "src", p), "utf8").replace(/\r\n/g, "\n");
@@ -142,4 +144,49 @@ test("modifier edit is under the same pos.edit_orders gate as qty/remove", () =>
   const s = src("screens/pos/DineInWorkspace.tsx");
   // one gate (editSentGate = canEditOrders) drives canEditSent for all sent-line edits
   assert.match(s, /canEditSent=\{editSentGate\.allowed\}/);
+});
+
+// --- Options button visibility (UX): only when the item HAS modifier groups -------
+
+const G = (id: string): ModifierGroup => ({ id }) as unknown as ModifierGroup;
+
+test("visibility basis: an item WITH a modifier group resolves at least one group", () => {
+  const groups = [G("g1"), G("g2")];
+  const withGroups = groupsForItem("item-with", { "item-with": ["g1"] }, groups);
+  assert.equal(withGroups.length > 0, true); // -> Options SHOWN
+});
+
+test("visibility basis: an item WITHOUT any modifier group resolves none", () => {
+  const groups = [G("g1"), G("g2")];
+  const noGroups = groupsForItem("item-none", {}, groups);
+  assert.equal(noGroups.length, 0); // -> Options HIDDEN (no dead-end dialog)
+});
+
+test("DineInRoundPanel: the Options button also requires the item to HAVE modifiers", () => {
+  const s = src("components/pos/DineInRoundPanel.tsx");
+  // gated on the predicate in addition to the concrete menu_item_id
+  assert.match(s, /props\.onEditSentModifiers && l\.menu_item_id && props\.itemHasModifiers\?\.\(l\.menu_item_id\)/);
+  // the predicate is a declared prop
+  assert.match(s, /itemHasModifiers\?:\s*\(menuItemId: string\) => boolean/);
+});
+
+test("DineInRoundPanel: qty +/- and remove are NOT gated by itemHasModifiers", () => {
+  const s = src("components/pos/DineInRoundPanel.tsx");
+  // qty/remove controls render under canEditSent only; itemHasModifiers appears solely on the Options line
+  assert.equal((s.match(/itemHasModifiers/g) ?? []).length, 2); // the prop type + the one Options guard
+  assert.doesNotMatch(s, /onEditSentQty\?\.\(l, -1\)[^\n]*itemHasModifiers/);
+  assert.doesNotMatch(s, /onRemoveSentLine\?\.\(l\)[^\n]*itemHasModifiers/);
+});
+
+test("DineInWorkspace: derives itemHasModifiers from the SAME menu/group lookup and passes it", () => {
+  const s = src("screens/pos/DineInWorkspace.tsx");
+  assert.match(s, /groupsForItem\(menuItemId, input\.menu\.groupsByItem, input\.menu\.groups\)\.length > 0/);
+  assert.match(s, /itemHasModifiers=\{itemHasModifiers\}/);
+});
+
+test("Takeaway/Delivery add flow is untouched by the visibility fix (Dine-In scoped)", () => {
+  // The add-flow picker still opens purely on the item's own groups; no itemHasModifiers there.
+  const pw = src("screens/pos/PosWorkspace.tsx");
+  assert.match(pw, /groupsForItem\(item\.id, menu\.groupsByItem, menu\.groups\)/);
+  assert.doesNotMatch(pw, /itemHasModifiers/);
 });
