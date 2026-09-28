@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Breadee RC",
+  "identifier": "app.breadee.desktop.rc",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-rc-channel/latest.json"
+      ]
+    }
+  }
+}
