@@ -30,7 +30,11 @@ import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { classifyError } from "@/lib/pos/errors";
 import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
-import { buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
+import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
+import { ModifierDialog } from "@/components/pos/ModifierDialog";
+import { groupsForItem } from "@/lib/pos/modifiers";
+import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
+import type { MenuItem, ModifierOption } from "@/types/pos";
 import { ServiceFloor } from "@/components/pos/floor/ServiceFloor";
 import { FloorDesigner } from "@/components/pos/floor/designer/FloorDesigner";
 import { MapListToggle, type DineInFloorView } from "@/components/pos/floor/MapListToggle";
@@ -679,6 +683,57 @@ export function useDineInWorkspace(input: {
   );
   const onRemoveSentLine = useCallback((line: BillLine) => void editSentLine(line, 0), [editSentLine]);
 
+  // --- Phase D: change a SENT line's modifiers (atomic cancel-old + make-new) ----
+  // Reuses the shared ModifierDialog, PRE-FILLED with the line's current options, so
+  // the cashier edits from the real state. Confirm sends op=change_modifiers for the
+  // exact persisted line id; the server owns the delta and we re-read the bill.
+  const [editModLine, setEditModLine] = useState<BillLine | null>(null);
+  const editModItem = useMemo<MenuItem | null>(
+    () => (editModLine?.menu_item_id ? input.menu.items.find((m) => m.id === editModLine.menu_item_id) ?? null : null),
+    [editModLine, input.menu.items],
+  );
+  const editModGroups = useMemo(
+    () => (editModItem ? groupsForItem(editModItem.id, input.menu.groupsByItem, input.menu.groups) : []),
+    [editModItem, input.menu.groupsByItem, input.menu.groups],
+  );
+  const editModOptionsByGroup = useMemo(() => {
+    const map: Record<string, ModifierOption[]> = {};
+    for (const o of input.menu.options) (map[o.modifier_group_id] ??= []).push(o);
+    return map;
+  }, [input.menu.options]);
+
+  const onEditSentModifiers = useCallback((line: BillLine) => setEditModLine(line), []);
+  const saveSentModifiers = useCallback(
+    async (result: ItemOptionsResult) => {
+      const line = editModLine;
+      if (!line) return;
+      const bill = useTables.getState().bill;
+      const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
+      if (!order) { setEditModLine(null); return; }
+      setEditingLineId(line.id);
+      setEditModLine(null);
+      try {
+        await editOrderLine(
+          buildChangeModifiersPayload({
+            orderId: order.id,
+            lineId: line.id,
+            quantity: result.quantity,
+            modifiers: result.modifiers,
+            expectedVersion: order.pos_entity_version,
+            clientOpId: crypto.randomUUID(),
+          }),
+        );
+        await tables.loadBill(ctx);
+      } catch (e) {
+        await tables.loadBill(ctx);
+        toast.push({ tone: "warning", message: "The option change did not apply. The bill was reloaded.", detail: classifyError(e).message });
+      } finally {
+        setEditingLineId(null);
+      }
+    },
+    [editModLine, tables, ctx, toast],
+  );
+
   /**
    * Open the payment dialog.
    *
@@ -1295,6 +1350,7 @@ export function useDineInWorkspace(input: {
           editingLineId={editingLineId}
           onEditSentQty={onEditSentQty}
           onRemoveSentLine={onRemoveSentLine}
+          onEditSentModifiers={onEditSentModifiers}
         />
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1302,12 +1358,33 @@ export function useDineInWorkspace(input: {
       selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
-      editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine,
+      editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine, onEditSentModifiers,
     ],
   );
 
   const dialogs = (
     <>
+      {/* Phase D — change a SENT line's options. The SAME shared chooser the add
+          flow uses, pre-filled with the line's current modifiers/quantity via the
+          backward-compatible seed props (add flow unchanged). Confirm sends
+          op=change_modifiers for this exact line id; ingredient customization is off
+          because change_modifiers edits modifiers only. */}
+      <ModifierDialog
+        open={Boolean(editModLine && editModItem)}
+        item={editModItem}
+        basePrice={editModLine?.base_price ?? 0}
+        groups={editModGroups}
+        optionsByGroup={editModOptionsByGroup}
+        currency={input.currency}
+        rate={input.rate}
+        ingredientCustomization={false}
+        seedKey={editModLine ? `edit:${editModLine.id}` : null}
+        initialModifiers={editModLine?.modifiers ?? []}
+        initialQuantity={editModLine?.quantity ?? 1}
+        confirmLabel="Save changes"
+        onCancel={() => setEditModLine(null)}
+        onConfirm={(result) => void saveSentModifiers(result)}
+      />
       {/* The SAME dialog Takeaway uses. Not a copy: one discount validator, one
           currency conversion, one tender/change calculation, one keypad. Only
           the identity at the top differs, which is the part that should. */}

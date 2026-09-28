@@ -898,8 +898,8 @@ function PosWorkspaceInner() {
     return () => window.clearInterval(id);
   }, [openTablesOpen]);
   const roundMenu = useMemo(
-    () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options }),
-    [menu.groupsByItem, menu.groups, menu.options],
+    () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options, items: menu.items }),
+    [menu.groupsByItem, menu.groups, menu.options, menu.items],
   );
   const dineIn = useDineInWorkspace({
     pos,
