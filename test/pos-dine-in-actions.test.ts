@@ -267,7 +267,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // editing, gated on pos.edit_orders; writes no refund/payment).
   // AND BY PHASE E: 36 -> 38 for `pos_split_settle` + `pos_split_state` (item/quantity
   // Split Bill: settlement/allocation only, gated on pos.split_bill; no second sale).
-  assert.equal(members.length, 38, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND BY PHASE G: 38 -> 41 for `pos_payout_create` + `pos_payout_reverse` + `pos_payout_list`
+  // (cash drawer outflows linked to an existing source; never a second economic event).
+  assert.equal(members.length, 41, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:
@@ -277,6 +279,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // `collect` as well as `complete` so a receivables money RPC cannot slip past
   // this guard; the two receivables READS (`_search`, `_customer`) match none of
   // these words and are correctly excluded. `pos_remove_order_item` is absent.
+  // Phase G: the three `pos_payout_*` names match the `pay` pattern and belong here —
+  // a payout MOVES physical cash out of the drawer, so it is correctly counted among
+  // the money-moving RPCs this guard watches.
   assert.deepEqual(
     members.filter((m) => /submit|pay|void|refund|complete|collect/.test(m)).sort(),
     [
@@ -284,6 +289,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
       "pos_complete_table_on_account",
       "pos_pay_order",
       "pos_pay_table",
+      "pos_payout_create",
+      "pos_payout_list",
+      "pos_payout_reverse",
       "pos_receivable_collect",
       "pos_submit_order",
       "pos_void_order",
