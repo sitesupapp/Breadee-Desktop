@@ -50,6 +50,12 @@ export type DineInRoundPanelProps = {
   onRemoveSentLine?: (line: BillLine) => void;
   /** Opens the item's modifier chooser for this sent line (change = cancel old + make new). */
   onEditSentModifiers?: (line: BillLine) => void;
+  /**
+   * True when the line's menu item actually has at least one modifier group in this menu.
+   * The "Options" action is shown ONLY then, so tapping it can never dead-end on
+   * "This item has no options". qty +/- and remove are unaffected.
+   */
+  itemHasModifiers?: (menuItemId: string) => boolean;
 };
 
 export function DineInRoundPanel(props: DineInRoundPanelProps) {
@@ -184,7 +190,7 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
                                 >
                                   +
                                 </button>
-                                {props.onEditSentModifiers && l.menu_item_id && (
+                                {props.onEditSentModifiers && l.menu_item_id && props.itemHasModifiers?.(l.menu_item_id) && (
                                   <button
                                     type="button"
                                     aria-label={`Edit options for ${l.name}`}
