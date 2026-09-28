@@ -174,6 +174,9 @@ test("the RPC allow-list contains exactly the thirty-six expected names", () => 
       // (pos.delivery.manage). Never a customer-money RPC.
       "pos_set_delivery_ops",
       "pos_shift_expected",
+      // Phase E: item/quantity Split Bill — settlement/allocation only (pos.split_bill).
+      "pos_split_settle",
+      "pos_split_state",
       "pos_submit_order",
       "pos_table_map",
       "pos_upsert_customer",
@@ -181,7 +184,7 @@ test("the RPC allow-list contains exactly the thirty-six expected names", () => 
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 36);
+  assert.equal(members.length, 38);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

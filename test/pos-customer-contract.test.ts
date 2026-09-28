@@ -157,7 +157,9 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // cost reconciliation, gated on pos.delivery.settlements.manage). No customer money.
   // 24 -> 25 in Phase D: `pos_edit_order_line` (open/unpaid dine-in sent-line editing,
   // gated on pos.edit_orders; writes no refund/payment). Not a customer-money RPC.
-  assert.equal(names.length, 25);
+  // 25 -> 27 in Phase E: `pos_split_settle` + `pos_split_state` (item/quantity Split Bill,
+  // settlement/allocation only, gated on pos.split_bill). Not a customer-money RPC.
+  assert.equal(names.length, 27);
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
   assert.ok(names.includes("pos_configure_tables"));

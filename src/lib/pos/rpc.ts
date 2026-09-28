@@ -83,6 +83,17 @@ export type PosRpcName =
   // `pos_remove_order_item`). IDEMPOTENT on a client-supplied `client_op_id` and
   // optimistic-concurrency-guarded via `expected_version`. See `lib/pos/orders.ts`.
   | "pos_edit_order_line"
+  // Phase E — item/quantity-based Split Bill for Dine-In. A split is a SETTLEMENT,
+  // never a second sale: `pos_split_settle` allocates specific items/quantities on an
+  // OPEN, UNPAID dine-in bill and settles them through the EXISTING pos_payments
+  // ledger, so kitchen tickets, inventory/COGS and the GL sale posting (which fires
+  // once, only when the PARENT completes) are untouched. Server-authoritative available
+  // qty (line qty - already allocated), fail-closed on over-allocation / stale
+  // `expected_version` (VERSION_CONFLICT) / non-open-unpaid (NOT_SPLITTABLE), gated on
+  // `pos.split_bill`, IDEMPOTENT on a client-supplied `client_op_id`. `pos_split_state`
+  // is the READ projection (per-line available qty + settlements). See `lib/pos/split.ts`.
+  | "pos_split_settle"
+  | "pos_split_state"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by
