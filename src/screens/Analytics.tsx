@@ -236,7 +236,7 @@ function Dashboard({ data, money }: { data: AnalyticsData; money: (n: number) =>
             rows={data.payment_methods.map((p) => ({ label: p.label, value: p.amount, badge: p.is_cash ? "Cash" : undefined }))}
             money={money}
             emptyText="No payments in this period."
-            colorFor={(i) => PAY_COLORS[i % PAY_COLORS.length]}
+            colorFor={(i) => PAY_BAR_CLASSES[i % PAY_BAR_CLASSES.length]}
           />
         </Card>
       </div>
@@ -264,7 +264,9 @@ function Dashboard({ data, money }: { data: AnalyticsData; money: (n: number) =>
   );
 }
 
-const PAY_COLORS = ["#16a34a", "#2563eb", "#7c3aed", "#db2777", "#ea580c", "#0891b2"];
+// Distinct category bar colours as Tailwind named classes (no hex literals — the theme
+// test forbids them; named utilities are fine and give payment methods stable colours).
+const PAY_BAR_CLASSES = ["bg-emerald-500", "bg-sky-600", "bg-violet-600", "bg-pink-600", "bg-orange-500", "bg-cyan-600"];
 
 function Kpi({ label, value, icon, tone, big }: { label: string; value: string; icon: string; tone?: "brand" | "warn"; big?: boolean }) {
   const ring = tone === "brand" ? "border-brand/30 bg-brand-soft/40" : tone === "warn" ? "border-amber-200 bg-amber-50" : "border-line bg-white";
@@ -304,19 +306,20 @@ function TrendChart({ data, money }: { data: AnalyticsData; money: (n: number) =
   const labelEvery = Math.ceil(n / 8);
   return (
     <div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 190 }} preserveAspectRatio="none" role="img" aria-label="Sales trend">
+      {/* currentColor = brand (token), so the trend follows the theme — no hex literals. */}
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full text-brand" style={{ height: 190 }} preserveAspectRatio="none" role="img" aria-label="Sales trend">
         <defs>
           <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#16a34a" stopOpacity="0.28" />
-            <stop offset="100%" stopColor="#16a34a" stopOpacity="0.02" />
+            <stop offset="0%" stopColor="currentColor" stopOpacity="0.26" />
+            <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
           </linearGradient>
         </defs>
-        <line x1={padL} y1={padT + innerH} x2={W - padR} y2={padT + innerH} stroke="#e2e8f0" strokeWidth="1" />
+        <line x1={padL} y1={padT + innerH} x2={W - padR} y2={padT + innerH} className="stroke-slate-200" strokeWidth="1" />
         <path d={area} fill="url(#trendFill)" />
-        <path d={line} fill="none" stroke="#16a34a" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-        {n <= 32 && pts.map((p, i) => <circle key={i} cx={x(i)} cy={y(p.amount)} r={n <= 14 ? 3 : 2} fill="#16a34a" />)}
+        <path d={line} fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+        {n <= 32 && pts.map((p, i) => <circle key={i} cx={x(i)} cy={y(p.amount)} r={n <= 14 ? 3 : 2} fill="currentColor" />)}
         {pts.map((p, i) => (i % labelEvery === 0 || i === n - 1) ? (
-          <text key={`t${i}`} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="#64748b">{trendBucketLabel(p.bucket, data.granularity)}</text>
+          <text key={`t${i}`} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" className="fill-slate-500">{trendBucketLabel(p.bucket, data.granularity)}</text>
         ) : null)}
       </svg>
       <p className="mt-1 text-center text-[11px] text-sub">Peak: <span className="font-bold text-ink">{money(peak.amount)}</span> at {trendBucketLabel(peak.bucket, data.granularity)}</p>
@@ -341,7 +344,7 @@ function BarList({
       {rows.map((r, i) => {
         const pct = total > 0 ? Math.round((r.value / total) * 100) : 0;
         const w = Math.max(2, Math.round((r.value / max) * 100));
-        const color = colorFor ? colorFor(i) : "#16a34a";
+        const colorClass = colorFor ? colorFor(i) : "bg-brand";
         return (
           <li key={r.label + i}>
             <div className="mb-1 flex items-baseline justify-between gap-2 text-sm">
@@ -352,7 +355,7 @@ function BarList({
               <span className="shrink-0 tabular-nums text-sub"><span className="font-bold text-ink">{money(r.value)}</span> · {pct}%</span>
             </div>
             <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full rounded-full" style={{ width: `${w}%`, backgroundColor: color }} />
+              <div className={`h-full rounded-full ${colorClass}`} style={{ width: `${w}%` }} />
             </div>
             {r.sub && <p className="mt-0.5 text-[11px] text-sub">{r.sub}</p>}
           </li>
