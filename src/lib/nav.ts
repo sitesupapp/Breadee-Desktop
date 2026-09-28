@@ -8,7 +8,7 @@
 // tenant owners, whom `pos_assert_operator` rejects server-side.
 
 import { FEATURES, hasFeature, type FeatureMap } from "@/lib/features";
-import { canOperatePOS, canViewReceivables } from "@/lib/pos/access";
+import { canOperatePOS, canViewReceivables, canViewAnalytics, canViewPayouts } from "@/lib/pos/access";
 import { canViewMenuBuilder } from "@/lib/menu/access";
 import type { GlyphName } from "@/components/Glyph";
 import type { TenantRole, UserStatus } from "@/lib/types";
@@ -59,6 +59,35 @@ export const NAV_ITEMS: NavItem[] = [
         permissions: ctx.permissions,
         features: ctx.features,
       }),
+  },
+  {
+    // Phase H — Analytics is a FIRST-CLASS main-dashboard module (not inside the
+    // cashier layout). Owners see it too (analytics is a management view; the RPC runs
+    // no operator assertion). Hidden unless the user holds `pos.analytics.view`.
+    to: "/analytics",
+    label: "Analytics",
+    glyph: "analytics",
+    show: (ctx) =>
+      canViewAnalytics({
+        membership: { role: ctx.role, status: ctx.status },
+        permissions: ctx.permissions,
+        features: ctx.features,
+      }).allowed,
+  },
+  {
+    // Phase H — Payouts promoted to the main dashboard, DIRECTLY BELOW Analytics.
+    // Reuses the Phase G page/logic unchanged; only navigation moved here (the cashier
+    // launcher is removed). Gate is the Phase G `canViewPayouts` (operator + owner-block,
+    // matching pos_payout_list's pos_assert_operator), so it fails closed identically.
+    to: "/payouts",
+    label: "Payouts",
+    glyph: "cash-out",
+    show: (ctx) =>
+      canViewPayouts({
+        membership: { role: ctx.role, status: ctx.status },
+        permissions: ctx.permissions,
+        features: ctx.features,
+      }).allowed,
   },
   {
     to: "/receivables",

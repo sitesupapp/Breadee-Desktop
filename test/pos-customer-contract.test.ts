@@ -161,7 +161,8 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // settlement/allocation only, gated on pos.split_bill). Not a customer-money RPC.
   // 27 -> 30 in Phase G: `pos_payout_create` + `pos_payout_reverse` + `pos_payout_list`
   // (cash drawer outflows linked to an existing source; never a customer-money RPC).
-  assert.equal(names.length, 30);
+  // 30 -> 31 in Phase H: `pos_analytics_summary` (read-only analytics; never customer-money).
+  assert.equal(names.length, 31);
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
   assert.ok(names.includes("pos_configure_tables"));

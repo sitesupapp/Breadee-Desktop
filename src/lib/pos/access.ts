@@ -55,6 +55,12 @@ export const POS_PERMISSIONS = {
   PAYOUTS_VIEW: "pos.payouts.view",
   PAYOUTS_CREATE: "pos.payouts.create",
   PAYOUTS_REVERSE: "pos.payouts.reverse",
+  // Phase H — POS Analytics. VIEW gates the Analytics dashboard (pos_analytics_summary
+  // checks it for itself); EXPORT gates the PDF. UNLIKE operational POS keys these are
+  // NOT owner-excluded — analytics is a management view and pos_analytics_summary runs
+  // no pos_assert_operator, so owners (the primary analytics audience) are allowed.
+  ANALYTICS_VIEW: "pos.analytics.view",
+  ANALYTICS_EXPORT: "pos.analytics.export",
   APPLY_DISCOUNTS: "pos.apply_discounts",
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
@@ -233,6 +239,38 @@ export function canReversePayout(ctx: PosAccessContext): Gate {
     return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_REVERSE), "You do not have permission to reverse a cash payout.");
+}
+
+/**
+ * POS Analytics dashboard (Phase H).
+ *
+ * A MANAGEMENT view, NOT an operational POS action: `pos_analytics_summary` runs no
+ * `pos_assert_operator`, so — unlike the payout/receivables gates — this does NOT
+ * exclude owners (owners are the primary analytics audience). The order the RPC would
+ * refuse in: active membership, the `pos` feature, then the `pos.analytics.view`
+ * permission the RPC checks for itself. Not a security boundary; the RPC re-enforces
+ * tenant/OU/permission. It only decides whether the sidebar entry + page are offered.
+ */
+export function canViewAnalytics(ctx: PosAccessContext): Gate {
+  const m = ctx.membership;
+  if (!m || !isActiveMember(m.status)) {
+    return { allowed: false, reason: "Your membership is not active for this tenant." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS)) {
+    return { allowed: false, reason: "POS is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.ANALYTICS_VIEW), "You do not have permission to view analytics.");
+}
+
+/**
+ * Exporting the Analytics PDF (Phase H). Everything `canViewAnalytics` requires plus
+ * the `pos.analytics.export` permission. A view-only analyst sees the dashboard but
+ * finds Export disabled, exactly as the server would gate a heavier export path.
+ */
+export function canExportAnalytics(ctx: PosAccessContext): Gate {
+  const view = canViewAnalytics(ctx);
+  if (!view.allowed) return view;
+  return gate(perm(ctx, POS_PERMISSIONS.ANALYTICS_EXPORT), "You do not have permission to export analytics.");
 }
 
 /**

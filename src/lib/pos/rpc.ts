@@ -110,6 +110,13 @@ export type PosRpcName =
   | "pos_payout_create"
   | "pos_payout_reverse"
   | "pos_payout_list"
+  // Phase H — POS Analytics. ONE server-aggregated report over a bounded date range,
+  // gated on `pos.analytics.view`. Reuses the canonical pos_range_report patterns
+  // (OU/branch gate, USD normalization, split-safe per-order sales, standalone refunds)
+  // and adds business-timezone bucketing, a dynamic payment-method breakdown, a sales
+  // trend, top items and the Phase G cash-payout total. READ-only; no N+1; the SAME
+  // response drives the dashboard AND the PDF (one source of truth). See lib/pos/analytics.ts.
+  | "pos_analytics_summary"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by

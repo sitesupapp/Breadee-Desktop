@@ -269,7 +269,8 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // Split Bill: settlement/allocation only, gated on pos.split_bill; no second sale).
   // AND BY PHASE G: 38 -> 41 for `pos_payout_create` + `pos_payout_reverse` + `pos_payout_list`
   // (cash drawer outflows linked to an existing source; never a second economic event).
-  assert.equal(members.length, 41, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND BY PHASE H: 41 -> 42 for `pos_analytics_summary` (one read-only analytics report).
+  assert.equal(members.length, 42, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:
