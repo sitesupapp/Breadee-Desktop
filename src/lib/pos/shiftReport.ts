@@ -161,6 +161,9 @@ export function buildShiftReportLines(input: {
     cashUsd: number;
     cashLbpOriginal: number;
     openingCash: number;
+    // Phase G — cash paid out of the drawer this shift; optional so a pre-Phase-G
+    // caller (no field) prints exactly as before.
+    cashPayouts?: number;
     expectedCash: number;
     actualCash: number;
     difference: number;
@@ -230,6 +233,9 @@ export function buildShiftReportLines(input: {
   // drawer figure is three orders of magnitude below the sales figure above it.
   lines.push({ label: "", kind: "rule" }, { label: `DRAWER (${CASH_CONTRACT_CURRENCY})`, kind: "heading" });
   lines.push({ label: "Opening cash", value: fmt(money.openingCash, CASH_CONTRACT_CURRENCY) });
+  if ((money.cashPayouts ?? 0) > 0) {
+    lines.push({ label: "Cash payouts", value: `- ${fmt(money.cashPayouts ?? 0, CASH_CONTRACT_CURRENCY)}` });
+  }
   lines.push({ label: "Expected", value: fmt(money.expectedCash, CASH_CONTRACT_CURRENCY) });
   lines.push({ label: "Counted", value: fmt(money.actualCash, CASH_CONTRACT_CURRENCY) });
   lines.push({ label: "Difference", value: fmt(money.difference, CASH_CONTRACT_CURRENCY), kind: "total" });

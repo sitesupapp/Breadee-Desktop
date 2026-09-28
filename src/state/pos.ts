@@ -10,11 +10,14 @@ import {
   canApplyDiscounts,
   canCollectReceivables,
   canCreateOrders,
+  canCreatePayout,
   canEndShift,
   canManageDelivery,
   canOpenShift,
   canOperatePOS,
+  canReversePayout,
   canTakeOnAccount,
+  canViewPayouts,
   canTakePayments,
   canUseOrderType,
   canViewDeliveryReport,
@@ -49,6 +52,9 @@ export type PosContext = {
     manageDelivery: Gate;
     viewDeliveryReport: Gate;
     reconcileDeliverySettlements: Gate;
+    viewPayouts: Gate;
+    createPayout: Gate;
+    reversePayout: Gate;
   };
   routes: {
     takeaway: boolean;
@@ -120,6 +126,9 @@ export function usePosContext(): PosContext {
         manageDelivery: canManageDelivery(access),
         viewDeliveryReport: canViewDeliveryReport(access),
         reconcileDeliverySettlements: canReconcileDeliverySettlements(access),
+        viewPayouts: canViewPayouts(access),
+        createPayout: canCreatePayout(access),
+        reversePayout: canReversePayout(access),
       },
       routes: {
         takeaway: canUseOrderType(access, FEATURES.POS_TAKEAWAY),

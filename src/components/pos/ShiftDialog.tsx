@@ -162,6 +162,12 @@ export function EndShiftDialog({
                     three and the input below must share one unit. */}
                 <SummaryRow label="Opening float" value={formatMoney(expected.opening_cash, CASH_CONTRACT_CURRENCY)} />
                 <SummaryRow label="Cash taken" value={formatMoney(expected.cash_sales, CASH_CONTRACT_CURRENCY)} />
+                {/* Phase G — cash paid OUT of the drawer this shift, already subtracted
+                    from Expected by the server. Shown as a negative so the arithmetic on
+                    screen matches (opening + cash taken − payouts = expected). */}
+                {expected.cash_payouts > 0 && (
+                  <SummaryRow label="Cash payouts" value={`- ${formatMoney(expected.cash_payouts, CASH_CONTRACT_CURRENCY)}`} tone="amber" />
+                )}
                 <div className="mt-1 flex items-baseline justify-between border-t border-line pt-2">
                   <span className="text-sm font-bold text-ink">Expected</span>
                   <span className="text-xl font-extrabold tabular-nums text-ink">
@@ -319,6 +325,10 @@ export function ShiftReportDialog({
           <p className="mb-2 text-sm font-bold text-ink">Cash ({CASH_CONTRACT_CURRENCY})</p>
           <SummaryRow label="Opening float" value={formatMoney(report.opening_cash, CASH_CONTRACT_CURRENCY)} />
           <SummaryRow label="Cash sales" value={formatMoney(report.cash_sales, CASH_CONTRACT_CURRENCY)} />
+          {/* Phase G — cash paid out of the drawer, already subtracted from Expected. */}
+          {report.cash_payouts > 0 && (
+            <SummaryRow label="Cash payouts" value={`- ${formatMoney(report.cash_payouts, CASH_CONTRACT_CURRENCY)}`} tone="amber" />
+          )}
           <SummaryRow label="Expected" value={formatMoney(report.expected_cash, CASH_CONTRACT_CURRENCY)} />
           <SummaryRow label="Counted" value={formatMoney(report.actual_cash, CASH_CONTRACT_CURRENCY)} />
         </div>
