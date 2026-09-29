@@ -124,8 +124,8 @@ export async function loadTableBill(input: {
   const { data, error } = await supabase
     .from("pos_orders")
     .select(
-      "id, order_number, status, payment_status, shift_id, branch_id, tenant_id, subtotal, discount_amount, total_amount, primary_currency_snapshot, usd_to_lbp_rate_snapshot, created_at, " +
-        "pos_order_items(id, name_snapshot, quantity, base_price, modifiers_total, final_unit_price, line_total, kitchen_note, batch_no, " +
+      "id, order_number, status, payment_status, pos_entity_version, shift_id, branch_id, tenant_id, subtotal, discount_amount, total_amount, primary_currency_snapshot, usd_to_lbp_rate_snapshot, created_at, " +
+        "pos_order_items(id, menu_item_id, name_snapshot, quantity, base_price, modifiers_total, final_unit_price, line_total, kitchen_note, batch_no, " +
         "pos_order_item_modifiers(modifier_group_id, modifier_option_id, name_snapshot, price_delta, quantity))",
     )
     .eq("tenant_id", input.tenantId)
