@@ -45,6 +45,7 @@ import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import { buildReceipt } from "@/lib/receipt";
 import { readOrderReceiptLines, readSettledOrder } from "@/lib/pos/deliverySettlement";
 import { isNativeAvailable, listPrinters, printReport } from "@/lib/nativePrinting";
@@ -596,11 +597,14 @@ function PosWorkspaceInner() {
               cashUsd: report.cash_usd,
               cashLbpOriginal: report.cash_lbp_original,
               openingCash: report.opening_cash,
+              cashPayouts: report.cash_payouts,
               expectedCash: report.expected_cash,
               actualCash: report.actual_cash,
               difference: report.difference,
             },
             detail,
+            // Phase C — dynamic payment breakdown for the printed PAYMENTS block.
+            payments: paymentSummary(report),
             note: report.notes,
             fmt: formatMoney,
           }),
@@ -895,8 +899,8 @@ function PosWorkspaceInner() {
     return () => window.clearInterval(id);
   }, [openTablesOpen]);
   const roundMenu = useMemo(
-    () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options }),
-    [menu.groupsByItem, menu.groups, menu.options],
+    () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options, items: menu.items }),
+    [menu.groupsByItem, menu.groups, menu.options, menu.items],
   );
   const dineIn = useDineInWorkspace({
     pos,

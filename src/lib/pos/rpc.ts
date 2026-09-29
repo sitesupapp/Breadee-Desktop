@@ -74,6 +74,28 @@ export type PosRpcName =
   // than riding along here.
   | "pos_edit_order"
   | "pos_void_order"
+  // Phase D — Open Dine-In line editing (qty/remove/modifier change) as ONE atomic op:
+  // fail-closed to (dine_in, sent_to_kitchen, unpaid) + pos.edit_orders, idempotent on
+  // client_op_id, optimistic-concurrency via expected_version. See lib/pos/orders.ts.
+  | "pos_edit_order_line"
+  // Phase E — item/quantity Split Bill for Dine-In. A split is a SETTLEMENT, never a
+  // second sale: pos_split_settle allocates items/qty on an open, unpaid bill and settles
+  // through the EXISTING pos_payments ledger (POS_SALE fires once, on parent completion).
+  // Gated pos.split_bill, idempotent on client_op_id. pos_split_state is the read projection.
+  | "pos_split_settle"
+  | "pos_split_state"
+  // Phase G — POS Payouts / Cash Drawer Outflows. A drawer-movement layer linked to an
+  // EXISTING economic source; NEVER a second economic event. pos_payout_create (gated
+  // pos.payouts.create) validates the source and reduces the drawer expectation;
+  // pos_payout_reverse (gated pos.payouts.reverse) reverses only the drawer movement,
+  // while the shift is open; pos_payout_list (gated pos.payouts.view) is the read projection.
+  // Money-mover: ONLINE-ONLY, never enqueued offline. See lib/pos/payouts.ts.
+  | "pos_payout_create"
+  | "pos_payout_reverse"
+  | "pos_payout_list"
+  // Phase H — POS Analytics. ONE server-aggregated report over a bounded date range,
+  // gated pos.analytics.view. READ-only; the SAME response drives the dashboard AND PDF.
+  | "pos_analytics_summary"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by

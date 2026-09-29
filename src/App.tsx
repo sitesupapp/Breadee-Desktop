@@ -7,6 +7,8 @@ import { Dashboard } from "@/screens/Dashboard";
 import { MenuBuilder } from "@/screens/menu/MenuBuilder";
 import { PosWorkspace } from "@/screens/pos/PosWorkspace";
 import { CustomerAccounts } from "@/screens/CustomerAccounts";
+import { Analytics } from "@/screens/Analytics";
+import { PayoutsPage } from "@/screens/PayoutsPage";
 import { Profile } from "@/screens/Profile";
 import { Settings } from "@/screens/settings/Settings";
 import { Info } from "@/screens/Info";
@@ -86,6 +88,11 @@ export default function App() {
               (canViewReceivables) fails closed; the nav item is hidden unless
               entitled. */}
           <Route path="/receivables" element={<CustomerAccounts />} />
+          {/* Phase H — Analytics + Payouts are first-class main-dashboard modules,
+              inside the Shell (NOT the cashier /pos workspace). Each fails closed on
+              its own gate; the sidebar hides the entry unless entitled. */}
+          <Route path="/analytics" element={<Analytics />} />
+          <Route path="/payouts" element={<PayoutsPage />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/settings/*" element={<Settings />} />
           <Route path="/blocked" element={<Info title="Access blocked" body="This account/tenant is blocked. Contact your administrator." />} />

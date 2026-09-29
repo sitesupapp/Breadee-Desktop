@@ -14,7 +14,7 @@
 // needed, it is read from the RPC response. That is the whole point: the desktop
 // can never disagree with the shift report.
 
-import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftExpected, ShiftReport, ShiftStatus } from "@/types/pos";
+import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftExpected, ShiftPayBreakdown, ShiftPayMethod, ShiftReport, ShiftStatus } from "@/types/pos";
 import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull } from "@/lib/pos/rpc";
 
 const SHIFT_STATUSES: ShiftStatus[] = ["open", "ended_by_cashier", "pending_manager_review", "approved", "rejected"];
@@ -81,10 +81,12 @@ export async function getShiftExpected(shiftId: string): Promise<ShiftExpected> 
     cash_sales: num(row.cash_sales),
     orders: num(row.orders),
     opening_cash: num(row.opening_cash),
+    cash_payouts: num(row.cash_payouts),
     cash_usd: num(row.cash_usd),
     cash_lbp_original: num(row.cash_lbp_original),
     cash_lbp_usd: num(row.cash_lbp_usd),
     exchange_rate: numOrNull(row.exchange_rate),
+    ...toPayBreakdown(row),
     delivery_order_count: num(row.delivery_order_count),
     total_delivery_fees: num(row.total_delivery_fees),
     delivery_fees_cash: num(row.delivery_fees_cash),
@@ -136,6 +138,25 @@ function toPayments(value: unknown): Record<string, number> {
   return out;
 }
 
+// Phase C: the server's dynamic, catalog-driven payment breakdown. Read straight
+// from the RPC response (never recomputed). Absent on pre-Phase-C payloads — then
+// payment_methods is undefined and the UI falls back to the legacy `payments` map.
+function toPayMethods(value: unknown): ShiftPayMethod[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((entry) => {
+    const r = asRecord(entry);
+    return { key: str(r.key), label: str(r.label, str(r.key)), is_cash: bool(r.is_cash), amount: num(r.amount) };
+  });
+}
+function toPayBreakdown(row: Record<string, unknown>): ShiftPayBreakdown {
+  return {
+    payment_methods: toPayMethods(row.payment_methods),
+    cash_total: numOrNull(row.cash_total),
+    non_cash_total: numOrNull(row.non_cash_total),
+    grand_payment_total: numOrNull(row.grand_payment_total),
+  };
+}
+
 /**
  * End the shift. The server computes and stores the report and moves the shift to
  * `pending_manager_review` - the desktop only supplies the counted cash and note.
@@ -173,6 +194,7 @@ export async function endShift(input: {
     expected_cash: num(row.expected_cash),
     actual_cash: num(row.actual_cash),
     difference: num(row.difference),
+    cash_payouts: num(row.cash_payouts),
     notes: strOrNull(row.notes),
     opened_at: strOrNull(row.opened_at),
     closed_at: strOrNull(row.closed_at),
@@ -182,6 +204,7 @@ export async function endShift(input: {
     exchange_rate: numOrNull(row.exchange_rate),
     by_item: toByItem(row.by_item),
     payments: toPayments(row.payments),
+    ...toPayBreakdown(row),
     delivery_order_count: num(row.delivery_order_count),
     total_delivery_fees: num(row.total_delivery_fees),
     delivery_fees_cash: num(row.delivery_fees_cash),

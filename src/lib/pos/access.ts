@@ -42,6 +42,15 @@ export const POS_PERMISSIONS = {
   ACCESS: "pos.access",
   CREATE_ORDERS: "pos.create_orders",
   TAKE_PAYMENTS: "pos.take_payments",
+  // Phase E — item/quantity Split Bill. A DISTINCT authority; `pos_split_settle` checks this key.
+  SPLIT_BILL: "pos.split_bill",
+  // Phase G — POS Payouts / Cash Drawer Outflows. THREE distinct authorities the payout RPCs check.
+  PAYOUTS_VIEW: "pos.payouts.view",
+  PAYOUTS_CREATE: "pos.payouts.create",
+  PAYOUTS_REVERSE: "pos.payouts.reverse",
+  // Phase H — POS Analytics. VIEW gates the dashboard (pos_analytics_summary checks it); EXPORT the PDF.
+  ANALYTICS_VIEW: "pos.analytics.view",
+  ANALYTICS_EXPORT: "pos.analytics.export",
   APPLY_DISCOUNTS: "pos.apply_discounts",
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
@@ -169,6 +178,74 @@ export function canTakePayments(ctx: PosAccessContext): Gate {
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.APPLY_DISCOUNTS), "You do not have permission to apply discounts.");
+}
+
+/**
+ * Phase E — splitting a Dine-In bill by item/quantity. Its own permission key,
+ * NOT conflated with take_payments or edit_orders — exactly what `pos_split_settle`
+ * checks for itself. Not a security boundary; the RPC re-enforces operator, tenant,
+ * OU, version and available-qty. It exists so Split Bill is offered only where the
+ * server would honour it.
+ */
+export function canSplitBill(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.SPLIT_BILL), "You do not have permission to split bills.");
+}
+
+/**
+ * POS Payouts — Cash Drawer Outflows (Phase G). Operational cash-drawer acts, so they
+ * carry the owner block `canOperatePOS` applies (mirroring `pos_assert_operator`, which
+ * every payout RPC runs), then the dedicated permission the RPC checks for itself.
+ */
+export function canViewPayouts(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_VIEW), "You do not have permission to view cash payouts.");
+}
+
+export function canCreatePayout(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_CREATE), "You do not have permission to record a cash payout.");
+}
+
+/**
+ * Reversing a payout. A DISTINCT authority from creating one — `pos_payout_reverse`
+ * agrees. Built on the same POS-access prerequisite so a create-only operator finds
+ * Reverse refused. Connectivity is enforced at the call site, not in this gate.
+ */
+export function canReversePayout(ctx: PosAccessContext): Gate {
+  if (!canOperatePOS(ctx)) {
+    return { allowed: false, reason: posAccessDenialReason(ctx) ?? "You are not allowed to use POS." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.PAYOUTS_REVERSE), "You do not have permission to reverse a cash payout.");
+}
+
+/**
+ * POS Analytics dashboard (Phase H). A MANAGEMENT view, NOT an operational POS action:
+ * `pos_analytics_summary` runs no `pos_assert_operator`, so this does NOT exclude owners.
+ * Active membership + `pos` feature + the `pos.analytics.view` permission the RPC checks.
+ */
+export function canViewAnalytics(ctx: PosAccessContext): Gate {
+  const m = ctx.membership;
+  if (!m || !isActiveMember(m.status)) {
+    return { allowed: false, reason: "Your membership is not active for this tenant." };
+  }
+  if (!hasFeature(ctx.features, FEATURES.POS)) {
+    return { allowed: false, reason: "POS is not enabled for this plan." };
+  }
+  return gate(perm(ctx, POS_PERMISSIONS.ANALYTICS_VIEW), "You do not have permission to view analytics.");
+}
+
+/**
+ * Exporting the Analytics PDF (Phase H). Everything `canViewAnalytics` requires plus
+ * the `pos.analytics.export` permission.
+ */
+export function canExportAnalytics(ctx: PosAccessContext): Gate {
+  const view = canViewAnalytics(ctx);
+  if (!view.allowed) return view;
+  return gate(perm(ctx, POS_PERMISSIONS.ANALYTICS_EXPORT), "You do not have permission to export analytics.");
 }
 
 /**

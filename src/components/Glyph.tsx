@@ -27,6 +27,8 @@ export type GlyphName =
   | "dashboard"
   | "menu-builder"
   | "pos"
+  | "analytics"
+  | "cash-out"
   | "profile"
   | "settings"
   // shell controls
@@ -86,6 +88,10 @@ const GLYPHS: Record<GlyphName, string> = {
   "menu-builder":
     "M12 6.5v13M12 6.5C10.5 5 8 4.5 4.5 4.5v13c3.5 0 6 .5 7.5 2M12 6.5c1.5-1.5 4-2 7.5-2v13c-3.5 0-6 .5-7.5 2",
   pos: "M3.5 7.5h17v10h-17v-10Zm0 3.5h17M6.5 15h4M16 15h1.5",
+  // Analytics: chart axis + three ascending bars — "how are we doing".
+  analytics: "M4 4v16h16M8 20v-5M12.5 20v-9M17 20v-6",
+  // Cash-out (Payouts): a wallet/note base with a clear out-arrow — "cash leaving".
+  "cash-out": "M4 9.5h10.5v7H4v-7ZM4 9.5 5.3 6h7.9l1.3 3.5M8 13h1.8M19.5 4.5 15 9M19.5 4.5h-4M19.5 4.5v4",
   profile: "M12 11.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM5 20a7 7 0 0 1 14 0",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM12 3.5v2.2M12 18.3v2.2M20.5 12h-2.2M5.7 12H3.5M18 6l-1.6 1.6M7.6 16.4 6 18M18 18l-1.6-1.6M7.6 7.6 6 6",
   fullscreen: "M4 9V4.5h5M20 9V4.5h-5M4 15v4.5h5M20 15v4.5h-5",

@@ -28,8 +28,24 @@ import { DineInRoundPanel } from "@/components/pos/DineInRoundPanel";
 import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
+import { loadAutoSeatDirectOpen, readCachedAutoSeat } from "@/lib/pos/autoSeat";
 import { classifyError } from "@/lib/pos/errors";
-import { canClearTable, canCloseTable, canManageFloor, canMoveTable, canOpenTable, canViewFloor } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
+import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
+import { SplitBillPanel } from "@/components/pos/SplitBillPanel";
+import {
+  buildSplitSettlePayload,
+  loadSplitState,
+  loadSplitPaymentMethods,
+  settleSplit,
+  type SplitState,
+  type SplitPaymentMethod,
+  type SplitAllocationInput,
+} from "@/lib/pos/split";
+import { ModifierDialog } from "@/components/pos/ModifierDialog";
+import { groupsForItem } from "@/lib/pos/modifiers";
+import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
+import type { MenuItem, ModifierOption } from "@/types/pos";
 import { ServiceFloor } from "@/components/pos/floor/ServiceFloor";
 import { FloorDesigner } from "@/components/pos/floor/designer/FloorDesigner";
 import { MapListToggle, type DineInFloorView } from "@/components/pos/floor/MapListToggle";
@@ -87,7 +103,7 @@ import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import type { DiscountType } from "@/lib/pos/discounts";
 import type { ReceiptData } from "@/lib/receipt";
 import type { CartLine } from "@/types/pos";
-import type { TableBill, TableSummary } from "@/types/tables";
+import type { BillLine, TableBill, TableSummary } from "@/types/tables";
 
 /** Which half of Dine-in is on screen. Add Items borrows the menu from the shell. */
 export type DineInView = "map" | "add_items";
@@ -215,6 +231,9 @@ export function useDineInWorkspace(input: {
    * case `pos_open_table` accepts free text in.
    */
   const [manualOpen, setManualOpen] = useState(false);
+  // Phase F — Auto-Seat. Start from the last synchronized value (offline-safe) so the
+  // very first tap is correct, then refresh from the canonical settings row when online.
+  const [autoSeat, setAutoSeat] = useState<boolean>(() => readCachedAutoSeat(pos.branch.id));
   const [openError, setOpenError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -460,6 +479,33 @@ export function useDineInWorkspace(input: {
     [selected, openGate.allowed, ctx, toast],
   );
 
+  // Phase F — refresh the branch's auto-seat setting from the canonical row when
+  // online; offline keeps the last synchronized value already in state. Never blocks.
+  useEffect(() => {
+    if (!input.online) return;
+    let live = true;
+    void loadAutoSeatDirectOpen(pos.tenantId, pos.branch.id).then((v) => {
+      if (live) setAutoSeat(v);
+    });
+    return () => {
+      live = false;
+    };
+  }, [input.online, pos.tenantId, pos.branch.id]);
+
+  // Opening the SELECTED free table. Auto-seat SKIPS the seat prompt only when the
+  // setting is ON and the table carries a published seat count (pos_tables.seats);
+  // otherwise the existing seat modal appears — never a dead end, never an invented count.
+  const requestOpenSelected = useCallback(() => {
+    if (!openGate.allowed) return;
+    setOpenError(null);
+    if (autoSeat && selected && (selected.seats ?? 0) > 0) {
+      void confirmOpen(selected.seats);
+      return;
+    }
+    setManualOpen(false);
+    setSeatOpen(true);
+  }, [openGate.allowed, autoSeat, selected, confirmOpen]);
+
   // --- Level 2B: rounds -------------------------------------------------------
 
   const roundCtx: RoundContext = useMemo(
@@ -648,6 +694,167 @@ export function useDineInWorkspace(input: {
     setPayError(null);
     setPayOpen(true);
   }, [payGate.allowed]);
+
+  // --- Phase D: edit an already-SENT bill line (open, unpaid dine-in only) ----
+  // The SERVER owns the delta/kitchen/totals/version; the desktop only shapes the
+  // request and re-reads the authoritative bill afterwards. Gated on pos.edit_orders.
+  const editSentGate = useMemo(() => canEditOrders(pos.access), [pos.access]);
+  const [editingLineId, setEditingLineId] = useState<string | null>(null);
+
+  // --- Phase E: Split Bill (item/quantity settlement) ------------------------
+  // A split is a SETTLEMENT, never a new sale. The server (pos_split_settle) owns
+  // every figure; this screen re-reads pos_split_state after each split. Gated on
+  // pos.split_bill. VERSION_CONFLICT and every other error re-read the bill.
+  const splitGate = useMemo(() => canSplitBill(pos.access), [pos.access]);
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [splitState, setSplitState] = useState<SplitState | null>(null);
+  const [splitMethods, setSplitMethods] = useState<SplitPaymentMethod[]>([]);
+  const [splitLoading, setSplitLoading] = useState(false);
+  const [splitBusy, setSplitBusy] = useState(false);
+  const [splitError, setSplitError] = useState<string | null>(null);
+  const [splitLastPaid, setSplitLastPaid] = useState<{ display_no: string; amount: number; method: string } | null>(null);
+
+  const openSplit = useCallback(async () => {
+    if (!splitGate.allowed) return;
+    const bill = useTables.getState().bill;
+    const order = bill?.orders.find((o) => o.payment_status !== "paid") ?? bill?.orders[0];
+    if (!order) return;
+    setSplitError(null);
+    setSplitLastPaid(null);
+    setSplitLoading(true);
+    setSplitOpen(true);
+    try {
+      const [state, methods] = await Promise.all([loadSplitState(order.id), loadSplitPaymentMethods(pos.tenantId)]);
+      setSplitState(state);
+      setSplitMethods(methods);
+    } catch (e) {
+      setSplitError(classifyError(e).message);
+    } finally {
+      setSplitLoading(false);
+    }
+  }, [splitGate.allowed, pos.tenantId]);
+
+  const paySplit = useCallback(
+    async (allocations: SplitAllocationInput[], method: string) => {
+      const st = splitState;
+      if (!st) return;
+      setSplitBusy(true);
+      setSplitError(null);
+      try {
+        const result = await settleSplit(
+          buildSplitSettlePayload({
+            orderId: st.order_id,
+            expectedVersion: st.pos_entity_version,
+            method,
+            currencyCode: st.currency,
+            clientOpId: crypto.randomUUID(),
+            allocations,
+          }),
+        );
+        setSplitLastPaid({ display_no: result.display_no, amount: result.amount, method: result.method });
+        setSplitState(await loadSplitState(st.order_id));
+        await tables.loadBill(ctx);
+      } catch (e) {
+        setSplitError(classifyError(e).message);
+        try {
+          setSplitState(await loadSplitState(st.order_id));
+          await tables.loadBill(ctx);
+        } catch {
+          /* keep the original error visible */
+        }
+      } finally {
+        setSplitBusy(false);
+      }
+    },
+    [splitState, tables, ctx],
+  );
+
+  const editSentLine = useCallback(
+    async (line: BillLine, newQuantity: number) => {
+      const bill = useTables.getState().bill;
+      const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
+      if (!order) return;
+      setEditingLineId(line.id);
+      try {
+        await editOrderLine(
+          buildSetQuantityPayload({
+            orderId: order.id,
+            lineId: line.id,
+            newQuantity,
+            expectedVersion: order.pos_entity_version,
+            clientOpId: crypto.randomUUID(),
+          }),
+        );
+        await tables.loadBill(ctx);
+      } catch (e) {
+        await tables.loadBill(ctx);
+        toast.push({ tone: "warning", message: "The edit did not apply. The bill was reloaded.", detail: classifyError(e).message });
+      } finally {
+        setEditingLineId(null);
+      }
+    },
+    [tables, ctx, toast],
+  );
+
+  const onEditSentQty = useCallback(
+    (line: BillLine, delta: number) => {
+      void editSentLine(line, Math.max(0, line.quantity + delta));
+    },
+    [editSentLine],
+  );
+  const onRemoveSentLine = useCallback((line: BillLine) => void editSentLine(line, 0), [editSentLine]);
+
+  // --- Phase D: change a SENT line's modifiers (atomic cancel-old + make-new) ----
+  const [editModLine, setEditModLine] = useState<BillLine | null>(null);
+  const editModItem = useMemo<MenuItem | null>(
+    () => (editModLine?.menu_item_id ? input.menu.items.find((m) => m.id === editModLine.menu_item_id) ?? null : null),
+    [editModLine, input.menu.items],
+  );
+  const editModGroups = useMemo(
+    () => (editModItem ? groupsForItem(editModItem.id, input.menu.groupsByItem, input.menu.groups) : []),
+    [editModItem, input.menu.groupsByItem, input.menu.groups],
+  );
+  const editModOptionsByGroup = useMemo(() => {
+    const map: Record<string, ModifierOption[]> = {};
+    for (const o of input.menu.options) (map[o.modifier_group_id] ??= []).push(o);
+    return map;
+  }, [input.menu.options]);
+
+  const onEditSentModifiers = useCallback((line: BillLine) => setEditModLine(line), []);
+  const itemHasModifiers = useCallback(
+    (menuItemId: string) => groupsForItem(menuItemId, input.menu.groupsByItem, input.menu.groups).length > 0,
+    [input.menu.groupsByItem, input.menu.groups],
+  );
+  const saveSentModifiers = useCallback(
+    async (result: ItemOptionsResult) => {
+      const line = editModLine;
+      if (!line) return;
+      const bill = useTables.getState().bill;
+      const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
+      if (!order) { setEditModLine(null); return; }
+      setEditingLineId(line.id);
+      setEditModLine(null);
+      try {
+        await editOrderLine(
+          buildChangeModifiersPayload({
+            orderId: order.id,
+            lineId: line.id,
+            quantity: result.quantity,
+            modifiers: result.modifiers,
+            expectedVersion: order.pos_entity_version,
+            clientOpId: crypto.randomUUID(),
+          }),
+        );
+        await tables.loadBill(ctx);
+      } catch (e) {
+        await tables.loadBill(ctx);
+        toast.push({ tone: "warning", message: "The option change did not apply. The bill was reloaded.", detail: classifyError(e).message });
+      } finally {
+        setEditingLineId(null);
+      }
+    },
+    [editModLine, tables, ctx, toast],
+  );
 
   /**
    * The locked completion sequence (2D-09).
@@ -1020,7 +1227,7 @@ export function useDineInWorkspace(input: {
       tableOpen: () => {
         if (!focusedId) return;
         if (focusedId !== tables.selectedTableId) return select(focusedId);
-        if (openGate.allowed) setSeatOpen(true);
+        requestOpenSelected();
       },
       addItems: () => void enterAddItems(),
       // Level 2C. Each OPENS its confirmation - a chord never performs the
@@ -1204,10 +1411,7 @@ export function useDineInWorkspace(input: {
         addItemsGate={addItemsGate}
         shiftOpen={hasOpenShift}
         onAddItems={() => void enterAddItems()}
-        onOpenTable={() => {
-          setOpenError(null);
-          setSeatOpen(true);
-        }}
+        onOpenTable={requestOpenSelected}
         onOpenShift={input.onOpenShift}
         moveGate={opGates.move}
         closeGate={opGates.close}
@@ -1217,12 +1421,14 @@ export function useDineInWorkspace(input: {
         onClear={() => requestOp("clear")}
         payGate={payGate}
         onPay={requestPay}
+        splitGate={splitGate}
+        onSplit={() => void openSplit()}
         onPrintBill={() => void printBill()}
         printBusy={printingBill}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, printBill, printingBill],
+    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
   );
 
   const roundPanel = useCallback(
@@ -1248,6 +1454,12 @@ export function useDineInWorkspace(input: {
           onSubmitRound={() => void sendRound()}
           onDiscardRound={discardRound}
           onBackToMap={requestLeaveAddItems}
+          canEditSent={editSentGate.allowed}
+          editingLineId={editingLineId}
+          onEditSentQty={onEditSentQty}
+          onRemoveSentLine={onRemoveSentLine}
+          onEditSentModifiers={onEditSentModifiers}
+          itemHasModifiers={itemHasModifiers}
         />
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1255,11 +1467,32 @@ export function useDineInWorkspace(input: {
       selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
+      editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine, onEditSentModifiers, itemHasModifiers,
     ],
   );
 
   const dialogs = (
     <>
+      {/* Phase D — change a SENT line's options. The SAME shared chooser the add
+          flow uses, pre-filled with the line's current modifiers/quantity via the
+          backward-compatible seed props (add flow unchanged). Confirm sends
+          op=change_modifiers for this exact line id. */}
+      <ModifierDialog
+        open={Boolean(editModLine && editModItem)}
+        item={editModItem}
+        basePrice={editModLine?.base_price ?? 0}
+        groups={editModGroups}
+        optionsByGroup={editModOptionsByGroup}
+        currency={input.currency}
+        rate={input.rate}
+        ingredientCustomization={false}
+        seedKey={editModLine ? `edit:${editModLine.id}` : null}
+        initialModifiers={editModLine?.modifiers ?? []}
+        initialQuantity={editModLine?.quantity ?? 1}
+        confirmLabel="Save changes"
+        onCancel={() => setEditModLine(null)}
+        onConfirm={(result) => void saveSentModifiers(result)}
+      />
       {/* The SAME dialog Takeaway uses. Not a copy: one discount validator, one
           currency conversion, one tender/change calculation, one keypad. Only
           the identity at the top differs, which is the part that should. */}
@@ -1302,6 +1535,21 @@ export function useDineInWorkspace(input: {
         error={opError}
         onCancel={() => setOpDialog(null)}
         onConfirm={confirmMove}
+      />
+
+      {/* Phase E — Split Bill. A settlement/allocation screen; every figure is the
+          server's, re-read after each split so PAID vs REMAINING is always the truth. */}
+      <SplitBillPanel
+        open={splitOpen}
+        state={splitState}
+        loading={splitLoading}
+        error={splitError}
+        busy={splitBusy}
+        methods={splitMethods}
+        currency={tables.bill?.currency ?? input.currency}
+        lastPaid={splitLastPaid}
+        onPaySelected={(allocations, method) => void paySplit(allocations, method)}
+        onClose={() => setSplitOpen(false)}
       />
 
       <CloseTableDialog

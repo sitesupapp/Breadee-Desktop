@@ -39,6 +39,9 @@ export type TableBillPanelProps = {
   payGate: Gate;
   /** Opens the payment dialog. Settling happens there, behind the same gate. */
   onPay: () => void;
+  /** Phase E — item/quantity Split Bill. Gated on pos.split_bill (separate from pay). */
+  splitGate: Gate;
+  onSplit: () => void;
   /**
    * Print the table's CURRENT bill BEFORE payment (guest asked for the bill).
    * Manual preview of the server's bill; it takes no payment, closes no table,
@@ -215,7 +218,16 @@ export function TableBillPanel(props: TableBillPanelProps) {
         {table && bill && bill.orders.length > 0 && (
           <GatedButton gate={props.payGate} size="lg" className="mb-2 w-full" onClick={props.onPay}>
             <Glyph name="pay" size={18} />
-            Pay (F4)
+            Pay Full Bill
+          </GatedButton>
+        )}
+
+        {/* Phase E — Split Bill. Shown right under Pay Full Bill, gated on pos.split_bill.
+            Item/quantity settlement: some guests pay part of the bill now, the rest stays open. */}
+        {table && bill && bill.orders.length > 0 && (
+          <GatedButton gate={props.splitGate} variant="outline" size="lg" className="mb-2 w-full" onClick={props.onSplit}>
+            <Glyph name="kitchen" size={18} />
+            Split Bill
           </GatedButton>
         )}
 

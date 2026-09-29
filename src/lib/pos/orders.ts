@@ -256,3 +256,104 @@ export async function submitOrder(payload: SubmitOrderPayload): Promise<SubmitOr
     idempotent: bool(row.idempotent),
   };
 }
+
+// --- Phase D: Open Dine-In sent-line editing -------------------------------
+//
+// One atomic server op per cashier edit (pos_edit_order_line). The desktop only
+// shapes the request and re-reads the bill afterwards; the SERVER owns the delta,
+// the kitchen cancel/generate, the totals and the version. `client_op_id` is minted
+// once per logical edit and reused on retry so a lost response replays rather than
+// double-applies; `expected_version` is the order's pos_entity_version at edit time.
+
+type EditLineModifier = {
+  group_id: string | null;
+  option_id: string | null;
+  name: string;
+  price_delta: number;
+  quantity: number;
+};
+
+export type EditLinePayload = {
+  order_id: string;
+  target_item_id: string;
+  op: "set_quantity" | "change_modifiers";
+  new_quantity?: number;
+  quantity?: number;
+  modifiers?: EditLineModifier[];
+  expected_version: number;
+  client_op_id: string;
+  reason?: string | null;
+};
+
+export type EditLineResult = {
+  order_id: string;
+  order_number: string;
+  previous_quantity: number;
+  new_quantity: number;
+  total_amount: number;
+  action: string;
+  pos_entity_version: number;
+  idempotent: boolean;
+};
+
+/** Set a sent line's quantity (0 = full remove; higher = append-only increase). Pure. */
+export function buildSetQuantityPayload(input: {
+  orderId: string;
+  lineId: string;
+  newQuantity: number;
+  expectedVersion: number;
+  clientOpId: string;
+  reason?: string | null;
+}): EditLinePayload {
+  return {
+    order_id: input.orderId,
+    target_item_id: input.lineId,
+    op: "set_quantity",
+    new_quantity: input.newQuantity,
+    expected_version: input.expectedVersion,
+    client_op_id: input.clientOpId,
+    reason: input.reason ?? null,
+  };
+}
+
+/** Replace a sent line's modifier configuration (remove + append replacement). Pure. */
+export function buildChangeModifiersPayload(input: {
+  orderId: string;
+  lineId: string;
+  quantity: number;
+  modifiers: EditLineModifier[];
+  expectedVersion: number;
+  clientOpId: string;
+  reason?: string | null;
+}): EditLinePayload {
+  return {
+    order_id: input.orderId,
+    target_item_id: input.lineId,
+    op: "change_modifiers",
+    quantity: input.quantity,
+    modifiers: input.modifiers.map((m) => ({
+      group_id: m.group_id,
+      option_id: m.option_id,
+      name: m.name,
+      price_delta: m.price_delta,
+      quantity: m.quantity,
+    })),
+    expected_version: input.expectedVersion,
+    client_op_id: input.clientOpId,
+    reason: input.reason ?? null,
+  };
+}
+
+export async function editOrderLine(payload: EditLinePayload): Promise<EditLineResult> {
+  const row = asRecord(await callPosRpc("pos_edit_order_line", { p_payload: payload }));
+  return {
+    order_id: requireId(row.order_id, "pos_edit_order_line", "order_id"),
+    order_number: str(row.order_number),
+    previous_quantity: num(row.previous_quantity),
+    new_quantity: num(row.new_quantity),
+    total_amount: num(row.total_amount),
+    action: str(row.action),
+    pos_entity_version: num(row.pos_entity_version),
+    idempotent: bool(row.idempotent),
+  };
+}

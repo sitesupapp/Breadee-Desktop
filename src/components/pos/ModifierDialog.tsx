@@ -24,6 +24,15 @@ export type ModifierDialogProps = {
   rate: number | null;
   /** Show the Menu Builder ingredient list for this item so it can be edited. */
   ingredientCustomization?: boolean;
+  // Phase D — optional pre-fill for EDITING an already-sent line's configuration.
+  // All default to the add-item behaviour, so an add caller that passes none is
+  // byte-for-byte unchanged. `seedKey` identifies the open session (a line id when
+  // editing) so re-opening the SAME item as a different line re-seeds correctly.
+  seedKey?: string | null;
+  initialModifiers?: SelectedModifier[];
+  initialQuantity?: number;
+  initialNote?: string | null;
+  confirmLabel?: string;
   onCancel: () => void;
   onConfirm: (input: ItemOptionsResult) => void;
 };
@@ -36,14 +45,18 @@ export function ModifierDialog(props: ModifierDialogProps) {
   /** Menu Builder ingredients the cashier has switched OFF for this line. */
   const [removed, setRemoved] = useState<string[]>([]);
 
-  // Reset whenever a different item opens the dialog.
+  // Reset whenever a different session opens the dialog. `seedKey` defaults to the
+  // item id (add flow, unchanged); an edit caller passes the line id so re-opening
+  // the same item as another line re-seeds. Seeds from the initial* props, which are
+  // empty/1/"" by default so the add flow is byte-for-byte as before.
   const itemId = props.item?.id ?? null;
-  const [lastItemId, setLastItemId] = useState<string | null>(null);
-  if (itemId !== lastItemId) {
-    setLastItemId(itemId);
-    setSelected([]);
-    setQuantity(1);
-    setNote("");
+  const seedKey = props.seedKey ?? itemId;
+  const [lastSeed, setLastSeed] = useState<string | null>(null);
+  if (seedKey !== lastSeed) {
+    setLastSeed(seedKey);
+    setSelected(props.initialModifiers ?? []);
+    setQuantity(props.initialQuantity ?? 1);
+    setNote(props.initialNote ?? "");
     setRemoved([]);
     setShowErrors(false);
   }
@@ -133,7 +146,7 @@ export function ModifierDialog(props: ModifierDialogProps) {
               {formatMoney(totals.lineTotal, props.currency)}
             </span>
             <Button size="lg" onClick={confirm}>
-              Add to order
+              {props.confirmLabel ?? "Add to order"}
             </Button>
           </div>
         </div>
