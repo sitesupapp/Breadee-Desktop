@@ -8,6 +8,7 @@ import { visibleNav } from "@/lib/nav";
 import { Badge } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { UpdateBanner } from "@/components/UpdateBanner";
+import { WhatsNew } from "@/components/WhatsNew";
 import { useUpdates } from "@/state/updates";
 
 export function Shell() {
@@ -114,6 +115,9 @@ export function Shell() {
           <Outlet />
         </main>
       </div>
+      {/* Phase H release — once-per-version What's New. Decides for itself whether to
+          open (first launch on this version) and persists "seen" on Done. */}
+      <WhatsNew />
     </div>
   );
 }
