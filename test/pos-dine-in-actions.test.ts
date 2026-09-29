@@ -277,6 +277,10 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // `collect` as well as `complete` so a receivables money RPC cannot slip past
   // this guard; the two receivables READS (`_search`, `_customer`) match none of
   // these words and are correctly excluded. `pos_remove_order_item` is absent.
+  // Phase G — the three payout names match the `pay` pattern (pos_payout_*) and are
+  // genuine drawer money-movers, so they belong in this guard. Split settle moves
+  // money too but is covered by the exact-list contract; it does not match this
+  // heuristic pattern and is intentionally not added here.
   assert.deepEqual(
     members.filter((m) => /submit|pay|void|refund|complete|collect/.test(m)).sort(),
     [
@@ -284,6 +288,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
       "pos_complete_table_on_account",
       "pos_pay_order",
       "pos_pay_table",
+      "pos_payout_create",
+      "pos_payout_list",
+      "pos_payout_reverse",
       "pos_receivable_collect",
       "pos_submit_order",
       "pos_void_order",
