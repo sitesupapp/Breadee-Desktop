@@ -553,7 +553,10 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // (22nd, 23rd) - one internal write and one read-only report.
   // Delivery Settlement WS7B adds `pos_delivery_resolve_cost` (24th) - post-close
   // cost reconciliation, gated on pos.delivery.settlements.manage.
-  assert.equal(names.length, 24);
+  // POS A-H (1.0.30) adds 7 more (25th-31st): pos_edit_order_line, pos_split_settle,
+  // pos_split_state, pos_payout_create, pos_payout_reverse, pos_payout_list,
+  // pos_analytics_summary. remove-item still stays out.
+  assert.equal(names.length, 31);
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));

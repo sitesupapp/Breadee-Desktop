@@ -115,13 +115,12 @@ test("the modifiers and QR surfaces follow their sub-features", () => {
 
 // --- navigation ---------------------------------------------------------------
 
-test("the sidebar order is Dashboard, Menu Builder, POS, Customer Accounts, Profile, Settings", () => {
-  // Wave 3C inserted Customer Accounts between POS and Profile - a receivables
-  // surface that belongs with the operational tools, above the personal/local
-  // ones. Menu Builder stays second, so its index assertion is unchanged.
+test("the sidebar order is Dashboard, Menu Builder, POS, Analytics, Payouts, Customer Accounts, Profile, Settings", () => {
+  // Phase H inserted Analytics then Payouts directly below POS (first-class main
+  // dashboard modules), above Customer Accounts. Menu Builder stays second.
   assert.deepEqual(
     NAV_ITEMS.map((n) => n.label),
-    ["Dashboard", "Menu Builder", "POS", "Customer Accounts", "Profile", "Settings"],
+    ["Dashboard", "Menu Builder", "POS", "Analytics", "Payouts", "Customer Accounts", "Profile", "Settings"],
   );
   assert.equal(NAV_ITEMS[1].to, "/menu-builder");
 });

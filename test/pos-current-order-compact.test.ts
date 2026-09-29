@@ -133,7 +133,7 @@ test("the table bill panel offers Print, and Pay stays the large primary", () =>
   assert.match(tableBillPanel, /onPrintBill: \(\) => void;/);
   assert.match(tableBillPanel, /Print bill/);
   // The touch-target guard also enforces this; asserted here beside the change.
-  assert.match(tableBillPanel, /gate=\{props\.payGate\}[\s\S]*?size="lg"[\s\S]*?Pay \(F4\)/);
+  assert.match(tableBillPanel, /gate=\{props\.payGate\}[\s\S]*?size="lg"[\s\S]*?Pay Full Bill/);
 });
 
 test("dine-in prints the unpaid bill through the MANUAL layer, not the auto-print funnel", () => {

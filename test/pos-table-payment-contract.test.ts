@@ -142,6 +142,8 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       "floor_service_layout",
       "floor_takeover_lease",
       "floor_unplaced_tables",
+      // Phase H — Analytics summary (pos.analytics.view). Sorts first among pos_*.
+      "pos_analytics_summary",
       "pos_cash_box_shift",
       "pos_clear_table",
       "pos_close_table",
@@ -154,12 +156,18 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       // Delivery Settlement WS7B: post-close cost resolution (pos.delivery.settlements.manage).
       "pos_delivery_resolve_cost",
       "pos_edit_order",
+      // Phase D — open dine-in sent-line editing (pos.edit_orders).
+      "pos_edit_order_line",
       "pos_end_shift",
       "pos_move_table",
       "pos_open_shift",
       "pos_open_table",
       "pos_pay_order",
       "pos_pay_table",
+      // Phase G — POS Payouts / cash drawer outflows (pos.payouts.create/list/reverse).
+      "pos_payout_create",
+      "pos_payout_list",
+      "pos_payout_reverse",
       // Wave 3C: the Customer Accounts surface - two reads and one money write.
       "pos_receivable_collect",
       "pos_receivables_customer",
@@ -168,6 +176,9 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       // (pos.delivery.manage). Never a customer-money RPC.
       "pos_set_delivery_ops",
       "pos_shift_expected",
+      // Phase E — item/quantity Split Bill (pos.split_bill). Read + settle.
+      "pos_split_settle",
+      "pos_split_state",
       "pos_submit_order",
       "pos_table_map",
       "pos_upsert_customer",
@@ -175,7 +186,7 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 35);
+  assert.equal(members.length, 42);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
@@ -184,7 +195,9 @@ test("pos_pay_table is present, and is the only new settlement name", () => {
     (m) => m[1],
   );
   assert.ok(members.includes("pos_pay_table"));
-  assert.equal(members.filter((m) => m.startsWith("pos_pay")).length, 2, "an unexpected pay RPC appeared");
+  // "pos_pay_" (trailing underscore) matches only the two settlement pay RPCs;
+  // the Phase G "pos_payout_*" names are payouts, not pays, and are excluded.
+  assert.equal(members.filter((m) => m.startsWith("pos_pay_")).length, 2, "an unexpected pay RPC appeared");
 });
 
 // --- the payload -------------------------------------------------------------

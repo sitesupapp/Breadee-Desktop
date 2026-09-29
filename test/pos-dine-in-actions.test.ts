@@ -156,7 +156,7 @@ test("every Pay surface renders from the SAME gate value, not its own computatio
 
 test("Pay and Clear are not adjacent - the collect and the void must not be mis-tapped", () => {
   const panel = read("components", "pos", "TableBillPanel.tsx");
-  const pay = panel.indexOf("Pay (F4)");
+  const pay = panel.indexOf("Pay Full Bill");
   // The label gained the word "bill" in the approved design; the property this
   // test protects - Pay above Clear, with the whole operations block between
   // them - is unchanged and is what the assertions below still check.
@@ -263,7 +263,11 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // floor RPCs (floor_service_layout READ + the draft/lease surface + the publish
   // lifecycle). All ship-dark, gated server-side on pos.floor_map (+ floor_manage /
   // floor_publish); none moves customer money.
-  assert.equal(members.length, 35, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY POS A-H (1.0.30): 35 -> 42, for the 7 Phase D/E/G/H RPCs
+  // (pos_edit_order_line, pos_split_settle, pos_split_state, pos_payout_create,
+  // pos_payout_reverse, pos_payout_list, pos_analytics_summary). Each reviewed and
+  // gated on its own permission; line removal (pos_remove_order_item) STILL stays out.
+  assert.equal(members.length, 42, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:

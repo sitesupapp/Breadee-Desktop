@@ -701,7 +701,9 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // library layer, not from these screens - the check below still holds.
   // 24 since Delivery Settlement WS7B added `pos_delivery_resolve_cost`
   // (post-close cost reconciliation), also called from the library layer.
-  assert.equal(names.length, 24);
+  // 31 since POS A-H (1.0.30) added the 7 Phase D/E/G/H RPCs, all called from the
+  // library layer, not from these delivery screens - the check below still holds.
+  assert.equal(names.length, 31);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));

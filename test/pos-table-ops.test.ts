@@ -316,8 +316,9 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // 23 -> 24, for `pos_delivery_resolve_cost` (post-close cost resolution,
   // cash-inert). AND DINE-IN FLOOR MAP + DESIGNER (this candidate): 24 -> 35, for the
   // eleven ship-dark floor RPCs (published-floor READ + draft/lease + publish
-  // lifecycle); none moves customer money.
-  assert.equal(members.length, 35, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // lifecycle); none moves customer money. AND POS A-H (1.0.30): 35 -> 42, for the
+  // 7 Phase D/E/G/H RPCs, each reviewed and gated on its own permission.
+  assert.equal(members.length, 42, `the RPC allow-list changed size: ${members.join(", ")}`);
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

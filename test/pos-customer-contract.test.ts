@@ -156,7 +156,10 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // 23 -> 24 in Delivery Settlement 1.0.23: `pos_delivery_resolve_cost` (post-close
   // cost resolution, cash-inert, gated on pos.delivery.settlements.manage). Floor-map
   // RPCs are not part of this release.
-  assert.equal(names.length, 24);
+  // 24 -> 31 in POS A-H (1.0.30): pos_edit_order_line (D), pos_split_settle +
+  // pos_split_state (E), pos_payout_create + pos_payout_reverse + pos_payout_list (G),
+  // pos_analytics_summary (H). All reviewed; each gated on its own permission.
+  assert.equal(names.length, 31);
   assert.ok(names.includes("pos_delivery_resolve_cost"));
   assert.ok(names.includes("pos_complete_on_account"));
   assert.ok(names.includes("pos_complete_table_on_account"));
