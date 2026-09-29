@@ -74,6 +74,8 @@ export type OpenTableResult = {
 
 export type BillLine = {
   id: string;
+  /** Phase D: needed to re-open the item's modifier chooser when editing a sent line. */
+  menu_item_id: string | null;
   name: string;
   quantity: number;
   base_price: number;
@@ -91,6 +93,8 @@ export type BillOrder = {
   order_number: string;
   status: string;
   payment_status: string;
+  /** Phase D: optimistic-concurrency token sent as expected_version on a sent-line edit. */
+  pos_entity_version: number;
   shift_id: string | null;
   branch_id: string | null;
   tenant_id: string;

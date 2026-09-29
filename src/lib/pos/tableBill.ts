@@ -35,6 +35,8 @@ function toLine(raw: unknown): BillLine | null {
   if (!id) return null;
   return {
     id,
+    // Phase D — for re-opening the modifier chooser when editing a sent line.
+    menu_item_id: strOrNull(r.menu_item_id),
     name: str(r.name_snapshot, "Item"),
     quantity: num(r.quantity),
     base_price: num(r.base_price),
@@ -62,6 +64,8 @@ function toOrder(raw: unknown): BillOrder | null {
     order_number: str(r.order_number),
     status: str(r.status),
     payment_status: str(r.payment_status),
+    // Phase D — optimistic-concurrency token for sent-line edits (expected_version).
+    pos_entity_version: num(r.pos_entity_version),
     shift_id: strOrNull(r.shift_id),
     branch_id: strOrNull(r.branch_id),
     tenant_id: str(r.tenant_id),

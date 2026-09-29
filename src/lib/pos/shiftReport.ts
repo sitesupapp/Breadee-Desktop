@@ -161,15 +161,22 @@ export function buildShiftReportLines(input: {
     cashUsd: number;
     cashLbpOriginal: number;
     openingCash: number;
+    // Phase G — cash paid out of the drawer this shift; optional so a pre-Phase-G
+    // caller (no field) prints exactly as before.
+    cashPayouts?: number;
     expectedCash: number;
     actualCash: number;
     difference: number;
   };
   detail: ShiftReportDetail;
+  // Phase C: dynamic, catalog-driven payment breakdown (cash + each non-cash tender)
+  // with Total non-cash and Total payments. Null/empty for a pre-Phase-C shift.
+  payments?: { rows: { label: string; is_cash: boolean; amount: number }[]; nonCashTotal: number; grandTotal: number } | null;
   note: string | null;
   fmt: (amount: number, currency: CurrencyCode) => string;
 }): ReportLine[] {
   const { fmt, currency, money, detail } = input;
+  const pay = input.payments && input.payments.rows.length ? input.payments : null;
   const lines: ReportLine[] = [
     { label: "END OF SHIFT REPORT", kind: "heading" },
     { label: input.businessName },
@@ -199,8 +206,16 @@ export function buildShiftReportLines(input: {
   lines.push({ label: "Refunded", value: String(detail.reversals.refunded) });
   lines.push({ label: "Not counted as sales", value: fmt(detail.reversals.amount, currency) });
 
-  lines.push({ label: "", kind: "rule" }, { label: "PAYMENTS", kind: "heading" });
-  lines.push({ label: "Cash sales", value: fmt(money.cashSales, CASH_CONTRACT_CURRENCY) });
+  lines.push({ label: "", kind: "rule" }, { label: `PAYMENTS (${CASH_CONTRACT_CURRENCY})`, kind: "heading" });
+  if (pay) {
+    for (const m of pay.rows) {
+      lines.push({ label: m.is_cash ? m.label : `${m.label} (non-cash)`, value: fmt(m.amount, CASH_CONTRACT_CURRENCY) });
+    }
+    lines.push({ label: "Total non-cash", value: fmt(pay.nonCashTotal, CASH_CONTRACT_CURRENCY) });
+    lines.push({ label: "Total payments", value: fmt(pay.grandTotal, CASH_CONTRACT_CURRENCY), kind: "total" });
+  } else {
+    lines.push({ label: "Cash sales", value: fmt(money.cashSales, CASH_CONTRACT_CURRENCY) });
+  }
   lines.push({ label: "Cash USD", value: fmt(money.cashUsd, "USD") });
   if (money.cashLbpOriginal > 0) lines.push({ label: "Cash LBP", value: fmt(money.cashLbpOriginal, "LBP") });
 
@@ -209,6 +224,9 @@ export function buildShiftReportLines(input: {
   // drawer figure is three orders of magnitude below the sales figure above it.
   lines.push({ label: "", kind: "rule" }, { label: `DRAWER (${CASH_CONTRACT_CURRENCY})`, kind: "heading" });
   lines.push({ label: "Opening cash", value: fmt(money.openingCash, CASH_CONTRACT_CURRENCY) });
+  if ((money.cashPayouts ?? 0) > 0) {
+    lines.push({ label: "Cash payouts", value: `- ${fmt(money.cashPayouts ?? 0, CASH_CONTRACT_CURRENCY)}` });
+  }
   lines.push({ label: "Expected", value: fmt(money.expectedCash, CASH_CONTRACT_CURRENCY) });
   lines.push({ label: "Counted", value: fmt(money.actualCash, CASH_CONTRACT_CURRENCY) });
   lines.push({ label: "Difference", value: fmt(money.difference, CASH_CONTRACT_CURRENCY), kind: "total" });
