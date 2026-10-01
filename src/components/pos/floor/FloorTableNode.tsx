@@ -63,6 +63,7 @@ export function FloorTableNode({
   const ariaLabel = [
     model.name,
     model.missing ? "unavailable" : state === "active_bill" || state === "occupied" ? "open bill" : "free",
+    model.mergedSources.length > 0 ? `merged with ${model.mergedSources.join(", ")}` : null,
     model.seats != null ? `${model.seats} seats` : null,
     model.elapsedLabel ? `open ${model.elapsedLabel}` : null,
     shapeLabel(element.shape),
@@ -107,6 +108,16 @@ export function FloorTableNode({
               <span className="tabular-nums">{model.seats}</span>
             </>
           ) : null}
+        </span>
+      )}
+      {/* 1.0.31 — merged-state: this table's bill absorbed the listed source tables.
+          Data-driven from merge provenance; never a hard-coded number. */}
+      {showSecondary && !model.missing && model.mergedSources.length > 0 && (
+        <span
+          className="max-w-full truncate text-[10px] font-bold"
+          title={`Merged with ${model.mergedSources.join(", ")}`}
+        >
+          +{model.mergedSources.join(" +")}
         </span>
       )}
       {showSecondary && model.missing && (

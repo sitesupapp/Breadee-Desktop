@@ -30,6 +30,8 @@ export type FloorNodeModel = {
   total: number | null;
   currency: TableSummary["currency"];
   mixedCurrency: boolean;
+  /** 1.0.31 — source table names folded into this table by a merge (provenance). */
+  mergedSources: string[];
   /** True when this placement points at a table absent from the current map. */
   missing: boolean;
 };
@@ -61,6 +63,7 @@ export function buildFloorNode(
       total: null,
       currency: null,
       mixedCurrency: false,
+      mergedSources: [],
       missing: true,
     };
   }
@@ -77,6 +80,7 @@ export function buildFloorNode(
     total: table.total,
     currency: table.currency,
     mixedCurrency: table.mixed_currency,
+    mergedSources: table.merged_sources ?? [],
     missing: false,
   };
 }

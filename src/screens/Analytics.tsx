@@ -27,6 +27,7 @@ import {
   type Analytics as AnalyticsData,
   type PresetKey,
 } from "@/lib/pos/analytics";
+import { loadDeletionReport, removalTypeLabel, type DeletionReasonRow } from "@/lib/pos/deletionReport";
 
 type BranchOpt = { id: string; name: string };
 
@@ -185,10 +186,101 @@ export function Analytics() {
             </div>
             {/* Print/PDF report — hidden on screen, the ONLY thing that prints. Same data. */}
             <PrintReport data={data} money={money} pos={pos} range={range} />
+            {/* 1.0.31 — audited deletion/reduction reasons for the same range + branch.
+                Read-only; reuses the activity-log events written by the edit RPCs. */}
+            <div className="mt-5 print:hidden">
+              <DeletionsReport from={range.from} to={range.to} branchId={branchId ?? pos.branch.id} />
+            </div>
           </>
         )
       )}
     </div>
+  );
+}
+
+function formatWhen(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  return new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// 1.0.31 — Deletions & Reductions. A small read surface over the audited removal/
+// reduction events (pos_deletion_reason_report → activity_logs). Self-contained: it
+// loads for the range + branch the Analytics screen is already showing. Single-branch
+// (the chosen branch, or the operator's own) by design.
+function DeletionsReport({ from, to, branchId }: { from: string; to: string; branchId: string | null }) {
+  const [rows, setRows] = useState<DeletionReasonRow[] | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [err, setErr] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  useEffect(() => {
+    if (!branchId) {
+      setRows([]);
+      setStatus("ready");
+      return;
+    }
+    const s = ++seq.current;
+    setStatus("loading");
+    setErr(null);
+    void loadDeletionReport({ from, to, branchId })
+      .then((r) => {
+        if (s === seq.current) {
+          setRows(r);
+          setStatus("ready");
+        }
+      })
+      .catch((e) => {
+        if (s !== seq.current) return;
+        setErr(e instanceof Error ? e.message : "Could not load the deletion report.");
+        setStatus("error");
+      });
+  }, [from, to, branchId]);
+
+  return (
+    <Card className="p-4">
+      <SectionTitle title="Deletions & Reductions" hint="Audited removals, reductions and option changes on dine-in bills" />
+      {status === "loading" && <Skeleton className="mt-3 h-24 w-full" />}
+      {status === "error" && <p className="mt-3 text-xs font-semibold text-red-700">{err}</p>}
+      {status === "ready" && rows && rows.length === 0 && (
+        <p className="mt-3 text-sm text-sub">No removals or reductions were recorded for this period.</p>
+      )}
+      {status === "ready" && rows && rows.length > 0 && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full min-w-[640px] text-left text-xs">
+            <thead className="text-[11px] uppercase tracking-wide text-sub">
+              <tr>
+                <th className="py-1.5 pr-3 font-semibold">When</th>
+                <th className="py-1.5 pr-3 font-semibold">User</th>
+                <th className="py-1.5 pr-3 font-semibold">Order</th>
+                <th className="py-1.5 pr-3 font-semibold">Table</th>
+                <th className="py-1.5 pr-3 font-semibold">Item</th>
+                <th className="py-1.5 pr-3 font-semibold">Type</th>
+                <th className="py-1.5 pr-3 font-semibold">Qty</th>
+                <th className="py-1.5 pr-3 font-semibold">Reason</th>
+              </tr>
+            </thead>
+            <tbody className="align-top">
+              {rows.map((r, i) => (
+                <tr key={i} className="border-t border-line">
+                  <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums text-sub">{formatWhen(r.at)}</td>
+                  <td className="py-1.5 pr-3">{r.actor || "—"}</td>
+                  <td className="py-1.5 pr-3 tabular-nums">{r.orderNumber ?? "—"}</td>
+                  <td className="py-1.5 pr-3">{r.tableName ?? "—"}</td>
+                  <td className="py-1.5 pr-3 font-semibold text-ink">{r.item ?? "—"}</td>
+                  <td className="py-1.5 pr-3">
+                    {removalTypeLabel(r.removalType)}
+                    {r.refunded ? " · refunded" : ""}
+                  </td>
+                  <td className="py-1.5 pr-3 tabular-nums">{r.quantityRemoved ?? "—"}</td>
+                  <td className="py-1.5 pr-3">{r.reason ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 

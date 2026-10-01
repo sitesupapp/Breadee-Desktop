@@ -57,6 +57,9 @@ function toTable(raw: unknown): TableSummary | null {
     total: numOrNull(r.total),
     currency: toCurrency(r.currency),
     mixed_currency: bool(r.mixed_currency),
+    merged_sources: Array.isArray(r.merged_sources)
+      ? (r.merged_sources as unknown[]).map((x) => str(x)).filter((s) => s !== "")
+      : [],
   };
 }
 

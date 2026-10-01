@@ -151,6 +151,8 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       "pos_complete_on_account",
       "pos_complete_table_on_account",
       "pos_configure_tables",
+      // 1.0.31 — read-only deletion/reduction reason report (pos.analytics.view).
+      "pos_deletion_reason_report",
       // Delivery Management: the read-only delivery report (pos.reports.view).
       "pos_delivery_report",
       // Delivery Settlement WS7B: post-close cost resolution (pos.delivery.settlements.manage).
@@ -188,8 +190,8 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  // 42 -> 43 in 1.0.31 for pos_merge_tables (table merge).
-  assert.equal(members.length, 43);
+  // 42 -> 44 in 1.0.31 for pos_merge_tables + pos_deletion_reason_report.
+  assert.equal(members.length, 44);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

@@ -39,6 +39,7 @@ export type PosRpcName =
   // Level 2C - table operations.
   | "pos_move_table"
   | "pos_merge_tables"
+  | "pos_deletion_reason_report"
   | "pos_close_table"
   | "pos_clear_table"
   // Level 2D - settlement. Note this RPC has NO idempotency key, unlike
