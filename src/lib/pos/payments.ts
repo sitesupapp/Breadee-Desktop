@@ -16,9 +16,17 @@ import { callPosRpc, asRecord, bool, num, numOrNull, requireId, str } from "@/li
 import { hasValidRate, roundForCurrency, type CurrencyCode } from "@/lib/currency";
 import type { PayOrderResult } from "@/types/pos";
 
-/** The only method the current POS contract exercises; kept as a field, not a literal. */
-export type PaymentMethod = "cash";
+/**
+ * A tenant payment-method KEY from the Phase B `pos_payment_methods` catalog.
+ * Widened from the former `"cash"` literal so the normal checkout dialog can
+ * carry any ACTIVE catalog key — the server already honours it: the pay RPCs
+ * read `p_payload->>'method'` (default `cash`) and persist it on the order and
+ * the payment row. Every caller already forwards the method; only the dialog's
+ * list of choices changed.
+ */
+export type PaymentMethod = string;
 
+/** Offline / fallback choice set. Cash is always active and always valid. */
 export const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [{ value: "cash", label: "Cash" }];
 
 export type PayOrderInput = {

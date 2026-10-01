@@ -42,6 +42,7 @@ import {
   type SplitPaymentMethod,
   type SplitAllocationInput,
 } from "@/lib/pos/split";
+import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { ModifierDialog } from "@/components/pos/ModifierDialog";
 import { groupsForItem } from "@/lib/pos/modifiers";
 import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
@@ -278,6 +279,10 @@ export function useDineInWorkspace(input: {
   // Customer Receivables / On Account. Its own latch, and a customer picker that
   // is live only while the payment dialog is open and on-account is reachable.
   const onAccountLatch = useRef(createOnAccountLatch());
+  // Normal full-bill checkout methods: the Phase B catalog Split already uses,
+  // Cash-only when offline. Fed to PaymentDialog so Pay Full Bill shows the
+  // tenant's active methods instead of Cash-only.
+  const activePaymentMethods = useActivePaymentMethods(pos.tenantId, input.online);
   const onAccountReachable = payOpen && pos.gates.takeOnAccount.allowed && input.online;
   const customerPicker = useCustomerPicker({
     access: pos.access,
@@ -1504,6 +1509,7 @@ export function useDineInWorkspace(input: {
         rate={input.rate}
         discountGate={pos.gates.applyDiscounts}
         payGate={payGate}
+        paymentMethods={activePaymentMethods}
         orderNumber={tables.bill?.orders.map((o) => o.order_number).filter(Boolean).join(", ") || null}
         dineIn={
           selected

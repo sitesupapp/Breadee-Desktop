@@ -58,7 +58,7 @@ on:
   # actually being reachable. What matters is preserved: a production installer
   # can never fall out of ordinary work on desktop-staging or out of a PR.
   push:
-    branches: [desktop-production-build, claude/desktop-1030-pos-cumulative]
+    branches: [desktop-production-build]
 
 # Read-only token: this workflow has no release, tag, or publish step.
 permissions:

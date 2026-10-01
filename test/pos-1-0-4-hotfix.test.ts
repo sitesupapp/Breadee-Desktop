@@ -426,7 +426,10 @@ test("every payment control survives the compact layout", () => {
   ]) {
     assert.ok(paymentDialog.includes(control), `${control} must still be in the payment dialog`);
   }
-  assert.match(paymentDialog, /PAYMENT_METHODS\.map/);
+  // 1.0.31: the Method field now maps the tenant's ACTIVE payment-method catalog
+  // (the prop-fed `methods`), not the former static PAYMENT_METHODS cash-only
+  // constant. The field itself (label="Method") and the layout are unchanged.
+  assert.match(paymentDialog, /methods\.map\(\(m\) =>/);
   assert.match(paymentDialog, /\["USD", "LBP"\]/);
   assert.match(paymentDialog, /\["none", "percent", "amount"\]/);
   assert.match(keypad, /"7", "8", "9", "4", "5", "6", "1", "2", "3", "0", "00", "\."/);

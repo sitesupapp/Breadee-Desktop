@@ -17,7 +17,7 @@ import { CustomerSearch, type CustomerSearchProps } from "@/components/pos/Custo
 import { useShortcuts } from "@/lib/keyboard/provider";
 import { convertCurrency, formatMoney, hasValidRate, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { computeDiscount, discountPayload, fixedDiscountToPrimary, type DiscountType } from "@/lib/pos/discounts";
-import { computeChange, paymentBlockedReason, PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
+import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { parseDeliveryFee } from "@/lib/pos/deliverySettlement";
 
 /**
@@ -77,6 +77,14 @@ export type PaymentDialogProps = {
   rate: number | null;
   discountGate: Gate;
   payGate: Gate;
+  /**
+   * The tenant's ACTIVE payment methods (Phase B catalog) for THIS checkout —
+   * the same catalog Split Bill uses, supplied by the workspace via
+   * `useActivePaymentMethods` (Cash-only when offline). Absent/empty falls back
+   * to Cash-only, so the dialog is never left without a valid choice. The
+   * submitted value is the stable catalog KEY; the label is display-only.
+   */
+  paymentMethods?: readonly { key: string; label: string; is_cash: boolean }[];
   /** Set once the order exists; a retry pays THIS order rather than creating one. */
   orderNumber: string | null;
   /**
@@ -172,6 +180,14 @@ export function PaymentDialog(props: PaymentDialogProps) {
 
   // Delivery settlement only: the manual fee (delivery orders show the input).
   const isDelivery = props.delivery != null;
+
+  // Active payment methods for this checkout — the Phase B catalog the workspace
+  // supplied (same source Split Bill uses). Cash-only fallback keeps the dialog
+  // valid offline or before the catalog loads; Cash is always a valid server default.
+  const methods =
+    props.paymentMethods && props.paymentMethods.length > 0
+      ? props.paymentMethods
+      : [{ key: "cash", label: "Cash", is_cash: true }];
   const feeParsed = parseDeliveryFee(deliveryFee);
   const feeValue = isDelivery && feeParsed.valid ? feeParsed.value : 0;
   // DISPLAY PREVIEW ONLY, so the cashier sees what to collect and change is right.
@@ -396,9 +412,9 @@ export function PaymentDialog(props: PaymentDialogProps) {
               to occupy two full-width blocks between them. */}
           <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
             <Field label="Method">
-              <div className="flex gap-2">
-                {PAYMENT_METHODS.map((m) => (
-                  <Choice key={m.value} active={method === m.value} onClick={() => setMethod(m.value)}>
+              <div className="flex flex-wrap gap-2">
+                {methods.map((m) => (
+                  <Choice key={m.key} active={method === m.key} onClick={() => setMethod(m.key)}>
                     {m.label}
                   </Choice>
                 ))}
