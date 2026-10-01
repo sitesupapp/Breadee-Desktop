@@ -10,6 +10,7 @@
 
 import { Badge, Button, GatedButton, PanelTitle, Skeleton, cn, type Gate } from "@/components/ui";
 import { addressText } from "@/lib/pos/deliveryHistory";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import type { CustomerAddress, CustomerProfile } from "@/lib/pos/customers";
 
 /**
@@ -75,7 +76,7 @@ export function CustomerCard(props: CustomerCardProps) {
   return (
     <section aria-label="Selected customer" className="rounded-2xl border border-line bg-white p-4">
       <PanelTitle right={selected ? <Badge tone="green">Address chosen</Badge> : undefined}>
-        {c.name || "New customer"}
+        {customerDisplayName(c.name, c.phone, "New customer")}
       </PanelTitle>
 
       <p className="mt-0.5 text-sm text-sub">{c.phone || "No phone"}</p>

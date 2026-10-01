@@ -24,6 +24,7 @@ import { Modal } from "@/components/overlays";
 import { Glyph } from "@/components/Glyph";
 import { formatMoney, parseAmount, roundUsd, type CurrencyCode } from "@/lib/currency";
 import { PAYMENT_METHODS, type PaymentMethod } from "@/lib/pos/payments";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import {
   assertCollectionAmount,
   collectReceivable,
@@ -344,7 +345,7 @@ export function CustomerAccounts() {
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-bold text-ink">{r.name || "Unnamed customer"}</span>
+                  <span className="truncate text-sm font-bold text-ink">{customerDisplayName(r.name, r.phone, "Unnamed customer")}</span>
                   <span className="shrink-0 text-sm font-extrabold tabular-nums text-ink">
                     {formatMoney(r.outstandingUsd, "USD")}
                   </span>
@@ -465,7 +466,7 @@ function AccountSummary({ account }: { account: ReceivableAccount }) {
     <Card className="p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-lg font-extrabold text-ink">{customer.name || "Unnamed customer"}</p>
+          <p className="truncate text-lg font-extrabold text-ink">{customerDisplayName(customer.name, customer.phone, "Unnamed customer")}</p>
           <p className="text-sm text-sub">{customer.phone || "No phone on file"}</p>
         </div>
         <div className="text-right">
@@ -721,7 +722,7 @@ function ConfirmationView({ confirmation }: { confirmation: ReceivableConfirmati
         <p className="text-xs text-sub">collected · {c.paymentStatus === "partial" ? "balance remaining" : "settled"}</p>
       </div>
       <dl className="space-y-1.5 text-sm">
-        <Row label="Customer" value={c.customerName || "—"} />
+        <Row label="Customer" value={customerDisplayName(c.customerName, c.customerPhone, "—")} />
         <Row label="Order" value={`#${c.orderNumber}`} />
         <Row label="Paid" value={formatMoney(c.paidAmount, c.paidCurrency)} />
         <Row label="Method" value={c.method || "—"} />

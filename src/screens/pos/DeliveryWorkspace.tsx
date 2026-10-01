@@ -136,6 +136,7 @@ import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
 import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
 import { DeliveryReport } from "@/components/pos/DeliveryReport";
 import { EditOrderDialog, VoidOrderDialog, type EditOrderIntent } from "@/components/pos/DeliveryOrderDialogs";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import { computeDiscount } from "@/lib/pos/discounts";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { computeChange, paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
@@ -1942,7 +1943,7 @@ export function useDeliveryWorkspace(input: {
   /** Who this order is for. Pinned above the menu so it is never out of sight. */
   const identityStrip = (
     <div className="flex flex-wrap items-center gap-2 rounded-xl bg-brand-soft px-3 py-2">
-      <span className="text-xs font-extrabold text-brand-dark">{customers.selected?.name ?? "Customer"}</span>
+      <span className="text-xs font-extrabold text-brand-dark">{customerDisplayName(customers.selected?.name, customers.selected?.phone, "Customer")}</span>
       <span className="text-[11px] font-semibold text-brand-dark/80">{customers.selected?.phone ?? ""}</span>
       {address && <span className="min-w-0 truncate text-[11px] text-brand-dark/80">· {addressLine(address)}</span>}
     </div>
@@ -2316,7 +2317,7 @@ export function useDeliveryWorkspace(input: {
         paymentMethods={activePaymentMethods}
         orderNumber={payTarget.order?.order_number ?? null}
         delivery={{
-          customerName: payTarget.order ? (receiptIdentity(payTarget.order).customerName ?? "Customer") : "Customer",
+          customerName: payTarget.order ? customerDisplayName(receiptIdentity(payTarget.order).customerName, receiptIdentity(payTarget.order).customerPhone, "Customer") : "Customer",
           address: payTarget.order ? receiptIdentity(payTarget.order).addressText : null,
         }}
         onAccount={(() => {
@@ -2363,7 +2364,7 @@ export function useDeliveryWorkspace(input: {
            adapter rather than chosen anywhere in the UI. */
         action={detail ? voidActionFor(detail) : "cancel"}
         order={detail}
-        customerName={detail ? (parties.get(detail.id)?.customerName ?? null) : null}
+        customerName={detail ? (parties.get(detail.id)?.customerName?.trim() || parties.get(detail.id)?.customerPhone?.trim() || null) : null}
         currency={input.currency}
         gate={voidGate}
         busy={voidBusy}
@@ -2393,7 +2394,7 @@ export function useDeliveryWorkspace(input: {
         open={switchTo !== null}
         size="sm"
         title="Start a new customer's order?"
-        subtitle={`${deliveryLines.length} item${deliveryLines.length === 1 ? "" : "s"} are waiting to be sent for ${customers.selected?.name ?? "this customer"}.`}
+        subtitle={`${deliveryLines.length} item${deliveryLines.length === 1 ? "" : "s"} are waiting to be sent for ${customerDisplayName(customers.selected?.name, customers.selected?.phone, "this customer")}.`}
         onClose={() => setSwitchTo(null)}
         footer={
           <div className="flex justify-end gap-2">
@@ -2407,7 +2408,7 @@ export function useDeliveryWorkspace(input: {
         }
       >
         <p className="text-sm text-ink">
-          These items were added for {customers.selected?.name ?? "the current customer"}. They cannot be sent for
+          These items were added for {customerDisplayName(customers.selected?.name, customers.selected?.phone, "the current customer")}. They cannot be sent for
           anyone else, so switching now discards them.
         </p>
         <p className="mt-2 text-xs text-sub">Send the order first if you want to keep it.</p>

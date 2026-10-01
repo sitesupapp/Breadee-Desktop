@@ -15,6 +15,7 @@ import { Badge, Button, Input, Skeleton, Textarea, cn } from "@/components/ui";
 import { normalizePhoneE164 } from "@/lib/pos/phone";
 import type { CustomerAddress, CustomerOrder, CustomerProfile } from "@/lib/pos/customers";
 import { addressLine } from "@/components/pos/CustomerCard";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -327,7 +328,7 @@ export function CustomerHistoryDialog(props: CustomerHistoryDialogProps) {
       open={props.open}
       size="md"
       title="Order history"
-      subtitle={props.customer ? `${props.customer.name ?? "Customer"} · ${props.customer.phone ?? "no phone"}` : null}
+      subtitle={props.customer ? (props.customer.name?.trim() ? `${props.customer.name.trim()} · ${props.customer.phone ?? "no phone"}` : customerDisplayName(null, props.customer.phone, "Customer")) : null}
       onClose={props.onClose}
       footer={
         <div className="flex items-center justify-between gap-2">

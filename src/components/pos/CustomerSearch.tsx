@@ -10,6 +10,7 @@
 // rows that no one can look up by phone again.
 
 import { Badge, Button, GatedButton, Input, Skeleton, cn, type Gate } from "@/components/ui";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import { looksLikePhone } from "@/lib/pos/phone";
 import type { CustomerMatch } from "@/lib/pos/customers";
 
@@ -96,7 +97,7 @@ export function CustomerSearch(props: CustomerSearchProps) {
                     "text-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40",
                   )}
                 >
-                  <span className="min-w-0 truncate font-semibold text-ink">{m.name || "Unnamed customer"}</span>
+                  <span className="min-w-0 truncate font-semibold text-ink">{customerDisplayName(m.name, m.phone, "Unnamed customer")}</span>
                   <span className="shrink-0 text-sub">{m.phone || "—"}</span>
                 </button>
               </li>

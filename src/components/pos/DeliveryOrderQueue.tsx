@@ -14,6 +14,7 @@
 
 import { Badge, Button, EmptyState, ErrorState, Skeleton, cn } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import {
   orderStateLabel,
   orderStateTone,
@@ -103,7 +104,7 @@ export function DeliveryOrderQueue(props: DeliveryOrderQueueProps) {
                         </span>
                         <span className="text-[11px] font-semibold text-sub">{orderTimeLabel(o.created_at)}</span>
                       </div>
-                      <p className="truncate text-xs font-semibold text-ink">{party.customerName ?? "Customer"}</p>
+                      <p className="truncate text-xs font-semibold text-ink">{customerDisplayName(party.customerName, party.customerPhone, "Customer")}</p>
                       <p className="truncate text-[11px] text-sub">{party.addressText ?? "No address on file"}</p>
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">

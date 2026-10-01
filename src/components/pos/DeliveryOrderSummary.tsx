@@ -16,6 +16,7 @@ import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { addressLine } from "@/components/pos/CustomerCard";
 import type { CustomerAddress, CustomerProfile } from "@/lib/pos/customers";
 import { kitchenStateLabel, type OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 
 export type DeliveryOrderSummaryProps = {
   order: OpenDeliveryOrder;
@@ -56,7 +57,7 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
       )}
 
       <div className="mt-3 space-y-0.5">
-        <p className="text-xs font-bold text-ink">{props.customer?.name ?? "Customer"}</p>
+        <p className="text-xs font-bold text-ink">{customerDisplayName(props.customer?.name, props.customer?.phone, "Customer")}</p>
         <p className="text-[11px] text-sub">{props.customer?.phone ?? "-"}</p>
         {props.address && <p className="text-[11px] text-sub">{addressLine(props.address)}</p>}
       </div>

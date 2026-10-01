@@ -14,6 +14,7 @@ import { Modal } from "@/components/overlays";
 import { Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { CustomerSearch, type CustomerSearchProps } from "@/components/pos/CustomerSearch";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import { convertCurrency, formatMoney, hasValidRate, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { computeDiscount, discountPayload, fixedDiscountToPrimary, type DiscountType } from "@/lib/pos/discounts";
@@ -482,7 +483,7 @@ export function PaymentDialog(props: PaymentDialogProps) {
                 <div className="flex items-center justify-between gap-2 rounded-xl border border-line px-3 py-2">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-bold text-ink">
-                      {oa.customer.name || oa.customer.phone || "Selected customer"}
+                      {customerDisplayName(oa.customer.name, oa.customer.phone, "Selected customer")}
                     </p>
                     {oa.customer.name && oa.customer.phone && (
                       <p className="truncate text-xs text-sub">{oa.customer.phone}</p>

@@ -18,6 +18,7 @@
 
 import { Badge, Button, GatedButton, Skeleton, type Gate } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import {
   orderStateLabel,
   orderStateTone,
@@ -147,7 +148,7 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
         </div>
 
         <div className="mt-3 space-y-0.5 border-t border-line pt-3">
-          <p className="text-xs font-bold text-ink">{party.customerName ?? "Customer"}</p>
+          <p className="text-xs font-bold text-ink">{customerDisplayName(party.customerName, party.customerPhone, "Customer")}</p>
           <p className="text-[11px] text-sub">{party.customerPhone ?? "-"}</p>
           <p className="text-[11px] text-sub">{party.addressText ?? "No address on file"}</p>
         </div>
