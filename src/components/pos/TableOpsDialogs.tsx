@@ -307,3 +307,114 @@ export function ClearTableDialog({
     </Modal>
   );
 }
+
+// --- Merge (1.0.31) ----------------------------------------------------------
+//
+// Fold one or more OTHER occupied tables' open bills into the current table. The
+// picker only OFFERS occupied tables; the server owns the real eligibility (it
+// refuses a source that is paid, split, on-account, cross-shift, consumed or
+// adjusted) and performs the fold atomically. The source tables are freed.
+
+export function MergeTablesDialog({
+  open,
+  primary,
+  sources,
+  busy,
+  gate,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  primary: TableSummary | null;
+  sources: TableSummary[];
+  busy: boolean;
+  gate: Gate;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: (sourceTableIds: string[]) => void;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (open) setSelected([]);
+  }, [open]);
+
+  const toggle = (id: string) =>
+    setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+
+  const canConfirm = !busy && gate.allowed && selected.length > 0;
+
+  return (
+    <Modal
+      open={open && !!primary}
+      title={primary ? `Merge into ${primary.name}` : "Merge tables"}
+      subtitle="Other occupied tables' bills move onto this one, and those tables are freed."
+      size="md"
+      onClose={onCancel}
+      footer={
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            {error && <p className="truncate text-xs font-semibold text-red-700">{error}</p>}
+            {!gate.allowed && gate.reason && (
+              <p className="truncate text-xs font-semibold text-amber-800">{gate.reason}</p>
+            )}
+          </div>
+          <div className="flex shrink-0 gap-2">
+            <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              size="lg"
+              onClick={() => canConfirm && onConfirm(selected)}
+              disabled={!canConfirm}
+              title={gate.reason ?? undefined}
+            >
+              {busy ? "Merging..." : selected.length > 0 ? `Merge ${selected.length} table${selected.length === 1 ? "" : "s"}` : "Merge tables"}
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      {sources.length === 0 ? (
+        <EmptyState
+          title="No other occupied table to merge"
+          hint="Only tables that currently hold an open bill can be merged in. Open or seat another table first."
+        />
+      ) : (
+        <>
+          <p className="mb-2 text-xs text-sub">
+            Choose the tables whose bills should move onto {primary?.name}. A bill that is paid, split,
+            on account, adjusted or on another shift will be refused by the server.
+          </p>
+          <ul className="grid max-h-[40vh] grid-cols-1 gap-2 overflow-y-auto overscroll-contain">
+            {sources.map((t) => {
+              const on = selected.includes(t.id);
+              return (
+                <li key={t.id}>
+                  <button
+                    type="button"
+                    onClick={() => toggle(t.id)}
+                    aria-pressed={on}
+                    className={cn(
+                      "flex min-h-[52px] w-full items-center justify-between gap-2 rounded-xl border-2 px-3 text-left",
+                      on ? "border-brand bg-brand-soft/40" : "border-line bg-white hover:bg-slate-50",
+                    )}
+                  >
+                    <span className="truncate text-sm font-bold text-ink">{t.name}</span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      {t.total != null && t.currency && (
+                        <span className="text-xs font-semibold tabular-nums text-sub">{formatMoney(t.total, t.currency)}</span>
+                      )}
+                      {on && <Badge tone="green">Selected</Badge>}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+    </Modal>
+  );
+}

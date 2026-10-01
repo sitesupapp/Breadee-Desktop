@@ -267,7 +267,10 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // (pos_edit_order_line, pos_split_settle, pos_split_state, pos_payout_create,
   // pos_payout_reverse, pos_payout_list, pos_analytics_summary). Each reviewed and
   // gated on its own permission; line removal (pos_remove_order_item) STILL stays out.
-  assert.equal(members.length, 42, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY 1.0.31 MERGE TABLES: 42 -> 43, for `pos_merge_tables` (folds other
+  // occupied tables' bills into one; gated on pos.tables.merge; not a money RPC).
+  assert.equal(members.length, 43, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.ok(members.includes("pos_merge_tables"), "pos_merge_tables should be in the allow-list");
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
   assert.ok(members.includes("pos_upsert_customer"), "pos_upsert_customer is not callable - Level 3A cannot save a customer");
   // The money-moving names, counted so a new one cannot arrive unnoticed:

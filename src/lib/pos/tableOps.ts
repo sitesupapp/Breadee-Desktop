@@ -37,7 +37,7 @@
 // an unpaid bill is the SERVER telling us payment is still missing, and that
 // refusal is surfaced, never worked around.
 
-import { asRecord, bool, callPosRpc, num } from "@/lib/pos/rpc";
+import { asRecord, bool, callPosRpc, num, str } from "@/lib/pos/rpc";
 import type { TableSummary } from "@/types/tables";
 import type { Gate } from "@/components/ui";
 
@@ -67,7 +67,7 @@ export class SameTableError extends Error {
   }
 }
 
-export type TableOpKind = "move" | "close" | "clear";
+export type TableOpKind = "move" | "close" | "clear" | "merge";
 
 export type MoveResult = { ok: boolean; orders_moved: number };
 export type CloseResult = { ok: boolean; orders_completed: number };
@@ -148,6 +148,57 @@ export async function moveTable(input: { fromTableId: string; toTableId: string 
     await callPosRpc("pos_move_table", { p_from: input.fromTableId, p_to: input.toTableId }),
   );
   return { ok: bool(row.ok), orders_moved: num(row.orders_moved) };
+}
+
+// --- merge (1.0.31) ----------------------------------------------------------
+
+export type MergeResult = {
+  ok: boolean;
+  merge_id: string;
+  primary_order_number: string;
+  subtotal: number;
+  sources_merged: number;
+};
+
+/**
+ * The occupied tables (other than the primary) whose open bills could be folded in.
+ * This is only what the picker OFFERS; the server owns real eligibility and will
+ * refuse a source that is paid, split, on-account, cross-shift or adjusted.
+ */
+export function mergeableSources(tables: TableSummary[], primary: TableSummary | null): TableSummary[] {
+  if (!primary) return [];
+  return tables.filter((t) => t.id !== primary.id && t.orders > 0 && t.status === "occupied");
+}
+
+/**
+ * Fold one or more source tables' open bills into the primary table, in ONE
+ * server transaction. `expected` carries the tables' pos_entity_versions so a
+ * stale floor is refused; `clientOpId` makes a lost response replay rather than
+ * merge twice. The desktop only shapes the request and re-reads the bill after.
+ */
+export async function mergeTables(input: {
+  primaryTableId: string;
+  sourceTableIds: string[];
+  expected?: Record<string, number>;
+  clientOpId?: string;
+}): Promise<MergeResult> {
+  const row = asRecord(
+    await callPosRpc("pos_merge_tables", {
+      p_payload: {
+        primary_table_id: input.primaryTableId,
+        source_table_ids: input.sourceTableIds,
+        ...(input.expected ? { expected: input.expected } : {}),
+        ...(input.clientOpId ? { client_op_id: input.clientOpId } : {}),
+      },
+    }),
+  );
+  return {
+    ok: bool(row.ok),
+    merge_id: str(row.merge_id),
+    primary_order_number: str(row.primary_order_number),
+    subtotal: num(row.subtotal),
+    sources_merged: num(row.sources_merged),
+  };
 }
 
 export async function closeTable(input: { tableId: string }): Promise<CloseResult> {

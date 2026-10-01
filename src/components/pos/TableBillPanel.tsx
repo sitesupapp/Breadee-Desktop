@@ -32,9 +32,12 @@ export type TableBillPanelProps = {
   moveGate: Gate;
   closeGate: Gate;
   clearGate: Gate;
+  /** 1.0.31 — fold other occupied tables' bills into this one. Opens a confirmation. */
+  mergeGate: Gate;
   onMove: () => void;
   onClose: () => void;
   onClear: () => void;
+  onMerge: () => void;
   /** Level 2D. The SHARED `payTableGate` result - never recomputed in this panel. */
   payGate: Gate;
   /** Opens the payment dialog. Settling happens there, behind the same gate. */
@@ -273,6 +276,15 @@ export function TableBillPanel(props: TableBillPanelProps) {
           <GatedButton gate={props.closeGate} variant="ghost" size="md" className="w-full" onClick={props.onClose}>
             <Glyph name="check" size={16} />
             Close table
+          </GatedButton>
+        </div>
+
+        {/* 1.0.31 — Merge is a table operation that folds other occupied bills into
+            this one. It does not void money, so it sits with Move/Close, not Clear. */}
+        <div className="mt-2">
+          <GatedButton gate={props.mergeGate} variant="ghost" size="md" className="w-full" onClick={props.onMerge}>
+            <Glyph name="move" size={16} />
+            Merge tables
           </GatedButton>
         </div>
 

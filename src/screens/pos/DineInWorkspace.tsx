@@ -30,7 +30,7 @@ import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { loadAutoSeatDirectOpen, readCachedAutoSeat } from "@/lib/pos/autoSeat";
 import { classifyError } from "@/lib/pos/errors";
-import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
+import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMergeTables, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
 import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
 import { modifierChangeRemovesComponents } from "@/lib/pos/editReason";
 import { SplitBillPanel } from "@/components/pos/SplitBillPanel";
@@ -54,12 +54,14 @@ import { FloorDesigner } from "@/components/pos/floor/designer/FloorDesigner";
 import { MapListToggle, type DineInFloorView } from "@/components/pos/floor/MapListToggle";
 import { Glyph } from "@/components/Glyph";
 import { readPosFeatures, writePosFeatures } from "@/lib/pos/posFeatures";
-import { ClearTableDialog, CloseTableDialog, MoveTableDialog } from "@/components/pos/TableOpsDialogs";
+import { ClearTableDialog, CloseTableDialog, MergeTablesDialog, MoveTableDialog } from "@/components/pos/TableOpsDialogs";
 import {
   clearOutcomeMessage,
   clearTable,
   closeOutcomeMessage,
   closeTable,
+  mergeableSources,
+  mergeTables,
   moveOutcomeMessage,
   moveTable,
   tableOpGate,
@@ -338,6 +340,7 @@ export function useDineInWorkspace(input: {
       move: tableOpGate({ kind: "move", permitted: canMoveTable(pos.access), ...common }),
       close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
+      merge: tableOpGate({ kind: "merge", permitted: canMergeTables(pos.access), ...common }),
     };
   }, [pos.access, selected, hasOpenShift, input.online]);
 
@@ -439,6 +442,30 @@ export function useDineInWorkspace(input: {
       void runOp("clear", async () => clearOutcomeMessage(await clearTable({ tableId: selected.id, reason }), name));
     },
     [selected, opGates.clear.allowed, runOp],
+  );
+
+  // Phase 4 (1.0.31) — fold other occupied tables' bills into this one. The server
+  // re-checks every table/order under lock; the client sends the table versions it
+  // last saw (stale-floor guard) and a stable client_op_id (replay-safe).
+  const confirmMerge = useCallback(
+    (sourceTableIds: string[]) => {
+      if (!selected || !opGates.merge.allowed || sourceTableIds.length === 0) return;
+      const primaryName = selected.name;
+      const expected: Record<string, number> = {};
+      for (const t of tables.map.tables) {
+        if (t.id === selected.id || sourceTableIds.includes(t.id)) expected[t.id] = t.pos_entity_version;
+      }
+      void runOp("merge", async () => {
+        const r = await mergeTables({
+          primaryTableId: selected.id,
+          sourceTableIds,
+          expected,
+          clientOpId: crypto.randomUUID(),
+        });
+        return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
+      });
+    },
+    [selected, opGates.merge.allowed, tables.map.tables, runOp],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -1463,9 +1490,11 @@ export function useDineInWorkspace(input: {
         moveGate={opGates.move}
         closeGate={opGates.close}
         clearGate={opGates.clear}
+        mergeGate={opGates.merge}
         onMove={() => requestOp("move")}
         onClose={() => requestOp("close")}
         onClear={() => requestOp("clear")}
+        onMerge={() => requestOp("merge")}
         payGate={payGate}
         onPay={requestPay}
         splitGate={splitGate}
@@ -1600,6 +1629,17 @@ export function useDineInWorkspace(input: {
         error={opError}
         onCancel={() => setOpDialog(null)}
         onConfirm={confirmMove}
+      />
+
+      <MergeTablesDialog
+        open={opDialog === "merge"}
+        primary={selected}
+        sources={mergeableSources(tables.map.tables, selected)}
+        busy={opBusy}
+        gate={opGates.merge}
+        error={opError}
+        onCancel={() => setOpDialog(null)}
+        onConfirm={confirmMerge}
       />
 
       {/* Phase E — Split Bill. A settlement/allocation screen; every figure is the

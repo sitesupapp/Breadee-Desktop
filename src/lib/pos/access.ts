@@ -63,6 +63,10 @@ export const POS_PERMISSIONS = {
   TABLES_MOVE: "pos.tables.move",
   TABLES_CLEAR: "pos.tables.clear",
   TABLES_CLOSE: "pos.tables.close",
+  // Dine-In MERGE (1.0.31). Folds other occupied tables' open bills into this one.
+  // Server-gated by pos.tables.merge, which travels with pos.tables.move
+  // (owner/admin/manager by default; custom roles must grant it explicitly).
+  TABLES_MERGE: "pos.tables.merge",
   // Dine-In Floor DESIGNER (Phase 3A). `floor_manage` is the key every draft/lease
   // RPC checks for itself (floor_draft / autosave / acquire / heartbeat / takeover
   // / unplaced). `floor_publish` gates PUBLISHING, which Phase 3A does not do — the
@@ -520,6 +524,16 @@ export function canMoveTable(ctx: PosAccessContext): Gate {
 
 export function canCloseTable(ctx: PosAccessContext): Gate {
   return tableOpGate(ctx, POS_PERMISSIONS.TABLES_CLOSE, "You do not have permission to close tables.");
+}
+
+/**
+ * Merging folds other occupied tables' open bills into this one and voids the
+ * emptied source orders, so it is a table-management operation on the order model.
+ * Like every other here it is only a permission-map lookup; the RPC re-checks
+ * pos.tables.merge, the tenant, the OU and every eligibility rule server-side.
+ */
+export function canMergeTables(ctx: PosAccessContext): Gate {
+  return tableOpGate(ctx, POS_PERMISSIONS.TABLES_MERGE, "You do not have permission to merge tables.");
 }
 
 /**
