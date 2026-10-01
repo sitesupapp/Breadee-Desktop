@@ -89,6 +89,7 @@ import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import { isBackendReachable } from "@/lib/offline/reachability";
+import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { getDeviceIdentity } from "@/lib/device";
@@ -151,6 +152,10 @@ function PosWorkspaceInner() {
   const [menuDrilled, setMenuDrilled] = useState(false);
 
   const tenantId = pos.tenantId;
+  // Normal-checkout payment methods: the same Phase B catalog Split Bill uses,
+  // Cash-only when offline. Fed to PaymentDialog so Takeaway Pay shows the tenant's
+  // active methods instead of Cash-only.
+  const activePaymentMethods = useActivePaymentMethods(tenantId, online);
 
   const fetchMenu = useCallback(async () => {
     if (!tenantId) return;
@@ -2554,6 +2559,7 @@ function PosWorkspaceInner() {
         rate={rate}
         discountGate={pos.gates.applyDiscounts}
         payGate={payGate}
+        paymentMethods={activePaymentMethods}
         orderNumber={
           payIntent?.kind === "order"
             ? (payIntent.order.order_number ?? null)

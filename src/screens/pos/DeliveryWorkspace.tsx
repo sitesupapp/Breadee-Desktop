@@ -152,6 +152,7 @@ import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/u
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable } from "@/lib/offline/reachability";
+import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn } from "@/lib/offline/db";
 import { getDeviceIdentity } from "@/lib/device";
 import { useShortcuts } from "@/lib/keyboard/provider";
@@ -274,6 +275,10 @@ export function useDeliveryWorkspace(input: {
   const toast = useToast();
   const customers = useCustomers();
   const cart = useCart();
+  // Delivery settlement methods: the Phase B catalog Split uses, Cash-only when
+  // offline. Only the checkout CHOICES change — delivery accounting / COD semantics
+  // are untouched (the server still owns every figure).
+  const activePaymentMethods = useActivePaymentMethods(pos.tenantId, online);
 
   const [dialog, setDialog] = useState<DeliveryDialog>({ kind: "none" });
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -2308,6 +2313,7 @@ export function useDeliveryWorkspace(input: {
         rate={input.rate}
         discountGate={input.applyDiscounts}
         payGate={payGate}
+        paymentMethods={activePaymentMethods}
         orderNumber={payTarget.order?.order_number ?? null}
         delivery={{
           customerName: payTarget.order ? (receiptIdentity(payTarget.order).customerName ?? "Customer") : "Customer",
