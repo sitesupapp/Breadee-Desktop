@@ -47,6 +47,9 @@ export type RefusalKind =
   | "same_table"
   | "cross_tenant_table"
   | "clear_reason_required"
+  // Dine-In line edits (1.0.31 Phase 2)
+  | "reason_required"
+  | "version_conflict"
   // Dine-In rounds (Level 2B)
   | "empty_round"
   | "modifier_required"
@@ -212,6 +215,22 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     kind: "clear_reason_required",
     test: /a reason is required to clear a table/i,
     hint: "Say why the bill is being voided - it is recorded against your account.",
+    expected: true,
+  },
+  // --- Dine-In line edits (1.0.31 Phase 2). Both are server refusals raised by
+  // pos_edit_order_line via pos_op_error; the desktop prompts for the reason up
+  // front, so REASON_REQUIRED is a backstop, and VERSION_CONFLICT is the standard
+  // optimistic-concurrency refusal shared with the paid-removal path.
+  {
+    kind: "reason_required",
+    test: /a reason is required to remove or reduce an item/i,
+    hint: "Choose or type why the item is being removed or reduced - it is recorded against your account.",
+    expected: true,
+  },
+  {
+    kind: "version_conflict",
+    test: /this order changed since it was loaded/i,
+    hint: "The bill was reloaded with the latest changes. Review it, then make the edit again.",
     expected: true,
   },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before

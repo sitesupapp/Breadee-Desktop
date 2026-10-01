@@ -32,6 +32,7 @@ import { loadAutoSeatDirectOpen, readCachedAutoSeat } from "@/lib/pos/autoSeat";
 import { classifyError } from "@/lib/pos/errors";
 import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
 import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
+import { modifierChangeRemovesComponents } from "@/lib/pos/editReason";
 import { SplitBillPanel } from "@/components/pos/SplitBillPanel";
 import {
   buildSplitSettlePayload,
@@ -44,6 +45,7 @@ import {
 } from "@/lib/pos/split";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { ModifierDialog } from "@/components/pos/ModifierDialog";
+import { EditReasonDialog } from "@/components/pos/EditReasonDialog";
 import { groupsForItem } from "@/lib/pos/modifiers";
 import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
 import type { MenuItem, ModifierOption } from "@/types/pos";
@@ -774,8 +776,16 @@ export function useDineInWorkspace(input: {
     [splitState, tables, ctx],
   );
 
+  // Phase 2: a persisted REMOVAL or REDUCTION needs an audited reason; a plain
+  // increase or additive modifier change does not. The prompt holds the pending
+  // edit while the reason dialog is open.
+  type ReasonPrompt =
+    | { kind: "quantity"; line: BillLine; newQuantity: number }
+    | { kind: "modifier"; line: BillLine; result: ItemOptionsResult };
+  const [reasonPrompt, setReasonPrompt] = useState<ReasonPrompt | null>(null);
+
   const editSentLine = useCallback(
-    async (line: BillLine, newQuantity: number) => {
+    async (line: BillLine, newQuantity: number, reason: string | null = null) => {
       const bill = useTables.getState().bill;
       const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
       if (!order) return;
@@ -788,6 +798,7 @@ export function useDineInWorkspace(input: {
             newQuantity,
             expectedVersion: order.pos_entity_version,
             clientOpId: crypto.randomUUID(),
+            reason,
           }),
         );
         await tables.loadBill(ctx);
@@ -803,11 +814,17 @@ export function useDineInWorkspace(input: {
 
   const onEditSentQty = useCallback(
     (line: BillLine, delta: number) => {
-      void editSentLine(line, Math.max(0, line.quantity + delta));
+      const next = Math.max(0, line.quantity + delta);
+      // A reduction (including down to zero) is audited; an increase is not.
+      if (next < line.quantity) setReasonPrompt({ kind: "quantity", line, newQuantity: next });
+      else void editSentLine(line, next);
     },
     [editSentLine],
   );
-  const onRemoveSentLine = useCallback((line: BillLine) => void editSentLine(line, 0), [editSentLine]);
+  const onRemoveSentLine = useCallback(
+    (line: BillLine) => setReasonPrompt({ kind: "quantity", line, newQuantity: 0 }),
+    [],
+  );
 
   // --- Phase D: change a SENT line's modifiers (atomic cancel-old + make-new) ----
   const [editModLine, setEditModLine] = useState<BillLine | null>(null);
@@ -830,15 +847,12 @@ export function useDineInWorkspace(input: {
     (menuItemId: string) => groupsForItem(menuItemId, input.menu.groupsByItem, input.menu.groups).length > 0,
     [input.menu.groupsByItem, input.menu.groups],
   );
-  const saveSentModifiers = useCallback(
-    async (result: ItemOptionsResult) => {
-      const line = editModLine;
-      if (!line) return;
+  const commitSentModifiers = useCallback(
+    async (line: BillLine, result: ItemOptionsResult, reason: string | null) => {
       const bill = useTables.getState().bill;
       const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
-      if (!order) { setEditModLine(null); return; }
+      if (!order) return;
       setEditingLineId(line.id);
-      setEditModLine(null);
       try {
         await editOrderLine(
           buildChangeModifiersPayload({
@@ -848,6 +862,7 @@ export function useDineInWorkspace(input: {
             modifiers: result.modifiers,
             expectedVersion: order.pos_entity_version,
             clientOpId: crypto.randomUUID(),
+            reason,
           }),
         );
         await tables.loadBill(ctx);
@@ -858,7 +873,34 @@ export function useDineInWorkspace(input: {
         setEditingLineId(null);
       }
     },
-    [editModLine, tables, ctx, toast],
+    [tables, ctx, toast],
+  );
+
+  // A modifier change that DROPS or REPLACES a component is audited (the same
+  // predicate the server enforces); a pure addition is applied straight away.
+  const saveSentModifiers = useCallback(
+    (result: ItemOptionsResult) => {
+      const line = editModLine;
+      if (!line) return;
+      setEditModLine(null);
+      if (modifierChangeRemovesComponents(line.modifiers, result.modifiers)) {
+        setReasonPrompt({ kind: "modifier", line, result });
+      } else {
+        void commitSentModifiers(line, result, null);
+      }
+    },
+    [editModLine, commitSentModifiers],
+  );
+
+  const confirmReason = useCallback(
+    (reason: string) => {
+      const p = reasonPrompt;
+      setReasonPrompt(null);
+      if (!p) return;
+      if (p.kind === "quantity") void editSentLine(p.line, p.newQuantity, reason);
+      else void commitSentModifiers(p.line, p.result, reason);
+    },
+    [reasonPrompt, editSentLine, commitSentModifiers],
   );
 
   /**
@@ -1497,6 +1539,23 @@ export function useDineInWorkspace(input: {
         confirmLabel="Save changes"
         onCancel={() => setEditModLine(null)}
         onConfirm={(result) => void saveSentModifiers(result)}
+      />
+      {/* Phase 2 — the mandatory reason for a persisted removal/reduction. Opened by
+          onRemoveSentLine, a quantity reduction, or a modifier change that drops a
+          component; the reason is sent on the SAME edit RPC and audited server-side. */}
+      <EditReasonDialog
+        open={reasonPrompt !== null}
+        busy={editingLineId !== null}
+        title={
+          reasonPrompt?.kind === "modifier"
+            ? "Why change these options?"
+            : reasonPrompt?.kind === "quantity" && reasonPrompt.newQuantity === 0
+              ? "Why remove this item?"
+              : "Why reduce this item?"
+        }
+        subtitle="A reason is required and recorded in the activity log."
+        onConfirm={confirmReason}
+        onCancel={() => setReasonPrompt(null)}
       />
       {/* The SAME dialog Takeaway uses. Not a copy: one discount validator, one
           currency conversion, one tender/change calculation, one keypad. Only
