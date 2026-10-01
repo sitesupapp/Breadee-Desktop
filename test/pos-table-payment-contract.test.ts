@@ -188,7 +188,8 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
     ],
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
-  assert.equal(members.length, 42);
+  // 42 -> 43 in 1.0.31 for pos_merge_tables (table merge).
+  assert.equal(members.length, 43);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
