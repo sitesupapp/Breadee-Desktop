@@ -19,9 +19,10 @@ import type { PayOrderResult } from "@/types/pos";
 /**
  * A tenant payment-method KEY from the Phase B `pos_payment_methods` catalog.
  * Widened from the former `"cash"` literal so the normal checkout dialog can
- * carry any ACTIVE catalog key — the server already honours it: both
- * `pos_pay_order_core` and `pos_pay_table_core` read `p_payload->>'method'`
- * (default `cash`) and store it to `pos_orders.payment_method` + `pos_payments.method`.
+ * carry any ACTIVE catalog key — the server already honours it: the pay RPCs
+ * read `p_payload->>'method'` (default `cash`) and persist it on the order and
+ * the payment row. Every caller already forwards the method; only the dialog's
+ * list of choices changed.
  */
 export type PaymentMethod = string;
 
