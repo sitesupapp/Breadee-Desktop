@@ -159,6 +159,8 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       // Phase D — open dine-in sent-line editing (pos.edit_orders).
       "pos_edit_order_line",
       "pos_end_shift",
+      // 1.0.31 — fold other occupied tables' bills into one (pos.tables.merge).
+      "pos_merge_tables",
       "pos_move_table",
       "pos_open_shift",
       "pos_open_table",

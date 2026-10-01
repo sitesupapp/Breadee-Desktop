@@ -318,7 +318,9 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // eleven ship-dark floor RPCs (published-floor READ + draft/lease + publish
   // lifecycle); none moves customer money. AND POS A-H (1.0.30): 35 -> 42, for the
   // 7 Phase D/E/G/H RPCs, each reviewed and gated on its own permission.
-  assert.equal(members.length, 42, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND 1.0.31 MERGE TABLES: 42 -> 43, for `pos_merge_tables` (gated on pos.tables.merge).
+  assert.equal(members.length, 43, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.ok(members.includes("pos_merge_tables"));
 });
 
 test("no table action is deferred any more - Pay was the last one", async () => {

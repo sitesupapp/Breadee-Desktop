@@ -556,7 +556,9 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // POS A-H (1.0.30) adds 7 more (25th-31st): pos_edit_order_line, pos_split_settle,
   // pos_split_state, pos_payout_create, pos_payout_reverse, pos_payout_list,
   // pos_analytics_summary. remove-item still stays out.
-  assert.equal(names.length, 31);
+  // 31 -> 32 in 1.0.31: pos_merge_tables (table merge). remove-item still stays out.
+  assert.equal(names.length, 32);
+  assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
