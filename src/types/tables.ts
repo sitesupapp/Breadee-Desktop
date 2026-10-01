@@ -42,8 +42,10 @@ export type TableSummary = {
   /** True when the table's open orders span more than one currency snapshot. */
   mixed_currency: boolean;
   /** 1.0.31 — source table names folded into this table's open bill by a merge,
-   *  from the pos_table_merges provenance. Empty when the table is not a merge primary. */
-  merged_sources: string[];
+   *  from the pos_table_merges provenance. Empty/absent when not a merge primary.
+   *  Optional so geometry-only previews need not supply it; the pos_table_map
+   *  parser always sets it, and consumers default it to []. */
+  merged_sources?: string[];
 };
 
 /** The full `pos_table_map` response, including its aggregate counters. */

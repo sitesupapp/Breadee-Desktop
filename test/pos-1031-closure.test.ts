@@ -39,7 +39,7 @@ test("A a merged table's node model exposes its source names; a plain one is emp
 // --- B. the data path + render for the merged label ---
 
 test("B TableSummary + pos_table_map parser carry merged_sources", () => {
-  assert.match(stripJsxComments(read("types", "tables.ts")), /merged_sources: string\[\]/);
+  assert.match(stripJsxComments(read("types", "tables.ts")), /merged_sources\??: string\[\]/);
   assert.match(stripJsxComments(read("lib", "pos", "tables.ts")), /merged_sources:/);
 });
 
