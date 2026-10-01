@@ -21,7 +21,7 @@ name: Desktop Windows Build Check
 on:
   # Run on every push to the working branch for the desktop app (post-merge gate).
   push:
-    branches: [desktop-staging, claude/desktop-1031-payment-hotfix-clean]
+    branches: [desktop-staging, claude/desktop-1031-payment-hotfix-clean, claude/desktop-1031-cumulative-repair]
   # Run as a gate on PRs into either integration branch. `desktop-staging` was
   # added after Level 1 integration found that PRs into it ran NO checks at all
   # and had to be gated by manual workflow_dispatch.
