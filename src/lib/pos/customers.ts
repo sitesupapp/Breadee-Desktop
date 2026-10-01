@@ -293,8 +293,9 @@ export async function loadCustomerProfile(customerId: string): Promise<CustomerP
 // --- the duplicate decision (P0) --------------------------------------------
 
 export type CreateDecision =
-  /** Nothing on file matches, raw or normalised. Safe to insert. */
-  | { kind: "create"; phone: string }
+  /** Nothing on file matches. Safe to insert. Carries a phone, or (when the caller
+   *  allows name-only identity, e.g. a general Customer-Accounts/A-R create) a name. */
+  | { kind: "create"; phone?: string; name?: string }
   /** Exactly one equivalent customer exists - use them, do not insert. */
   | { kind: "select"; candidate: CustomerMatch }
   /** Several equivalent rows exist (the duplicate this gap already created). */
@@ -308,10 +309,19 @@ export type CreateDecision =
  * Pure so the rule is testable without a network - and so it is stated once
  * rather than re-derived at each call site.
  */
-export function decideCreate(input: { query: string; candidates: CustomerMatch[] }): CreateDecision {
+export function decideCreate(input: {
+  query: string;
+  candidates: CustomerMatch[];
+  /** General Customer-Accounts/A-R creation accepts a NAME-only identity; delivery
+   *  (and every other caller) leaves this false and keeps phone-required. */
+  allowNameOnly?: boolean;
+}): CreateDecision {
   const query = input.query.trim();
   if (query === "") return { kind: "refused", reason: "Enter a customer name or phone number." };
   if (!looksLikePhone(query)) {
+    // A non-phone query is a NAME. Only a name-only-capable caller may create from it;
+    // the phone-first duplicate rule below still owns every phone-shaped query.
+    if (input.allowNameOnly) return { kind: "create", name: query };
     return { kind: "refused", reason: "No customer found. Enter a phone number to create a new customer." };
   }
   const normalized = normalizePhoneE164(query);
@@ -339,6 +349,9 @@ export type CustomerUpsertPayload = {
   name?: string;
   notes?: string;
   address?: AddressPayload;
+  /** Phase 3 (1.0.31): opt a general A-R create into name-only identity. The server
+   *  keeps phone REQUIRED unless this is true AND a name is present. */
+  allow_name_only?: boolean;
 };
 
 export type AddressPayload = {
@@ -353,7 +366,7 @@ export type AddressPayload = {
   is_default?: boolean;
 };
 
-export const CUSTOMER_PAYLOAD_KEYS = ["branch_id", "id", "phone", "name", "notes", "address"] as const;
+export const CUSTOMER_PAYLOAD_KEYS = ["branch_id", "id", "phone", "name", "notes", "address", "allow_name_only"] as const;
 
 /**
  * Fields the desktop must never send.
@@ -377,20 +390,36 @@ const clean = (v: string | null | undefined): string | undefined => {
   return s === "" ? undefined : s;
 };
 
-/** New customer. The RAW typed phone is sent - the server derives `phone_e164`. */
+/**
+ * New customer. The RAW typed phone is sent - the server derives `phone_e164`.
+ *
+ * Phone stays REQUIRED by default, so delivery and every existing caller are
+ * unchanged. A general Customer-Accounts/A-R create passes `allowNameOnly: true`
+ * with a name and no phone; that, and only that, produces a name-only payload
+ * (carrying `allow_name_only` so the server permits it). A create with neither a
+ * valid phone nor an allowed name still throws InvalidPhoneError.
+ */
 export function buildCreatePayload(input: {
   branchId: string | null;
-  phone: string;
+  phone?: string | null;
   name?: string | null;
   notes?: string | null;
+  allowNameOnly?: boolean;
 }): CustomerUpsertPayload {
   const phone = clean(input.phone);
-  if (!phone || normalizePhoneE164(phone) === null) throw new InvalidPhoneError();
-  const payload: CustomerUpsertPayload = { branch_id: input.branchId, phone };
   const name = clean(input.name);
-  const notes = clean(input.notes);
+  if (phone) {
+    if (normalizePhoneE164(phone) === null) throw new InvalidPhoneError();
+  } else if (!(input.allowNameOnly && name)) {
+    // No phone, and either name-only is not allowed or no name was given.
+    throw new InvalidPhoneError();
+  }
+  const payload: CustomerUpsertPayload = { branch_id: input.branchId };
+  if (phone) payload.phone = phone;
   if (name !== undefined) payload.name = name;
+  const notes = clean(input.notes);
   if (notes !== undefined) payload.notes = notes;
+  if (!phone && input.allowNameOnly) payload.allow_name_only = true;
   return payload;
 }
 

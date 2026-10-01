@@ -23,6 +23,9 @@ export type CustomerSearchProps = {
   writeGate: Gate;
   /** True while a create is in flight - the button must not be pressable twice. */
   saving: boolean;
+  /** When set, a non-phone query may be created as a NAME-only customer (general
+   *  A-R). Only changes the empty-state guidance; delivery leaves it unset. */
+  allowNameOnly?: boolean;
   onQueryChange: (q: string) => void;
   onFindOrCreate: () => void;
   onPick: (customerId: string) => void;
@@ -110,7 +113,9 @@ export function CustomerSearch(props: CustomerSearchProps) {
         <p className="text-[11px] text-sub">
           {phoneLike
             ? "No customer found. Find / create will add this number."
-            : "No customer found. Enter a phone number to create a new customer."}
+            : props.allowNameOnly
+              ? "No customer found. Find / create will add this name."
+              : "No customer found. Enter a phone number to create a new customer."}
         </p>
       )}
 

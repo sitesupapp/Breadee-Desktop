@@ -71,6 +71,9 @@ export function useCustomerPicker(input: {
   // The latest term the operator has typed, read back after an async search so a
   // response that lost the race is dropped rather than overwriting fresh results.
   const latestTerm = useRef("");
+  // The name the operator has already been warned is a duplicate. A second
+  // "Find / create" on the SAME name confirms the create; changing the query clears it.
+  const nameConfirmRef = useRef<string | null>(null);
 
   // Reset everything when the slot is closed, so a customer chosen for one sale
   // is never carried into the next.
@@ -81,6 +84,7 @@ export function useCustomerPicker(input: {
       setSearching(false);
       setError(null);
       setSelected(null);
+      nameConfirmRef.current = null;
     }
   }, [enabled]);
 
@@ -89,6 +93,8 @@ export function useCustomerPicker(input: {
     if (!enabled) return;
     const term = query.trim();
     latestTerm.current = term;
+    // A new query invalidates any armed duplicate-name confirmation.
+    if (nameConfirmRef.current !== null && nameConfirmRef.current !== term) nameConfirmRef.current = null;
     if (term === "") {
       setResults(null);
       setSearching(false);
@@ -155,7 +161,7 @@ export function useCustomerPicker(input: {
         return;
       }
 
-      const decision = decideCreate({ query: term, candidates });
+      const decision = decideCreate({ query: term, candidates, allowNameOnly: true });
       if (decision.kind === "select") {
         setSelected({
           id: decision.candidate.id,
@@ -176,23 +182,34 @@ export function useCustomerPicker(input: {
         return;
       }
 
-      // A genuine create. Phone-first (the P0 rule): a receivable customer must be
-      // findable by phone later. Name/notes are left for the customer book.
+      // A genuine create. A phone create stays phone-first (a receivable customer
+      // keyed by phone is findable later); a NAME-only create is allowed here for
+      // general A-R, with a soft one-tap duplicate-name confirmation.
       if (!writeGate.allowed) {
         setError(writeGate.reason ?? "You cannot add a customer.");
         return;
       }
+      if (decision.name) {
+        const dupeName = decision.name.trim().toLowerCase();
+        const dupes = candidates.filter((c) => (c.name ?? "").trim().toLowerCase() === dupeName);
+        if (dupes.length > 0 && nameConfirmRef.current !== decision.name) {
+          nameConfirmRef.current = decision.name;
+          setError(`A customer named "${decision.name}" already exists. Tap "Find / create" again to add another.`);
+          return;
+        }
+      }
+      nameConfirmRef.current = null;
       setSaving(true);
       setError(null);
       try {
         const outcome = await performCustomerCreate({
-          payload: buildCreatePayload({ branchId, phone: decision.phone }),
+          payload: buildCreatePayload({ branchId, phone: decision.phone, name: decision.name, allowNameOnly: true }),
           submit: upsertCustomer,
           recoverSearch: (phone) => searchCustomers(phone),
           latch: latch.current,
         });
         if (outcome.ok) {
-          setSelected({ id: outcome.customerId, name: null, phone: decision.phone });
+          setSelected({ id: outcome.customerId, name: decision.name ?? null, phone: decision.phone ?? null });
           setResults(null);
         } else {
           const message = outcome.error instanceof Error ? outcome.error.message : "Could not add the customer.";
@@ -213,6 +230,7 @@ export function useCustomerPicker(input: {
     lookupGate,
     writeGate,
     saving,
+    allowNameOnly: true,
     onQueryChange: setQuery,
     onFindOrCreate,
     onPick: pick,

@@ -40,8 +40,13 @@ const deliverySources = [customersSrc, workspaceSrc, stateSrc];
 
 // --- the payload -------------------------------------------------------------
 
-test("the payload has exactly the six keys the RPC reads", () => {
-  assert.deepEqual([...CUSTOMER_PAYLOAD_KEYS], ["branch_id", "id", "phone", "name", "notes", "address"]);
+test("the payload has exactly the keys the RPC reads", () => {
+  // 1.0.31 Phase 3 adds `allow_name_only`: a general Customer-Accounts/A-R create
+  // sets it to opt into name-only identity; the server keeps phone required otherwise.
+  assert.deepEqual(
+    [...CUSTOMER_PAYLOAD_KEYS],
+    ["branch_id", "id", "phone", "name", "notes", "address", "allow_name_only"],
+  );
 });
 
 test("phone_e164 is the first forbidden field - the server derives it", () => {

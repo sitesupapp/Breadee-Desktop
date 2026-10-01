@@ -634,7 +634,7 @@ export function useDeliveryWorkspace(input: {
       return;
     }
     setDialogError(null);
-    setDialog({ kind: "customer", mode: "create", initial: { ...EMPTY_CUSTOMER_FORM, phone: decision.phone } });
+    setDialog({ kind: "customer", mode: "create", initial: { ...EMPTY_CUSTOMER_FORM, phone: decision.phone ?? "" } });
   }, [lookupGate.allowed, toast, writeGate.allowed, writeGate.reason]);
 
   const submitCreate = useCallback(
