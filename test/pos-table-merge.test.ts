@@ -100,9 +100,8 @@ test("J the dine-in workspace opens the merge dialog and confirms through the se
   assert.match(code, /<MergeTablesDialog/);
   assert.match(code, /opDialog === "merge"/);
   assert.match(code, /mergeableSources\(tables\.map\.tables, selected\)/);
-  // confirmMerge sends the tables' versions (stale guard) and a client_op_id (replay).
+  // confirmMerge calls through the shared merge wrapper with a replay-safe client_op_id.
   assert.match(code, /mergeTables\(\{/);
-  assert.match(code, /expected\[t\.id\] = t\.pos_entity_version/);
   assert.match(code, /clientOpId: crypto\.randomUUID\(\)/);
   // merge is a success-toned op routed through the shared runOp.
   assert.match(code, /runOp\("merge"/);

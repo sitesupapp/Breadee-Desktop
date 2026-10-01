@@ -445,27 +445,24 @@ export function useDineInWorkspace(input: {
   );
 
   // Phase 4 (1.0.31) — fold other occupied tables' bills into this one. The server
-  // re-checks every table/order under lock; the client sends the table versions it
-  // last saw (stale-floor guard) and a stable client_op_id (replay-safe).
+  // locks and re-checks every table and order under the transaction and enforces all
+  // eligibility; a stable client_op_id makes a lost response replay rather than
+  // merge twice. (The pos_table_map row carries no entity version, so the optional
+  // per-table stale guard is left to the server's own locked re-read.)
   const confirmMerge = useCallback(
     (sourceTableIds: string[]) => {
       if (!selected || !opGates.merge.allowed || sourceTableIds.length === 0) return;
       const primaryName = selected.name;
-      const expected: Record<string, number> = {};
-      for (const t of tables.map.tables) {
-        if (t.id === selected.id || sourceTableIds.includes(t.id)) expected[t.id] = t.pos_entity_version;
-      }
       void runOp("merge", async () => {
         const r = await mergeTables({
           primaryTableId: selected.id,
           sourceTableIds,
-          expected,
           clientOpId: crypto.randomUUID(),
         });
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
-    [selected, opGates.merge.allowed, tables.map.tables, runOp],
+    [selected, opGates.merge.allowed, runOp],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
