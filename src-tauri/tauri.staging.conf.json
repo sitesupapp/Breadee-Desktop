@@ -3,7 +3,7 @@
   "productName": "Breadee Staging",
   "identifier": "app.breadee.desktop.staging",
   "bundle": {
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": false
   },
   "plugins": {
     "updater": {

@@ -108,7 +108,12 @@ jobs:
       #    STAGING Supabase env must be present here too, or the packaged app
       #    ships a blank window. Secrets only — never a committed .env.
       - name: Build Tauri installer
-        run: npm run tauri:build
+        # Build with the STAGING identity override (app.breadee.desktop.staging) so the
+        # artifact installs side-by-side with a production Breadee rather than clobbering
+        # it, and is unmistakably the staging-backend build. Unsigned, no updater artifacts
+        # (the staging config sets createUpdaterArtifacts:false) — this is a functional
+        # native-acceptance substitute, never a release.
+        run: npm run tauri:build -- --config src-tauri/tauri.staging.conf.json
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
