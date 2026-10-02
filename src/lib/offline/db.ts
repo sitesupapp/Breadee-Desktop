@@ -96,6 +96,53 @@ export interface PosOfflineTxn {
   /** Why the transaction needs a human (shift closed, permission, validation...). */
   review_reason?: string | null;
   last_error?: string | null;
+  /**
+   * Set when this sale was created against an OFFLINE-opened shift that has no
+   * canonical server shift id yet (see `PendingShift`). On reconnect the replay
+   * engine resolves that pending shift exactly once, then remaps this txn's
+   * `shift_id` (inside `order_payload`) to the canonical id BEFORE submitting.
+   * Null/absent for sales against a real server shift (the common case).
+   */
+  pending_shift_local_id?: string | null;
+}
+
+/** Lifecycle of an offline-opened shift that has not yet reached the server. */
+export type PendingShiftStatus = "pending_sync" | "synced" | "needs_attention";
+
+/**
+ * A shift OPENED while fully offline.
+ *
+ * Case 2 of offline continuity: a cashier meets a backend outage with no
+ * previously-hydrated open shift. `pos_open_shift` needs connectivity, so the open
+ * is captured durably here - BEFORE the UI reports success - and the shift is
+ * surfaced to POS as the active shift (`local_shift_id` stands in for the server
+ * id) so Takeaway cash sales can continue. On reconnect the replay engine opens the
+ * shift exactly once (`pos_open_shift` dedups on `client_op_id` AND is single-open
+ * server-side), records the canonical `server_shift_id`, and remaps every dependent
+ * offline sale to it. The server stays authoritative: if a shift is already open for
+ * this cashier, the canonical id is that existing shift.
+ */
+export interface PendingShift {
+  /** Client-generated identity, minted BEFORE any UI success. PK + the offline ActiveShift.id. */
+  local_shift_id: string;
+  /** Immutable op id reused on every open replay - the server idempotency key. */
+  client_op_id: string;
+  tenant_id: string;
+  branch_id: string | null;
+  device_id: string;
+  terminal_id: string;
+  cashier_user_id: string;
+  opening_cash_amount: number;
+  /** Operational currency code captured at open (display only; POS math never reads this). */
+  currency: string;
+  opened_at: string; // client ISO, at offline capture
+  status: PendingShiftStatus;
+  /** The canonical server shift id, filled once opened on reconnect. */
+  server_shift_id?: string | null;
+  attempts: number;
+  last_error?: string | null;
+  /** Why the open needs a human (permission, prior shift awaiting approval, branch access...). */
+  review_reason?: string | null;
 }
 
 /**
@@ -129,6 +176,8 @@ class BreadeeDB extends Dexie {
   posOfflineTxns!: Table<PosOfflineTxn, string>;
   // Added in schema version 3 (see below). Keyed by the server customer id.
   posCustomers!: Table<CachedCustomer, string>;
+  // Added in schema version 4 (see below). Keyed by local_shift_id.
+  pendingShifts!: Table<PendingShift, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -150,6 +199,12 @@ class BreadeeDB extends Dexie {
     // database upgrades in place with all data preserved.
     this.version(3).stores({
       posCustomers: "id, tenant_id, branch_id, phone_e164, name",
+    });
+    // Version 4 - ADDITIVE. Adds ONLY the pendingShifts store for shifts opened
+    // while fully offline (Case 2). Every prior store carries forward untouched; a
+    // v1/v2/v3 database upgrades in place with all data preserved.
+    this.version(4).stores({
+      pendingShifts: "local_shift_id, client_op_id, tenant_id, branch_id, status, cashier_user_id, opened_at",
     });
   }
 }
@@ -341,4 +396,51 @@ export async function listResumablePosTxns(
         t.cashier_user_id === cashierUserId,
     )
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+// ---------------------------------------------------------------------------
+// Offline-opened shifts (Case 2) - pendingShifts store (v4)
+// ---------------------------------------------------------------------------
+
+/** Durably commit an offline-opened shift BEFORE the UI reports success. */
+export async function addPendingShift(shift: PendingShift): Promise<string> {
+  await localdb.pendingShifts.add(shift);
+  return shift.local_shift_id;
+}
+
+/** One pending shift by its local id. */
+export async function getPendingShift(localShiftId: string): Promise<PendingShift | undefined> {
+  return localdb.pendingShifts.get(localShiftId);
+}
+
+/**
+ * The ONE active offline-opened shift for this cashier in this tenant that has not
+ * yet reached the server, or undefined. Scoped by tenant+cashier (a cashier runs at
+ * most one shift), so another user's/tenant's pending shift is never surfaced.
+ * Newest-opened wins if more than one somehow exists.
+ */
+export async function getActivePendingShift(
+  tenantId: string | null,
+  cashierUserId: string | null,
+): Promise<PendingShift | undefined> {
+  if (!tenantId || !cashierUserId) return undefined;
+  const all = await localdb.pendingShifts.where("status").anyOf("pending_sync", "needs_attention").toArray();
+  return all
+    .filter((s) => s.tenant_id === tenantId && s.cashier_user_id === cashierUserId)
+    .sort((a, b) => b.opened_at.localeCompare(a.opened_at))[0];
+}
+
+/** Every pending shift still awaiting the server (for the reconnect resolver). */
+export async function listUnsyncedPendingShifts(): Promise<PendingShift[]> {
+  return localdb.pendingShifts.where("status").anyOf("pending_sync", "needs_attention").toArray();
+}
+
+/** Patch one pending shift by its local id. */
+export async function updatePendingShift(localShiftId: string, patch: Partial<PendingShift>): Promise<void> {
+  await localdb.pendingShifts.update(localShiftId, patch);
+}
+
+/** Drop a pending shift (e.g. once reconciled to a canonical server shift). */
+export async function deletePendingShift(localShiftId: string): Promise<void> {
+  await localdb.pendingShifts.delete(localShiftId);
 }

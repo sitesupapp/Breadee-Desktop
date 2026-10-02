@@ -24,7 +24,7 @@
 //   * terminal refusals (shift closed, permission, validation) -> `needs_attention`,
 //     never a hot retry loop; the row is retained for a human, never dropped.
 
-import { localdb, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
+import { getPendingShift, localdb, updatePendingShift, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import type { SubmitOrderPayload } from "@/lib/pos/orders";
 import type { CurrencyCode } from "@/lib/currency";
 
@@ -111,6 +111,8 @@ function isAlreadyPaid(message: string): boolean {
 export type PosTxnSyncDeps = {
   submit: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string }>;
   pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown> }) => Promise<unknown>;
+  /** Open (or adopt) the shift for an offline-opened Case-2 shift, exactly once. */
+  openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string }) => Promise<{ shiftId: string; reused: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -127,6 +129,10 @@ const defaultDeps: PosTxnSyncDeps = {
   pay: async (args) => {
     const { payOrder } = await import("@/lib/pos/payments");
     return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount });
+  },
+  openShift: async (args) => {
+    const { openShiftWithOp } = await import("@/lib/pos/shifts");
+    return openShiftWithOp(args);
   },
   isTransport: isTransportFailure,
   hasSession: async () => {
@@ -215,6 +221,55 @@ async function replayOne(t: PosOfflineTxn, report: PosTxnSyncReport, d: PosTxnSy
   report.synced.push(t.local_txn_id);
 }
 
+/** Outcome of resolving a pending offline-opened shift to a canonical server id. */
+type ShiftResolution =
+  | { ok: true; serverShiftId: string }
+  | { ok: false; retriable: boolean; reason: string };
+
+/**
+ * Open (or adopt) the canonical server shift for a shift that was opened offline,
+ * EXACTLY ONCE. Idempotent on two independent axes:
+ *   * if we already recorded a `server_shift_id`, reuse it (no second open);
+ *   * otherwise `openShift` carries the pending shift's `client_op_id`, so the server
+ *     front-door dedups a retry AND its single-open rule adopts any shift already
+ *     open for this cashier (e.g. opened on another device while this one was offline).
+ * A transport failure is retriable; a definitive refusal (permission, prior shift
+ * awaiting approval, branch access) parks the pending shift for a human.
+ */
+async function resolvePendingShiftCanonical(localShiftId: string, d: PosTxnSyncDeps): Promise<ShiftResolution> {
+  const p = await getPendingShift(localShiftId);
+  if (!p) return { ok: false, retriable: false, reason: "shift_missing" };
+  if (p.status === "synced" && p.server_shift_id) return { ok: true, serverShiftId: p.server_shift_id };
+  try {
+    const { shiftId } = await d.openShift({
+      branchId: p.branch_id,
+      openingCash: p.opening_cash_amount,
+      clientOpId: p.client_op_id,
+    });
+    await updatePendingShift(localShiftId, {
+      status: "synced",
+      server_shift_id: shiftId,
+      attempts: (p.attempts ?? 0) + 1,
+      last_error: null,
+      review_reason: null,
+    });
+    return { ok: true, serverShiftId: shiftId };
+  } catch (e) {
+    if (d.isTransport(e)) {
+      await updatePendingShift(localShiftId, { attempts: (p.attempts ?? 0) + 1, last_error: "open: transport" });
+      return { ok: false, retriable: true, reason: "shift_open_transport" };
+    }
+    const kind = terminalKind(errMsg(e)) ?? "shift_open_failed";
+    await updatePendingShift(localShiftId, {
+      status: "needs_attention",
+      review_reason: kind,
+      last_error: errMsg(e),
+      attempts: (p.attempts ?? 0) + 1,
+    });
+    return { ok: false, retriable: false, reason: kind };
+  }
+}
+
 /**
  * Replay all queued offline sales that belong to the LIVE session. Safe to call on
  * reconnect, on POS mount, and from the Sync Center button - single-flight protects
@@ -247,6 +302,8 @@ export async function syncPosTxns(
   if (!(await d.hasSession())) return report;
 
   syncing = true;
+  // Resolve each referenced pending shift at most once per pass (open-exactly-once).
+  const shiftResolutions = new Map<string, ShiftResolution>();
   try {
     // FIFO by capture time. Only queued work is replayed; `needs_attention`
     // requires an explicit operator retry (handled by requeueForAttention).
@@ -263,17 +320,54 @@ export async function syncPosTxns(
         report.deferred.push(t.local_txn_id);
         continue;
       }
-      await updatePosOfflineTxn(t.local_txn_id, {
+
+      // Dependency (Phase F): a sale captured against an OFFLINE-opened shift must
+      // first have that shift opened on the server, then its frozen `shift_id`
+      // remapped to the canonical id - BEFORE the order is submitted.
+      let txn = t;
+      if (t.pending_shift_local_id) {
+        const localId = t.pending_shift_local_id;
+        let r = shiftResolutions.get(localId);
+        if (!r) {
+          r = await resolvePendingShiftCanonical(localId, d);
+          shiftResolutions.set(localId, r);
+        }
+        if (!r.ok) {
+          if (r.retriable) {
+            await updatePosOfflineTxn(t.local_txn_id, { status: "queued", last_error: "shift: " + r.reason });
+            report.retriable.push(t.local_txn_id);
+          } else {
+            await updatePosOfflineTxn(t.local_txn_id, {
+              status: "needs_attention",
+              review_reason: r.reason,
+              last_error: "shift: " + r.reason,
+            });
+            report.needsAttention.push({ id: t.local_txn_id, reason: r.reason });
+          }
+          continue;
+        }
+        // Remap the frozen payload's shift_id to the canonical server shift, durably
+        // (so any later retry carries the real id and never re-reads the local one).
+        const remapped = { ...(t.order_payload as SubmitOrderPayload), shift_id: r.serverShiftId };
+        await updatePosOfflineTxn(t.local_txn_id, {
+          order_payload: remapped,
+          shift_id: r.serverShiftId,
+          pending_shift_local_id: null,
+        });
+        txn = { ...t, order_payload: remapped, shift_id: r.serverShiftId, pending_shift_local_id: null };
+      }
+
+      await updatePosOfflineTxn(txn.local_txn_id, {
         status: "syncing",
-        attempts: (t.attempts ?? 0) + 1,
+        attempts: (txn.attempts ?? 0) + 1,
         last_attempt_at: new Date().toISOString(),
       });
       try {
-        await replayOne({ ...t, attempts: (t.attempts ?? 0) + 1 }, report, d);
+        await replayOne({ ...txn, attempts: (txn.attempts ?? 0) + 1 }, report, d);
       } catch (e) {
         // Unexpected engine error - keep the work, never drop it.
-        await updatePosOfflineTxn(t.local_txn_id, { status: "queued", last_error: errMsg(e) });
-        report.retriable.push(t.local_txn_id);
+        await updatePosOfflineTxn(txn.local_txn_id, { status: "queued", last_error: errMsg(e) });
+        report.retriable.push(txn.local_txn_id);
       }
     }
   } finally {
