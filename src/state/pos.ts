@@ -73,12 +73,15 @@ export function usePosContext(): PosContext {
   const membershipId = session.membership?.id ?? null;
   const userId = session.userId;
   const email = session.email;
+  const currency = session.currency?.primary ?? "USD";
 
   useEffect(() => {
     let active = true;
     setContextLoaded(false);
     Promise.all([
-      loadBranchContext(session.tenant, session.membership).catch(() => UNKNOWN_BRANCH),
+      // Pass the operational display currency so the branch NAME + currency are
+      // cached together (shift-independent) for offline restarts.
+      loadBranchContext(session.tenant, session.membership, { currency }).catch(() => UNKNOWN_BRANCH),
       loadOperatorName(userId, email).catch(() => email ?? "Cashier"),
     ])
       .then(([b, name]) => {
@@ -93,8 +96,8 @@ export function usePosContext(): PosContext {
       active = false;
     };
     // Re-resolve when the tenant, membership or signed-in user changes - nothing
-    // else can move the branch or the operator.
-  }, [tenantId, membershipId, userId, email, session.tenant, session.membership]);
+    // else can move the branch or the operator. `currency` only tags the cache.
+  }, [tenantId, membershipId, userId, email, currency, session.tenant, session.membership]);
 
   return useMemo(() => {
     const access: PosAccessContext = {
