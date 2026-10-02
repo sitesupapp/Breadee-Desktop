@@ -3,6 +3,7 @@ import { supabase } from "@/lib/supabase";
 import { getDeviceIdentity } from "@/lib/device";
 import { purgeForeignSnapshots, clearSnapshotCache, purgeForeignCachedCustomers, clearCachedCustomers } from "@/lib/offline/db";
 import { clearPosSessionSnapshot } from "@/lib/offline/posSession";
+import { clearBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
 import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
@@ -192,6 +193,9 @@ export const useSession = create<SessionState>((set, get) => ({
     // holds belong to the user who just signed out and must never be restored for
     // whoever logs in next on this terminal.
     clearPosSessionSnapshot();
+    // The durable branch-context cache (names only) also belongs to this terminal's
+    // signed-out session; drop it so it never names a branch for the next login.
+    clearBranchContext();
     // Drop the read-only snapshot cache so no cached data survives into the next login.
     // The durable outbox (unsynced work) is preserved by design — never dropped here.
     await clearSnapshotCache().catch(() => {});

@@ -12,6 +12,7 @@
 import { supabase } from "@/lib/supabase";
 import { getDeviceIdentity } from "@/lib/device";
 import { readPosSessionSnapshot, restoreBranchNameFromSnapshot } from "@/lib/offline/posSession";
+import { restoreBranchName, saveBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant } from "@/lib/types";
 
 export type BranchContext = {
@@ -31,36 +32,62 @@ export function resolveBranchId(tenant: Tenant | null, membership: Membership | 
 }
 
 /**
+ * The branch NAME to show offline for an already-resolved branch id, from the
+ * durable caches, or null. Tries the shift-INDEPENDENT branch-context cache first
+ * (works with no open shift - the gap that caused "Branch unavailable"), then the
+ * open-shift POS-session snapshot. Both are identity-gated (device+tenant+branch);
+ * the id is always the authority, so this can never widen, rename or invent access.
+ */
+function cachedBranchName(branchId: string, tenantId: string, deviceId: string): string | null {
+  return (
+    restoreBranchName({ deviceId, tenantId, branchId }) ??
+    restoreBranchNameFromSnapshot(readPosSessionSnapshot(), { branchId, tenantId, deviceId })
+  );
+}
+
+/**
  * Resolve the branch and read its NAME. A uuid fragment is never an acceptable
- * label for a cashier, so a failed lookup falls back to plain words.
+ * label for a cashier, so a failed/offline lookup falls back to the durable caches,
+ * then to plain words. `currency` (the operational display currency, when known) is
+ * cached alongside the name so an offline restart can name the branch regardless of
+ * shift state.
  */
 export async function loadBranchContext(
   tenant: Tenant | null,
   membership: Membership | null,
+  opts?: { currency?: string },
 ): Promise<BranchContext> {
   const id = resolveBranchId(tenant, membership);
   if (!id || !tenant) return UNKNOWN_BRANCH;
   const pinned = !membership?.all_branches;
-  const { data, error } = await supabase
-    .from("branches")
-    .select("id, name")
-    .eq("id", id)
-    .eq("tenant_id", tenant.id)
-    .maybeSingle();
-  if (error || !data) {
-    // Offline (or the name row is momentarily unreadable): fall back to the last
-    // server-confirmed name from the durable POS-session snapshot, but ONLY for
-    // the SAME device+tenant+branch. The id above is already the authority; this
-    // just spares the cashier a "Branch unavailable" label for a branch they are
-    // validly operating in. A foreign, absent or mismatched snapshot yields the
-    // honest fallback - it can never widen or rename access.
-    const cached = restoreBranchNameFromSnapshot(readPosSessionSnapshot(), {
-      branchId: id,
-      tenantId: tenant.id,
-      deviceId: getDeviceIdentity().device_id,
-    });
-    return { id, name: cached ?? "Branch unavailable", pinned };
+  const deviceId = getDeviceIdentity().device_id;
+
+  // Known-offline: do not even attempt the network (it would fail with a raw
+  // "Failed to fetch" in the console). Serve the cached name straight away. A
+  // backend that is unreachable while navigator.onLine stays true (the WebView2
+  // Wi-Fi-drop quirk) is handled by the try/catch below instead.
+  const netOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+  if (netOffline) {
+    return { id, name: cachedBranchName(id, tenant.id, deviceId) ?? "Branch unavailable", pinned };
   }
-  const name = typeof data.name === "string" && data.name.trim() !== "" ? data.name.trim() : "Unnamed branch";
-  return { id, name, pinned };
+
+  try {
+    const { data, error } = await supabase
+      .from("branches")
+      .select("id, name")
+      .eq("id", id)
+      .eq("tenant_id", tenant.id)
+      .maybeSingle();
+    // A transport failure can surface as either a thrown TypeError or an {error}
+    // result depending on the runtime; treat both as "unreachable" (caught below).
+    if (error || !data) throw error ?? new Error("branch name unavailable");
+    const name = typeof data.name === "string" && data.name.trim() !== "" ? data.name.trim() : "Unnamed branch";
+    // Cache the server-confirmed name (shift-independent) for the next offline start.
+    saveBranchContext({ deviceId, tenantId: tenant.id, branchId: id, branchName: name, currency: opts?.currency ?? "USD" });
+    return { id, name, pinned };
+  } catch {
+    // Offline (or the name row is momentarily unreadable): name from the durable
+    // caches, else the honest placeholder. Never a raw network error to the UI.
+    return { id, name: cachedBranchName(id, tenant.id, deviceId) ?? "Branch unavailable", pinned };
+  }
 }

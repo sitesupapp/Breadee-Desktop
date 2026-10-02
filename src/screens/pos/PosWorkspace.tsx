@@ -284,13 +284,50 @@ function PosWorkspaceInner() {
     void refreshOfflineQueue();
     const run = () => {
       if (!tenantId || !userId) return;
-      void syncPosTxns({ tenantId, branchId: pos.branch.id, cashierUserId: userId, online: true }, "reconnect").then(() =>
-        refreshOfflineQueue(),
+      void syncPosTxns({ tenantId, branchId: pos.branch.id, cashierUserId: userId, online: true }, "reconnect").then(
+        async () => {
+          await refreshOfflineQueue();
+          // Replay may have opened an offline-opened shift (Case 2) exactly once on
+          // the server. Re-read the shift so the canonical server shift supersedes
+          // the local pending one, and new orders bind to the real shift id.
+          await useShift.getState().refresh(tenantId, userId);
+        },
       );
     };
+    // Drain on mount when we are already online, and whenever `online` flips true.
+    // This covers reopening the app ONLINE after an offline restart (the OS fires no
+    // `online` event because connectivity never dropped in this process), so a
+    // pending offline-opened shift + its queued sale still sync without a manual
+    // action. syncPosTxns is single-flight and re-checks connectivity/session, so a
+    // redundant call with the `online` event / reachability effect is harmless.
+    if (online) run();
     window.addEventListener("online", run);
     return () => window.removeEventListener("online", run);
-  }, [tenantId, userId, pos.branch.id, refreshOfflineQueue]);
+  }, [tenantId, userId, pos.branch.id, online, refreshOfflineQueue]);
+
+  // Reconnect that the browser's `online` event cannot see: on Windows/WebView2 a
+  // backend outage can leave navigator.onLine === true, so "the backend came back"
+  // is detected by the reachability probe, not an `online` event. When the probe
+  // flips unreachable -> reachable we re-hydrate the session (leaving offline mode),
+  // drain the offline queue (opening any offline-opened shift exactly once), and
+  // re-read the shift so the canonical server shift supersedes the local pending one.
+  const prevReachableRef = useRef(backendReachable);
+  useEffect(() => {
+    const becameReachable = backendReachable && !prevReachableRef.current;
+    prevReachableRef.current = backendReachable;
+    if (!becameReachable || !tenantId || !userId) return;
+    void (async () => {
+      if (useSession.getState().offlineMode) {
+        await useSession.getState().loadContextOnline().catch(() => {});
+      }
+      await syncPosTxns(
+        { tenantId, branchId: pos.branch.id, cashierUserId: userId, online: true },
+        "backend-returned",
+      ).catch(() => {});
+      await refreshOfflineQueue();
+      await useShift.getState().refresh(tenantId, userId);
+    })();
+  }, [backendReachable, tenantId, userId, pos.branch.id, refreshOfflineQueue]);
 
   // --- window ----------------------------------------------------------------
   useEffect(() => {
@@ -1270,6 +1307,9 @@ function PosWorkspaceInner() {
           total,
           status: "queued",
           attempts: 0,
+          // When the active shift was opened offline (Case 2) its id is a LOCAL id;
+          // the replay engine opens the shift once on reconnect and remaps this.
+          pending_shift_local_id: useShift.getState().pendingLocalId ?? null,
         });
       }
       const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
@@ -1327,6 +1367,9 @@ function PosWorkspaceInner() {
           total,
           status: "queued",
           attempts: 0,
+          // When the active shift was opened offline (Case 2) its id is a LOCAL id;
+          // the replay engine opens the shift once on reconnect and remaps this.
+          pending_shift_local_id: useShift.getState().pendingLocalId ?? null,
         });
       }
       const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
@@ -1373,7 +1416,11 @@ function PosWorkspaceInner() {
       // means the order is committed DURABLY to the SAME offline transaction a
       // later Pay settles, with a local kitchen ticket - never an online submit
       // that would fail with "Failed to fetch".
-      if (!(await isBackendReachable())) {
+      // Also force the offline path while the active shift was opened offline and
+      // has no canonical server id yet: an online submit would carry a LOCAL shift
+      // id the server would reject. Reconnect reconciles the shift, then online
+      // resumes normally.
+      if (useShift.getState().pendingLocalId != null || !(await isBackendReachable())) {
         await saveOfflineSend(submitted);
         return;
       }
@@ -1582,7 +1629,11 @@ function PosWorkspaceInner() {
         // sale is committed DURABLY offline under the cart's stable op id (shared
         // with any prior offline Send), never an online submit/pay. An EXISTING
         // server order is never rerouted offline - it settles online or not at all.
-        if (intent.kind === "draft" && input.method === "cash" && !(await isBackendReachable())) {
+        if (
+          intent.kind === "draft" &&
+          input.method === "cash" &&
+          (useShift.getState().pendingLocalId != null || !(await isBackendReachable()))
+        ) {
           await saveOfflineCashPayment(lines, { currency: input.currency, discount: input.discount });
           return;
         }
@@ -1837,9 +1888,14 @@ function PosWorkspaceInner() {
       setBusy(true);
       setShiftError(null);
       try {
-        await shiftStore.open({ tenantId, userId, branchId: pos.branch.id, openingCash });
+        await shiftStore.open({ tenantId, userId, branchId: pos.branch.id, openingCash, currency });
         setOpenShiftOpen(false);
-        toast.push({ tone: "success", message: "Shift opened" });
+        const pendingOpen = useShift.getState().pendingLocalId != null;
+        toast.push({
+          tone: "success",
+          message: pendingOpen ? "Shift opened offline" : "Shift opened",
+          detail: pendingOpen ? "It will sync to the server when the connection returns." : undefined,
+        });
       } catch (e) {
         const c = classifyError(e);
         setShiftError(c.hint ? `${c.message} ${c.hint}` : c.message);
@@ -1847,7 +1903,7 @@ function PosWorkspaceInner() {
         setBusy(false);
       }
     },
-    [pos.branch.id, shiftStore, tenantId, toast, userId],
+    [currency, pos.branch.id, shiftStore, tenantId, toast, userId],
   );
 
   const startEndShift = useCallback(async () => {
