@@ -226,6 +226,15 @@ test("PosWorkspace: offline Send + offline Cash Pay are gated on backend reachab
   assert.match(src, /clientOpId: txn\.client_op_id/, "resumed cart keeps the transaction's client_op_id");
 });
 
+test("PosWorkspace: the offline queue drains on mount when online (reopen after an offline restart)", () => {
+  const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
+  // A fresh ONLINE launch fires no `online` event and no reachability transition, so
+  // the reconnect effect must also drain when already online, or a pending
+  // offline-opened shift + its queued sale would never sync after a restart.
+  assert.match(src, /if \(online\) run\(\);/, "drains on mount / when online flips true");
+  assert.match(src, /window\.addEventListener\("online", run\)/, "still drains on the OS connectivity-restored signal");
+});
+
 test("sign-out drops the durable POS-session snapshot (no cross-user restore)", () => {
   const src = stripComments(read("state", "session.ts"));
   assert.match(src, /signOut:[\s\S]*clearPosSessionSnapshot\(\)/, "signOut clears the snapshot");

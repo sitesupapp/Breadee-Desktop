@@ -294,9 +294,16 @@ function PosWorkspaceInner() {
         },
       );
     };
+    // Drain on mount when we are already online, and whenever `online` flips true.
+    // This covers reopening the app ONLINE after an offline restart (the OS fires no
+    // `online` event because connectivity never dropped in this process), so a
+    // pending offline-opened shift + its queued sale still sync without a manual
+    // action. syncPosTxns is single-flight and re-checks connectivity/session, so a
+    // redundant call with the `online` event / reachability effect is harmless.
+    if (online) run();
     window.addEventListener("online", run);
     return () => window.removeEventListener("online", run);
-  }, [tenantId, userId, pos.branch.id, refreshOfflineQueue]);
+  }, [tenantId, userId, pos.branch.id, online, refreshOfflineQueue]);
 
   // Reconnect that the browser's `online` event cannot see: on Windows/WebView2 a
   // backend outage can leave navigator.onLine === true, so "the backend came back"
