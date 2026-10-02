@@ -107,6 +107,14 @@ jobs:
       #    tauri:build re-runs `npm run build` (beforeBuildCommand), so the same
       #    STAGING Supabase env must be present here too, or the packaged app
       #    ships a blank window. Secrets only — never a committed .env.
+      # Tauri embeds the frontend INTO the app crate at compile time, and Cargo's
+      # fingerprint does not invalidate when only dist/ changes — so a cached crate can
+      # ship a STALE (or empty) embedded frontend and the app opens to a blank window.
+      # The release workflows bust this; the installer workflow did not, which produced a
+      # blank 1.0.32 staging window. Clean just the app crate so dist is re-embedded fresh.
+      - name: Force fresh frontend embed (bust stale app-crate cache)
+        run: cargo clean -p breadee-desktop --manifest-path src-tauri/Cargo.toml
+
       - name: Build Tauri installer
         # Build with the STAGING identity override (app.breadee.desktop.staging) so the
         # artifact installs side-by-side with a production Breadee rather than clobbering
