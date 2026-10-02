@@ -10,49 +10,39 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.30";
+export const WHATS_NEW_VERSION = "1.0.31";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
 export type WhatsNewPage = { glyph: GlyphName; title: string; body: string };
 
-// One short, business-worded page per major POS capability in this release. No
+// One short, business-worded page per shipped POS capability in this release. No
 // developer terminology; icons come from the existing Glyph set.
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
     glyph: "kitchen",
-    title: "Faster Dine-In Editing",
-    body: "Adjust item quantities and modifiers on an open dine-in order in place — no need to void and start over. Changes flow straight to the kitchen.",
-  },
-  {
-    glyph: "pay",
-    title: "Split Bills",
-    body: "Let guests pay separately. Choose which items go on each split, take the payment, and the table closes automatically once everything is settled.",
-  },
-  {
-    glyph: "cash-out",
-    title: "Flexible Payment Methods",
-    body: "Create and rename your own payment methods and choose which show at checkout. Cash stays protected and always available.",
-  },
-  {
-    glyph: "drawer",
-    title: "Clearer End of Shift",
-    body: "See takings split into cash and non-cash, with any cash payouts subtracted — so the expected drawer is right the first time.",
-  },
-  {
-    glyph: "pos",
-    title: "Faster Table Opening",
-    body: "Turn on Auto-Seat to jump straight to the order screen when you open a table, saving a tap on every order.",
-  },
-  {
-    glyph: "cash-out",
-    title: "Payouts",
-    body: "Record cash paid out of the drawer for an expense, purchase, or supplier — linked to the business record, reflected in the drawer, and reversible.",
+    title: "Recorded Reasons for Changes",
+    body: "When you reduce or remove an item from a sent dine-in order, note a quick reason. It's kept on the bill's history so every change is accounted for.",
   },
   {
     glyph: "analytics",
-    title: "Analytics + PDF",
-    body: "Track sales trends, top items, and payment breakdowns from the new Analytics menu, and export a polished PDF report in one click.",
+    title: "Deletions & Reductions Report",
+    body: "A new section in Analytics lists every removal, reduction and modifier change — with who made it, when, and why — so nothing is a mystery at close.",
+  },
+  {
+    glyph: "pos",
+    title: "Faster Customer Lookup",
+    body: "Open a customer account by name or phone, with clearer names shown across delivery and accounts so the right guest is easy to find.",
+  },
+  {
+    glyph: "pos",
+    title: "Merge Tables",
+    body: "Combine two or more open dine-in tables into one bill when guests move together — the items and kitchen tickets follow, and the other tables free up.",
+  },
+  {
+    glyph: "pos",
+    title: "Merged Tables on the Floor",
+    body: "The floor map now marks a table that has others merged into it, so staff can see at a glance which bill is the combined one.",
   },
 ];
 
