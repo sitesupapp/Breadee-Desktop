@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Breadee Staging",
+  "identifier": "app.breadee.desktop.staging",
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-staging-channel/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU2REMyOUIzM0Q4MDZCNDYKUldSR2E0QTlzeW5jNW5Zb1M0aXNheFlXRVJ1V1pBQ2dsR0NKUnBxNWxJQmozNDlMVm92SDg0TysK"
+    }
+  }
+}
