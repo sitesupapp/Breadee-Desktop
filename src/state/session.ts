@@ -18,6 +18,10 @@ const DEFAULT_CURRENCY: CurrencySettings = { primary: "USD", rate: null };
 const CACHE_KEY = "breadee-desktop-context";
 const OFFLINE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // require online re-auth after 7 days
 
+// De-dupes concurrent in-session permission refreshes: window "focus" and "online"
+// can fire together, and we never want two overlapping RPC round-trips for the same thing.
+let permissionRefreshInFlight: Promise<void> | null = null;
+
 type CachedContext = {
   userId: string;
   email: string | null;
@@ -47,6 +51,9 @@ type SessionState = {
   signInWithGoogle: () => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   loadContextOnline: () => Promise<void>;
+  /** Re-fetch ONLY features + permissions for the current tenant, in place, without a
+   *  full context reload. Lets a web-side role change reach a running till on focus/online. */
+  refreshPermissions: () => Promise<void>;
   can: (perm: string) => boolean;
 };
 
@@ -169,6 +176,42 @@ export const useSession = create<SessionState>((set, get) => ({
     };
     set({ ...next, offlineMode: false, online: true });
     writeCache({ ...next, cachedAt: Date.now() });
+  },
+
+  refreshPermissions: async () => {
+    const { membership, offlineMode, userId } = get();
+    // Only a live, online, signed-in tenant session refreshes. Offline mode keeps its
+    // cached snapshot untouched; no membership means there is nothing to refresh.
+    if (!navigator.onLine || offlineMode || !membership?.tenant_id) return;
+    if (permissionRefreshInFlight) return permissionRefreshInFlight;
+    const tenantId = membership.tenant_id;
+    permissionRefreshInFlight = (async () => {
+      try {
+        const [{ data: feat }, { data: perms }] = await Promise.all([
+          supabase.rpc("get_tenant_effective_features", { p_tenant: tenantId }),
+          supabase.rpc("current_user_permissions", { p_tenant: tenantId }),
+        ]);
+        // Bail if the session changed under us (sign-out / tenant switch / went offline)
+        // so a late response can never repaint a different context.
+        const cur = get();
+        if (cur.offlineMode || cur.userId !== userId || cur.membership?.tenant_id !== tenantId) return;
+        const features = (feat as unknown as FeatureMap) ?? cur.features;
+        const permsMap = perms as Record<string, boolean> | null;
+        // A valid member returns the FULL catalog map; an empty object means "no active
+        // membership resolved" — never clobber a working permission set with that.
+        const permissions =
+          permsMap && typeof permsMap === "object" && Object.keys(permsMap).length > 0 ? permsMap : cur.permissions;
+        set({ features, permissions, online: true });
+        // Keep the offline cache coherent so a later offline launch restores the fresh grants.
+        const cache = readCache();
+        if (cache && cache.userId === userId) writeCache({ ...cache, features, permissions, cachedAt: Date.now() });
+      } catch {
+        // Transient failure — keep the existing permissions. A refresh must never blank the UI.
+      } finally {
+        permissionRefreshInFlight = null;
+      }
+    })();
+    return permissionRefreshInFlight;
   },
 
   signIn: async (email, password) => {

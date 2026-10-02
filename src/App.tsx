@@ -41,13 +41,28 @@ export default function App() {
 
   useEffect(() => {
     void init();
-    const on = () => useSession.setState({ online: true });
+    const on = () => {
+      useSession.setState({ online: true });
+      // A role/permission change made on the web while this till was already running
+      // otherwise only reaches it on sign-in/restart. Refresh on reconnect (the store
+      // de-dupes concurrent refreshes and no-ops when offline/offline-mode/no tenant).
+      void useSession.getState().refreshPermissions();
+    };
     const off = () => useSession.setState({ online: false });
+    // Regaining focus is the other natural moment to pick up a just-made grant.
+    const onFocus = () => {
+      if (document.visibilityState === "hidden") return;
+      void useSession.getState().refreshPermissions();
+    };
     window.addEventListener("online", on);
     window.addEventListener("offline", off);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
     return () => {
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
     };
   }, [init]);
 

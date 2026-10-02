@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.31";
+export const WHATS_NEW_VERSION = "1.0.32";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -20,29 +20,19 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string };
 // developer terminology; icons come from the existing Glyph set.
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
-    glyph: "kitchen",
-    title: "Recorded Reasons for Changes",
-    body: "When you reduce or remove an item from a sent dine-in order, note a quick reason. It's kept on the bill's history so every change is accounted for.",
+    glyph: "pos",
+    title: "Better Dine-In Table Control",
+    body: "Tables can now be selected normally using either a mouse or a touchscreen — a click and a tap behave the same. Dragging still pans the floor, and a drag no longer opens a table by accident.",
+  },
+  {
+    glyph: "pos",
+    title: "More Role Controls",
+    body: "Merge Tables, Split Bill, Payouts, Payment Methods and Analytics can now be configured for your team in Roles & Permissions. New permissions stay off until an owner or admin turns them on.",
   },
   {
     glyph: "analytics",
-    title: "Deletions & Reductions Report",
-    body: "A new section in Analytics lists every removal, reduction and modifier change — with who made it, when, and why — so nothing is a mystery at close.",
-  },
-  {
-    glyph: "pos",
-    title: "Faster Customer Lookup",
-    body: "Open a customer account by name or phone, with clearer names shown across delivery and accounts so the right guest is easy to find.",
-  },
-  {
-    glyph: "pos",
-    title: "Merge Tables",
-    body: "Combine two or more open dine-in tables into one bill when guests move together — the items and kitchen tickets follow, and the other tables free up.",
-  },
-  {
-    glyph: "pos",
-    title: "Merged Tables on the Floor",
-    body: "The floor map now marks a table that has others merged into it, so staff can see at a glance which bill is the combined one.",
+    title: "Payout Visibility",
+    body: "Cash-drawer payouts now appear with their linked Expense, Purchase Invoice, Supplier Payment or Maintenance job on the website, so the record is easy to find. The document's own paid status is unchanged.",
   },
 ];
 

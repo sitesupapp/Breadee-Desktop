@@ -60,7 +60,7 @@ export function FloorCanvas({
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<Viewport>({ width: 0, height: 0 });
-  const drag = useRef<{ active: boolean; moved: boolean; startX: number; startY: number; base: Transform } | null>(null);
+  const drag = useRef<{ active: boolean; moved: boolean; captured: boolean; startX: number; startY: number; base: Transform } | null>(null);
 
   const plane = useMemo(() => sectionPlane(section, elements), [section, elements]);
   const refDim = useMemo(() => referenceTableDimension(elements), [elements]);
@@ -95,8 +95,13 @@ export function FloorCanvas({
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (transform === null) return;
-    drag.current = { active: true, moved: false, startX: e.clientX, startY: e.clientY, base: transform };
-    ref.current?.setPointerCapture?.(e.pointerId);
+    // Record the gesture origin only. Pointer capture is taken LAZILY in onPointerMove,
+    // once a real pan crosses PAN_THRESHOLD_PX. Capturing on every press (as before) made
+    // WebView2/Chromium synthesise the following mouse `click` against THIS canvas instead
+    // of the table <button> under the cursor, so a mouse TAP never reached the button's
+    // onClick and could not select a table — while touch taps were unaffected because their
+    // click is hit-tested fresh. Leaving a stationary press uncaptured keeps that click intact.
+    drag.current = { active: true, moved: false, captured: false, startX: e.clientX, startY: e.clientY, base: transform };
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
@@ -104,11 +109,18 @@ export function FloorCanvas({
     const dx = e.clientX - d.startX;
     const dy = e.clientY - d.startY;
     if (!d.moved && Math.hypot(dx, dy) < PAN_THRESHOLD_PX) return;
+    // A genuine pan has begun — capture the pointer now (once) so the drag keeps tracking
+    // if it leaves the canvas, and so this move suppresses the trailing click.
+    if (!d.captured) {
+      ref.current?.setPointerCapture?.(e.pointerId);
+      d.captured = true;
+    }
     d.moved = true;
     onTransform(clampPan({ scale: d.base.scale, tx: d.base.tx + dx, ty: d.base.ty + dy }, plane, viewportRef.current));
   };
   const endDrag = (e: React.PointerEvent) => {
-    if (drag.current?.active) ref.current?.releasePointerCapture?.(e.pointerId);
+    // Release only if a pan actually took capture; a plain tap never did.
+    if (drag.current?.captured) ref.current?.releasePointerCapture?.(e.pointerId);
     drag.current = null;
   };
 
