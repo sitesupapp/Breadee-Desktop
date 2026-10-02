@@ -73,6 +73,32 @@ export async function openShift(input: { branchId: string | null; openingCash: n
   return { shiftId: requireId(row.shift_id, "pos_open_shift", "shift_id") };
 }
 
+/**
+ * Open a shift while REPLAYING a shift that was opened offline (Case 2).
+ *
+ * Identical to `openShift` but carries the offline shift's `client_op_id`, so the
+ * server front-door dedups on it (`pos_op_replay`) - a retry after a lost response
+ * returns the SAME canonical shift instead of opening a second one. Combined with
+ * the core's single-open rule (an already-open shift is returned with `reused`),
+ * replay is exactly-once AND adopts any shift already open for this cashier. The
+ * `reused` flag is surfaced so the caller can log/branch on it.
+ */
+export async function openShiftWithOp(input: {
+  branchId: string | null;
+  openingCash: number;
+  clientOpId: string;
+}): Promise<{ shiftId: string; reused: boolean }> {
+  const data = await callPosRpc("pos_open_shift", {
+    p_payload: {
+      branch_id: input.branchId,
+      opening_cash_amount: Number(input.openingCash) || 0,
+      client_op_id: input.clientOpId,
+    },
+  });
+  const row = asRecord(data);
+  return { shiftId: requireId(row.shift_id, "pos_open_shift", "shift_id"), reused: bool(row.reused) };
+}
+
 /** Expected-cash preview. Pure server truth - shown, never recomputed. */
 export async function getShiftExpected(shiftId: string): Promise<ShiftExpected> {
   const row = asRecord(await callPosRpc("pos_shift_expected", { p_shift: shiftId }));
