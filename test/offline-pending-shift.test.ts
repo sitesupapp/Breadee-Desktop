@@ -306,6 +306,37 @@ test("a second Open-Shift after one already exists returns the SAME shift (no du
 
 // --- the canonicalization-race invariant (Fix 6) at the engine boundary ---
 
+test("an already-synced pending shift is STILL rejected on a device/OU mismatch (scope before reuse)", async () => {
+  // The shift is already synced and carries a canonical server id, but it belongs to
+  // another device. Its canonical id must NOT leak into this context's replay: the
+  // scope check runs BEFORE the synced fast-path.
+  await addPendingShift(makePending({ local_shift_id: "L-synced-foreign", status: "synced", server_shift_id: "LEAK-SRV", device_id: "dev2" }));
+  // A dependent sale that passes the txn tenant/branch/cashier guard (device is not
+  // part of that guard) but whose shift is the out-of-scope synced one above.
+  await addPosOfflineTxn(makeDependentTxn("L-synced-foreign"));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.submits, 0, "a foreign synced shift id is never submitted");
+  assert.ok(!c.submittedShiftIds.includes("LEAK-SRV"), "the foreign canonical id never leaks into replay");
+  assert.equal(report.needsAttention.length, 1);
+  assert.equal(report.needsAttention[0].reason, "shift_scope_mismatch");
+});
+
+test("post-switch context: replay under a NEW branch/OU never opens or submits the old OU's work", async () => {
+  // Simulates reconnect AFTER loadContextOnline() moved the session to branch b2:
+  // the offline shift + sale captured under b1 must be left for the b1 context, never
+  // replayed under b2 (the component now derives ctx fresh, so ctx.branchId === b2).
+  await addPendingShift(makePending({ local_shift_id: "L-b1", branch_id: "b1" }));
+  await addPosOfflineTxn(makeDependentTxn("L-b1")); // branch_id b1
+  const b2ctx = { tenantId: "t1", branchId: "b2", cashierUserId: "u1", deviceId: "dev1", online: true };
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(b2ctx, "backend-returned", deps(c));
+  assert.equal(c.opens, 0, "the b1 shift is not opened under the b2 context");
+  assert.equal(c.submits, 0, "the b1 sale is not submitted under the b2 context");
+  assert.deepEqual(report.deferred, [(await localdb.posOfflineTxns.toArray())[0].local_txn_id], "the b1 sale is deferred, not parked");
+  assert.equal((await getPendingShift("L-b1"))?.status, "pending_sync", "the b1 shift is left intact for its own context");
+});
+
 test("a remapped sale NEVER keeps a local shift id, and a non-pending sale is submitted as captured", async () => {
   // Pending (Case 2) sale: must be remapped to the canonical id before submit.
   await addPendingShift(makePending({ local_shift_id: "L1" }));

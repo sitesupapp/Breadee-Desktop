@@ -253,10 +253,10 @@ async function resolvePendingShiftCanonical(
 ): Promise<ShiftResolution> {
   const p = await getPendingShift(localShiftId);
   if (!p) return { ok: false, retriable: false, reason: "shift_missing" };
-  if (p.status === "synced" && p.server_shift_id) return { ok: true, serverShiftId: p.server_shift_id };
-  // Isolation: never open a pending shift that is not for THIS exact live context
-  // (tenant + branch/OU + cashier + device). It may be valid in another session; it
-  // is simply not ours to open here.
+  // Isolation FIRST, before ANY successful return (including the already-synced
+  // fast path below): never resolve a pending shift that is not for THIS exact live
+  // context (tenant + branch/OU + cashier + device). A shift's canonical id must
+  // never leak into another context's replay, even one already opened on the server.
   if (
     p.tenant_id !== ctx.tenantId ||
     (p.branch_id ?? null) !== (ctx.branchId ?? null) ||
@@ -265,6 +265,9 @@ async function resolvePendingShiftCanonical(
   ) {
     return { ok: false, retriable: false, reason: "shift_scope_mismatch" };
   }
+  // Already opened on the server this/a prior pass: reuse its canonical id (no second
+  // open). Reached only after the scope check above has confirmed it is ours.
+  if (p.status === "synced" && p.server_shift_id) return { ok: true, serverShiftId: p.server_shift_id };
   // A shift already definitively refused (needs_attention) must NOT be re-opened
   // automatically; it awaits explicit human reconciliation.
   if (p.status === "needs_attention") {

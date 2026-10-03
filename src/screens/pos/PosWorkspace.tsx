@@ -56,6 +56,7 @@ import type { VoidAction } from "@/lib/pos/deliveryOrderManagement";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
+import { resolveBranchId } from "@/lib/branch";
 import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
@@ -330,12 +331,23 @@ function PosWorkspaceInner() {
       if (useSession.getState().offlineMode) {
         await useSession.getState().loadContextOnline().catch(() => {});
       }
+      // Re-read the SERVER-AUTHORITATIVE context AFTER rehydration: the online load
+      // may have changed the active tenant/branch/OU or revoked access entirely.
+      // Replaying under the stale pre-reconnect context could bind offline work to
+      // the wrong OU, so tenant, cashier and branch are all derived fresh here
+      // (resolveBranchId is pure). If the tenant/user is gone, do not replay - the
+      // per-context scope guards would defer the work anyway, but skipping is clearer.
+      const s = useSession.getState();
+      const freshTenantId = s.tenant?.id ?? null;
+      const freshUserId = s.userId ?? null;
+      if (!freshTenantId || !freshUserId) return;
+      const freshBranchId = resolveBranchId(s.tenant, s.membership);
       await syncPosTxns(
-        { tenantId, branchId: pos.branch.id, cashierUserId: userId, deviceId: getDeviceIdentity().device_id, online: true },
+        { tenantId: freshTenantId, branchId: freshBranchId, cashierUserId: freshUserId, deviceId: getDeviceIdentity().device_id, online: true },
         "backend-returned",
       ).catch(() => {});
       await refreshOfflineQueue();
-      await useShift.getState().refresh(tenantId, userId, pos.branch.id);
+      await useShift.getState().refresh(freshTenantId, freshUserId, freshBranchId);
     })();
   }, [backendReachable, tenantId, userId, pos.branch.id, refreshOfflineQueue]);
 
