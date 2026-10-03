@@ -212,10 +212,12 @@ function PosWorkspaceInner() {
   // --- shift -----------------------------------------------------------------
   const userId = pos.userId;
   useEffect(() => {
-    if (pos.allowed && tenantId && userId) void shiftStore.refresh(tenantId, userId);
+    // Pass the live branch/OU so a pending offline-opened shift is restored on mount
+    // ONLY for this exact context (never a sibling branch/OU's pending shift).
+    if (pos.allowed && tenantId && userId) void shiftStore.refresh(tenantId, userId, pos.branch.id);
     // The store is a stable zustand reference; re-running on it would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pos.allowed, tenantId, userId]);
+  }, [pos.allowed, tenantId, userId, pos.branch.id]);
 
   const shiftId = requireOpenShiftId(shiftStore.shift);
 
@@ -290,15 +292,17 @@ function PosWorkspaceInner() {
     void refreshOfflineQueue();
     const run = () => {
       if (!tenantId || !userId) return;
-      void syncPosTxns({ tenantId, branchId: pos.branch.id, cashierUserId: userId, online: true }, "reconnect").then(
-        async () => {
-          await refreshOfflineQueue();
-          // Replay may have opened an offline-opened shift (Case 2) exactly once on
-          // the server. Re-read the shift so the canonical server shift supersedes
-          // the local pending one, and new orders bind to the real shift id.
-          await useShift.getState().refresh(tenantId, userId);
-        },
-      );
+      void syncPosTxns(
+        { tenantId, branchId: pos.branch.id, cashierUserId: userId, deviceId: getDeviceIdentity().device_id, online: true },
+        "reconnect",
+      ).then(async () => {
+        await refreshOfflineQueue();
+        // Replay may have opened an offline-opened shift (Case 2) exactly once on
+        // the server. Re-read the shift so the canonical server shift supersedes
+        // the local pending one, and new orders bind to the real shift id. Scoped to
+        // THIS branch/OU so a pending shift for another context is never adopted.
+        await useShift.getState().refresh(tenantId, userId, pos.branch.id);
+      });
     };
     // Drain on mount when we are already online, and whenever `online` flips true.
     // This covers reopening the app ONLINE after an offline restart (the OS fires no
@@ -327,11 +331,11 @@ function PosWorkspaceInner() {
         await useSession.getState().loadContextOnline().catch(() => {});
       }
       await syncPosTxns(
-        { tenantId, branchId: pos.branch.id, cashierUserId: userId, online: true },
+        { tenantId, branchId: pos.branch.id, cashierUserId: userId, deviceId: getDeviceIdentity().device_id, online: true },
         "backend-returned",
       ).catch(() => {});
       await refreshOfflineQueue();
-      await useShift.getState().refresh(tenantId, userId);
+      await useShift.getState().refresh(tenantId, userId, pos.branch.id);
     })();
   }, [backendReachable, tenantId, userId, pos.branch.id, refreshOfflineQueue]);
 
@@ -1270,28 +1274,35 @@ function PosWorkspaceInner() {
   );
 
   const buildOfflinePayload = useCallback(
-    (opId: string, lines: CartLine[]): SubmitOrderPayload =>
+    (opId: string, lines: CartLine[], activeShiftId: string): SubmitOrderPayload =>
       buildSubmitPayload({
         branchId: pos.branch.id,
-        shiftId: shiftId as string,
+        shiftId: activeShiftId,
         orderType: "takeaway",
         clientOpId: opId,
         lines,
         orderNote: orderNoteRef.current.trim() ? orderNoteRef.current.trim() : null,
       }),
-    [pos.branch.id, shiftId],
+    [pos.branch.id],
   );
 
   /** Offline Send to kitchen: one durable txn (sent, unpaid) + a local ticket; cart kept. */
   const saveOfflineSend = useCallback(
     async (lines: CartLine[]) => {
-      if (!shiftId || !tenantId || !userId) {
+      // Capture the active shift id AND its pending-dependency marker from ONE
+      // atomic store read. The payload's shift_id and pending_shift_local_id must
+      // be a matched pair: reading them separately lets a reconnect canonicalization
+      // interleave and persist a LOCAL shift id with no dependency marker (orphan).
+      const shiftSnap = useShift.getState();
+      const activeShiftId = requireOpenShiftId(shiftSnap.shift);
+      const pendingLocalId = shiftSnap.pendingLocalId ?? null;
+      if (!activeShiftId || !tenantId || !userId) {
         toast.push({ tone: "warning", message: "Open a shift before sending an order." });
         return;
       }
       const opId = useCart.getState().ensureOpId();
       const dev = getDeviceIdentity();
-      const payload = buildOfflinePayload(opId, lines);
+      const payload = buildOfflinePayload(opId, lines, activeShiftId);
       const total = cartSubtotal(lines);
       const existing = await getPosOfflineTxnByOp(opId);
       const localId = existing?.local_txn_id ?? crypto.randomUUID();
@@ -1307,7 +1318,7 @@ function PosWorkspaceInner() {
           terminal_id: dev.terminal_id,
           cashier_user_id: userId,
           cashier_user_name: pos.userName,
-          shift_id: shiftId,
+          shift_id: activeShiftId,
           created_at: new Date().toISOString(),
           order_payload: payload,
           payment_intent: null,
@@ -1318,7 +1329,8 @@ function PosWorkspaceInner() {
           attempts: 0,
           // When the active shift was opened offline (Case 2) its id is a LOCAL id;
           // the replay engine opens the shift once on reconnect and remaps this.
-          pending_shift_local_id: useShift.getState().pendingLocalId ?? null,
+          // Captured from the SAME snapshot as shift_id above, so the pair is atomic.
+          pending_shift_local_id: pendingLocalId,
         });
       }
       const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
@@ -1333,20 +1345,26 @@ function PosWorkspaceInner() {
       toast.push({ tone: "success", message: "Saved offline - sent to kitchen", detail: `Ref ${ref}. It will sync when the connection returns.` });
       // Cart is kept so the operator can Pay the SAME order next.
     },
-    [buildOfflinePayload, currency, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, shiftId, tenantId, ticketForOrder, toast, userId],
+    [buildOfflinePayload, currency, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
 
   /** Offline Cash Pay of a draft: upsert the SAME txn with the payment intent; cart cleared. */
   const saveOfflineCashPayment = useCallback(
     async (lines: CartLine[], input: { currency: CurrencyCode; discount: Record<string, unknown> }) => {
-      if (!shiftId || !tenantId || !userId) {
+      // One atomic shift snapshot: shift_id and pending_shift_local_id are a matched
+      // pair (see saveOfflineSend) - reading them separately risks an orphan on a
+      // reconnect canonicalization that interleaves between the two reads.
+      const shiftSnap = useShift.getState();
+      const activeShiftId = requireOpenShiftId(shiftSnap.shift);
+      const pendingLocalId = shiftSnap.pendingLocalId ?? null;
+      if (!activeShiftId || !tenantId || !userId) {
         toast.push({ tone: "warning", message: "Open a shift before taking payment." });
         return;
       }
       if (lines.length === 0) return;
       const opId = useCart.getState().ensureOpId();
       const dev = getDeviceIdentity();
-      const payload = buildOfflinePayload(opId, lines);
+      const payload = buildOfflinePayload(opId, lines, activeShiftId);
       const total = cartSubtotal(lines);
       const intent = {
         method: "cash" as const,
@@ -1367,7 +1385,7 @@ function PosWorkspaceInner() {
           terminal_id: dev.terminal_id,
           cashier_user_id: userId,
           cashier_user_name: pos.userName,
-          shift_id: shiftId,
+          shift_id: activeShiftId,
           created_at: new Date().toISOString(),
           order_payload: payload,
           payment_intent: intent,
@@ -1378,7 +1396,8 @@ function PosWorkspaceInner() {
           attempts: 0,
           // When the active shift was opened offline (Case 2) its id is a LOCAL id;
           // the replay engine opens the shift once on reconnect and remaps this.
-          pending_shift_local_id: useShift.getState().pendingLocalId ?? null,
+          // Captured from the SAME snapshot as shift_id above, so the pair is atomic.
+          pending_shift_local_id: pendingLocalId,
         });
       }
       const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
@@ -1395,7 +1414,7 @@ function PosWorkspaceInner() {
       newOrder();
       toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
     },
-    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, shiftId, tenantId, ticketForOrder, toast, userId],
+    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
 
   /** Resume an offline order that was sent to the kitchen but not yet paid. */

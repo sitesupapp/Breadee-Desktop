@@ -45,7 +45,7 @@ type ShiftState = {
   lastReport: ShiftReport | null;
   error: string | null;
 
-  refresh: (tenantId: string, userId: string) => Promise<void>;
+  refresh: (tenantId: string, userId: string, branchId?: string | null) => Promise<void>;
   refreshCashBox: () => Promise<void>;
   open: (input: {
     tenantId: string;
@@ -72,7 +72,7 @@ export const useShift = create<ShiftState>((set, get) => ({
   lastReport: null,
   error: null,
 
-  refresh: async (tenantId, userId) => {
+  refresh: async (tenantId, userId, branchId = null) => {
     set({ loading: true, error: null });
     const deviceId = getDeviceIdentity().device_id;
     try {
@@ -85,8 +85,9 @@ export const useShift = create<ShiftState>((set, get) => ({
       }
       // Reachable, and the server says NO open shift. A pending offline-opened shift
       // that hasn't synced yet is NOT contradicted by this (it was never on the
-      // server), so keep showing it until the replay engine opens it on reconnect.
-      const pending = await getActivePendingShift(tenantId, userId).catch(() => undefined);
+      // server), so keep showing it until the reconnect reconcile opens it. Scoped to
+      // THIS exact tenant+branch/OU+cashier+device; pending_sync only.
+      const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
       if (pending) {
         set({
           shift: pendingShiftToActiveShift(pending),
@@ -102,10 +103,21 @@ export const useShift = create<ShiftState>((set, get) => ({
       set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null });
       clearPosSessionSnapshot();
     } catch (e) {
-      // The server is unreachable - not "no shift". Restore the offline operating
-      // context so the cashier can keep taking the cash sales this level exists for.
+      // Restore offline state ONLY for a confirmed transport/unreachable condition.
+      // A definitive server authorization/validation refusal must NOT reactivate a
+      // stale snapshot or pending shift - it surfaces as an error instead.
       const transport = isTransportFailure(e) || (typeof navigator !== "undefined" && navigator.onLine === false);
-
+      if (!transport) {
+        set({
+          shift: null,
+          cashBox: null,
+          loading: false,
+          offlineRestored: false,
+          pendingLocalId: null,
+          error: e instanceof Error ? e.message : "Could not read the current shift.",
+        });
+        return;
+      }
       // 1) a previously-hydrated server open shift (Case 1).
       const restored = restoreShiftFromSnapshot(readPosSessionSnapshot(), {
         deviceId,
@@ -116,8 +128,8 @@ export const useShift = create<ShiftState>((set, get) => ({
         set({ shift: restored, cashBox: null, loading: false, offlineRestored: true, pendingLocalId: null, error: null });
         return;
       }
-      // 2) a shift opened offline on this device (Case 2).
-      const pending = await getActivePendingShift(tenantId, userId).catch(() => undefined);
+      // 2) a shift opened offline on this device for THIS exact context (Case 2).
+      const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
       if (pending) {
         set({
           shift: pendingShiftToActiveShift(pending),
@@ -130,20 +142,8 @@ export const useShift = create<ShiftState>((set, get) => ({
         return;
       }
       // 3) No offline context at all. For an expected outage this is NOT an error:
-      // the status bar shows Offline and the cashier can open a shift offline. Only
-      // a genuine (non-transport) server refusal surfaces a message.
-      if (transport) {
-        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null });
-        return;
-      }
-      set({
-        shift: null,
-        cashBox: null,
-        loading: false,
-        offlineRestored: false,
-        pendingLocalId: null,
-        error: e instanceof Error ? e.message : "Could not read the current shift.",
-      });
+      // the status bar shows Offline and the cashier can open a shift offline.
+      set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null });
     }
   },
 
@@ -176,7 +176,7 @@ export const useShift = create<ShiftState>((set, get) => ({
         await openShift({ branchId, openingCash });
         // Re-read rather than trust the returned id: this also picks up the case
         // where the server CONTINUED an existing open shift instead of creating one.
-        await get().refresh(tenantId, userId);
+        await get().refresh(tenantId, userId, branchId);
         return;
       } catch (e) {
         // A definitive refusal (permission, prior shift awaiting approval, feature

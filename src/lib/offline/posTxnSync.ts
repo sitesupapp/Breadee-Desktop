@@ -24,7 +24,7 @@
 //   * terminal refusals (shift closed, permission, validation) -> `needs_attention`,
 //     never a hot retry loop; the row is retained for a human, never dropped.
 
-import { getPendingShift, localdb, updatePendingShift, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
+import { getPendingShift, listActivePendingShifts, localdb, updatePendingShift, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import type { SubmitOrderPayload } from "@/lib/pos/orders";
 import type { CurrencyCode } from "@/lib/currency";
 
@@ -32,6 +32,12 @@ export type PosTxnSyncContext = {
   tenantId: string | null;
   branchId: string | null;
   cashierUserId: string | null;
+  /**
+   * The live device id. Offline-opened shifts are only ever resolved/replayed when
+   * they belong to THIS exact tenant+branch/OU+cashier+device, so a pending shift
+   * from a sibling branch/OU, another user, or another device is never opened here.
+   */
+  deviceId: string | null;
   online: boolean;
 };
 
@@ -44,6 +50,10 @@ export type PosTxnSyncReport = {
   retriable: string[];
   /** Skipped because they belong to a different tenant/branch/cashier than the live session. */
   deferred: string[];
+  /** Offline-opened shifts opened/adopted on the server this pass (local ids). */
+  shiftsSynced: string[];
+  /** Offline-opened shifts parked for a human this pass. */
+  shiftsNeedsAttention: { id: string; reason: string }[];
 };
 
 /** Module-level single-flight lock so auto + manual sync never run the queue twice at once. */
@@ -236,10 +246,30 @@ type ShiftResolution =
  * A transport failure is retriable; a definitive refusal (permission, prior shift
  * awaiting approval, branch access) parks the pending shift for a human.
  */
-async function resolvePendingShiftCanonical(localShiftId: string, d: PosTxnSyncDeps): Promise<ShiftResolution> {
+async function resolvePendingShiftCanonical(
+  localShiftId: string,
+  ctx: PosTxnSyncContext,
+  d: PosTxnSyncDeps,
+): Promise<ShiftResolution> {
   const p = await getPendingShift(localShiftId);
   if (!p) return { ok: false, retriable: false, reason: "shift_missing" };
   if (p.status === "synced" && p.server_shift_id) return { ok: true, serverShiftId: p.server_shift_id };
+  // Isolation: never open a pending shift that is not for THIS exact live context
+  // (tenant + branch/OU + cashier + device). It may be valid in another session; it
+  // is simply not ours to open here.
+  if (
+    p.tenant_id !== ctx.tenantId ||
+    (p.branch_id ?? null) !== (ctx.branchId ?? null) ||
+    p.cashier_user_id !== ctx.cashierUserId ||
+    p.device_id !== ctx.deviceId
+  ) {
+    return { ok: false, retriable: false, reason: "shift_scope_mismatch" };
+  }
+  // A shift already definitively refused (needs_attention) must NOT be re-opened
+  // automatically; it awaits explicit human reconciliation.
+  if (p.status === "needs_attention") {
+    return { ok: false, retriable: false, reason: p.review_reason ?? "needs_attention" };
+  }
   try {
     const { shiftId } = await d.openShift({
       branchId: p.branch_id,
@@ -289,6 +319,8 @@ export async function syncPosTxns(
     needsAttention: [],
     retriable: [],
     deferred: [],
+    shiftsSynced: [],
+    shiftsNeedsAttention: [],
   };
 
   // Treat as offline ONLY when the browser explicitly says so. In non-browser
@@ -305,6 +337,24 @@ export async function syncPosTxns(
   // Resolve each referenced pending shift at most once per pass (open-exactly-once).
   const shiftResolutions = new Map<string, ShiftResolution>();
   try {
+    // Reconnect reconcile: open EVERY in-scope offline-opened shift exactly once,
+    // independent of whether a sale depends on it. A shift opened offline with no
+    // order must still be opened on the server on reconnect (and the result cached so
+    // the dependent-order loop below reuses it). Scope-filtered to this exact
+    // tenant+branch/OU+cashier+device, pending_sync only.
+    const scopedPending = await listActivePendingShifts(
+      ctx.tenantId,
+      ctx.cashierUserId,
+      ctx.branchId,
+      ctx.deviceId,
+    );
+    for (const p of scopedPending) {
+      const r = await resolvePendingShiftCanonical(p.local_shift_id, ctx, d);
+      shiftResolutions.set(p.local_shift_id, r);
+      if (r.ok) report.shiftsSynced.push(p.local_shift_id);
+      else if (!r.retriable) report.shiftsNeedsAttention.push({ id: p.local_shift_id, reason: r.reason });
+    }
+
     // FIFO by capture time. Only queued work is replayed; `needs_attention`
     // requires an explicit operator retry (handled by requeueForAttention).
     const txns = (await localdb.posOfflineTxns.where("status").anyOf("queued", "syncing").toArray()).sort((a, b) =>
@@ -329,7 +379,7 @@ export async function syncPosTxns(
         const localId = t.pending_shift_local_id;
         let r = shiftResolutions.get(localId);
         if (!r) {
-          r = await resolvePendingShiftCanonical(localId, d);
+          r = await resolvePendingShiftCanonical(localId, ctx, d);
           shiftResolutions.set(localId, r);
         }
         if (!r.ok) {

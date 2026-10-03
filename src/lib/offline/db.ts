@@ -414,25 +414,44 @@ export async function getPendingShift(localShiftId: string): Promise<PendingShif
 }
 
 /**
- * The ONE active offline-opened shift for this cashier in this tenant that has not
- * yet reached the server, or undefined. Scoped by tenant+cashier (a cashier runs at
- * most one shift), so another user's/tenant's pending shift is never surfaced.
- * Newest-opened wins if more than one somehow exists.
+ * In-scope offline-opened shifts for the EXACT live context. Scoped by
+ * tenant + cashier + branch/OU + device, and ONLY `pending_sync` (never
+ * `needs_attention`, which has been definitively refused and must not be reactivated
+ * for new sales, nor `synced`). This is the isolation boundary: a pending shift from
+ * a sibling branch/OU, another cashier, another tenant, or another device can never
+ * surface as the active shift. Newest-opened first.
+ */
+export async function listActivePendingShifts(
+  tenantId: string | null,
+  cashierUserId: string | null,
+  branchId: string | null,
+  deviceId: string | null,
+): Promise<PendingShift[]> {
+  if (!tenantId || !cashierUserId || !deviceId) return [];
+  const all = await localdb.pendingShifts.where("status").equals("pending_sync").toArray();
+  return all
+    .filter(
+      (s) =>
+        s.tenant_id === tenantId &&
+        s.cashier_user_id === cashierUserId &&
+        (s.branch_id ?? null) === (branchId ?? null) &&
+        s.device_id === deviceId,
+    )
+    .sort((a, b) => b.opened_at.localeCompare(a.opened_at));
+}
+
+/**
+ * The ONE active offline-opened (`pending_sync`) shift for the EXACT live context
+ * (tenant + cashier + branch/OU + device), or undefined. See `listActivePendingShifts`
+ * for the isolation rationale.
  */
 export async function getActivePendingShift(
   tenantId: string | null,
   cashierUserId: string | null,
+  branchId: string | null,
+  deviceId: string | null,
 ): Promise<PendingShift | undefined> {
-  if (!tenantId || !cashierUserId) return undefined;
-  const all = await localdb.pendingShifts.where("status").anyOf("pending_sync", "needs_attention").toArray();
-  return all
-    .filter((s) => s.tenant_id === tenantId && s.cashier_user_id === cashierUserId)
-    .sort((a, b) => b.opened_at.localeCompare(a.opened_at))[0];
-}
-
-/** Every pending shift still awaiting the server (for the reconnect resolver). */
-export async function listUnsyncedPendingShifts(): Promise<PendingShift[]> {
-  return localdb.pendingShifts.where("status").anyOf("pending_sync", "needs_attention").toArray();
+  return (await listActivePendingShifts(tenantId, cashierUserId, branchId, deviceId))[0];
 }
 
 /** Patch one pending shift by its local id. */

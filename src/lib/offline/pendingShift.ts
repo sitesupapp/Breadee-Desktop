@@ -11,12 +11,18 @@
 
 import type { ActiveShift } from "@/types/pos";
 import { getDeviceIdentity } from "@/lib/device";
-import { addPendingShift, type PendingShift } from "@/lib/offline/db";
+import { localdb, type PendingShift } from "@/lib/offline/db";
 
 /**
  * Mint and durably commit a new offline-opened shift for the live session, then
  * return it. The ids are client-generated BEFORE anything is shown as successful,
  * so a crash right after this call still leaves a recoverable, replayable shift.
+ *
+ * EXACTLY-ONCE per (tenant + branch/OU + cashier + device): the check-and-create
+ * runs inside one Dexie read-write transaction, so repeated or concurrent offline
+ * Open-Shift actions can never leave more than one `pending_sync` shift for the same
+ * live context - the existing one is returned instead of inserting a duplicate. A
+ * `needs_attention` shift is NOT reused (it was refused and awaits reconciliation).
  */
 export async function createLocalPendingShift(args: {
   tenantId: string;
@@ -26,22 +32,32 @@ export async function createLocalPendingShift(args: {
   currency: string;
 }): Promise<PendingShift> {
   const dev = getDeviceIdentity();
-  const shift: PendingShift = {
-    local_shift_id: crypto.randomUUID(),
-    client_op_id: crypto.randomUUID(),
-    tenant_id: args.tenantId,
-    branch_id: args.branchId,
-    device_id: dev.device_id,
-    terminal_id: dev.terminal_id,
-    cashier_user_id: args.cashierUserId,
-    opening_cash_amount: Number(args.openingCashAmount) || 0,
-    currency: args.currency,
-    opened_at: new Date().toISOString(),
-    status: "pending_sync",
-    attempts: 0,
-  };
-  await addPendingShift(shift);
-  return shift;
+  return localdb.transaction("rw", localdb.pendingShifts, async () => {
+    const existing = (await localdb.pendingShifts.where("status").equals("pending_sync").toArray()).find(
+      (s) =>
+        s.tenant_id === args.tenantId &&
+        s.cashier_user_id === args.cashierUserId &&
+        (s.branch_id ?? null) === (args.branchId ?? null) &&
+        s.device_id === dev.device_id,
+    );
+    if (existing) return existing;
+    const shift: PendingShift = {
+      local_shift_id: crypto.randomUUID(),
+      client_op_id: crypto.randomUUID(),
+      tenant_id: args.tenantId,
+      branch_id: args.branchId,
+      device_id: dev.device_id,
+      terminal_id: dev.terminal_id,
+      cashier_user_id: args.cashierUserId,
+      opening_cash_amount: Number(args.openingCashAmount) || 0,
+      currency: args.currency,
+      opened_at: new Date().toISOString(),
+      status: "pending_sync",
+      attempts: 0,
+    };
+    await localdb.pendingShifts.add(shift);
+    return shift;
+  });
 }
 
 /**

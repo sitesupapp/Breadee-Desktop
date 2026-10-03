@@ -31,7 +31,7 @@ class MemStorage {
 }
 (globalThis as unknown as { localStorage: MemStorage }).localStorage = new MemStorage();
 
-const ctx = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", online: true };
+const ctx = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", online: true };
 
 function makePending(over: Partial<PendingShift> = {}): PendingShift {
   const localId = over.local_shift_id ?? "local-shift-" + crypto.randomUUID().slice(0, 6);
@@ -108,12 +108,27 @@ test("createLocalPendingShift persists; it projects to an OPEN ActiveShift usabl
   assert.equal(active.opening_cash_amount, 50);
 });
 
-test("getActivePendingShift is scoped to this tenant+cashier", async () => {
+test("getActivePendingShift is scoped to this tenant+cashier+branch/OU+device", async () => {
   await addPendingShift(makePending({ local_shift_id: "mine" }));
   await addPendingShift(makePending({ local_shift_id: "theirs", cashier_user_id: "u2" }));
-  assert.equal((await getActivePendingShift("t1", "u1"))?.local_shift_id, "mine");
-  assert.equal(await getActivePendingShift("t1", "u2").then((s) => s?.local_shift_id), "theirs");
-  assert.equal(await getActivePendingShift("tOther", "u1"), undefined);
+  await addPendingShift(makePending({ local_shift_id: "otherBranch", branch_id: "b2" }));
+  await addPendingShift(makePending({ local_shift_id: "otherDevice", device_id: "dev2" }));
+  assert.equal((await getActivePendingShift("t1", "u1", "b1", "dev1"))?.local_shift_id, "mine");
+  assert.equal(await getActivePendingShift("t1", "u2", "b1", "dev1").then((s) => s?.local_shift_id), "theirs");
+  // Wrong tenant, branch/OU, or device never surfaces another context's shift.
+  assert.equal(await getActivePendingShift("tOther", "u1", "b1", "dev1"), undefined);
+  assert.equal(await getActivePendingShift("t1", "u1", "b2", "dev1").then((s) => s?.local_shift_id), "otherBranch");
+  assert.equal(await getActivePendingShift("t1", "u1", "b9", "dev1"), undefined, "no shift for an unknown branch");
+  assert.equal(await getActivePendingShift("t1", "u1", "b1", "dev2").then((s) => s?.local_shift_id), "otherDevice");
+  assert.equal(await getActivePendingShift("t1", "u1", "b1", "dev9"), undefined, "no shift for an unknown device");
+  // A null branch (single-OU tenant) is distinct from a concrete branch id.
+  assert.equal(await getActivePendingShift("t1", "u1", null, "dev1"), undefined, "null branch never matches branch b1");
+});
+
+test("getActivePendingShift ignores needs_attention and synced shifts (pending_sync only)", async () => {
+  await addPendingShift(makePending({ local_shift_id: "parked", status: "needs_attention" }));
+  await addPendingShift(makePending({ local_shift_id: "done", status: "synced", server_shift_id: "SRV" }));
+  assert.equal(await getActivePendingShift("t1", "u1", "b1", "dev1"), undefined, "a refused/synced shift is never active");
 });
 
 test("reconnect: open the shift ONCE, remap the order to the canonical id, submit once, pay once", async () => {
@@ -207,4 +222,110 @@ test("a dependent order whose pending shift row is missing goes to needs_attenti
   assert.equal(c.submits, 0);
   assert.equal(report.needsAttention.length, 1);
   assert.equal((await localdb.posOfflineTxns.toArray())[0].status, "needs_attention");
+});
+
+// --- scope isolation: the sync engine must never open another context's shift ---
+
+test("reconnect does NOT open a pending shift from another branch/OU", async () => {
+  // A shift opened offline for branch b2, while the live session is branch b1.
+  await addPendingShift(makePending({ local_shift_id: "L-b2", branch_id: "b2" }));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.opens, 0, "a sibling-branch pending shift is never opened by this session");
+  assert.equal(report.shiftsSynced.length, 0);
+  assert.equal(report.shiftsNeedsAttention.length, 0, "it is simply out of scope, not parked");
+  assert.equal((await getPendingShift("L-b2"))?.status, "pending_sync", "left untouched for its own session");
+});
+
+test("reconnect does NOT open a pending shift from another device", async () => {
+  await addPendingShift(makePending({ local_shift_id: "L-dev2", device_id: "dev2" }));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.opens, 0, "another device's pending shift is never opened here");
+  assert.equal(report.shiftsSynced.length, 0);
+  assert.equal((await getPendingShift("L-dev2"))?.status, "pending_sync");
+});
+
+test("a dependent order whose pending shift is out of scope is parked, never opened under this context", async () => {
+  // The order's shift belongs to another device; the engine must refuse to open it.
+  await addPendingShift(makePending({ local_shift_id: "L-x", device_id: "dev2" }));
+  await addPosOfflineTxn(makeDependentTxn("L-x"));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.opens, 0, "scope mismatch must not open the shift");
+  assert.equal(c.submits, 0, "and must not submit the order against a foreign shift");
+  assert.equal(report.needsAttention.length, 1);
+  assert.equal(report.needsAttention[0].reason, "shift_scope_mismatch");
+  assert.equal((await localdb.posOfflineTxns.toArray())[0].status, "needs_attention");
+});
+
+// --- saleless reconcile: an offline shift with no order must still open once ---
+
+test("reconnect opens an in-scope offline shift even with NO dependent sale (saleless)", async () => {
+  await addPendingShift(makePending({ local_shift_id: "L-solo" }));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.opens, 1, "a shift opened offline is reconciled on reconnect independent of any sale");
+  assert.equal(c.submits, 0);
+  assert.deepEqual(report.shiftsSynced, ["L-solo"]);
+  assert.equal((await getPendingShift("L-solo"))?.status, "synced");
+  assert.equal((await getPendingShift("L-solo"))?.server_shift_id, "SRV-SHIFT");
+});
+
+test("a needs_attention offline shift is NOT auto-reopened by the saleless reconcile", async () => {
+  await addPendingShift(makePending({ local_shift_id: "L-parked", status: "needs_attention", review_reason: "permission" }));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  const report = await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.opens, 0, "a definitively refused shift awaits human reconciliation, never an auto-reopen");
+  assert.equal(report.shiftsSynced.length, 0);
+  assert.equal((await getPendingShift("L-parked"))?.status, "needs_attention");
+});
+
+// --- exactly-once offline open under concurrency ---
+
+test("concurrent offline Open-Shift for the same context yields exactly ONE pending shift", async () => {
+  const args = { tenantId: "t1", branchId: "b1" as string | null, cashierUserId: "u1", openingCashAmount: 50, currency: "LBP" };
+  const results = await Promise.all([
+    createLocalPendingShift(args),
+    createLocalPendingShift(args),
+    createLocalPendingShift(args),
+  ]);
+  const ids = new Set(results.map((r) => r.local_shift_id));
+  assert.equal(ids.size, 1, "all concurrent opens resolve to the one durable pending shift");
+  const rows = await localdb.pendingShifts.where("status").equals("pending_sync").toArray();
+  assert.equal(rows.length, 1, "exactly one pending_sync row exists for the context");
+});
+
+test("a second Open-Shift after one already exists returns the SAME shift (no duplicate)", async () => {
+  const args = { tenantId: "t1", branchId: "b1" as string | null, cashierUserId: "u1", openingCashAmount: 50, currency: "LBP" };
+  const first = await createLocalPendingShift(args);
+  const second = await createLocalPendingShift(args);
+  assert.equal(second.local_shift_id, first.local_shift_id);
+  assert.equal((await localdb.pendingShifts.count()), 1);
+});
+
+// --- the canonicalization-race invariant (Fix 6) at the engine boundary ---
+
+test("a remapped sale NEVER keeps a local shift id, and a non-pending sale is submitted as captured", async () => {
+  // Pending (Case 2) sale: must be remapped to the canonical id before submit.
+  await addPendingShift(makePending({ local_shift_id: "L1" }));
+  await addPosOfflineTxn(makeDependentTxn("L1"));
+  // A normal sale against a REAL server shift: no pending marker, submitted verbatim.
+  await addPosOfflineTxn(
+    makeDependentTxn("SRV-REAL", {
+      local_txn_id: "plain",
+      client_op_id: "op-plain",
+      pending_shift_local_id: null,
+      shift_id: "SRV-REAL",
+      order_payload: { client_op_id: "op-plain", order_type: "takeaway", shift_id: "SRV-REAL", branch_id: "b1", status: "sent_to_kitchen", notes: null, items: [] },
+      created_at: "2026-09-30T11:00:00Z",
+    }),
+  );
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  await syncPosTxns(ctx, "reconnect", deps(c));
+  assert.equal(c.opens, 1, "only the Case-2 shift is opened");
+  // Neither submitted order may carry a LOCAL pending shift id.
+  assert.ok(!c.submittedShiftIds.includes("L1"), "the local shift id is never submitted to the server");
+  assert.ok(c.submittedShiftIds.includes("SRV-SHIFT"), "the Case-2 sale was remapped to canonical");
+  assert.ok(c.submittedShiftIds.includes("SRV-REAL"), "the real-shift sale was submitted as captured");
 });
