@@ -337,6 +337,24 @@ test("post-switch context: replay under a NEW branch/OU never opens or submits t
   assert.equal((await getPendingShift("L-b1"))?.status, "pending_sync", "the b1 shift is left intact for its own context");
 });
 
+test("two concurrent syncPosTxns never process the financial queue twice (single-flight BEFORE the first await)", async () => {
+  await addPendingShift(makePending({ local_shift_id: "L1" }));
+  await addPosOfflineTxn(makeDependentTxn("L1"));
+  const c: Counters = { opens: 0, submits: 0, pays: 0, submittedShiftIds: [] };
+  // A slow hasSession() means that if the single-flight lock were acquired only AFTER
+  // this await, both concurrent calls would pass the guard and replay the queue
+  // together. With the lock taken before the first await, the second call no-ops.
+  const slow = deps(c, { hasSession: async () => { await new Promise((r) => setTimeout(r, 25)); return true; } });
+  const [r1, r2] = await Promise.all([
+    syncPosTxns(ctx, "concurrent-a", slow),
+    syncPosTxns(ctx, "concurrent-b", slow),
+  ]);
+  assert.equal(c.opens, 1, "shift opened exactly once despite concurrent reconnects");
+  assert.equal(c.submits, 1, "order submitted exactly once");
+  assert.equal(c.pays, 1, "paid exactly once");
+  assert.equal(r1.synced.length + r2.synced.length, 1, "exactly one pass did the work; the other no-op'd on the lock");
+});
+
 test("a remapped sale NEVER keeps a local shift id, and a non-pending sale is submitted as captured", async () => {
   // Pending (Case 2) sale: must be remapped to the canonical id before submit.
   await addPendingShift(makePending({ local_shift_id: "L1" }));

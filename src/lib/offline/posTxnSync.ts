@@ -329,17 +329,22 @@ export async function syncPosTxns(
   // Treat as offline ONLY when the browser explicitly says so. In non-browser
   // runtimes (tests) navigator.onLine is undefined and must not block replay.
   const netOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+  // Acquire the single-flight lock BEFORE the first await. JS is single-threaded, so
+  // the `if (syncing)` check and `syncing = true` run atomically only while no await
+  // sits between them: setting the lock before awaiting hasSession() is what makes two
+  // concurrent reconnect calls mutually exclusive over the FINANCIAL queue. (Acquiring
+  // it after the await let both callers pass the guard and replay the queue together.)
   if (syncing) return report;
   if (!ctx.online || netOffline) return report;
   if (!ctx.tenantId || !ctx.cashierUserId) return report;
-
-  // No offline bypass: confirm a live authenticated session before replaying.
-  if (!(await d.hasSession())) return report;
-
   syncing = true;
+
   // Resolve each referenced pending shift at most once per pass (open-exactly-once).
   const shiftResolutions = new Map<string, ShiftResolution>();
   try {
+    // No offline bypass: confirm a live authenticated session before replaying.
+    // Inside the lock (and the try) so the lock is always released in `finally`.
+    if (!(await d.hasSession())) return report;
     // Reconnect reconcile: open EVERY in-scope offline-opened shift exactly once,
     // independent of whether a sale depends on it. A shift opened offline with no
     // order must still be opened on the server on reconnect (and the result cached so

@@ -289,54 +289,26 @@ function PosWorkspaceInner() {
     setOfflinePending(await pendingPosTxnCount().catch(() => 0));
     setResumable(await listResumablePosTxns(tenantId, pos.branch.id, userId).catch(() => []));
   }, [tenantId, pos.branch.id, userId]);
-  useEffect(() => {
-    void refreshOfflineQueue();
-    const run = () => {
-      if (!tenantId || !userId) return;
-      void syncPosTxns(
-        { tenantId, branchId: pos.branch.id, cashierUserId: userId, deviceId: getDeviceIdentity().device_id, online: true },
-        "reconnect",
-      ).then(async () => {
-        await refreshOfflineQueue();
-        // Replay may have opened an offline-opened shift (Case 2) exactly once on
-        // the server. Re-read the shift so the canonical server shift supersedes
-        // the local pending one, and new orders bind to the real shift id. Scoped to
-        // THIS branch/OU so a pending shift for another context is never adopted.
-        await useShift.getState().refresh(tenantId, userId, pos.branch.id);
-      });
-    };
-    // Drain on mount when we are already online, and whenever `online` flips true.
-    // This covers reopening the app ONLINE after an offline restart (the OS fires no
-    // `online` event because connectivity never dropped in this process), so a
-    // pending offline-opened shift + its queued sale still sync without a manual
-    // action. syncPosTxns is single-flight and re-checks connectivity/session, so a
-    // redundant call with the `online` event / reachability effect is harmless.
-    if (online) run();
-    window.addEventListener("online", run);
-    return () => window.removeEventListener("online", run);
-  }, [tenantId, userId, pos.branch.id, online, refreshOfflineQueue]);
 
-  // Reconnect that the browser's `online` event cannot see: on Windows/WebView2 a
-  // backend outage can leave navigator.onLine === true, so "the backend came back"
-  // is detected by the reachability probe, not an `online` event. When the probe
-  // flips unreachable -> reachable we re-hydrate the session (leaving offline mode),
-  // drain the offline queue (opening any offline-opened shift exactly once), and
-  // re-read the shift so the canonical server shift supersedes the local pending one.
-  const prevReachableRef = useRef(backendReachable);
-  useEffect(() => {
-    const becameReachable = backendReachable && !prevReachableRef.current;
-    prevReachableRef.current = backendReachable;
-    if (!becameReachable || !tenantId || !userId) return;
-    void (async () => {
+  // The ONE offline-drain path, shared by BOTH reconnect triggers below (the browser
+  // `online` event / already-online mount, and the backend-reachability probe). It
+  // always replays under the SERVER-AUTHORITATIVE context:
+  //   * if we were in offline mode it rehydrates first and STOPS on a failed
+  //     rehydration - it never falls through to replay under stale session state;
+  //   * it then derives tenant / cashier / branch FRESH from the session store, so an
+  //     OU switch or access revocation on reconnect cannot bind offline work to the
+  //     old OU (the pre-reconnect closure values are never used for replay).
+  // syncPosTxns is single-flight, so two triggers racing coalesce into one safe pass
+  // that is already running under fresh context - the loser simply no-ops.
+  const drainWithFreshContext = useCallback(
+    async (trigger: "reconnect" | "backend-returned") => {
       if (useSession.getState().offlineMode) {
-        await useSession.getState().loadContextOnline().catch(() => {});
+        try {
+          await useSession.getState().loadContextOnline();
+        } catch {
+          return; // a failed authoritative refresh must NOT replay under stale context
+        }
       }
-      // Re-read the SERVER-AUTHORITATIVE context AFTER rehydration: the online load
-      // may have changed the active tenant/branch/OU or revoked access entirely.
-      // Replaying under the stale pre-reconnect context could bind offline work to
-      // the wrong OU, so tenant, cashier and branch are all derived fresh here
-      // (resolveBranchId is pure). If the tenant/user is gone, do not replay - the
-      // per-context scope guards would defer the work anyway, but skipping is clearer.
       const s = useSession.getState();
       const freshTenantId = s.tenant?.id ?? null;
       const freshUserId = s.userId ?? null;
@@ -344,12 +316,42 @@ function PosWorkspaceInner() {
       const freshBranchId = resolveBranchId(s.tenant, s.membership);
       await syncPosTxns(
         { tenantId: freshTenantId, branchId: freshBranchId, cashierUserId: freshUserId, deviceId: getDeviceIdentity().device_id, online: true },
-        "backend-returned",
+        trigger,
       ).catch(() => {});
       await refreshOfflineQueue();
+      // Replay may have opened an offline-opened shift (Case 2) exactly once on the
+      // server; re-read so the canonical server shift supersedes the local pending one.
       await useShift.getState().refresh(freshTenantId, freshUserId, freshBranchId);
-    })();
-  }, [backendReachable, tenantId, userId, pos.branch.id, refreshOfflineQueue]);
+    },
+    [refreshOfflineQueue],
+  );
+
+  useEffect(() => {
+    void refreshOfflineQueue();
+    const run = () => {
+      void drainWithFreshContext("reconnect");
+    };
+    // Drain on mount when we are already online, and whenever `online` flips true.
+    // This covers reopening the app ONLINE after an offline restart (the OS fires no
+    // `online` event because connectivity never dropped in this process), so a
+    // pending offline-opened shift + its queued sale still sync without a manual
+    // action. The drain re-reads fresh context and syncPosTxns is single-flight, so a
+    // redundant call racing the reachability effect replays once, under fresh context.
+    if (online) run();
+    window.addEventListener("online", run);
+    return () => window.removeEventListener("online", run);
+  }, [online, refreshOfflineQueue, drainWithFreshContext]);
+
+  // Reconnect that the browser's `online` event cannot see: on Windows/WebView2 a
+  // backend outage can leave navigator.onLine === true, so "the backend came back"
+  // is detected by the reachability probe, not an `online` event. Same drain path.
+  const prevReachableRef = useRef(backendReachable);
+  useEffect(() => {
+    const becameReachable = backendReachable && !prevReachableRef.current;
+    prevReachableRef.current = backendReachable;
+    if (!becameReachable) return;
+    void drainWithFreshContext("backend-returned");
+  }, [backendReachable, drainWithFreshContext]);
 
   // --- window ----------------------------------------------------------------
   useEffect(() => {
