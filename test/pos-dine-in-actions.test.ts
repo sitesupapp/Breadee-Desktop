@@ -289,12 +289,16 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // genuine drawer money-movers, so they belong in this guard. Split settle moves
   // money too but is covered by the exact-list contract; it does not match this
   // heuristic pattern and is intentionally not added here.
-  // `pay_` (settlement) and `payout` (drawer) — NOT a bare `pay`, which would also
-  // match the W3 `pos_payment_method*` CONFIG RPCs. Those manage the catalog and move
-  // no money, so they are deliberately excluded; a real money RPC still matches
-  // submit/pay_/payout/void/refund/complete/collect and cannot slip past.
+  // The guard keeps the BROAD `pay` detection so any future money-moving `pos_payment_*`
+  // RPC is caught automatically. The two W3 payment-method CONFIG RPCs
+  // (pos_payment_method_save / pos_payment_methods_manage_list) also match `pay` but move
+  // no money, so they are excluded BY EXACT NAME — a narrowing of the pattern itself was
+  // rejected in review because it could let a future money RPC slip past unnoticed.
   assert.deepEqual(
-    members.filter((m) => /submit|pay_|payout|void|refund|complete|collect/.test(m)).sort(),
+    members
+      .filter((m) => /submit|pay|payout|void|refund|complete|collect/.test(m))
+      .filter((m) => m !== "pos_payment_method_save" && m !== "pos_payment_methods_manage_list")
+      .sort(),
     [
       "pos_complete_on_account",
       "pos_complete_table_on_account",

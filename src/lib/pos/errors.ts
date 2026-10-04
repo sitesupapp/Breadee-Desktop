@@ -229,10 +229,17 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
   },
   {
     kind: "version_conflict",
-    // Shared optimistic-concurrency refusal: the dine-in bill ("this order changed…")
-    // and the W3 payment-method editor ("this payment method changed…") both raise it.
-    test: /this (order|payment method) changed since it was loaded/i,
-    hint: "The latest changes were reloaded. Review them, then make the edit again.",
+    test: /this order changed since it was loaded/i,
+    hint: "The bill was reloaded with the latest changes. Review it, then make the edit again.",
+    expected: true,
+  },
+  {
+    // POS Final W3 (Part 5) — the payment-method editor's OWN optimistic-concurrency
+    // refusal. A SEPARATE rule (not a broadened one) so the dine-in bill's established
+    // wording and hint above are left exactly as they were.
+    kind: "version_conflict",
+    test: /this payment method changed since it was loaded/i,
+    hint: "The payment method was reloaded with the latest changes. Review it, then save again.",
     expected: true,
   },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before

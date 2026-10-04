@@ -40,9 +40,12 @@ test("the data layer requires + round-trips the opaque CAS token", () => {
   assert.match(admin, /callPosRpc\("pos_payment_methods_manage_list"/);
 });
 
-test("VERSION_CONFLICT is classified (payment-method wording covered)", () => {
+test("VERSION_CONFLICT is classified by a SEPARATE payment-method rule", () => {
   const errors = read("src/lib/pos/errors.ts");
-  assert.match(errors, /this \(order\|payment method\) changed since it was loaded/i);
+  // The payment-method editor has its own version_conflict rule...
+  assert.match(errors, /this payment method changed since it was loaded/i);
+  // ...and the established dine-in bill rule/wording is left untouched (not broadened).
+  assert.match(errors, /this order changed since it was loaded/i);
 });
 
 test("the UI is gated, protects Cash, surfaces the GL gate, and sends the token on edit", () => {
