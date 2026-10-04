@@ -555,6 +555,12 @@ export function PosSettings() {
             label="Ingredient customization"
             hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Onion”. It changes only that line: the menu item, its recipe and its cost are untouched."
           />
+          <Switch
+            checked={features.printReductionReceipt}
+            onChange={(next) => setFeature("printReductionReceipt", next)}
+            label="Print a receipt when an item is reduced or cancelled"
+            hint="When a cashier reduces or cancels an already-sent Dine-In item, print a short record slip to the receipt printer — the item, the quantity removed, the reason, the table, staff and time. Off by default. It is a record only: it never affects the sale, the kitchen ticket, or the totals."
+          />
           {/* The "Categorized menu" switch moved to Settings → Cashier layout,
               with the Default mode it governs (Part 4). It is the same
               terminal-local posFeatures setting, just relocated. */}

@@ -32,9 +32,12 @@ import {
   autoPrintLatch,
   decideAutoPrint,
   receiptEventKey,
+  reductionEventKey,
   skipIsWorthReporting,
   type AutoPrintSkip,
 } from "@/lib/pos/autoPrint";
+import { readPosFeatures } from "@/lib/pos/posFeatures";
+import type { ReceiptRenderOptions } from "@/lib/pos/receiptRender";
 import { receiptOrderSource, blockMessage } from "@/lib/pos/cashierPrinter";
 import {
   kitchenBlockMessage,
@@ -459,6 +462,89 @@ export async function autoPrintReceipt(input: {
     return { kind: "failed", message: result.error.message };
   } catch (e) {
     return { kind: "failed", message: e instanceof Error ? e.message : "The receipt could not be printed." };
+  } finally {
+    autoPrintLatch.release(key);
+  }
+}
+
+// --- item reduction / cancellation record receipt (Part 2) -------------------
+
+/**
+ * Print the record slip for an item reduction/cancellation that the server has
+ * just committed, if THIS TERMINAL has `printReductionReceipt` switched on.
+ *
+ * Same discipline as the customer receipt above: called only after the edit RPC
+ * returned successfully; one attempt per committed reduction (the latch key is
+ * the server's post-edit `pos_entity_version`, so a remount or a re-read cannot
+ * reprint it); no retry; no failure channel that a caller's edit depends on. It
+ * routes to the RECEIPT destination and goes through the SAME thermal renderer as
+ * a customer receipt, but with a fixed restrictive render (`input.render`) that
+ * draws only the header and the removed line - no totals, no payment.
+ *
+ * It NEVER touches the kitchen cook-ticket. The kitchen is already updated by the
+ * server on a reduction (the line delete cancels/rolls-up its tickets); this slip
+ * is a RECEIPT-printer record only and adds no inventory, kitchen or accounting
+ * effect. The gate is the terminal-local switch, never the branch auto-print
+ * settings, so it is independent of whether customer receipts auto-print.
+ */
+export async function autoPrintReductionReceipt(input: {
+  branchId: string | null;
+  access: PosAccessContext;
+  receipt: ReceiptData;
+  render: ReceiptRenderOptions;
+  event: { orderId: string; targetItemId: string; posEntityVersion: number };
+}): Promise<ReceiptAutoPrintStatus> {
+  const native = isNativeAvailable();
+  const key = reductionEventKey(input.event);
+
+  if (!native) return { kind: "manual" };
+  if (autoPrintLatch.claimed(key)) return { kind: "manual" };
+  // The terminal switch, read on the print path (not the sale path) exactly like
+  // the branch auto-print settings above. Off -> nothing prints, silently.
+  if (!readPosFeatures().printReductionReceipt) return { kind: "manual" };
+
+  const installed = await listPrinters();
+  const resolution = await resolveFor({
+    branchId: input.branchId,
+    purpose: "receipt",
+    orderSource: "dine_in",
+    installed,
+  });
+  if (printerIsSilenced(resolution)) return { kind: "manual" };
+
+  const decision = decideAutoPrint({
+    nativeAvailable: native,
+    enabled: true, // the terminal switch was already checked above
+    permission: canPrintReceipts(input.access),
+    hasDocument: input.receipt.lines.length > 0,
+    resolution,
+    alreadyAttempted: autoPrintLatch.claimed(key),
+  });
+
+  if (decision.kind === "skip") {
+    if (decision.skip.reason === "unroutable" && decision.skip.resolution.kind === "blocked") {
+      return { kind: "failed", message: blockMessage(decision.skip.resolution.block) };
+    }
+    return { kind: "manual" };
+  }
+  if (resolution.kind !== "single") return { kind: "manual" };
+  if (!autoPrintLatch.claim(key)) return { kind: "manual" };
+
+  try {
+    const result = await printReceipt({
+      printerName: resolution.target.windowsName,
+      paperWidth: resolution.target.paperWidth,
+      copies: resolution.target.copies,
+      // The slip's OWN fixed render (header + removed line only); never the
+      // tenant's designed customer-receipt sections, which carry totals/payment.
+      receipt: { ...input.receipt, ...input.render },
+    });
+    if (result.ok) {
+      return { kind: "sent", copies: result.value.copies_accepted, printer: result.value.printer_name };
+    }
+    return { kind: "failed", message: result.error.message };
+  } catch (e) {
+    return { kind: "failed", message: e instanceof Error ? e.message : "The reduction receipt could not be printed." };
   } finally {
     autoPrintLatch.release(key);
   }
