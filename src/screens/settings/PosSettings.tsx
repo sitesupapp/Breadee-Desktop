@@ -24,6 +24,8 @@ import { Badge, Button, Card, EmptyState, ErrorState, Input, Skeleton } from "@/
 import { Switch } from "@/components/Switch";
 import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 import { usePosContext } from "@/state/pos";
+import { canManagePaymentMethods } from "@/lib/pos/access";
+import { PaymentMethodsSettings } from "@/components/pos/PaymentMethodsSettings";
 import { configureTables, loadTableMap, tableNamesForCount, validateTableCount } from "@/lib/pos/tables";
 import type { TableMap } from "@/types/tables";
 import { loadServerPrinters, type ServerPrinter } from "@/lib/pos/printerRegistry";
@@ -299,6 +301,10 @@ export function PosSettings() {
           {!saving && saved && <Badge tone="green">Saved</Badge>}
         </div>
       </Card>
+
+      {/* Payment Methods management (Part 5). Self-hides unless the operator holds
+          pos.payment_methods.manage; the server enforces it on every call. */}
+      <PaymentMethodsSettings canManage={canManagePaymentMethods(pos.access).allowed} />
 
       {/* --- branch-wide ------------------------------------------------- */}
       <Card className="p-6">

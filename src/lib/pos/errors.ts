@@ -229,8 +229,10 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
   },
   {
     kind: "version_conflict",
-    test: /this order changed since it was loaded/i,
-    hint: "The bill was reloaded with the latest changes. Review it, then make the edit again.",
+    // Shared optimistic-concurrency refusal: the dine-in bill ("this order changed…")
+    // and the W3 payment-method editor ("this payment method changed…") both raise it.
+    test: /this (order|payment method) changed since it was loaded/i,
+    hint: "The latest changes were reloaded. Review them, then make the edit again.",
     expected: true,
   },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before

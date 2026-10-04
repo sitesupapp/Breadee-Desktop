@@ -183,7 +183,18 @@ export type PosRpcName =
   // only — a draft edit or a restore never affects it until a publish succeeds.
   | "floor_publish"
   | "floor_history"
-  | "floor_restore_revision";
+  | "floor_restore_revision"
+  // POS Final W3 (Part 5) — Payment Methods MANAGEMENT in POS Settings.
+  // `pos_payment_methods_manage_list` is the manager READ (includes INACTIVE methods;
+  // SECURITY INVOKER, explicit tenant scope, gated pos.payment_methods.manage) — distinct
+  // from the checkout catalog (loadSplitPaymentMethods, active-only, unchanged).
+  // `pos_payment_method_save` creates/edits a method with an ATOMIC optimistic-concurrency
+  // token: an update MUST send `expected_updated_at` (the opaque timestamptz from the last
+  // read); a stale token returns a VERSION_CONFLICT the UI must surface (reload + reapply),
+  // never silently retry. is_cash/is_system are server-authoritative; cash is undeactivatable;
+  // activating a method requires its GL mapping when accounting is on.
+  | "pos_payment_methods_manage_list"
+  | "pos_payment_method_save";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

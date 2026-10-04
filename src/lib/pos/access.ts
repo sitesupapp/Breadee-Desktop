@@ -42,6 +42,10 @@ export const POS_PERMISSIONS = {
   ACCESS: "pos.access",
   CREATE_ORDERS: "pos.create_orders",
   TAKE_PAYMENTS: "pos.take_payments",
+  // POS Final W3 (Part 5) — manage the tenant's payment-method catalog in POS Settings.
+  // Tenant-level authority (pos_current_user_has_perm, no OU scope); the save + manager-list
+  // RPCs both enforce it server-side.
+  PAYMENT_METHODS_MANAGE: "pos.payment_methods.manage",
   // Phase E — item/quantity Split Bill. A DISTINCT authority; `pos_split_settle` checks this key.
   SPLIT_BILL: "pos.split_bill",
   // Phase G — POS Payouts / Cash Drawer Outflows. THREE distinct authorities the payout RPCs check.
@@ -178,6 +182,11 @@ export function canCreateOrders(ctx: PosAccessContext): Gate {
 
 export function canTakePayments(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.TAKE_PAYMENTS), "You do not have permission to take payments.");
+}
+
+/** POS Final W3 (Part 5) — manage the payment-method catalog (POS Settings). */
+export function canManagePaymentMethods(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.PAYMENT_METHODS_MANAGE), "You do not have permission to manage payment methods.");
 }
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
