@@ -78,6 +78,9 @@ export function PendingTransfersBanner({
       setError(null);
       // Invalidate any in-flight poll so its (pre-decision) response can't overwrite the refresh below.
       seqRef.current += 1;
+      // Scope every continuation to the context this decision started in: if the shift/OU changes
+      // during the await, we must not setError/setStep/onApproved/refresh into the NEW context.
+      const myCtx = ctxRef.current;
       try {
         // The CAS token comes from the SELF-SCOPED recipient read (pos_order_transfers_for_recipient),
         // so a recipient holding only pos.transfers.approve (e.g. a cashier) can decide without
@@ -88,15 +91,18 @@ export function PendingTransfersBanner({
           targetShiftId: action === "approve" ? openShiftId : null,
           expectedVersion: t.posEntityVersion,
         });
+        if (ctxRef.current !== myCtx) return; // context changed mid-call — leave the new context untouched
         setStep(null);
         await load();
         if (action === "approve") onApproved?.();
       } catch (e) {
-        setError(classifyError(e).message);
-        // Re-sync in case the transfer already moved on (terminal-state / conflict).
-        await load();
+        if (ctxRef.current === myCtx) {
+          setError(classifyError(e).message);
+          // Re-sync in case the transfer already moved on (terminal-state / conflict).
+          await load();
+        }
       } finally {
-        setBusyId(null);
+        if (ctxRef.current === myCtx) setBusyId(null);
       }
     },
     [openShiftId, load, onApproved],

@@ -107,15 +107,20 @@ export function TransferDialog({
 
   const selectedCount = selectedOrders.size;
   const confirmed = confirmText === CONFIRM_WORD; // exactly correct (§6.3)
-  const canSubmit = !busy && !!recipientId && selectedCount > 0 && confirmed;
+  // Action-gate: submission is allowed ONLY when the dialog is open and the loaded orders/recipients
+  // belong to the CURRENT (shiftId, branchId). This gates the footer AND the submit path (not just
+  // the body), so a context switch or an in-flight reload can never submit the previous session's
+  // orders/recipient — even for the first commit or via the Alt+Shift shortcut.
+  const ctxReady = open && !loading && !loadError && loadedKey === `${shiftId}|${branchId}`;
+  const canSubmit = ctxReady && !busy && !!recipientId && selectedCount > 0 && confirmed;
 
   const submit = useCallback(async () => {
-    if (!recipientId || selectedOrders.size === 0 || confirmText !== CONFIRM_WORD || busy) return;
+    if (!canSubmit) return; // invocation-time guard: covers ctxReady + recipient + orders + confirmed
     setBusy(true);
     setError(null);
     try {
       const res = await createTransfer({
-        toUserId: recipientId,
+        toUserId: recipientId as string,
         orderIds: Array.from(selectedOrders),
         clientToken: tokenRef.current,
       });
@@ -125,7 +130,7 @@ export function TransferDialog({
     } finally {
       setBusy(false);
     }
-  }, [recipientId, selectedOrders, confirmText, busy, onCreated]);
+  }, [canSubmit, recipientId, selectedOrders, onCreated]);
 
   // §6.3 — Alt+Shift accelerator. Only fires the submit when the form is already valid
   // (recipient + orders + the typed TRANSFER), so the typed confirmation stays authoritative.
@@ -157,10 +162,6 @@ export function TransferDialog({
     [recipients, recipientId],
   );
 
-  // Render-gate: the form shows only when the loaded data belongs to the CURRENT (shiftId, branchId).
-  // Until then we show the skeleton, so a context change can't flash the previous session's data.
-  const ctxReady = loadedKey === `${shiftId}|${branchId}`;
-
   return (
     <Modal
       open={open}
@@ -176,7 +177,7 @@ export function TransferDialog({
               Cancel
             </Button>
             <Button size="lg" onClick={() => void submit()} disabled={!canSubmit} title={!confirmed ? `Type ${CONFIRM_WORD} to confirm` : undefined}>
-              {busy ? "Transferring..." : `Transfer${selectedCount ? ` ${selectedCount}` : ""}`}
+              {busy ? "Transferring..." : `Transfer${ctxReady && selectedCount ? ` ${selectedCount}` : ""}`}
             </Button>
           </div>
         </div>

@@ -102,8 +102,12 @@ test("the Transfer dialog enforces the typed-TRANSFER confirmation + Alt+Shift",
   // load is invalidated on close (seqRef bumps on every open/close/context change).
   assert.match(dlg, /seq !== seqRef\.current/);
   assert.match(dlg, /seqRef\.current \+= 1/);
-  // render-gate: the form shows only when the loaded data matches the current (shiftId, branchId).
-  assert.match(dlg, /const ctxReady = loadedKey === /);
+  // render + ACTION gate: ctxReady requires open + cleanly-loaded + current (shiftId, branchId);
+  // canSubmit requires ctxReady, and submit() guards on canSubmit — so a stale footer or the
+  // Alt+Shift shortcut cannot submit the previous session's orders/recipient during a context switch.
+  assert.match(dlg, /const ctxReady = open && !loading && !loadError && loadedKey === /);
+  assert.match(dlg, /const canSubmit = ctxReady /);
+  assert.match(dlg, /if \(!canSubmit\) return;/);
 });
 
 test("the recipient banner approves into the operator's own shift with a two-step confirm", () => {
@@ -126,6 +130,9 @@ test("the recipient banner approves into the operator's own shift with a two-ste
   // render-gate: visible rows are derived from the CURRENT openShiftId DURING render (not a passive
   // effect), so a shift/OU switch shows nothing stale even on the first commit.
   assert.match(b, /loaded\.ctx === openShiftId/);
+  // a decision's continuations (setError/setStep/onApproved/refresh) are scoped to the context it
+  // started in, so a mid-call shift/OU change can't bleed into the new context.
+  assert.match(b, /ctxRef\.current !== myCtx/);
   // shows the sender name (§6.7 "From [user]") + the order count
   assert.match(b, /t\.fromUserName/);
   assert.match(b, /From /);
