@@ -66,7 +66,7 @@ function makeSnapshot(over: Partial<PosSessionSnapshot> = {}): PosSessionSnapsho
   };
 }
 
-const IDENTITY = { deviceId: DEV, tenantId: TENANT, cashierUserId: CASHIER };
+const IDENTITY = { deviceId: DEV, tenantId: TENANT, cashierUserId: CASHIER, branchId: BRANCH };
 
 beforeEach(() => {
   (globalThis as unknown as { localStorage: MemStorage }).localStorage.clear();
@@ -124,12 +124,14 @@ test("a non-open shift is never persisted and never restored", () => {
   assert.equal(readPosSessionSnapshot(), null, "a non-open shift is not a valid snapshot");
 });
 
-test("rejects a snapshot from a different tenant, cashier, or device", () => {
+test("rejects a snapshot from a different tenant, cashier, device, or branch/OU", () => {
   savePosSessionSnapshot(makeSnapshot());
   const snap = readPosSessionSnapshot();
-  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: "other-tenant", cashierUserId: CASHIER }), null);
-  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: TENANT, cashierUserId: "other-cashier" }), null);
-  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: "other-device", tenantId: TENANT, cashierUserId: CASHIER }), null);
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: "other-tenant", cashierUserId: CASHIER, branchId: BRANCH }), null);
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: TENANT, cashierUserId: "other-cashier", branchId: BRANCH }), null);
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: "other-device", tenantId: TENANT, cashierUserId: CASHIER, branchId: BRANCH }), null);
+  // Branch/OU is part of identity: a snapshot from a sibling branch never restores.
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: TENANT, cashierUserId: CASHIER, branchId: "other-branch" }), null);
   assert.equal(snapshotMatchesIdentity(snap as PosSessionSnapshot, { deviceId: DEV, tenantId: null, cashierUserId: CASHIER }), false, "no identity, no restore");
   assert.equal(restoreBranchNameFromSnapshot(snap, { branchId: BRANCH, tenantId: "other-tenant", deviceId: DEV }), null);
   assert.equal(restoreBranchNameFromSnapshot(snap, { branchId: "other-branch", tenantId: TENANT, deviceId: DEV }), null);
@@ -181,16 +183,19 @@ test("clear removes the snapshot", () => {
 test("shift store: offline refresh restores the snapshot; a live 'no shift' clears it", () => {
   const src = stripComments(read("state", "shift.ts"));
   assert.match(src, /catch[\s\S]*restoreShiftFromSnapshot\(readPosSessionSnapshot\(\)/, "offline refresh restores from snapshot");
-  assert.match(src, /deviceId: getDeviceIdentity\(\)\.device_id/, "restore is device-scoped");
+  assert.match(src, /const deviceId = getDeviceIdentity\(\)\.device_id/, "restore is device-scoped");
   assert.match(src, /offlineRestored: true/, "an offline-restored shift is flagged, not passed off as live");
   assert.match(src, /clearPosSessionSnapshot\(\)/, "server 'no shift' / close clears the snapshot");
   assert.match(src, /offlineRestored: false/, "a successful live read clears the offline flag");
+  // Case 2: an offline-opened shift is restored from the durable pending-shift store.
+  assert.match(src, /getActivePendingShift\(/, "offline refresh falls back to a pending offline-opened shift");
 });
 
 test("branch resolver: offline name falls back to the snapshot, never widening access", () => {
   const src = stripComments(read("lib", "branch.ts"));
-  assert.match(src, /restoreBranchNameFromSnapshot\(readPosSessionSnapshot\(\)/, "offline branch name from snapshot");
-  assert.match(src, /name: cached \?\? "Branch unavailable"/, "honest fallback when no snapshot applies");
+  assert.match(src, /restoreBranchNameFromSnapshot\(readPosSessionSnapshot\(\)/, "offline branch name from the open-shift snapshot");
+  assert.match(src, /restoreBranchName\(\{ deviceId, tenantId, branchId \}\)/, "offline branch name from the shift-INDEPENDENT branch-context cache");
+  assert.match(src, /\?\? "Branch unavailable"/, "honest fallback when no cache applies");
   assert.match(src, /export function resolveBranchId/, "branch id remains resolved from tenant/membership, not the snapshot");
 });
 
@@ -213,13 +218,23 @@ test("PosWorkspace: the Online badge is qualified by backend reachability, not n
 
 test("PosWorkspace: offline Send + offline Cash Pay are gated on backend reachability and share one txn", () => {
   const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
-  // Both offline paths probe the backend and upsert by the cart's op id.
-  assert.match(src, /if \(!\(await isBackendReachable\(\)\)\) \{\s*await saveOfflineSend/, "offline Send gated on reachability");
-  assert.match(src, /intent\.kind === "draft" && input\.method === "cash" && !\(await isBackendReachable\(\)\)/, "offline Pay gated (draft + cash only)");
+  // Both offline paths probe the backend (and force offline while a pending
+  // offline-opened shift is active) and upsert by the cart's op id.
+  assert.match(src, /isBackendReachable\(\)\)\) \{\s*await saveOfflineSend/, "offline Send gated on reachability");
+  assert.match(src, /intent\.kind === "draft" &&[\s\S]*?input\.method === "cash" &&[\s\S]*?isBackendReachable\(\)/, "offline Pay gated (draft + cash only)");
   const matches = src.match(/getPosOfflineTxnByOp\(opId\)/g) || [];
   assert.ok(matches.length >= 2, "Send and Pay both match the existing txn by op id (one logical order)");
   assert.match(src, /submitPayloadToCartLines\(/, "resume rebuilds the cart from the durable payload");
   assert.match(src, /clientOpId: txn\.client_op_id/, "resumed cart keeps the transaction's client_op_id");
+});
+
+test("PosWorkspace: the offline queue drains on mount when online (reopen after an offline restart)", () => {
+  const src = stripJsxComments(read("screens", "pos", "PosWorkspace.tsx"));
+  // A fresh ONLINE launch fires no `online` event and no reachability transition, so
+  // the reconnect effect must also drain when already online, or a pending
+  // offline-opened shift + its queued sale would never sync after a restart.
+  assert.match(src, /if \(online\) run\(\);/, "drains on mount / when online flips true");
+  assert.match(src, /window\.addEventListener\("online", run\)/, "still drains on the OS connectivity-restored signal");
 });
 
 test("sign-out drops the durable POS-session snapshot (no cross-user restore)", () => {

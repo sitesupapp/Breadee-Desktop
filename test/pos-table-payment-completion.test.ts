@@ -376,10 +376,13 @@ test("the cash box is re-read from the server, never incremented locally", () =>
   const workspace = read("screens", "pos", "DineInWorkspace.tsx");
   assert.match(workspace, /refreshCashBox\(\)/, "the cash box is not refreshed after a table payment");
   assert.doesNotMatch(workspace, /cashBox\s*[+]=|setCashBox|cashBox:\s*\{/, "the cash box is being mutated locally");
-  // And it is the SAME authoritative reader takeaway uses.
+  // And it is the SAME authoritative reader takeaway uses. The drawer is read from
+  // the server (now via the shiftNet indirection) and committed from that read; an
+  // in-flight response for a superseded shift is dropped, never incremented locally.
   const shiftStore = read("state", "shift.ts");
-  assert.match(shiftStore, /refreshCashBox: async \(\) => \{/);
-  assert.match(shiftStore, /cashBox: await getCashBox\(shift\.id\)/, "the cash box is no longer read from the server");
+  assert.match(shiftStore, /refreshCashBox: async \(guard\) => \{/);
+  assert.match(shiftStore, /await shiftNet\.getCashBox\(forShiftId\)/, "the cash box is no longer read from the server");
+  assert.match(shiftStore, /set\(\{ cashBox: box \}\)/, "the server's drawer value is what gets committed");
 });
 
 test("the receipt goes through the store-owned presentation layer", () => {

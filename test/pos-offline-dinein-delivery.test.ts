@@ -131,6 +131,7 @@ function deps(over: Partial<PosTxnSyncDeps> = {}): PosTxnSyncDeps {
   return {
     submit: async () => ({ order_id: "srv-" + crypto.randomUUID().slice(0, 8), order_number: "260923-0001" }),
     pay: async () => ({ paid: true }),
+    openShift: async () => ({ shiftId: "srv-shift-" + crypto.randomUUID().slice(0, 8), reused: false }),
     isTransport: (e) => e instanceof TypeError,
     hasSession: async () => true,
     ...over,
