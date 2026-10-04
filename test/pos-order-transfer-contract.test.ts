@@ -98,6 +98,8 @@ test("the Transfer dialog enforces the typed-TRANSFER confirmation + Alt+Shift",
   assert.match(dlg, /confirmText === CONFIRM_WORD/);
   assert.match(dlg, /altKey && e\.shiftKey/);
   assert.match(dlg, /createTransfer\(/);
+  // stale-session guard: a load from an earlier dialog session/branch is ignored.
+  assert.match(dlg, /genRef\.current !== gen/);
 });
 
 test("the recipient banner approves into the operator's own shift with a two-step confirm", () => {
@@ -110,10 +112,12 @@ test("the recipient banner approves into the operator's own shift with a two-ste
   assert.match(b, /expectedVersion: t\.posEntityVersion/);
   assert.doesNotMatch(b, /getTransferDetail/);
   // polls while the shift is open, so a transfer arriving AFTER mount still appears (§6.7),
-  // with interval cleanup + a stale-response guard
+  // with interval cleanup + a request-generation stale-response guard (ignores out-of-order
+  // poll/refresh responses and cross-context bleed; a decision bumps the generation).
   assert.match(b, /setInterval\(/);
   assert.match(b, /clearInterval\(/);
-  assert.match(b, /aliveRef/);
+  assert.match(b, /genRef\.current === gen/);
+  assert.match(b, /genRef\.current \+= 1/);
   // shows the sender name (§6.7 "From [user]") + the order count
   assert.match(b, /t\.fromUserName/);
   assert.match(b, /From /);

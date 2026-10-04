@@ -26,33 +26,38 @@ export function PendingTransfersBanner({
   const [step, setStep] = useState<PendingStep>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const aliveRef = useRef(true);
-
-  useEffect(() => {
-    aliveRef.current = true;
-    return () => {
-      aliveRef.current = false;
-    };
-  }, []);
+  // Request-generation guard: every context change (shift open/close/change, a decision, or
+  // unmount) bumps genRef, so a stale poll/refresh response captured under an older generation is
+  // ignored and can never overwrite the current context (no cross-shift/OU bleed, and a
+  // pre-decision poll can't re-display a transfer the operator just approved/rejected).
+  const genRef = useRef(0);
 
   const load = useCallback(async () => {
+    const gen = genRef.current;
     try {
       const rows = await listPendingTransfersForMe();
-      if (aliveRef.current) setItems(rows);
+      if (genRef.current === gen) setItems(rows);
     } catch {
       // A read failure here must never block the POS; just show nothing.
-      if (aliveRef.current) setItems([]);
+      if (genRef.current === gen) setItems([]);
     }
   }, []);
 
   // Load on open AND poll while the shift stays open, so a transfer created AFTER the recipient
-  // opened their shift still appears (§6.7). Interval is cleared on unmount / shift change; the
-  // aliveRef guards against a late response setting state after unmount.
+  // opened their shift still appears (§6.7). The interval is cleared, and the generation bumped
+  // (invalidating any in-flight response), on unmount / shift change.
   useEffect(() => {
-    if (!openShiftId) return;
+    genRef.current += 1;
+    if (!openShiftId) {
+      setItems([]);
+      return;
+    }
     void load();
     const id = setInterval(() => void load(), 20000);
-    return () => clearInterval(id);
+    return () => {
+      genRef.current += 1;
+      clearInterval(id);
+    };
   }, [openShiftId, load]);
 
   const decide = useCallback(
@@ -63,6 +68,8 @@ export function PendingTransfersBanner({
       }
       setBusyId(t.transferId);
       setError(null);
+      // Invalidate any in-flight poll so its (pre-decision) response can't overwrite the refresh below.
+      genRef.current += 1;
       try {
         // The CAS token comes from the SELF-SCOPED recipient read (pos_order_transfers_for_recipient),
         // so a recipient holding only pos.transfers.approve (e.g. a cashier) can decide without
