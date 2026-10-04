@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { classifyError } from "@/lib/pos/errors";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -105,7 +106,33 @@ test("the recipient banner approves into the operator's own shift with a two-ste
   assert.match(b, /decideTransfer\(/);
   // approve targets the operator's own open shift
   assert.match(b, /targetShiftId: action === "approve" \? openShiftId : null/);
+  // CAS token comes from the self-scoped read (no getTransferDetail / no view perm needed)
+  assert.match(b, /expectedVersion: t\.posEntityVersion/);
+  assert.doesNotMatch(b, /getTransferDetail/);
   // two-step: a confirm step before the decision fires
   assert.match(b, /Confirm approve/);
   assert.match(b, /Confirm reject/);
+});
+
+test("decide + reapprove require a valid expected version (mandatory CAS), sourced from the self-scoped read", () => {
+  const t = read("src/lib/pos/transfers.ts");
+  // both guard a non-integer version before issuing the RPC, and always send it
+  assert.match(t, /Number\.isInteger\(input\.expectedVersion\)/);
+  assert.match(t, /expected_version: input\.expectedVersion/);
+  // the recipient read surfaces pos_entity_version so a view-less recipient can still pass CAS
+  assert.match(t, /posEntityVersion: num\(r\.pos_entity_version\)/);
+});
+
+test("classifyError maps the transfer refusals to the right kinds (behavioral)", () => {
+  assert.equal(
+    classifyError(new Error("This transfer changed since it was loaded. Reload and retry.")).kind,
+    "version_conflict",
+  );
+  assert.equal(classifyError(new Error("This transfer was already approved.")).kind, "transfer_conflict");
+  assert.equal(
+    classifyError(new Error("Cannot close this shift: 2 order(s) still open. Resolve them before ending the shift.")).kind,
+    "open_orders_block",
+  );
+  // the pre-existing dine-in bill rule stays distinct and intact
+  assert.equal(classifyError(new Error("This order changed since it was loaded.")).kind, "version_conflict");
 });

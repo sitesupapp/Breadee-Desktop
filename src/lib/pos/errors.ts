@@ -356,7 +356,10 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     // POS Final W4/W5 (Part 6) — End Shift refused because open orders remain. Classified so
     // the UI can offer the Transfer action instead of just showing the refusal.
     kind: "open_orders_block",
-    test: /order\(s\) still open|cannot close this shift/i,
+    // The canonical pos_end_shift refusal is "... N order(s) still open. Resolve them before
+    // ending the shift." Match that specifically — do NOT broadly match "cannot close this shift",
+    // which other refusals could also use and would wrongly offer the Transfer action.
+    test: /order\(s\) still open/i,
     hint: "Transfer or resolve the open orders, then end your shift.",
     expected: true,
   },

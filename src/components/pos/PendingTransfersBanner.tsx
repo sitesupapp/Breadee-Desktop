@@ -9,12 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, cn } from "@/components/ui";
 import { classifyError } from "@/lib/pos/errors";
-import {
-  decideTransfer,
-  getTransferDetail,
-  listPendingTransfersForMe,
-  type PendingTransfer,
-} from "@/lib/pos/transfers";
+import { decideTransfer, listPendingTransfersForMe, type PendingTransfer } from "@/lib/pos/transfers";
 
 type PendingStep = { id: string; action: "approve" | "reject" } | null;
 
@@ -55,16 +50,14 @@ export function PendingTransfersBanner({
       setBusyId(t.transferId);
       setError(null);
       try {
-        let expectedVersion: number | null = null;
-        if (action === "approve") {
-          // Fetch the current version for the CAS guard right before transitioning.
-          expectedVersion = (await getTransferDetail(t.transferId)).posEntityVersion;
-        }
+        // The CAS token comes from the SELF-SCOPED recipient read (pos_order_transfers_for_recipient),
+        // so a recipient holding only pos.transfers.approve (e.g. a cashier) can decide without
+        // needing pos.transfers.view. Both approve and reject pass it (mandatory CAS).
         await decideTransfer({
           transferId: t.transferId,
           decision: action,
           targetShiftId: action === "approve" ? openShiftId : null,
-          expectedVersion,
+          expectedVersion: t.posEntityVersion,
         });
         setStep(null);
         await load();

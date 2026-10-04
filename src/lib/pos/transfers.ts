@@ -24,6 +24,9 @@ export type PendingTransfer = {
   status: TransferStatus;
   createdAt: string | null;
   orderCount: number;
+  /** The transfer's CAS token, returned by the SELF-SCOPED recipient read so the recipient can
+   *  pass it to decide WITHOUT needing pos.transfers.view (they only hold approve). */
+  posEntityVersion: number;
 };
 
 export type EligibleRecipient = {
@@ -106,6 +109,7 @@ export async function listPendingTransfersForMe(): Promise<PendingTransfer[]> {
       status: toStatus(r.status),
       createdAt: strOrNull(r.created_at),
       orderCount: num(r.order_count),
+      posEntityVersion: num(r.pos_entity_version),
     };
   });
 }
@@ -225,12 +229,17 @@ export async function decideTransfer(input: {
   /** Required for approve: the recipient's own OPEN shift the orders move into. */
   targetShiftId?: string | null;
   note?: string | null;
-  expectedVersion?: number | null;
+  /** REQUIRED (mandatory CAS): the transfer's pos_entity_version from the last read. */
+  expectedVersion: number;
 }): Promise<TransferResult> {
-  const payload: Record<string, unknown> = { transfer_id: input.transferId, decision: input.decision };
+  if (!Number.isInteger(input.expectedVersion)) throw new Error("A valid expected version is required to decide a transfer.");
+  const payload: Record<string, unknown> = {
+    transfer_id: input.transferId,
+    decision: input.decision,
+    expected_version: input.expectedVersion,
+  };
   if (input.targetShiftId) payload.target_shift_id = input.targetShiftId;
   if (input.note && input.note.trim()) payload.note = input.note.trim();
-  if (input.expectedVersion != null) payload.expected_version = input.expectedVersion;
   const r = asRecord(await callPosRpc("pos_order_transfer_decide", { p_payload: payload }));
   return {
     transferId: requireId(r.transfer_id, "pos_order_transfer_decide", "transfer_id"),
@@ -244,16 +253,18 @@ export async function reapproveTransfer(input: {
   transferId: string;
   targetShiftId: string;
   note?: string | null;
-  expectedVersion?: number | null;
+  /** REQUIRED (mandatory CAS): the transfer's pos_entity_version from the last read. */
+  expectedVersion: number;
   clientToken?: string;
 }): Promise<TransferResult> {
+  if (!Number.isInteger(input.expectedVersion)) throw new Error("A valid expected version is required to re-approve a transfer.");
   const payload: Record<string, unknown> = {
     transfer_id: input.transferId,
     target_shift_id: input.targetShiftId,
     reapprove_client_token: input.clientToken ?? newToken(),
+    expected_version: input.expectedVersion,
   };
   if (input.note && input.note.trim()) payload.note = input.note.trim();
-  if (input.expectedVersion != null) payload.expected_version = input.expectedVersion;
   const r = asRecord(await callPosRpc("pos_order_transfer_reapprove", { p_payload: payload }));
   return {
     transferId: requireId(r.transfer_id, "pos_order_transfer_reapprove", "transfer_id"),
