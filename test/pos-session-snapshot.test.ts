@@ -66,7 +66,7 @@ function makeSnapshot(over: Partial<PosSessionSnapshot> = {}): PosSessionSnapsho
   };
 }
 
-const IDENTITY = { deviceId: DEV, tenantId: TENANT, cashierUserId: CASHIER };
+const IDENTITY = { deviceId: DEV, tenantId: TENANT, cashierUserId: CASHIER, branchId: BRANCH };
 
 beforeEach(() => {
   (globalThis as unknown as { localStorage: MemStorage }).localStorage.clear();
@@ -124,12 +124,14 @@ test("a non-open shift is never persisted and never restored", () => {
   assert.equal(readPosSessionSnapshot(), null, "a non-open shift is not a valid snapshot");
 });
 
-test("rejects a snapshot from a different tenant, cashier, or device", () => {
+test("rejects a snapshot from a different tenant, cashier, device, or branch/OU", () => {
   savePosSessionSnapshot(makeSnapshot());
   const snap = readPosSessionSnapshot();
-  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: "other-tenant", cashierUserId: CASHIER }), null);
-  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: TENANT, cashierUserId: "other-cashier" }), null);
-  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: "other-device", tenantId: TENANT, cashierUserId: CASHIER }), null);
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: "other-tenant", cashierUserId: CASHIER, branchId: BRANCH }), null);
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: TENANT, cashierUserId: "other-cashier", branchId: BRANCH }), null);
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: "other-device", tenantId: TENANT, cashierUserId: CASHIER, branchId: BRANCH }), null);
+  // Branch/OU is part of identity: a snapshot from a sibling branch never restores.
+  assert.equal(restoreShiftFromSnapshot(snap, { deviceId: DEV, tenantId: TENANT, cashierUserId: CASHIER, branchId: "other-branch" }), null);
   assert.equal(snapshotMatchesIdentity(snap as PosSessionSnapshot, { deviceId: DEV, tenantId: null, cashierUserId: CASHIER }), false, "no identity, no restore");
   assert.equal(restoreBranchNameFromSnapshot(snap, { branchId: BRANCH, tenantId: "other-tenant", deviceId: DEV }), null);
   assert.equal(restoreBranchNameFromSnapshot(snap, { branchId: "other-branch", tenantId: TENANT, deviceId: DEV }), null);

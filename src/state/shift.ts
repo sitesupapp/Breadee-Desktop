@@ -47,7 +47,14 @@ type ShiftState = {
   error: string | null;
 
   refresh: (tenantId: string, userId: string, branchId?: string | null) => Promise<void>;
-  refreshCashBox: () => Promise<void>;
+  /**
+   * Re-read the cash box for the active shift. `guard`, when supplied, is checked
+   * after the (async) read and the result is discarded if it returns true - the
+   * caller (e.g. a shift refresh) uses this to drop a response that a newer refresh
+   * has superseded. The active-shift identity is always re-checked regardless, so an
+   * in-flight read for a shift that is no longer active can never overwrite state.
+   */
+  refreshCashBox: (guard?: () => boolean) => Promise<void>;
   open: (input: {
     tenantId: string;
     userId: string;
@@ -71,6 +78,12 @@ type ShiftState = {
 // result. The gate mechanism is unit-tested in test/offline-latest-gate.test.ts.
 const shiftRefreshGate = createLatestGate();
 
+// Network reads routed through one indirection object so integration tests can
+// inject deterministic fakes and drive the REAL store - its generation gate, branch
+// equality checks, cash-box guard and async ordering - without a Supabase client.
+// Production uses the shipped implementations.
+export const shiftNet = { findOpenShift, getCashBox };
+
 export const useShift = create<ShiftState>((set, get) => ({
   loading: true,
   shift: null,
@@ -88,12 +101,16 @@ export const useShift = create<ShiftState>((set, get) => ({
     set({ loading: true, error: null });
     const deviceId = getDeviceIdentity().device_id;
     try {
-      const shift = await findOpenShift(tenantId, userId);
+      const shift = await shiftNet.findOpenShift(tenantId, userId);
       if (isStale()) return;
-      if (shift) {
+      // The live open shift must be for THIS branch/OU. findOpenShift returns the
+      // cashier's most recent open shift across branches, so a shift opened in a
+      // sibling branch/OU must NOT surface as this POS context's active shift; fall
+      // through to the branch-scoped pending/none handling below instead.
+      if (shift && (shift.branch_id ?? null) === (branchId ?? null)) {
         // Server is the authority: a real open shift supersedes any offline state.
         set({ shift, loading: false, offlineRestored: false, pendingLocalId: null });
-        await get().refreshCashBox();
+        await get().refreshCashBox(isStale);
         return;
       }
       // Reachable, and the server says NO open shift. A pending offline-opened shift
@@ -133,11 +150,12 @@ export const useShift = create<ShiftState>((set, get) => ({
         });
         return;
       }
-      // 1) a previously-hydrated server open shift (Case 1).
+      // 1) a previously-hydrated server open shift (Case 1), for THIS branch/OU only.
       const restored = restoreShiftFromSnapshot(readPosSessionSnapshot(), {
         deviceId,
         tenantId,
         cashierUserId: userId,
+        branchId,
       });
       if (restored) {
         if (isStale()) return;
@@ -164,16 +182,25 @@ export const useShift = create<ShiftState>((set, get) => ({
     }
   },
 
-  refreshCashBox: async () => {
+  refreshCashBox: async (guard) => {
     const shift = get().shift;
     // A pending offline-opened shift has no server drawer to read; skip it.
     if (!shift || get().pendingLocalId) {
       set({ cashBox: null });
       return;
     }
+    // The shift this read is FOR. The active shift can change (a newer refresh, an
+    // OU switch) while getCashBox is in flight; a response for a shift that is no
+    // longer active - or that a newer refresh superseded (guard) - must be dropped so
+    // it never overwrites the current OU's drawer state.
+    const forShiftId = shift.id;
+    const stillCurrent = () => !guard?.() && get().shift?.id === forShiftId && !get().pendingLocalId;
     try {
-      set({ cashBox: await getCashBox(shift.id) });
+      const box = await shiftNet.getCashBox(forShiftId);
+      if (!stillCurrent()) return;
+      set({ cashBox: box });
     } catch (e) {
+      if (!stillCurrent()) return;
       // The drawer is informational; a failure here must not block ordering, and a
       // transport failure must not surface a raw network message.
       if (isTransportFailure(e)) {

@@ -53,6 +53,13 @@ export type SnapshotIdentity = {
   deviceId: string;
   tenantId: string | null;
   cashierUserId: string | null;
+  /**
+   * The branch/OU the restore is for. A Case-1 snapshot is restored ONLY when its
+   * branch matches exactly, so a snapshot saved in a sibling branch/OU (same device,
+   * tenant and cashier) can never surface as this branch's active shift. Callers must
+   * pass the resolved branch explicitly rather than relying on the default.
+   */
+  branchId?: string | null;
 };
 
 // A label that means "we could not resolve a branch" must never be persisted as
@@ -115,7 +122,10 @@ export function snapshotMatchesIdentity(s: PosSessionSnapshot, id: SnapshotIdent
     !!id.cashierUserId &&
     s.device_id === id.deviceId &&
     s.tenant_id === id.tenantId &&
-    s.cashier_user_id === id.cashierUserId
+    s.cashier_user_id === id.cashierUserId &&
+    // Exact branch/OU equality: a snapshot from another branch is never this
+    // context's shift, even on the same device/tenant/cashier.
+    (s.branch_id ?? null) === (id.branchId ?? null)
   );
 }
 
