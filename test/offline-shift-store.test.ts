@@ -87,6 +87,18 @@ test("a Case-1 snapshot from ANOTHER branch/OU is rejected on an offline refresh
   assert.equal(useShift.getState().error, null, "an expected outage with no in-scope shift is not an error");
 });
 
+test("sign-out during an in-flight refresh: the late result must NOT repopulate shift state", async () => {
+  // A refresh is parked in findOpenShift when the cashier signs out (clear()).
+  // clear() invalidates the refresh generation, so when findOpenShift finally
+  // resolves the refresh sees itself as stale and commits nothing.
+  shiftNet.findOpenShift = async () => { await delay(40); return openShift("SRV-LATE", "b1"); };
+  const p = useShift.getState().refresh("t1", "u1", "b1"); // claims a generation, then parks
+  await delay(10);
+  useShift.getState().clear(); // sign-out: invalidates the in-flight refresh
+  await p;
+  assert.equal(useShift.getState().shift, null, "the post-sign-out refresh result was dropped");
+});
+
 test("a Case-1 snapshot for THIS branch/OU is restored on an offline refresh", async () => {
   savePosSessionSnapshot({
     version: 1, source: "server", savedAt: Date.now(), device_id: DEVICE,

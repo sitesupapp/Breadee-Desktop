@@ -57,7 +57,7 @@ import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { Input, Button } from "@/components/ui";
 import { useSession } from "@/state/session";
 import { resolveBranchId } from "@/lib/branch";
-import { runFreshContextPasses } from "@/lib/offline/drainPasses";
+import { runReconnectDrain } from "@/lib/offline/reconnectDrain";
 import { usePosContext } from "@/state/pos";
 import { requireOpenShiftId, useShift } from "@/state/shift";
 import { selectItemCount, selectSubtotal, useCart, type CartOwner } from "@/state/cart";
@@ -303,41 +303,34 @@ function PosWorkspaceInner() {
   // that is already running under fresh context - the loser simply no-ops.
   const drainWithFreshContext = useCallback(
     async (trigger: "reconnect" | "backend-returned") => {
-      if (useSession.getState().offlineMode) {
-        try {
-          await useSession.getState().loadContextOnline();
-        } catch {
-          return; // a failed authoritative refresh must NOT replay under stale context
-        }
-      }
-      // Drain under the server-authoritative context, then re-validate it: if an OU
-      // switch (or sign-out) landed WHILE this drain was in flight - possibly causing
-      // a concurrent drain to no-op on the single-flight lock - the context key will
-      // have changed, so runFreshContextPasses runs ONE more pass under the new
-      // context (bounded, converges when stable). A chained re-pass, not a new queue.
-      await runFreshContextPasses(
-        () => {
+      // Thin wrapper over the extracted, integration-tested drain sequence. It drains
+      // under the server-authoritative context and re-validates that context before
+      // committing any post-sync state, re-passing if an OU switch / sign-out landed
+      // mid-drain. The queue display and the shift re-read are both scoped to the PASS
+      // context, never a render-time closure.
+      await runReconnectDrain({
+        isOfflineMode: () => useSession.getState().offlineMode,
+        loadContextOnline: () => useSession.getState().loadContextOnline(),
+        readContext: () => {
           const s = useSession.getState();
           const t = s.tenant?.id ?? null;
           const u = s.userId ?? null;
           if (!t || !u) return null;
           return { tenantId: t, userId: u, branchId: resolveBranchId(s.tenant, s.membership) };
         },
-        (c) => `${c.tenantId}|${c.userId}|${c.branchId}`,
-        async (c) => {
-          await syncPosTxns(
+        sync: (c) =>
+          syncPosTxns(
             { tenantId: c.tenantId, branchId: c.branchId, cashierUserId: c.userId, deviceId: getDeviceIdentity().device_id, online: true },
             trigger,
-          ).catch(() => {});
-          await refreshOfflineQueue();
-          // Replay may have opened an offline-opened shift (Case 2) exactly once on the
-          // server; re-read so the canonical server shift supersedes the local pending
-          // one. refresh is generation-guarded, so a stale pass never wins.
-          await useShift.getState().refresh(c.tenantId, c.userId, c.branchId);
+          ).then(() => undefined),
+        refreshQueue: async (c) => {
+          setOfflinePending(await pendingPosTxnCount().catch(() => 0));
+          setResumable(await listResumablePosTxns(c.tenantId, c.branchId, c.userId).catch(() => []));
         },
-      );
+        refreshShift: (c) => useShift.getState().refresh(c.tenantId, c.userId, c.branchId),
+      });
     },
-    [refreshOfflineQueue],
+    [],
   );
 
   useEffect(() => {

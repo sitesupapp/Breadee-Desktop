@@ -269,8 +269,13 @@ export const useShift = create<ShiftState>((set, get) => ({
 
   clearReport: () => set({ lastReport: null }),
 
-  clear: () =>
-    set({ loading: false, shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, error: null }),
+  clear: () => {
+    // Invalidate any in-flight refresh FIRST: a refresh that claimed its generation
+    // before sign-out must not resolve afterwards and repopulate shift state for a
+    // session that no longer exists.
+    shiftRefreshGate.invalidate();
+    set({ loading: false, shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, error: null });
+  },
 }));
 
 /** The one predicate the order/payment paths consult. */

@@ -10,12 +10,18 @@
 // superseded and skip its commit. Single-threaded JS guarantees claim() is atomic.
 export type LatestClaim = { isStale: () => boolean };
 
-export function createLatestGate(): { claim: () => LatestClaim } {
+export function createLatestGate(): { claim: () => LatestClaim; invalidate: () => void } {
   let seq = 0;
   return {
     claim() {
       const gen = ++seq;
       return { isStale: () => seq !== gen };
+    },
+    // Mark every outstanding claim stale WITHOUT handing out a new live one. Used on a
+    // hard reset (sign-out): an in-flight operation that claimed before this must not
+    // repopulate state after the reset, and nothing new is "latest" until the next claim.
+    invalidate() {
+      seq++;
     },
   };
 }
