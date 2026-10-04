@@ -57,40 +57,45 @@ export function TransferDialog({
   const [error, setError] = useState<string | null>(null);
   // One idempotency token per dialog session — a retried submit of the same intent is a no-op.
   const tokenRef = useRef<string>("");
-  // Request-generation guard: each dialog open bumps genRef, so a load response from an earlier
-  // session/branch/shift is ignored and cannot overwrite the current session's data.
-  const genRef = useRef(0);
+  // Latest-request-wins guard: every open/close/context change bumps seqRef, so a load response
+  // from an earlier session/branch/shift (or one still in flight when the dialog closes) is
+  // ignored and cannot overwrite the current session's data.
+  const seqRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!shiftId || !branchId) return;
-    const gen = genRef.current;
+    const seq = (seqRef.current += 1);
     setLoading(true);
     setLoadError(null);
     try {
       const [o, r] = await Promise.all([getUnresolvedOrders(shiftId), listEligibleRecipients(branchId)]);
-      if (genRef.current !== gen) return; // a newer dialog session superseded this request
+      if (seq !== seqRef.current) return; // a newer request/session superseded this one
       setOrders(o);
       setRecipients(r);
       setSelectedOrders(new Set(o.map((x) => x.orderId))); // default: all selected
     } catch (e) {
-      if (genRef.current === gen) setLoadError(classifyError(e).message);
+      if (seq === seqRef.current) setLoadError(classifyError(e).message);
     } finally {
-      if (genRef.current === gen) setLoading(false);
+      if (seq === seqRef.current) setLoading(false);
     }
   }, [shiftId, branchId]);
 
   useEffect(() => {
-    if (!open) return;
-    genRef.current += 1; // new session: invalidate any earlier in-flight load
-    tokenRef.current = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.()
-      ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    // Clear last session's data so nothing stale renders before this load resolves.
+    // Bump on EVERY open/close/context change so an in-flight load is invalidated (incl. on close),
+    // and clear the previous session's data synchronously so it can never render on reopen.
+    seqRef.current += 1;
     setOrders([]);
     setRecipients([]);
     setSelectedOrders(new Set());
     setRecipientId(null);
     setConfirmText("");
     setError(null);
+    if (!open) {
+      setLoading(false);
+      return;
+    }
+    tokenRef.current = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.()
+      ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setLoading(true);
     void load();
   }, [open, load]);

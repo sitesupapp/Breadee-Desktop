@@ -26,36 +26,40 @@ export function PendingTransfersBanner({
   const [step, setStep] = useState<PendingStep>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Request-generation guard: every context change (shift open/close/change, a decision, or
-  // unmount) bumps genRef, so a stale poll/refresh response captured under an older generation is
-  // ignored and can never overwrite the current context (no cross-shift/OU bleed, and a
-  // pre-decision poll can't re-display a transfer the operator just approved/rejected).
-  const genRef = useRef(0);
+  // Latest-request-wins guard. seqRef is a monotonic request counter; ctxRef is the shift/OU
+  // context a request was issued under. A response is applied ONLY if it is still the latest
+  // request issued (seq === seqRef.current) AND its context still matches (ctxRef). This defeats
+  // out-of-order completion WITHIN a context (an older poll can't overwrite a newer one), a
+  // pre-decision poll re-displaying an approved/rejected transfer (a decision bumps seqRef), and
+  // cross-shift/OU bleed (ctx mismatch). Items are also cleared on every transition so old-context
+  // rows never render or become actionable while the replacement is pending.
+  const seqRef = useRef(0);
+  const ctxRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
-    const gen = genRef.current;
+    const seq = (seqRef.current += 1);
+    const ctx = ctxRef.current;
     try {
       const rows = await listPendingTransfersForMe();
-      if (genRef.current === gen) setItems(rows);
+      if (seq === seqRef.current && ctx === ctxRef.current) setItems(rows);
     } catch {
       // A read failure here must never block the POS; just show nothing.
-      if (genRef.current === gen) setItems([]);
+      if (seq === seqRef.current && ctx === ctxRef.current) setItems([]);
     }
   }, []);
 
   // Load on open AND poll while the shift stays open, so a transfer created AFTER the recipient
-  // opened their shift still appears (§6.7). The interval is cleared, and the generation bumped
-  // (invalidating any in-flight response), on unmount / shift change.
+  // opened their shift still appears (§6.7). Every transition supersedes in-flight requests
+  // (seqRef bump) and clears old-context rows immediately; the interval is cleared on change/unmount.
   useEffect(() => {
-    genRef.current += 1;
-    if (!openShiftId) {
-      setItems([]);
-      return;
-    }
+    ctxRef.current = openShiftId;
+    seqRef.current += 1; // supersede any in-flight request from the previous context
+    setItems([]); // never show the previous shift/OU's rows while the new load is pending
+    if (!openShiftId) return;
     void load();
     const id = setInterval(() => void load(), 20000);
     return () => {
-      genRef.current += 1;
+      seqRef.current += 1;
       clearInterval(id);
     };
   }, [openShiftId, load]);
@@ -69,7 +73,7 @@ export function PendingTransfersBanner({
       setBusyId(t.transferId);
       setError(null);
       // Invalidate any in-flight poll so its (pre-decision) response can't overwrite the refresh below.
-      genRef.current += 1;
+      seqRef.current += 1;
       try {
         // The CAS token comes from the SELF-SCOPED recipient read (pos_order_transfers_for_recipient),
         // so a recipient holding only pos.transfers.approve (e.g. a cashier) can decide without

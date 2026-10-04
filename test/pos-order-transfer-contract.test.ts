@@ -98,8 +98,10 @@ test("the Transfer dialog enforces the typed-TRANSFER confirmation + Alt+Shift",
   assert.match(dlg, /confirmText === CONFIRM_WORD/);
   assert.match(dlg, /altKey && e\.shiftKey/);
   assert.match(dlg, /createTransfer\(/);
-  // stale-session guard: a load from an earlier dialog session/branch is ignored.
-  assert.match(dlg, /genRef\.current !== gen/);
+  // stale-session guard: a load from an earlier dialog session/branch is ignored, and an in-flight
+  // load is invalidated on close (seqRef bumps on every open/close/context change).
+  assert.match(dlg, /seq !== seqRef\.current/);
+  assert.match(dlg, /seqRef\.current \+= 1/);
 });
 
 test("the recipient banner approves into the operator's own shift with a two-step confirm", () => {
@@ -116,8 +118,11 @@ test("the recipient banner approves into the operator's own shift with a two-ste
   // poll/refresh responses and cross-context bleed; a decision bumps the generation).
   assert.match(b, /setInterval\(/);
   assert.match(b, /clearInterval\(/);
-  assert.match(b, /genRef\.current === gen/);
-  assert.match(b, /genRef\.current \+= 1/);
+  // latest-request-wins + context guard: apply only the newest response for the current shift/OU
+  assert.match(b, /seq === seqRef\.current && ctx === ctxRef\.current/);
+  assert.match(b, /seqRef\.current \+= 1/);
+  // old-context rows are cleared on every transition (never render while the replacement is pending)
+  assert.match(b, /setItems\(\[\]\)/);
   // shows the sender name (§6.7 "From [user]") + the order count
   assert.match(b, /t\.fromUserName/);
   assert.match(b, /From /);
