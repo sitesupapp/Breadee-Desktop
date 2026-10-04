@@ -62,6 +62,47 @@ export type ShiftReportDetail = {
 };
 
 /**
+ * Part 1 — items REDUCED or CANCELLED on submitted Dine-In lines during this
+ * shift, as the server aggregated it into `report_json.item_reductions`.
+ *
+ * DISTINCT from REVERSED above: that counts whole voided/cancelled/refunded
+ * ORDERS; this counts line-level reduction/cancellation EVENTS on orders that
+ * otherwise completed. The two never share a number, so nothing is double
+ * counted. `removedValueKnownSubtotal` is informational (the value of removed
+ * items, in the shift currency) and is NEVER netted off sales — sales already
+ * exclude removed lines. Optional/absent on reports written before this field
+ * existed, so every consumer tolerates its absence.
+ */
+export type ItemReductionReport = {
+  removalEventsCount: number;
+  reductionEventsCount: number;
+  totalRemovedQuantity: number;
+  removedValueKnownSubtotal: number;
+  /** Events whose stored price/qty could not be valued; surfaced, never zeroed in. */
+  valueUnavailableCount: number;
+  currency: CurrencyCode | null;
+};
+
+/**
+ * Map the raw `report_json.item_reductions` object (snake_case, server-written)
+ * to the typed summary. Returns null when the key is absent (old reports) or
+ * malformed, so the report simply omits the section rather than erroring.
+ */
+export function itemReductionsFromReport(raw: unknown): ItemReductionReport | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    removalEventsCount: num(r.removal_events_count),
+    reductionEventsCount: num(r.reduction_events_count),
+    totalRemovedQuantity: num(r.total_removed_quantity),
+    removedValueKnownSubtotal: num(r.removed_value_known_subtotal),
+    valueUnavailableCount: num(r.value_unavailable_count),
+    currency: (typeof r.currency === "string" ? r.currency : null) as CurrencyCode | null,
+  };
+}
+
+/**
  * Route counts and totals, from the shift's own orders.
  *
  * A reversed order still appears in its route's ORDER count - it happened, and
@@ -172,6 +213,9 @@ export function buildShiftReportLines(input: {
   // Phase C: dynamic, catalog-driven payment breakdown (cash + each non-cash tender)
   // with Total non-cash and Total payments. Null/empty for a pre-Phase-C shift.
   payments?: { rows: { label: string; is_cash: boolean; amount: number }[]; nonCashTotal: number; grandTotal: number } | null;
+  // Part 1 — line-level item reductions/cancellations this shift (report_json.item_reductions).
+  // Null/absent on a pre-Part-1 report; the section is then omitted entirely.
+  itemReductions?: ItemReductionReport | null;
   note: string | null;
   fmt: (amount: number, currency: CurrencyCode) => string;
 }): ReportLine[] {
@@ -205,6 +249,23 @@ export function buildShiftReportLines(input: {
   lines.push({ label: "Cancelled", value: String(detail.reversals.cancelled) });
   lines.push({ label: "Refunded", value: String(detail.reversals.refunded) });
   lines.push({ label: "Not counted as sales", value: fmt(detail.reversals.amount, currency) });
+
+  // Part 1 — items reduced/cancelled on submitted lines. Shown only when the
+  // server supplied the aggregate AND something was actually reduced, so an
+  // untouched shift (or an old report) adds no empty section. Distinct from
+  // REVERSED (orders) above; the value is informational, never netted off sales.
+  const ir = input.itemReductions;
+  if (ir && (ir.removalEventsCount > 0 || ir.reductionEventsCount > 0)) {
+    const irCur = ir.currency ?? currency;
+    lines.push({ label: "", kind: "rule" }, { label: "ITEMS REDUCED / REMOVED", kind: "heading" });
+    lines.push({ label: "Items removed", value: String(ir.removalEventsCount) });
+    lines.push({ label: "Items reduced", value: String(ir.reductionEventsCount) });
+    lines.push({ label: "Quantity removed", value: trimQty(ir.totalRemovedQuantity) });
+    lines.push({
+      label: ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} unpriced)` : "Value removed",
+      value: fmt(ir.removedValueKnownSubtotal, irCur),
+    });
+  }
 
   lines.push({ label: "", kind: "rule" }, { label: `PAYMENTS (${CASH_CONTRACT_CURRENCY})`, kind: "heading" });
   if (pay) {

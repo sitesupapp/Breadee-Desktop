@@ -204,6 +204,12 @@ export async function endShift(input: {
     exchange_rate: numOrNull(row.exchange_rate),
     by_item: toByItem(row.by_item),
     payments: toPayments(row.payments),
+    // Part 1 — raw item_reductions object (inner payload the server merged into the
+    // report). Kept raw here; mapped for display via itemReductionsFromReport.
+    item_reductions:
+      row.item_reductions && typeof row.item_reductions === "object" && !Array.isArray(row.item_reductions)
+        ? (row.item_reductions as Record<string, unknown>)
+        : null,
     ...toPayBreakdown(row),
     delivery_order_count: num(row.delivery_order_count),
     total_delivery_fees: num(row.total_delivery_fees),

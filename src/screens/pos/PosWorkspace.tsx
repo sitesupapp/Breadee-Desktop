@@ -44,7 +44,7 @@ import { DeliveryModal } from "@/components/pos/DeliveryModal";
 import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
-import { buildShiftReportLines, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { buildShiftReportLines, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import { buildReceipt } from "@/lib/receipt";
 import { readOrderReceiptLines, readSettledOrder } from "@/lib/pos/deliverySettlement";
@@ -613,6 +613,8 @@ function PosWorkspaceInner() {
             detail,
             // Phase C — dynamic payment breakdown for the printed PAYMENTS block.
             payments: paymentSummary(report),
+            // Part 1 — items reduced/cancelled this shift (null on pre-Part-1 reports).
+            itemReductions: itemReductionsFromReport(report.item_reductions),
             note: report.notes,
             fmt: formatMoney,
           }),

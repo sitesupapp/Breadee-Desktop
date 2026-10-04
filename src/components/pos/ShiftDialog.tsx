@@ -11,7 +11,7 @@ import { Badge, Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { differenceLabel } from "@/lib/pos/shifts";
-import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { buildShiftReportDetail, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { DeliveryFeeCashTreatment, ShiftExpected, ShiftReport } from "@/types/pos";
@@ -478,6 +478,31 @@ export function ShiftReportDialog({
             </div>
           )}
         </div>
+
+        {/* Part 1 — items REDUCED or CANCELLED on submitted lines this shift
+            (report_json.item_reductions). Distinct from the reversed-ORDERS block
+            above; the value is informational and never netted off sales. Rendered
+            only when the server supplied it and something was actually reduced, so
+            an untouched shift or a pre-Part-1 report shows nothing. */}
+        {(() => {
+          const ir = itemReductionsFromReport(report.item_reductions);
+          if (!ir || (ir.removalEventsCount === 0 && ir.reductionEventsCount === 0)) return null;
+          const irCur = ir.currency ?? currency;
+          return (
+            <div className="rounded-xl border border-line p-3">
+              <p className="mb-2 text-sm font-bold text-ink">Items reduced / removed</p>
+              <SummaryRow label="Items removed" value={String(ir.removalEventsCount)} />
+              <SummaryRow label="Items reduced" value={String(ir.reductionEventsCount)} />
+              <SummaryRow label="Quantity removed" value={String(ir.totalRemovedQuantity)} />
+              <SummaryRow
+                label={ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} unpriced)` : "Value removed"}
+                value={formatMoney(ir.removedValueKnownSubtotal, irCur)}
+                tone="amber"
+              />
+              <p className="text-[11px] text-sub">On submitted items; not netted off sales.</p>
+            </div>
+          );
+        })()}
       </div>
 
       <div className="mt-3 grid gap-3 text-xs sm:grid-cols-2">
