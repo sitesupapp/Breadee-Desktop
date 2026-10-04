@@ -323,11 +323,16 @@ function PosWorkspaceInner() {
             { tenantId: c.tenantId, branchId: c.branchId, cashierUserId: c.userId, deviceId: getDeviceIdentity().device_id, online: true },
             trigger,
           ).then(() => undefined),
-        refreshQueue: async (c) => {
-          setOfflinePending(await pendingPosTxnCount().catch(() => 0));
-          setResumable(await listResumablePosTxns(c.tenantId, c.branchId, c.userId).catch(() => []));
+        refreshQueue: async (c, isCurrent) => {
+          const pending = await pendingPosTxnCount().catch(() => 0);
+          const list = await listResumablePosTxns(c.tenantId, c.branchId, c.userId).catch(() => []);
+          // Re-check AFTER the async reads: if the OU switched meanwhile, do not paint
+          // this OU's queue into the now-active OU's UI.
+          if (!isCurrent()) return;
+          setOfflinePending(pending);
+          setResumable(list);
         },
-        refreshShift: (c) => useShift.getState().refresh(c.tenantId, c.userId, c.branchId),
+        refreshShift: (c, isCurrent) => useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent),
       });
     },
     [],

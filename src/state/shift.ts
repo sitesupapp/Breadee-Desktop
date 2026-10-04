@@ -46,7 +46,13 @@ type ShiftState = {
   lastReport: ShiftReport | null;
   error: string | null;
 
-  refresh: (tenantId: string, userId: string, branchId?: string | null) => Promise<void>;
+  /**
+   * `isCurrent`, when supplied, is a LIVE-context predicate re-evaluated at every
+   * commit point: a commit happens only while it still returns true. The reconnect
+   * drain passes it so a pass whose OU/context moved mid-refresh (after an OU switch)
+   * never commits its now-stale shift, even though its generation claim is the newest.
+   */
+  refresh: (tenantId: string, userId: string, branchId?: string | null, isCurrent?: () => boolean) => Promise<void>;
   /**
    * Re-read the cash box for the active shift. `guard`, when supplied, is checked
    * after the (async) read and the result is discarded if it returns true - the
@@ -93,16 +99,19 @@ export const useShift = create<ShiftState>((set, get) => ({
   lastReport: null,
   error: null,
 
-  refresh: async (tenantId, userId, branchId = null) => {
+  refresh: async (tenantId, userId, branchId = null, isCurrent) => {
     // Claim this refresh's generation. Any commit below is made ONLY while this is
-    // still the latest refresh; a newer refresh (e.g. after an OU switch) supersedes
-    // us, and our late result must not overwrite its authoritative state.
+    // still the latest refresh AND (if supplied) the live context is still ours. The
+    // generation stops an EARLIER refresh; `isCurrent` stops a refresh whose context
+    // moved after it was invoked - which the generation order alone cannot catch,
+    // because a late drain's refresh is the newest claim.
     const { isStale } = shiftRefreshGate.claim();
+    const superseded = () => isStale() || !(isCurrent?.() ?? true);
     set({ loading: true, error: null });
     const deviceId = getDeviceIdentity().device_id;
     try {
       const shift = await shiftNet.findOpenShift(tenantId, userId);
-      if (isStale()) return;
+      if (superseded()) return;
       // The live open shift must be for THIS branch/OU. findOpenShift returns the
       // cashier's most recent open shift across branches, so a shift opened in a
       // sibling branch/OU must NOT surface as this POS context's active shift; fall
@@ -110,7 +119,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       if (shift && (shift.branch_id ?? null) === (branchId ?? null)) {
         // Server is the authority: a real open shift supersedes any offline state.
         set({ shift, loading: false, offlineRestored: false, pendingLocalId: null });
-        await get().refreshCashBox(isStale);
+        await get().refreshCashBox(superseded);
         return;
       }
       // Reachable, and the server says NO open shift. A pending offline-opened shift
@@ -118,7 +127,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       // server), so keep showing it until the reconnect reconcile opens it. Scoped to
       // THIS exact tenant+branch/OU+cashier+device; pending_sync only.
       const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
-      if (isStale()) return;
+      if (superseded()) return;
       if (pending) {
         set({
           shift: pendingShiftToActiveShift(pending),
@@ -134,7 +143,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null });
       clearPosSessionSnapshot();
     } catch (e) {
-      if (isStale()) return;
+      if (superseded()) return;
       // Restore offline state ONLY for a confirmed transport/unreachable condition.
       // A definitive server authorization/validation refusal must NOT reactivate a
       // stale snapshot or pending shift - it surfaces as an error instead.
@@ -158,13 +167,13 @@ export const useShift = create<ShiftState>((set, get) => ({
         branchId,
       });
       if (restored) {
-        if (isStale()) return;
+        if (superseded()) return;
         set({ shift: restored, cashBox: null, loading: false, offlineRestored: true, pendingLocalId: null, error: null });
         return;
       }
       // 2) a shift opened offline on this device for THIS exact context (Case 2).
       const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
-      if (isStale()) return;
+      if (superseded()) return;
       if (pending) {
         set({
           shift: pendingShiftToActiveShift(pending),

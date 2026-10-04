@@ -27,10 +27,18 @@ export type ReconnectDrainDeps = {
   readContext: () => DrainContext | null;
   /** Replay the offline queue under this exact context. */
   sync: (ctx: DrainContext) => Promise<void>;
-  /** Refresh the offline-queue display for this exact context. */
-  refreshQueue: (ctx: DrainContext) => Promise<void>;
-  /** Re-read the active shift for this exact context. */
-  refreshShift: (ctx: DrainContext) => Promise<void>;
+  /**
+   * Refresh the offline-queue display for this exact context. `isCurrent` is a live
+   * guard the callback MUST re-check after its own async reads and before committing
+   * any UI state, so a context that moved mid-read never paints this OU's queue.
+   */
+  refreshQueue: (ctx: DrainContext, isCurrent: () => boolean) => Promise<void>;
+  /**
+   * Re-read the active shift for this exact context. `isCurrent` is forwarded so the
+   * shift commit is gated on the live context at the moment it would commit, not only
+   * on invocation order.
+   */
+  refreshShift: (ctx: DrainContext, isCurrent: () => boolean) => Promise<void>;
 };
 
 export async function runReconnectDrain(d: ReconnectDrainDeps): Promise<void> {
@@ -46,13 +54,19 @@ export async function runReconnectDrain(d: ReconnectDrainDeps): Promise<void> {
     drainContextKey,
     async (c) => {
       await d.sync(c).catch(() => {});
-      // Commit-time freshness check: if the live context moved during the sync, do
-      // NOT commit this (now stale) pass's queue/shift state. The loop re-reads the
-      // live context and re-passes under it.
-      const live = d.readContext();
-      if (!live || drainContextKey(live) !== drainContextKey(c)) return;
-      await d.refreshQueue(c);
-      await d.refreshShift(c);
+      // A live-context predicate re-evaluated at EVERY commit boundary, not once: the
+      // context can move during the sync OR during either post-sync refresh. Each
+      // commit step re-checks isCurrent() after its own async work, so a pass whose
+      // OU changed mid-step never commits this (now stale) OU's queue or shift; the
+      // loop then re-passes under the new context.
+      const isCurrent = () => {
+        const live = d.readContext();
+        return !!live && drainContextKey(live) === drainContextKey(c);
+      };
+      if (!isCurrent()) return;
+      await d.refreshQueue(c, isCurrent);
+      if (!isCurrent()) return;
+      await d.refreshShift(c, isCurrent);
     },
   );
 }

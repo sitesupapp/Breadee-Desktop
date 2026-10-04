@@ -54,9 +54,9 @@ test("OU-A drain parked in sync, switch to OU-B which commits, release OU-A: OU-
       }
     },
     refreshQueue: async () => {},
-    refreshShift: async (c) => {
+    refreshShift: async (c, isCurrent) => {
       committed.push(c.branchId);
-      await useShift.getState().refresh(c.tenantId, c.userId, c.branchId);
+      await useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent);
     },
   });
 
@@ -74,10 +74,64 @@ test("a stable context drains and commits exactly once through the drain", async
     readContext: () => A,
     sync: async () => {},
     refreshQueue: async () => {},
-    refreshShift: async (c) => { committed.push(c.branchId); await useShift.getState().refresh(c.tenantId, c.userId, c.branchId); },
+    refreshShift: async (c, isCurrent) => { committed.push(c.branchId); await useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent); },
   });
   assert.deepEqual(committed, ["bA"]);
   assert.equal(useShift.getState().shift?.id, "S-bA");
+});
+
+test("context switch DURING refreshQueue (the TOCTOU window after the pre-refresh check) commits NO OU-A state", async () => {
+  let liveCtx: DrainContext = A;
+  shiftNet.findOpenShift = async () => openShift(`S-${liveCtx.branchId}`, liveCtx.branchId);
+  const queueCommits: (string | null)[] = [];
+  const shiftCommits: (string | null)[] = [];
+  await runReconnectDrain({
+    isOfflineMode: () => false,
+    loadContextOnline: async () => {},
+    readContext: () => liveCtx,
+    sync: async () => {}, // instant: context is still OU-A at the pre-refreshQueue check
+    refreshQueue: async (c, isCurrent) => {
+      // The OU switches to B WHILE this queue refresh is awaiting its reads - exactly
+      // the window Konan flagged. After the awaits, the live-context guard must bail.
+      if (c.branchId === "bA") { await delay(10); liveCtx = B; }
+      if (!isCurrent()) return;
+      queueCommits.push(c.branchId);
+    },
+    refreshShift: async (c, isCurrent) => {
+      shiftCommits.push(c.branchId);
+      await useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent);
+    },
+  });
+  assert.ok(!queueCommits.includes("bA"), "OU-A queue never painted into OU-B's UI after the switch");
+  assert.ok(!shiftCommits.includes("bA"), "OU-A shift refresh never even ran after the switch");
+  assert.deepEqual(queueCommits, ["bB"], "only OU-B's queue committed");
+  assert.deepEqual(shiftCommits, ["bB"], "only OU-B's shift committed");
+  assert.equal(useShift.getState().shift?.branch_id, "bB");
+});
+
+test("context switch DURING the shift refresh itself: OU-A shift is not committed", async () => {
+  let liveCtx: DrainContext = A;
+  // findOpenShift is slow for OU-A; the OU switches to B while refresh(A) awaits it.
+  shiftNet.findOpenShift = async (_t, _u) => {
+    if (liveCtx.branchId === "bA") { await delay(10); liveCtx = B; return openShift("S-bA", "bA"); }
+    return openShift("S-bB", "bB");
+  };
+  const shiftCommits: (string | null)[] = [];
+  await runReconnectDrain({
+    isOfflineMode: () => false,
+    loadContextOnline: async () => {},
+    readContext: () => liveCtx,
+    sync: async () => {},
+    refreshQueue: async () => {},
+    refreshShift: async (c, isCurrent) => {
+      shiftCommits.push(c.branchId);
+      await useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent);
+    },
+  });
+  // refreshShift(A) runs, but inside refresh(A) the context flips to B during
+  // findOpenShift, so refresh's live guard blocks the OU-A commit.
+  assert.equal(useShift.getState().shift?.branch_id, "bB", "the active shift is OU-B's, never OU-A's");
+  assert.equal(useShift.getState().shift?.id, "S-bB");
 });
 
 test("a failed rehydration stops the drain entirely (no replay under stale context)", async () => {
