@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.32";
+export const WHATS_NEW_VERSION = "1.0.33";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -21,18 +21,18 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string };
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
     glyph: "pos",
-    title: "Better Dine-In Table Control",
-    body: "Tables can now be selected normally using either a mouse or a touchscreen — a click and a tap behave the same. Dragging still pans the floor, and a drag no longer opens a table by accident.",
+    title: "Improved Offline POS Continuity",
+    body: "Breadee POS now handles connection interruptions more reliably. Your branch and shift can stay available during supported offline operation, so you can keep serving customers.",
   },
   {
     glyph: "pos",
-    title: "More Role Controls",
-    body: "Merge Tables, Split Bill, Payouts, Payment Methods and Analytics can now be configured for your team in Roles & Permissions. New permissions stay off until an owner or admin turns them on.",
+    title: "Cash Orders Keep Working Offline",
+    body: "Cash orders can be safely queued while the connection is unavailable, and are automatically synchronized when connectivity returns.",
   },
   {
     glyph: "analytics",
-    title: "Payout Visibility",
-    body: "Cash-drawer payouts now appear with their linked Expense, Purchase Invoice, Supplier Payment or Maintenance job on the website, so the record is easy to find. The document's own paid status is unchanged.",
+    title: "Reliable Recovery",
+    body: "Improved restart recovery, shift synchronization, and duplicate protection — plus general stability improvements.",
   },
 ];
 
