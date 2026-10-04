@@ -6,7 +6,7 @@
 // same order ids); Reject leaves them with the original user and keeps the transfer re-approvable.
 // Self-scoped server-side (pos_order_transfers_for_recipient); the desktop only shows + confirms.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, cn } from "@/components/ui";
 import { classifyError } from "@/lib/pos/errors";
 import { decideTransfer, listPendingTransfersForMe, type PendingTransfer } from "@/lib/pos/transfers";
@@ -26,19 +26,33 @@ export function PendingTransfersBanner({
   const [step, setStep] = useState<PendingStep>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      setItems(await listPendingTransfersForMe());
+      const rows = await listPendingTransfersForMe();
+      if (aliveRef.current) setItems(rows);
     } catch {
       // A read failure here must never block the POS; just show nothing.
-      setItems([]);
+      if (aliveRef.current) setItems([]);
     }
   }, []);
 
+  // Load on open AND poll while the shift stays open, so a transfer created AFTER the recipient
+  // opened their shift still appears (§6.7). Interval is cleared on unmount / shift change; the
+  // aliveRef guards against a late response setting state after unmount.
   useEffect(() => {
     if (!openShiftId) return;
     void load();
+    const id = setInterval(() => void load(), 20000);
+    return () => clearInterval(id);
   }, [openShiftId, load]);
 
   const decide = useCallback(
@@ -90,8 +104,10 @@ export function PendingTransfersBanner({
             <div key={t.transferId} className={cn("rounded-lg border border-amber-200 bg-white px-3 py-2")}>
               <div className="flex items-center justify-between gap-2">
                 <span className="min-w-0 text-sm text-ink">
+                  <span className="text-sub">From </span>
+                  <span className="font-semibold">{t.fromUserName ?? "another cashier"}</span>
+                  <span className="text-sub"> · </span>
                   <span className="font-semibold">{t.orderCount} order{t.orderCount === 1 ? "" : "s"}</span>
-                  <span className="text-sub"> from another cashier</span>
                 </span>
                 {!confirming ? (
                   <div className="flex shrink-0 gap-2">

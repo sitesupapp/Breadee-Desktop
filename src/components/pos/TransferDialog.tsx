@@ -146,7 +146,7 @@ export function TransferDialog({
       onClose={busy ? () => {} : onCancel}
       footer={
         <div className="flex items-center justify-between gap-3">
-          {error ? <p className="truncate text-xs font-semibold text-red-700">{error}</p> : <span className="text-[11px] text-sub">Type {CONFIRM_WORD} (or press Alt+Shift) to confirm.</span>}
+          {error ? <p className="truncate text-xs font-semibold text-red-700">{error}</p> : <span className="text-[11px] text-sub">Type {CONFIRM_WORD} to confirm; Alt+Shift then submits.</span>}
           <div className="flex shrink-0 gap-2">
             <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>
               Cancel

@@ -109,17 +109,28 @@ test("the recipient banner approves into the operator's own shift with a two-ste
   // CAS token comes from the self-scoped read (no getTransferDetail / no view perm needed)
   assert.match(b, /expectedVersion: t\.posEntityVersion/);
   assert.doesNotMatch(b, /getTransferDetail/);
+  // polls while the shift is open, so a transfer arriving AFTER mount still appears (§6.7),
+  // with interval cleanup + a stale-response guard
+  assert.match(b, /setInterval\(/);
+  assert.match(b, /clearInterval\(/);
+  assert.match(b, /aliveRef/);
+  // shows the sender name (§6.7 "From [user]") + the order count
+  assert.match(b, /t\.fromUserName/);
+  assert.match(b, /From /);
   // two-step: a confirm step before the decision fires
   assert.match(b, /Confirm approve/);
   assert.match(b, /Confirm reject/);
 });
 
-test("decide + reapprove require a valid expected version (mandatory CAS), sourced from the self-scoped read", () => {
+test("decide AND reapprove each require a valid expected version (mandatory CAS), sourced from the self-scoped read", () => {
   const t = read("src/lib/pos/transfers.ts");
-  // both guard a non-integer version before issuing the RPC, and always send it
-  assert.match(t, /Number\.isInteger\(input\.expectedVersion\)/);
-  assert.match(t, /expected_version: input\.expectedVersion/);
-  // the recipient read surfaces pos_entity_version so a view-less recipient can still pass CAS
+  // decide and reapprove have DISTINCT guard messages, proving each independently rejects a
+  // non-integer version before issuing the RPC.
+  assert.match(t, /A valid expected version is required to decide a transfer/);
+  assert.match(t, /A valid expected version is required to re-approve a transfer/);
+  // both always send expected_version (two occurrences — one per function).
+  assert.equal((t.match(/expected_version: input\.expectedVersion/g) || []).length, 2);
+  // the recipient read surfaces pos_entity_version so a view-less recipient can still pass CAS.
   assert.match(t, /posEntityVersion: num\(r\.pos_entity_version\)/);
 });
 
@@ -135,4 +146,7 @@ test("classifyError maps the transfer refusals to the right kinds (behavioral)",
   );
   // the pre-existing dine-in bill rule stays distinct and intact
   assert.equal(classifyError(new Error("This order changed since it was loaded.")).kind, "version_conflict");
+  // NEGATIVE: a generic "Cannot close this shift" must NOT be classified as open_orders_block
+  // (the narrowed /order\(s\) still open/i rule), so Transfer is not offered on an unrelated refusal.
+  assert.notEqual(classifyError(new Error("Cannot close this shift right now.")).kind, "open_orders_block");
 });

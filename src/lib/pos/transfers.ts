@@ -19,6 +19,8 @@ export type TransferStatus = "pending_transfer" | "approved" | "rejected";
 export type PendingTransfer = {
   transferId: string;
   fromUserId: string;
+  /** The sender's display name, resolved server-side by the self-scoped read (§6.7 "From [user]"). */
+  fromUserName: string | null;
   fromShiftId: string;
   branchId: string;
   status: TransferStatus;
@@ -104,6 +106,7 @@ export async function listPendingTransfersForMe(): Promise<PendingTransfer[]> {
     return {
       transferId: requireId(r.transfer_id, "pos_order_transfers_for_recipient", "transfer_id"),
       fromUserId: str(r.from_user_id),
+      fromUserName: strOrNull(r.from_user_name),
       fromShiftId: str(r.from_shift_id),
       branchId: str(r.branch_id),
       status: toStatus(r.status),
