@@ -194,7 +194,28 @@ export type PosRpcName =
   // never silently retry. is_cash/is_system are server-authoritative; cash is undeactivatable;
   // activating a method requires its GL mapping when accounting is on.
   | "pos_payment_methods_manage_list"
-  | "pos_payment_method_save";
+  | "pos_payment_method_save"
+  // POS Final W4/W5 (Part 6) — Open-Orders Transfer. All SECURITY DEFINER, tenant+branch(OU)+
+  // permission gated server-side; order ownership (shift_id, cashier_user_id) is reassigned
+  // in place (SAME order id) + pos_entity_version bumped, so the sender's shift auto-unblocks.
+  // `_create` (sender; actor-scoped idempotent create_client_token; self-transfer refused),
+  // `_decide` (recipient approve/reject; expected_version CAS; approve reassigns all-or-nothing),
+  // `_reapprove` (website authorised user re-approves a rejected transfer; reapprove_client_token;
+  // recipient must still be eligible), and the reads `_for_recipient` (self-scoped pending, shown
+  // on Open Shift), `_list` / `_detail` (pos.transfers.view, tenant+branch scoped, no tokens).
+  | "pos_order_transfer_create"
+  | "pos_order_transfer_decide"
+  | "pos_order_transfer_reapprove"
+  | "pos_order_transfers_for_recipient"
+  | "pos_order_transfers_list"
+  | "pos_order_transfer_detail"
+  // Read that populates the recipient picker dynamically (§6.4): active members in the branch
+  // who hold pos.transfers.approve, excluding the caller. No hardcoded users/ids/roles.
+  | "pos_order_transfer_eligible_recipients"
+  // The authoritative set of orders that BLOCK End Shift for a shift (non-finalized, non-void) —
+  // read here so the desktop's End-Shift "open orders → Transfer" gate lists exactly the orders
+  // the server would block on. Pre-existing SECURITY DEFINER read; tenant-scoped.
+  | "pos_shift_unresolved_orders";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

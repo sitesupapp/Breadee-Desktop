@@ -168,7 +168,8 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // (read-only deletion/reduction report). Each gated on its own permission; no money RPC.
   // 33 -> 35 in POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list
   // (payment-method management; gated on pos.payment_methods.manage; no money RPC).
-  assert.equal(names.length, 35);
+  // 35 -> 43 in POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders.
+  assert.equal(names.length, 43);
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_deletion_reason_report"));
   assert.ok(names.includes("pos_delivery_resolve_cost"));

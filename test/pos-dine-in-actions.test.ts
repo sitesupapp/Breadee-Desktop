@@ -273,7 +273,9 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // AND AGAIN BY POS FINAL W3: 44 -> 46, for pos_payment_method_save +
   // pos_payment_methods_manage_list (payment-method MANAGEMENT; pos.payment_methods.manage;
   // NOT money RPCs — see the tightened money-mover pattern below).
-  assert.equal(members.length, 46, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND BY POS FINAL W4/W5 (Part 6): 46 -> 54, for the 6 Open-Orders Transfer RPCs +
+  // pos_order_transfer_eligible_recipients + pos_shift_unresolved_orders. None moves money.
+  assert.equal(members.length, 54, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"), "pos_merge_tables should be in the allow-list");
   assert.ok(members.includes("pos_deletion_reason_report"), "pos_deletion_reason_report should be in the allow-list");
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");

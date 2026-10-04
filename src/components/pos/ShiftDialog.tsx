@@ -101,6 +101,7 @@ export function EndShiftDialog({
   error,
   onCancel,
   onConfirm,
+  onTransferOpenOrders,
 }: {
   open: boolean;
   busy: boolean;
@@ -110,6 +111,9 @@ export function EndShiftDialog({
   error: string | null;
   onCancel: () => void;
   onConfirm: (input: { actual: number; notes: string | null; treatment: DeliveryFeeCashTreatment }) => void;
+  /** POS Final W5 (Part 6) — present only when End Shift is blocked by open orders AND the
+   *  operator may transfer; offers the Transfer action (§6.2). */
+  onTransferOpenOrders?: () => void;
 }) {
   const [actual, setActual] = useState("");
   const [notes, setNotes] = useState("");
@@ -146,11 +150,17 @@ export function EndShiftDialog({
         <div className="flex items-center justify-between gap-3">
           {error ? <p className="truncate text-xs font-semibold text-red-700">{error}</p> : <span />}
           <div className="flex shrink-0 gap-2">
+            {onTransferOpenOrders && (
+              <Button variant="primary" size="lg" onClick={onTransferOpenOrders} disabled={busy}>
+                Transfer open orders
+              </Button>
+            )}
             <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>
               Cancel
             </Button>
             <Button
               size="lg"
+              variant={onTransferOpenOrders ? "ghost" : "primary"}
               onClick={() => onConfirm({ actual: counted, notes: notes.trim() || null, treatment })}
               disabled={busy || !gate.allowed}
               title={gate.reason ?? undefined}

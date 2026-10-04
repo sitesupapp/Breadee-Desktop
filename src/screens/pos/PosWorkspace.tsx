@@ -32,6 +32,8 @@ import { ModifierDialog } from "@/components/pos/ModifierDialog";
 import { LineNoteDialog } from "@/components/pos/LineNoteDialog";
 import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components/pos/ShiftDialog";
+import { TransferDialog } from "@/components/pos/TransferDialog";
+import { PendingTransfersBanner } from "@/components/pos/PendingTransfersBanner";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
@@ -81,7 +83,7 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canViewDelivery, canViewFloor, canViewTables } from "@/lib/pos/access";
+import { canCreateTransfer, canViewDelivery, canViewFloor, canViewTables } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
@@ -449,6 +451,10 @@ function PosWorkspaceInner() {
   const [openShiftOpen, setOpenShiftOpen] = useState(false);
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [shiftError, setShiftError] = useState<string | null>(null);
+  // POS Final W5 (Part 6) — Open-Orders Transfer. `endShiftBlocked` flips true when End Shift
+  // is refused because open orders remain, so the End-Shift dialog can offer Transfer.
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [endShiftBlocked, setEndShiftBlocked] = useState(false);
   const [expected, setExpected] = useState<ShiftExpected | null>(null);
   // Receipt presentation is store-owned and atomic - see `state/receipt.ts`.
   const receiptStore = useReceipt();
@@ -1867,6 +1873,7 @@ function PosWorkspaceInner() {
   const startEndShift = useCallback(async () => {
     if (!shiftId) return;
     setShiftError(null);
+    setEndShiftBlocked(false);
     setExpected(null);
     setEndShiftOpen(true);
     try {
@@ -1896,6 +1903,8 @@ function PosWorkspaceInner() {
       } catch (e) {
         const c = classifyError(e);
         setShiftError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        // Part 6 — End Shift refused because open orders remain: offer the Transfer action.
+        if (c.kind === "open_orders_block") setEndShiftBlocked(true);
       } finally {
         setBusy(false);
       }
@@ -2606,7 +2615,47 @@ function PosWorkspaceInner() {
         error={shiftError}
         onCancel={() => setEndShiftOpen(false)}
         onConfirm={(input) => void doEndShift(input)}
+        onTransferOpenOrders={
+          endShiftBlocked && canCreateTransfer(pos.access).allowed
+            ? () => {
+                setEndShiftOpen(false);
+                setTransferOpen(true);
+              }
+            : undefined
+        }
       />
+
+      {/* POS Final W5 (Part 6) — sender's Transfer flow, opened from the blocked End-Shift dialog. */}
+      <TransferDialog
+        open={transferOpen}
+        shiftId={shiftId}
+        branchId={pos.branch.id}
+        onCancel={() => setTransferOpen(false)}
+        onCreated={(res) => {
+          setTransferOpen(false);
+          setEndShiftBlocked(false);
+          toast.push({
+            tone: "success",
+            message: `Transfer created — ${res.orderCount} order${res.orderCount === 1 ? "" : "s"} sent for approval.`,
+            detail: "The orders stay yours until the recipient approves, so End Shift stays blocked until then.",
+          });
+        }}
+      />
+
+      {/* POS Final W5 (Part 6) — incoming transfers to this operator, shown on Open Shift (§6.7).
+          Fixed, top-centered, below modals; self-hides when there is no open shift or nothing pending. */}
+      <div className="pointer-events-none fixed inset-x-0 top-2 z-40 flex justify-center px-4">
+        <div className="pointer-events-auto w-full max-w-2xl">
+          <PendingTransfersBanner
+            openShiftId={shiftId}
+            onApproved={() => {
+              void refreshShiftOrders();
+              void shiftStore.refreshCashBox();
+              void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+            }}
+          />
+        </div>
+      </div>
 
       {/* The orders are captured BEFORE the close cleared the active shift, so
           the report's route and reversal detail describes the shift it is
