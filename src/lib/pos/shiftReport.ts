@@ -262,7 +262,9 @@ export function buildShiftReportLines(input: {
     lines.push({ label: "Items reduced", value: String(ir.reductionEventsCount) });
     lines.push({ label: "Quantity removed", value: trimQty(ir.totalRemovedQuantity) });
     lines.push({
-      label: ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} unpriced)` : "Value removed",
+      // value_unavailable_count covers BOTH missing price and uncomputable quantity,
+      // so it is "values unavailable", not merely "unpriced".
+      label: ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} values unavailable)` : "Value removed",
       value: fmt(ir.removedValueKnownSubtotal, irCur),
     });
   }

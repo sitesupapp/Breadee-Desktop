@@ -495,7 +495,7 @@ export function ShiftReportDialog({
               <SummaryRow label="Items reduced" value={String(ir.reductionEventsCount)} />
               <SummaryRow label="Quantity removed" value={String(ir.totalRemovedQuantity)} />
               <SummaryRow
-                label={ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} unpriced)` : "Value removed"}
+                label={ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} values unavailable)` : "Value removed"}
                 value={formatMoney(ir.removedValueKnownSubtotal, irCur)}
                 tone="amber"
               />

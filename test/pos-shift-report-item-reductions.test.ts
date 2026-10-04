@@ -6,6 +6,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 import {
   buildShiftReportLines,
@@ -13,6 +16,10 @@ import {
   type ShiftReportDetail,
 } from "@/lib/pos/shiftReport";
 import type { CurrencyCode } from "@/lib/currency";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, "..");
+const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 
 const fmt = (n: number, c: CurrencyCode) => `${n} ${c}`;
 const emptyDetail: ShiftReportDetail = {
@@ -74,9 +81,30 @@ test("unpriced events are surfaced, not hidden; section stays separate from REVE
     removal_events_count: 1, reduction_events_count: 0, total_removed_quantity: 1,
     removed_value_known_subtotal: 0, value_unavailable_count: 2, currency: "USD",
   }));
-  assert.ok(out.some((l) => l.startsWith("Value removed (2 unpriced)=")));
+  assert.ok(out.some((l) => l.startsWith("Value removed (2 values unavailable)=")));
   // REVERSED (orders) and ITEMS REDUCED (lines) are both present and distinct.
   assert.ok(out.includes("REVERSED"));
   assert.ok(out.includes("ITEMS REDUCED / REMOVED"));
   assert.notEqual(out.indexOf("REVERSED"), out.indexOf("ITEMS REDUCED / REMOVED"));
+});
+
+test("endShift maps the raw item_reductions object onto the ShiftReport", () => {
+  const src = read("src/lib/pos/shifts.ts");
+  // The RPC row's item_reductions is carried RAW (object, not array) onto the report,
+  // to be mapped for display by itemReductionsFromReport.
+  assert.match(src, /item_reductions:\s*\n?\s*row\.item_reductions && typeof row\.item_reductions === "object" && !Array\.isArray\(row\.item_reductions\)/);
+  const types = read("src/types/pos.ts");
+  assert.match(types, /item_reductions:\s*Record<string, unknown> \| null/);
+});
+
+test("the on-screen ShiftDialog renders a card, separate from the reversed-orders block", () => {
+  const src = read("src/components/pos/ShiftDialog.tsx");
+  assert.match(src, /itemReductionsFromReport\(report\.item_reductions\)/);
+  assert.match(src, /Items reduced \/ removed/);
+  // The reduction card is only shown when something was actually reduced.
+  assert.match(src, /removalEventsCount === 0 && ir\.reductionEventsCount === 0/);
+  // It is a distinct block, not merged into the reversed-ORDERS section.
+  assert.ok(src.includes("Reversed orders") && src.includes("Items reduced / removed"));
+  // Wording covers both missing price and uncomputable quantity.
+  assert.match(src, /values unavailable/);
 });
