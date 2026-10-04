@@ -121,8 +121,16 @@ test("the picker component carries NO menu of its own — navigation only", () =
   }
 });
 
-test("Settings surfaces the terminal-local categorized toggle", () => {
-  const src = read("src/screens/settings/PosSettings.tsx");
-  assert.match(src, /checked=\{features\.categorizedMenu\}/);
-  assert.match(src, /setFeature\("categorizedMenu", next\)/);
+test("Cashier layout surfaces the terminal-local categorized toggle (Part 4)", () => {
+  // The toggle moved out of POS Settings into Cashier layout, with the Default
+  // mode it governs. It still reads/writes the ONE terminal-local posFeatures
+  // store - the same setting, relocated, never duplicated into a parallel copy.
+  const layout = read("src/screens/settings/CashierLayout.tsx");
+  assert.match(layout, /checked=\{features\.categorizedMenu\}/);
+  assert.match(layout, /onChange=\{setCategorizedMenu\}/);
+  assert.match(layout, /writePosFeatures\(\{ \.\.\.current, categorizedMenu: next \}\)/);
+  // POS Settings no longer carries it (no parallel copy, no duplicate write).
+  const settings = read("src/screens/settings/PosSettings.tsx");
+  assert.equal(settings.includes("features.categorizedMenu"), false, "PosSettings must not keep the moved toggle");
+  assert.equal(settings.includes('setFeature("categorizedMenu"'), false, "PosSettings must not keep the moved setter");
 });

@@ -555,12 +555,9 @@ export function PosSettings() {
             label="Ingredient customization"
             hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Onion”. It changes only that line: the menu item, its recipe and its cost are untouched."
           />
-          <Switch
-            checked={features.categorizedMenu}
-            onChange={(next) => setFeature("categorizedMenu", next)}
-            label="Categorized menu"
-            hint="The ordering screen opens on your menu categories; tapping one shows that category’s items, with a Back button to the categories. It only changes how the menu is browsed — the items, prices, options, cart and printing are unchanged. Applies to the Default layout; the Customized grid keeps its own keys."
-          />
+          {/* The "Categorized menu" switch moved to Settings → Cashier layout,
+              with the Default mode it governs (Part 4). It is the same
+              terminal-local posFeatures setting, just relocated. */}
         </div>
       </Card>
 

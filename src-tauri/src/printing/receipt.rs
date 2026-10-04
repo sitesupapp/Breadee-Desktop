@@ -551,11 +551,19 @@ pub fn build_receipt_page(doc: &ReceiptDoc, paper: PaperWidth) -> Vec<PageLine> 
         // Status label mirrors the preview: full-pay -> "Paid - method"; a partial
         // pay-later sale -> "Partial - method"; a whole bill on account -> "On
         // account"; anything else -> "Unpaid" (unchanged for full-pay receipts).
+        // The method is named ONLY when one is recorded. A missing or legacy
+        // method must never be presented as "cash" (the Part 3 reprint defect):
+        // `unwrap_or("cash")` printed paid card/online/COD orders as "Paid - cash"
+        // whenever the method was absent. Unknown shows the status alone.
+        let method_suffix = match doc.method.as_deref().map(str::trim) {
+            Some(m) if !m.is_empty() => format!(" - {}", m),
+            _ => String::new(),
+        };
         let status = if doc.paid {
-            format!("Paid - {}", doc.method.as_deref().unwrap_or("cash"))
+            format!("Paid{}", method_suffix)
         } else {
             match doc.payment_status.as_deref() {
-                Some("partial") => format!("Partial - {}", doc.method.as_deref().unwrap_or("cash")),
+                Some("partial") => format!("Partial{}", method_suffix),
                 Some("unpaid") => "On account".to_string(),
                 _ => "Unpaid".to_string(),
             }
@@ -763,6 +771,28 @@ mod tests {
         unpaid.paid = false;
         unpaid.method = None;
         assert!(texts(&build_receipt_page(&unpaid, PaperWidth::Mm80)).iter().any(|t| t == "Unpaid"));
+    }
+
+    #[test]
+    fn paid_method_named_faithfully_and_missing_method_never_prints_cash() {
+        // Part 3: a paid non-cash order must reprint its real method, and a paid
+        // order with NO recorded method must never be presented as "cash".
+        let mut card = doc();
+        card.method = Some("card".into());
+        let t = texts(&build_receipt_page(&card, PaperWidth::Mm80));
+        assert!(t.iter().any(|s| s == "Paid - card"), "paid card order must read 'Paid - card'");
+        assert!(!t.iter().any(|s| s == "Paid - cash"), "a card order must never read 'Paid - cash'");
+
+        let mut unknown = doc();
+        unknown.method = None; // legacy / unresolved method on a paid order
+        let t2 = texts(&build_receipt_page(&unknown, PaperWidth::Mm80));
+        assert!(t2.iter().any(|s| s == "Paid"), "paid order with no method must read a bare 'Paid'");
+        assert!(!t2.iter().any(|s| s == "Paid - cash"), "an unknown method must never default to 'cash'");
+
+        let mut blank = doc();
+        blank.method = Some("   ".into()); // whitespace-only is not a method
+        let t3 = texts(&build_receipt_page(&blank, PaperWidth::Mm80));
+        assert!(t3.iter().any(|s| s == "Paid"), "a blank method must read a bare 'Paid', not 'cash'");
     }
 
     #[test]
