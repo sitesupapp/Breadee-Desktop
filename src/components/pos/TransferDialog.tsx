@@ -50,6 +50,9 @@ export function TransferDialog({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [orders, setOrders] = useState<UnresolvedOrder[]>([]);
   const [recipients, setRecipients] = useState<EligibleRecipient[]>([]);
+  // The shift/branch context the loaded orders+recipients belong to; render shows the form ONLY
+  // when it matches the current (shiftId, branchId), so a context change can't flash stale data.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set());
   const [recipientId, setRecipientId] = useState<string | null>(null);
   const [confirmText, setConfirmText] = useState("");
@@ -72,6 +75,7 @@ export function TransferDialog({
       if (seq !== seqRef.current) return; // a newer request/session superseded this one
       setOrders(o);
       setRecipients(r);
+      setLoadedKey(`${shiftId}|${branchId}`);
       setSelectedOrders(new Set(o.map((x) => x.orderId))); // default: all selected
     } catch (e) {
       if (seq === seqRef.current) setLoadError(classifyError(e).message);
@@ -86,6 +90,7 @@ export function TransferDialog({
     seqRef.current += 1;
     setOrders([]);
     setRecipients([]);
+    setLoadedKey(null); // gate out any previous session's data until the fresh load applies
     setSelectedOrders(new Set());
     setRecipientId(null);
     setConfirmText("");
@@ -152,6 +157,10 @@ export function TransferDialog({
     [recipients, recipientId],
   );
 
+  // Render-gate: the form shows only when the loaded data belongs to the CURRENT (shiftId, branchId).
+  // Until then we show the skeleton, so a context change can't flash the previous session's data.
+  const ctxReady = loadedKey === `${shiftId}|${branchId}`;
+
   return (
     <Modal
       open={open}
@@ -173,13 +182,13 @@ export function TransferDialog({
         </div>
       }
     >
-      {loading && <div className="space-y-2"><Skeleton className="h-10 w-full" /><Skeleton className="h-24 w-full" /></div>}
+      {(loading || (!loadError && !ctxReady)) && <div className="space-y-2"><Skeleton className="h-10 w-full" /><Skeleton className="h-24 w-full" /></div>}
 
       {!loading && loadError && (
         <ErrorState title="Could not load the transfer form" message={loadError} onRetry={() => void load()} />
       )}
 
-      {!loading && !loadError && (
+      {!loading && !loadError && ctxReady && (
         <div className="space-y-4">
           {/* Recipient — dynamic, from the Users/Roles system (§6.4). */}
           <div>

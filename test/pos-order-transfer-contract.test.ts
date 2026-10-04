@@ -102,6 +102,8 @@ test("the Transfer dialog enforces the typed-TRANSFER confirmation + Alt+Shift",
   // load is invalidated on close (seqRef bumps on every open/close/context change).
   assert.match(dlg, /seq !== seqRef\.current/);
   assert.match(dlg, /seqRef\.current \+= 1/);
+  // render-gate: the form shows only when the loaded data matches the current (shiftId, branchId).
+  assert.match(dlg, /const ctxReady = loadedKey === /);
 });
 
 test("the recipient banner approves into the operator's own shift with a two-step confirm", () => {
@@ -121,8 +123,9 @@ test("the recipient banner approves into the operator's own shift with a two-ste
   // latest-request-wins + context guard: apply only the newest response for the current shift/OU
   assert.match(b, /seq === seqRef\.current && ctx === ctxRef\.current/);
   assert.match(b, /seqRef\.current \+= 1/);
-  // old-context rows are cleared on every transition (never render while the replacement is pending)
-  assert.match(b, /setItems\(\[\]\)/);
+  // render-gate: visible rows are derived from the CURRENT openShiftId DURING render (not a passive
+  // effect), so a shift/OU switch shows nothing stale even on the first commit.
+  assert.match(b, /loaded\.ctx === openShiftId/);
   // shows the sender name (§6.7 "From [user]") + the order count
   assert.match(b, /t\.fromUserName/);
   assert.match(b, /From /);

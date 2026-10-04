@@ -22,7 +22,11 @@ export function PendingTransfersBanner({
   /** Called after an approve succeeds, so the workspace can refresh its order/table state. */
   onApproved?: () => void;
 }) {
-  const [items, setItems] = useState<PendingTransfer[]>([]);
+  // Data is tagged with the shift/OU context it was loaded for, and the RENDER derives the visible
+  // rows from the CURRENT openShiftId (not a passive effect). So on a direct shift/OU switch the
+  // first commit already shows nothing stale — the previous context's rows never render or become
+  // actionable, even for one frame.
+  const [loaded, setLoaded] = useState<{ ctx: string | null; rows: PendingTransfer[] }>({ ctx: null, rows: [] });
   const [step, setStep] = useState<PendingStep>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,10 +45,10 @@ export function PendingTransfersBanner({
     const ctx = ctxRef.current;
     try {
       const rows = await listPendingTransfersForMe();
-      if (seq === seqRef.current && ctx === ctxRef.current) setItems(rows);
+      if (seq === seqRef.current && ctx === ctxRef.current) setLoaded({ ctx, rows });
     } catch {
       // A read failure here must never block the POS; just show nothing.
-      if (seq === seqRef.current && ctx === ctxRef.current) setItems([]);
+      if (seq === seqRef.current && ctx === ctxRef.current) setLoaded({ ctx, rows: [] });
     }
   }, []);
 
@@ -54,7 +58,7 @@ export function PendingTransfersBanner({
   useEffect(() => {
     ctxRef.current = openShiftId;
     seqRef.current += 1; // supersede any in-flight request from the previous context
-    setItems([]); // never show the previous shift/OU's rows while the new load is pending
+    setLoaded({ ctx: openShiftId, rows: [] }); // clear to the NEW context (render-gate also hides mismatches)
     if (!openShiftId) return;
     void load();
     const id = setInterval(() => void load(), 20000);
@@ -98,6 +102,8 @@ export function PendingTransfersBanner({
     [openShiftId, load, onApproved],
   );
 
+  // Render-gate: show rows ONLY when they were loaded for the CURRENT shift/OU context.
+  const items = loaded.ctx === openShiftId ? loaded.rows : [];
   if (!openShiftId || items.length === 0) return null;
 
   return (
