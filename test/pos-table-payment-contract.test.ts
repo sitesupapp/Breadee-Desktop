@@ -118,7 +118,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // RETARGETED BY DELIVERY SETTLEMENT 1.0.23: `pos_delivery_resolve_cost` (post-close
 // cost resolution, cash-inert) was added, so the expected set grows by exactly one
 // more reviewed name. (Floor-map RPCs are deliberately NOT part of this release.)
-test("the RPC allow-list contains exactly the thirty-five expected names", () => {
+test("the RPC allow-list contains exactly the forty-six expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -168,6 +168,10 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       "pos_open_table",
       "pos_pay_order",
       "pos_pay_table",
+      // POS Final W3 (Part 5) — payment-method management: the CAS-guarded save and
+      // the manager list (incl inactive). Sort between pos_pay_* and pos_payout_*.
+      "pos_payment_method_save",
+      "pos_payment_methods_manage_list",
       // Phase G — POS Payouts / cash drawer outflows (pos.payouts.create/list/reverse).
       "pos_payout_create",
       "pos_payout_list",
@@ -191,7 +195,8 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
   // 42 -> 44 in 1.0.31 for pos_merge_tables + pos_deletion_reason_report.
-  assert.equal(members.length, 44);
+  // 44 -> 46 for POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list.
+  assert.equal(members.length, 46);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

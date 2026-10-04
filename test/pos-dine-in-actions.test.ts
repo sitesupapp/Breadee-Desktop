@@ -270,7 +270,10 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // AND AGAIN BY 1.0.31: 42 -> 44, for `pos_merge_tables` (folds other occupied tables'
   // bills into one; pos.tables.merge) and `pos_deletion_reason_report` (read-only
   // deletion/reduction report; pos.analytics.view). Neither is a money RPC.
-  assert.equal(members.length, 44, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY POS FINAL W3: 44 -> 46, for pos_payment_method_save +
+  // pos_payment_methods_manage_list (payment-method MANAGEMENT; pos.payment_methods.manage;
+  // NOT money RPCs — see the tightened money-mover pattern below).
+  assert.equal(members.length, 46, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"), "pos_merge_tables should be in the allow-list");
   assert.ok(members.includes("pos_deletion_reason_report"), "pos_deletion_reason_report should be in the allow-list");
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
@@ -286,8 +289,12 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // genuine drawer money-movers, so they belong in this guard. Split settle moves
   // money too but is covered by the exact-list contract; it does not match this
   // heuristic pattern and is intentionally not added here.
+  // `pay_` (settlement) and `payout` (drawer) — NOT a bare `pay`, which would also
+  // match the W3 `pos_payment_method*` CONFIG RPCs. Those manage the catalog and move
+  // no money, so they are deliberately excluded; a real money RPC still matches
+  // submit/pay_/payout/void/refund/complete/collect and cannot slip past.
   assert.deepEqual(
-    members.filter((m) => /submit|pay|void|refund|complete|collect/.test(m)).sort(),
+    members.filter((m) => /submit|pay_|payout|void|refund|complete|collect/.test(m)).sort(),
     [
       "pos_complete_on_account",
       "pos_complete_table_on_account",

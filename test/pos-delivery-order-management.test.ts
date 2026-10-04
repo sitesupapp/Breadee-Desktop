@@ -557,7 +557,8 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // pos_split_state, pos_payout_create, pos_payout_reverse, pos_payout_list,
   // pos_analytics_summary. remove-item still stays out.
   // 31 -> 33 in 1.0.31: pos_merge_tables + pos_deletion_reason_report. remove-item stays out.
-  assert.equal(names.length, 33);
+  // 33 -> 35 for POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list.
+  assert.equal(names.length, 35);
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));
