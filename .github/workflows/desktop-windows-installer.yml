@@ -28,7 +28,7 @@ on:
   # workflow visible/registered in the Actions sidebar and builds the
   # installer artifact on each push to desktop-staging.
   push:
-    branches: [desktop-staging, claude/desktop-1031-payment-hotfix-clean, claude/desktop-1031-cumulative-repair]
+    branches: [desktop-staging, claude/desktop-1031-payment-hotfix-clean, claude/desktop-1031-cumulative-repair, claude/posfinal-1034-qa-packaging]
   # Build the installer for PRs into desktop-staging as well, so a reviewer can
   # download and smoke-test the actual .exe BEFORE the merge rather than after.
   # Safe to run on PRs: this is `pull_request` (never pull_request_target), so
