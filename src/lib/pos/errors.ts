@@ -9,6 +9,8 @@
 export type RefusalKind =
   | "no_shift"
   | "shift_closed"
+  // End Shift blocked because open orders remain (Part 6 — offer Transfer).
+  | "open_orders_block"
   | "permission"
   | "owner_blocked"
   | "branch"
@@ -50,6 +52,8 @@ export type RefusalKind =
   // Dine-In line edits (1.0.31 Phase 2)
   | "reason_required"
   | "version_conflict"
+  // Open-Orders Transfer (Part 6)
+  | "transfer_conflict"
   // Dine-In rounds (Level 2B)
   | "empty_round"
   | "modifier_required"
@@ -233,6 +237,32 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     hint: "The bill was reloaded with the latest changes. Review it, then make the edit again.",
     expected: true,
   },
+  {
+    // POS Final W3 (Part 5) — the payment-method editor's OWN optimistic-concurrency
+    // refusal. A SEPARATE rule (not a broadened one) so the dine-in bill's established
+    // wording and hint above are left exactly as they were.
+    kind: "version_conflict",
+    test: /this payment method changed since it was loaded/i,
+    hint: "The payment method was reloaded with the latest changes. Review it, then save again.",
+    expected: true,
+  },
+  {
+    // POS Final W4/W5 (Part 6) — Open-Orders Transfer optimistic-concurrency refusal (the
+    // transfer row, or an order, moved under the operator). Its OWN rule so the bill and
+    // payment-method wordings above are untouched.
+    kind: "version_conflict",
+    test: /this transfer changed since it was loaded|one or more orders changed since the transfer/i,
+    hint: "The transfer was reloaded with the latest state. Review it, then try again.",
+    expected: true,
+  },
+  {
+    // The transfer already reached a terminal state (approved/rejected), or a re-approval was
+    // attempted on a non-rejected transfer — a stale view, not a fault. Reload to see its state.
+    kind: "transfer_conflict",
+    test: /this transfer (was|is) already|only a rejected transfer can be re-approved/i,
+    hint: "This transfer already moved on. Reload the transfers list to see its current state.",
+    expected: true,
+  },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before
   // a request is made, so they are listed first and matched on our own wording.
   {
@@ -320,6 +350,17 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     kind: "no_shift",
     test: /open a shift before/i,
     hint: "Open a shift from the status bar, then try again.",
+    expected: true,
+  },
+  {
+    // POS Final W4/W5 (Part 6) — End Shift refused because open orders remain. Classified so
+    // the UI can offer the Transfer action instead of just showing the refusal.
+    kind: "open_orders_block",
+    // The canonical pos_end_shift refusal is "... N order(s) still open. Resolve them before
+    // ending the shift." Match that specifically — do NOT broadly match "cannot close this shift",
+    // which other refusals could also use and would wrongly offer the Transfer action.
+    test: /order\(s\) still open/i,
+    hint: "Transfer or resolve the open orders, then end your shift.",
     expected: true,
   },
   {

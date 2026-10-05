@@ -211,3 +211,21 @@ export function kitchenEventKey(input: { orderId: string; batchNo?: number | nul
 export function receiptEventKey(input: { orderNumber: string; paidAt?: string | null }): string {
   return `receipt:${input.orderNumber}${input.paidAt ? `:${input.paidAt}` : ""}`;
 }
+
+/**
+ * One committed item-reduction/cancellation on one order (Part 2).
+ *
+ * Keyed on the SERVER's post-edit `pos_entity_version`, which the edit RPC bumps
+ * by exactly one per committed edit, plus the order and the line. Two calls
+ * describing the same committed reduction therefore produce the same key, so a
+ * remount, a re-read of the bill, or a double-fire cannot print the slip twice.
+ * A genuine second reduction of the same line is a new edit with a new version,
+ * so it keys differently and prints its own slip.
+ */
+export function reductionEventKey(input: {
+  orderId: string;
+  targetItemId: string;
+  posEntityVersion: number;
+}): string {
+  return `reduction:${input.orderId}:${input.targetItemId}:${input.posEntityVersion}`;
+}

@@ -42,6 +42,10 @@ export const POS_PERMISSIONS = {
   ACCESS: "pos.access",
   CREATE_ORDERS: "pos.create_orders",
   TAKE_PAYMENTS: "pos.take_payments",
+  // POS Final W3 (Part 5) — manage the tenant's payment-method catalog in POS Settings.
+  // Tenant-level authority (pos_current_user_has_perm, no OU scope); the save + manager-list
+  // RPCs both enforce it server-side.
+  PAYMENT_METHODS_MANAGE: "pos.payment_methods.manage",
   // Phase E — item/quantity Split Bill. A DISTINCT authority; `pos_split_settle` checks this key.
   SPLIT_BILL: "pos.split_bill",
   // Phase G — POS Payouts / Cash Drawer Outflows. THREE distinct authorities the payout RPCs check.
@@ -55,6 +59,16 @@ export const POS_PERMISSIONS = {
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
   APPROVE_SHIFTS: "pos.approve_shifts",
+  // POS Final W4/W5 (Part 6) — Open-Orders Transfer. Tenant-level keys; the transfer RPCs
+  // re-enforce each server-side. Recipient eligibility is TRANSFERS_APPROVE (the "receive"
+  // permission). REAPPROVE is the website authorised-user key (W6); CREATE needs both
+  // CREATE and SELECT_RECIPIENT, matching pos_order_transfer_create.
+  TRANSFERS_VIEW: "pos.transfers.view",
+  TRANSFERS_CREATE: "pos.transfers.create",
+  TRANSFERS_SELECT_RECIPIENT: "pos.transfers.select_recipient",
+  TRANSFERS_APPROVE: "pos.transfers.approve",
+  TRANSFERS_REJECT: "pos.transfers.reject",
+  TRANSFERS_REAPPROVE: "pos.transfers.reapprove",
   // Dine-In tables. VIEW and OPEN are used in Level 2A; MOVE/CLEAR/CLOSE are
   // declared now so the keys live in one place, but nothing calls them yet -
   // their RPCs are not even in the `PosRpcName` union.
@@ -178,6 +192,34 @@ export function canCreateOrders(ctx: PosAccessContext): Gate {
 
 export function canTakePayments(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.TAKE_PAYMENTS), "You do not have permission to take payments.");
+}
+
+/** POS Final W3 (Part 5) — manage the payment-method catalog (POS Settings). */
+export function canManagePaymentMethods(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.PAYMENT_METHODS_MANAGE), "You do not have permission to manage payment methods.");
+}
+
+/**
+ * POS Final W4/W5 (Part 6) — Open-Orders Transfer gates. Tenant-level; each transfer RPC
+ * re-enforces its own key server-side, so these only decide whether a control is offered.
+ */
+export function canCreateTransfer(ctx: PosAccessContext): Gate {
+  // The sender needs BOTH create and recipient-selection, exactly as pos_order_transfer_create checks.
+  const g = gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_CREATE), "You do not have permission to transfer open orders.");
+  if (!g.allowed) return g;
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_SELECT_RECIPIENT), "You do not have permission to choose a transfer recipient.");
+}
+export function canApproveTransfer(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_APPROVE), "You do not have permission to approve transfers.");
+}
+export function canRejectTransfer(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_REJECT), "You do not have permission to reject transfers.");
+}
+export function canViewTransfers(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_VIEW), "You do not have permission to view transfers.");
+}
+export function canReapproveTransfer(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_REAPPROVE), "You do not have permission to re-approve transfers.");
 }
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {

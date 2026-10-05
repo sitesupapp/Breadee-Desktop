@@ -24,6 +24,8 @@ import { Badge, Button, Card, EmptyState, ErrorState, Input, Skeleton } from "@/
 import { Switch } from "@/components/Switch";
 import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 import { usePosContext } from "@/state/pos";
+import { canManagePaymentMethods } from "@/lib/pos/access";
+import { PaymentMethodsSettings } from "@/components/pos/PaymentMethodsSettings";
 import { configureTables, loadTableMap, tableNamesForCount, validateTableCount } from "@/lib/pos/tables";
 import type { TableMap } from "@/types/tables";
 import { loadServerPrinters, type ServerPrinter } from "@/lib/pos/printerRegistry";
@@ -300,6 +302,10 @@ export function PosSettings() {
         </div>
       </Card>
 
+      {/* Payment Methods management (Part 5). Self-hides unless the operator holds
+          pos.payment_methods.manage; the server enforces it on every call. */}
+      <PaymentMethodsSettings canManage={canManagePaymentMethods(pos.access).allowed} />
+
       {/* --- branch-wide ------------------------------------------------- */}
       <Card className="p-6">
         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -556,11 +562,14 @@ export function PosSettings() {
             hint="Tapping an item shows its Menu Builder ingredients so the cashier can remove one for that order line — “No Onion”. It changes only that line: the menu item, its recipe and its cost are untouched."
           />
           <Switch
-            checked={features.categorizedMenu}
-            onChange={(next) => setFeature("categorizedMenu", next)}
-            label="Categorized menu"
-            hint="The ordering screen opens on your menu categories; tapping one shows that category’s items, with a Back button to the categories. It only changes how the menu is browsed — the items, prices, options, cart and printing are unchanged. Applies to the Default layout; the Customized grid keeps its own keys."
+            checked={features.printReductionReceipt}
+            onChange={(next) => setFeature("printReductionReceipt", next)}
+            label="Print a receipt when an item is reduced or cancelled"
+            hint="When a cashier reduces or cancels an already-sent Dine-In item, print a short record slip to the receipt printer — the item, the quantity removed, the reason, the table, staff and time. Off by default. It is a record only: it never affects the sale, the kitchen ticket, or the totals."
           />
+          {/* The "Categorized menu" switch moved to Settings → Cashier layout,
+              with the Default mode it governs (Part 4). It is the same
+              terminal-local posFeatures setting, just relocated. */}
         </div>
       </Card>
 

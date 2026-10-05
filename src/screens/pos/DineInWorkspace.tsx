@@ -33,6 +33,8 @@ import { classifyError } from "@/lib/pos/errors";
 import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMergeTables, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
 import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
 import { modifierChangeRemovesComponents } from "@/lib/pos/editReason";
+import { autoPrintReductionReceipt } from "@/lib/pos/autoPrintRun";
+import { buildReductionReceipt } from "@/lib/pos/reductionReceipt";
 import { SplitBillPanel } from "@/components/pos/SplitBillPanel";
 import {
   buildSplitSettlePayload,
@@ -815,7 +817,7 @@ export function useDineInWorkspace(input: {
       if (!order) return;
       setEditingLineId(line.id);
       try {
-        await editOrderLine(
+        const result = await editOrderLine(
           buildSetQuantityPayload({
             orderId: order.id,
             lineId: line.id,
@@ -826,6 +828,43 @@ export function useDineInWorkspace(input: {
           }),
         );
         await tables.loadBill(ctx);
+        // Part 2: a REDUCTION or CANCELLATION (never an increase) may print a
+        // record slip to the receipt printer, if this terminal opted in. Fired
+        // AFTER the edit committed and the bill reloaded; best-effort and keyed by
+        // the server's post-edit version so it prints at most once. A print
+        // failure is surfaced but never un-does the edit it documents.
+        if (newQuantity < line.quantity) {
+          void (async () => {
+            try {
+              const { receipt, render } = buildReductionReceipt({
+                businessName: pos.tenantName,
+                branchName: pos.branch.name,
+                staffName: pos.userName,
+                orderNumber: result.order_number,
+                tableName: selected?.name ?? null,
+                currency: bill?.currency ?? input.currency,
+                at: new Date().toLocaleString(),
+                itemName: line.name,
+                previousQuantity: line.quantity,
+                newQuantity,
+                unitPrice: line.final_unit_price,
+                reason,
+              });
+              const status = await autoPrintReductionReceipt({
+                branchId: pos.branch.id,
+                access: pos.access,
+                receipt,
+                render,
+                event: { orderId: order.id, targetItemId: line.id, posEntityVersion: result.pos_entity_version },
+              });
+              if (status.kind === "failed") {
+                toast.push({ tone: "warning", message: "The reduction receipt did not print.", detail: status.message });
+              }
+            } catch {
+              /* A record slip is never allowed to disturb the edit it documents. */
+            }
+          })();
+        }
       } catch (e) {
         await tables.loadBill(ctx);
         toast.push({ tone: "warning", message: "The edit did not apply. The bill was reloaded.", detail: classifyError(e).message });
@@ -833,7 +872,7 @@ export function useDineInWorkspace(input: {
         setEditingLineId(null);
       }
     },
-    [tables, ctx, toast],
+    [tables, ctx, toast, pos, selected, input],
   );
 
   const onEditSentQty = useCallback(

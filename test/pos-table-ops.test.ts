@@ -319,7 +319,11 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // lifecycle); none moves customer money. AND POS A-H (1.0.30): 35 -> 42, for the
   // 7 Phase D/E/G/H RPCs, each reviewed and gated on its own permission.
   // AND 1.0.31: 42 -> 44, for `pos_merge_tables` and `pos_deletion_reason_report`.
-  assert.equal(members.length, 44, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND POS FINAL W3: 44 -> 46, for pos_payment_method_save + pos_payment_methods_manage_list
+  // (payment-method management; pos.payment_methods.manage; neither moves money).
+  // AND POS FINAL W4/W5 (Part 6): 46 -> 54, for the 6 transfer RPCs + eligible_recipients +
+  // pos_shift_unresolved_orders (none moves money).
+  assert.equal(members.length, 54, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"));
   assert.ok(members.includes("pos_deletion_reason_report"));
 });

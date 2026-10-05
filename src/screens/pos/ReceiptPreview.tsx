@@ -66,6 +66,12 @@ import {
  */
 export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: ReceiptRenderOptions }) {
   const show = (key: string) => !render?.sections || render.sections.includes(key);
+  // Name the settled method only when one is actually recorded. A missing or
+  // legacy method must NEVER be presented as "cash": that was the reprint
+  // defect (Part 3) where paid card/online/COD orders printed "Paid - cash".
+  // Unknown shows the status alone, never a guessed method. Mirrors the native
+  // thermal renderer (src-tauri/.../receipt.rs) exactly so paper == screen.
+  const methodSuffix = data.method && data.method.trim() ? ` - ${data.method.trim()}` : "";
   return (
     <div className="mx-auto w-[320px] rounded-lg border border-paper-line bg-paper p-4 font-mono text-[12px] leading-tight text-paper-ink">
       <div className="text-center">
@@ -216,9 +222,9 @@ export function ReceiptPaper({ data, render }: { data: ReceiptData; render?: Rec
         <div className="mt-1 flex justify-between text-[11px] text-paper-sub">
           <span>
             {data.paid
-              ? `Paid - ${data.method ?? "cash"}`
+              ? `Paid${methodSuffix}`
               : data.paymentStatus === "partial"
-                ? `Partial - ${data.method ?? "cash"}`
+                ? `Partial${methodSuffix}`
                 : data.paymentStatus === "unpaid"
                   ? "On account"
                   : "Unpaid"}

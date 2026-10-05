@@ -270,7 +270,12 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // AND AGAIN BY 1.0.31: 42 -> 44, for `pos_merge_tables` (folds other occupied tables'
   // bills into one; pos.tables.merge) and `pos_deletion_reason_report` (read-only
   // deletion/reduction report; pos.analytics.view). Neither is a money RPC.
-  assert.equal(members.length, 44, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND AGAIN BY POS FINAL W3: 44 -> 46, for pos_payment_method_save +
+  // pos_payment_methods_manage_list (payment-method MANAGEMENT; pos.payment_methods.manage;
+  // NOT money RPCs — see the tightened money-mover pattern below).
+  // AND BY POS FINAL W4/W5 (Part 6): 46 -> 54, for the 6 Open-Orders Transfer RPCs +
+  // pos_order_transfer_eligible_recipients + pos_shift_unresolved_orders. None moves money.
+  assert.equal(members.length, 54, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"), "pos_merge_tables should be in the allow-list");
   assert.ok(members.includes("pos_deletion_reason_report"), "pos_deletion_reason_report should be in the allow-list");
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");
@@ -286,8 +291,16 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // genuine drawer money-movers, so they belong in this guard. Split settle moves
   // money too but is covered by the exact-list contract; it does not match this
   // heuristic pattern and is intentionally not added here.
+  // The guard keeps the BROAD `pay` detection so any future money-moving `pos_payment_*`
+  // RPC is caught automatically. The two W3 payment-method CONFIG RPCs
+  // (pos_payment_method_save / pos_payment_methods_manage_list) also match `pay` but move
+  // no money, so they are excluded BY EXACT NAME — a narrowing of the pattern itself was
+  // rejected in review because it could let a future money RPC slip past unnoticed.
   assert.deepEqual(
-    members.filter((m) => /submit|pay|void|refund|complete|collect/.test(m)).sort(),
+    members
+      .filter((m) => /submit|pay|payout|void|refund|complete|collect/.test(m))
+      .filter((m) => m !== "pos_payment_method_save" && m !== "pos_payment_methods_manage_list")
+      .sort(),
     [
       "pos_complete_on_account",
       "pos_complete_table_on_account",

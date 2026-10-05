@@ -11,7 +11,7 @@ import { Badge, Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
 import { differenceLabel } from "@/lib/pos/shifts";
-import { buildShiftReportDetail, type ShiftReportDetail } from "@/lib/pos/shiftReport";
+import { buildShiftReportDetail, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { DeliveryFeeCashTreatment, ShiftExpected, ShiftReport } from "@/types/pos";
@@ -101,6 +101,7 @@ export function EndShiftDialog({
   error,
   onCancel,
   onConfirm,
+  onTransferOpenOrders,
 }: {
   open: boolean;
   busy: boolean;
@@ -110,6 +111,9 @@ export function EndShiftDialog({
   error: string | null;
   onCancel: () => void;
   onConfirm: (input: { actual: number; notes: string | null; treatment: DeliveryFeeCashTreatment }) => void;
+  /** POS Final W5 (Part 6) — present only when End Shift is blocked by open orders AND the
+   *  operator may transfer; offers the Transfer action (§6.2). */
+  onTransferOpenOrders?: () => void;
 }) {
   const [actual, setActual] = useState("");
   const [notes, setNotes] = useState("");
@@ -146,11 +150,17 @@ export function EndShiftDialog({
         <div className="flex items-center justify-between gap-3">
           {error ? <p className="truncate text-xs font-semibold text-red-700">{error}</p> : <span />}
           <div className="flex shrink-0 gap-2">
+            {onTransferOpenOrders && (
+              <Button variant="primary" size="lg" onClick={onTransferOpenOrders} disabled={busy}>
+                Transfer open orders
+              </Button>
+            )}
             <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>
               Cancel
             </Button>
             <Button
               size="lg"
+              variant={onTransferOpenOrders ? "ghost" : "primary"}
               onClick={() => onConfirm({ actual: counted, notes: notes.trim() || null, treatment })}
               disabled={busy || !gate.allowed}
               title={gate.reason ?? undefined}
@@ -478,6 +488,31 @@ export function ShiftReportDialog({
             </div>
           )}
         </div>
+
+        {/* Part 1 — items REDUCED or CANCELLED on submitted lines this shift
+            (report_json.item_reductions). Distinct from the reversed-ORDERS block
+            above; the value is informational and never netted off sales. Rendered
+            only when the server supplied it and something was actually reduced, so
+            an untouched shift or a pre-Part-1 report shows nothing. */}
+        {(() => {
+          const ir = itemReductionsFromReport(report.item_reductions);
+          if (!ir || (ir.removalEventsCount === 0 && ir.reductionEventsCount === 0)) return null;
+          const irCur = ir.currency ?? currency;
+          return (
+            <div className="rounded-xl border border-line p-3">
+              <p className="mb-2 text-sm font-bold text-ink">Items reduced / removed</p>
+              <SummaryRow label="Items removed" value={String(ir.removalEventsCount)} />
+              <SummaryRow label="Items reduced" value={String(ir.reductionEventsCount)} />
+              <SummaryRow label="Quantity removed" value={String(ir.totalRemovedQuantity)} />
+              <SummaryRow
+                label={ir.valueUnavailableCount > 0 ? `Value removed (${ir.valueUnavailableCount} values unavailable)` : "Value removed"}
+                value={formatMoney(ir.removedValueKnownSubtotal, irCur)}
+                tone="amber"
+              />
+              <p className="text-[11px] text-sub">On submitted items; not netted off sales.</p>
+            </div>
+          );
+        })()}
       </div>
 
       <div className="mt-3 grid gap-3 text-xs sm:grid-cols-2">

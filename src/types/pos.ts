@@ -199,6 +199,9 @@ export type ShiftReport = {
   exchange_rate: number | null;
   by_item: { item: string; qty: number; total: number }[];
   payments: Record<string, number>;
+  // Part 1 — raw report_json.item_reductions (server-written). Null on a report
+  // closed before the field existed. Mapped for display via itemReductionsFromReport.
+  item_reductions: Record<string, unknown> | null;
   // Delivery Fee shift treatment (m20260917120000). Persisted with the close snapshot.
   delivery_order_count: number;
   total_delivery_fees: number;

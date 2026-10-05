@@ -44,12 +44,23 @@ export type PosFeatures = {
    * is not entitled to.
    */
   preferFloorView: boolean;
+  /**
+   * Print a short record receipt to the RECEIPT printer when a cashier reduces or
+   * cancels an already-submitted Dine-In item (Part 2). Per-terminal, default OFF,
+   * so a till that has never chosen keeps today's silent behaviour. The slip is a
+   * record only - item, quantity removed, reason, table, staff and time - printed
+   * AFTER the server's edit has committed. It never touches, gates or replaces the
+   * operational kitchen cook-ticket (the kitchen is already updated server-side on
+   * a reduction) and it adds no inventory, kitchen or accounting effect.
+   */
+  printReductionReceipt: boolean;
 };
 
 export const POS_FEATURE_DEFAULTS: PosFeatures = {
   ingredientCustomization: false,
   categorizedMenu: false,
   preferFloorView: false,
+  printReductionReceipt: false,
 };
 
 /**
@@ -75,6 +86,7 @@ export function parsePosFeatures(raw: unknown): PosFeatures {
     ingredientCustomization: pick("ingredientCustomization"),
     categorizedMenu: pick("categorizedMenu"),
     preferFloorView: pick("preferFloorView"),
+    printReductionReceipt: pick("printReductionReceipt"),
   };
 }
 

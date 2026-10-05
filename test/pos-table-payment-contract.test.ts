@@ -118,7 +118,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // RETARGETED BY DELIVERY SETTLEMENT 1.0.23: `pos_delivery_resolve_cost` (post-close
 // cost resolution, cash-inert) was added, so the expected set grows by exactly one
 // more reviewed name. (Floor-map RPCs are deliberately NOT part of this release.)
-test("the RPC allow-list contains exactly the thirty-five expected names", () => {
+test("the RPC allow-list contains exactly the fifty-four expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -166,8 +166,21 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       "pos_move_table",
       "pos_open_shift",
       "pos_open_table",
+      // POS Final W4/W5 (Part 6) — Open-Orders Transfer: create/decide/reapprove, the reads
+      // (for_recipient/list/detail) + the recipient picker. Sort between pos_open_* and pos_pay_*.
+      "pos_order_transfer_create",
+      "pos_order_transfer_decide",
+      "pos_order_transfer_detail",
+      "pos_order_transfer_eligible_recipients",
+      "pos_order_transfer_reapprove",
+      "pos_order_transfers_for_recipient",
+      "pos_order_transfers_list",
       "pos_pay_order",
       "pos_pay_table",
+      // POS Final W3 (Part 5) — payment-method management: the CAS-guarded save and
+      // the manager list (incl inactive). Sort between pos_pay_* and pos_payout_*.
+      "pos_payment_method_save",
+      "pos_payment_methods_manage_list",
       // Phase G — POS Payouts / cash drawer outflows (pos.payouts.create/list/reverse).
       "pos_payout_create",
       "pos_payout_list",
@@ -180,6 +193,9 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
       // (pos.delivery.manage). Never a customer-money RPC.
       "pos_set_delivery_ops",
       "pos_shift_expected",
+      // POS Final W4/W5 (Part 6) — the End-Shift open-orders blocker set, read to populate the
+      // Transfer gate. Pre-existing read, now client-callable.
+      "pos_shift_unresolved_orders",
       // Phase E — item/quantity Split Bill (pos.split_bill). Read + settle.
       "pos_split_settle",
       "pos_split_state",
@@ -191,7 +207,9 @@ test("the RPC allow-list contains exactly the thirty-five expected names", () =>
     `the RPC allow-list changed: ${members.join(", ")}`,
   );
   // 42 -> 44 in 1.0.31 for pos_merge_tables + pos_deletion_reason_report.
-  assert.equal(members.length, 44);
+  // 44 -> 46 for POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list.
+  // 46 -> 54 for POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders.
+  assert.equal(members.length, 54);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

@@ -129,7 +129,12 @@ export function CurrentOrderPanel(props: {
           orderNumber: order.order_number ?? order.id.slice(0, 8),
           at: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
           paid: order.payment_status === "paid",
-          method: null,
+          // Reprint the method the order was actually settled with. A paid
+          // order carries its stored catalog method (cash, card, online, cod,
+          // or a tenant method); passing null here made the renderer fall back
+          // to "cash", so paid card/online/COD orders reprinted as "Paid - cash"
+          // (Part 3). Unpaid orders still carry no method.
+          method: order.payment_status === "paid" ? order.payment_method : null,
           // The order's OWN currency snapshot - the same source-of-truth rule
           // the delivery receipt fix establishes. Never a display currency.
           currency,

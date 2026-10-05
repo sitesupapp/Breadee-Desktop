@@ -28,6 +28,8 @@ import { GridDesigner, DesignerHint, type CellAction } from "@/components/pos/gr
 import { AddButtonWizard, EMPTY_DRAFT, draftFromButton, type WizardDraft } from "@/components/pos/grid/AddButtonWizard";
 import { fitAcrossProfiles, largestSafeGrid } from "@/lib/pos/grid/fit";
 import { readLayout, writeLayout } from "@/lib/pos/grid/storage";
+import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
+import { Switch } from "@/components/Switch";
 import {
   MAX_COLUMNS,
   MAX_ROWS,
@@ -61,6 +63,15 @@ export function CashierLayout() {
 
   const [saved, setSaved] = useState<PosGridLayout>(() => emptyLayout());
   const [draft, setDraft] = useState<PosGridLayout>(() => emptyLayout());
+  // The Categorized-menu option governs the DEFAULT layout, so it lives with
+  // the Default mode here (Part 4) instead of in POS Settings. It reads and
+  // writes the ONE terminal-local posFeatures store the rest of the POS uses -
+  // the same setting in a better place, never a parallel copy. Applied
+  // immediately, like the other terminal switches; no Save step.
+  const [features, setFeatures] = useState<PosFeatures>(() => readPosFeatures());
+  const setCategorizedMenu = useCallback((next: boolean) => {
+    setFeatures((current) => writePosFeatures({ ...current, categorizedMenu: next }));
+  }, []);
   const [items, setItems] = useState<SearchableItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -263,6 +274,30 @@ export function CashierLayout() {
           data — set it up on each terminal that needs it.
         </p>
       </Card>
+
+      {/* Default-layout browsing option (Part 4). Shown with the Default mode it
+          governs; hidden under Customized, which carries its own category keys. */}
+      {!draft.enabled && (
+        <Card className="p-6">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-sm font-extrabold text-ink">Default menu browsing</p>
+              <p className="mt-0.5 text-xs text-sub">
+                How the Default layout presents your menu at <strong className="text-ink">this terminal</strong>.
+              </p>
+            </div>
+            <Badge tone="slate">This terminal</Badge>
+          </div>
+          <div className="mt-2">
+            <Switch
+              checked={features.categorizedMenu}
+              onChange={setCategorizedMenu}
+              label="Categorized menu"
+              hint="The ordering screen opens on your menu categories; tapping one shows that category’s items, with a Back button to the categories. It only changes how the menu is browsed — the items, prices, options, cart and printing are unchanged. Applies to the Default layout; the Customized grid keeps its own keys."
+            />
+          </div>
+        </Card>
+      )}
 
       {draft.enabled && (
         <>

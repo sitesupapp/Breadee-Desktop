@@ -705,7 +705,11 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // library layer, not from these delivery screens - the check below still holds.
   // 31 -> 33 in 1.0.31: pos_merge_tables + pos_deletion_reason_report, both called from
   // the library layer, not from these delivery screens - the check below still holds.
-  assert.equal(names.length, 33);
+  // 33 -> 35 in POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list,
+  // called from POS Settings (paymentMethodsAdmin), not these delivery screens.
+  // 35 -> 43 for POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders,
+  // all called from the shift/transfer layer, not these delivery screens.
+  assert.equal(names.length, 43);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));
