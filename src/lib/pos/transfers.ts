@@ -251,27 +251,171 @@ export async function decideTransfer(input: {
   };
 }
 
-/** Website authorised user re-approves a REJECTED transfer into the recipient's open shift (W6). */
+/** Website authorised user re-approves a REJECTED transfer into the recipient's open shift (W6).
+ *  `targetShiftId` is OPTIONAL: when omitted (or null/blank) the server resolves the recipient's single
+ *  open shift itself (and refuses if they have zero or more than one). Only pass an explicit shift id to
+ *  pin a specific target; never send an empty string (the server validates it as a uuid). */
 export async function reapproveTransfer(input: {
   transferId: string;
-  targetShiftId: string;
+  targetShiftId?: string | null;
   note?: string | null;
   /** REQUIRED (mandatory CAS): the transfer's pos_entity_version from the last read. */
   expectedVersion: number;
   clientToken?: string;
 }): Promise<TransferResult> {
-  if (!Number.isInteger(input.expectedVersion)) throw new Error("A valid expected version is required to re-approve a transfer.");
-  const payload: Record<string, unknown> = {
-    transfer_id: input.transferId,
-    target_shift_id: input.targetShiftId,
-    reapprove_client_token: input.clientToken ?? newToken(),
-    expected_version: input.expectedVersion,
-  };
-  if (input.note && input.note.trim()) payload.note = input.note.trim();
-  const r = asRecord(await callPosRpc("pos_order_transfer_reapprove", { p_payload: payload }));
+  const r = asRecord(await callPosRpc("pos_order_transfer_reapprove", { p_payload: buildReapprovePayload(input) }));
   return {
     transferId: requireId(r.transfer_id, "pos_order_transfer_reapprove", "transfer_id"),
     status: toStatus(r.status),
     idempotent: r.idempotent === true,
+  };
+}
+
+/** Pure builder for the RE-APPROVE payload. Sends `target_shift_id` ONLY when a concrete shift is chosen;
+ *  when omitted/blank it is absent so the server auto-resolves the recipient's single open shift. Never
+ *  emits an empty-string shift id (the server validates it as a uuid). */
+export function buildReapprovePayload(input: { transferId: string; targetShiftId?: string | null; note?: string | null; expectedVersion: number; clientToken?: string }): Record<string, unknown> {
+  if (!Number.isInteger(input.expectedVersion)) throw new Error("A valid expected version is required to re-approve a transfer.");
+  const payload: Record<string, unknown> = {
+    transfer_id: input.transferId,
+    reapprove_client_token: input.clientToken ?? newToken(),
+    expected_version: input.expectedVersion,
+  };
+  if (input.targetShiftId && input.targetShiftId.trim()) payload.target_shift_id = input.targetShiftId.trim();
+  if (input.note && input.note.trim()) payload.note = input.note.trim();
+  return payload;
+}
+
+// --- Desktop 1.0.35 Transfer Center (B1) -------------------------------------
+//
+// Force Transfer and Sender Cancel. As everywhere else in this file, the desktop
+// performs NO authority logic: default-deny permissions, the branch's Force-Transfer
+// setting, fully-unpaid-only eligibility, single-open-shift resolution, exactly-once
+// replay (actor + branch + payload-fingerprint bound) and ownership-only reassignment
+// are ALL enforced by the SECURITY DEFINER RPCs. Force and Standard are separate RPCs;
+// Force never substitutes for Standard's recipient acceptance.
+
+/** A uuid for `client_op_id` (the force/cancel idempotency key — must be a real uuid, unlike
+ *  the free-form create_client_token). Prefers crypto.randomUUID; falls back to a v4 shape. */
+export function newOpId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    return (ch === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+/** Exactly-once key lifecycle: keep the SAME id while the intent fingerprint is unchanged (a retry of the
+ *  identical action, so a lost response replays), and rotate to a fresh id the moment the fingerprint
+ *  changes (a genuinely different action, so it never collides with the server's payload-fingerprint
+ *  binding or CAS). Used for the Send payload fingerprint and for each (transfer, action) cancel/reapprove
+ *  intent. Pure + deterministic given `prev`, so the id-rotation rule is unit-testable. */
+export function nextOpId(prev: { id: string; fp: string } | null, fp: string): { id: string; fp: string } {
+  return prev && prev.fp === fp ? prev : { id: newOpId(), fp };
+}
+
+/** Keep only the still-available ids from a prior selection — NEVER auto-adds. Used when a Send refresh
+ *  follows a failed/uncertain submit, so a reload cannot silently expand the operator's chosen subset. */
+export function keepAvailable(prev: Iterable<string>, available: Iterable<string>): Set<string> {
+  const avail = new Set(available);
+  return new Set([...prev].filter((id) => avail.has(id)));
+}
+
+/** Pure builder for the FORCE payload (extracted so the exactly-once + shape contract is testable). */
+export function buildForcePayload(input: { toUserId: string; orderIds: string[]; note?: string | null; clientOpId?: string }): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    client_op_id: input.clientOpId ?? newOpId(),
+    to_user_id: input.toUserId,
+    order_ids: input.orderIds,
+  };
+  if (input.note && input.note.trim()) payload.note = input.note.trim();
+  return payload;
+}
+
+/** Pure builder for the CANCEL payload (client_op_id + mandatory expected_version CAS). */
+export function buildCancelPayload(input: { transferId: string; note?: string | null; expectedVersion: number; clientOpId?: string }): Record<string, unknown> {
+  if (!Number.isInteger(input.expectedVersion)) throw new Error("A valid expected version is required to cancel a transfer.");
+  const payload: Record<string, unknown> = {
+    client_op_id: input.clientOpId ?? newOpId(),
+    transfer_id: input.transferId,
+    expected_version: input.expectedVersion,
+  };
+  if (input.note && input.note.trim()) payload.note = input.note.trim();
+  return payload;
+}
+
+export type ForceTransferResult = TransferResult & { transferMode: "force" };
+
+/** FORCE a transfer: immediately reassign the selected FULLY-UNPAID open orders to the recipient's
+ *  single open shift, with NO recipient acceptance. Requires `pos.orders.force_transfer` +
+ *  `pos.transfers.select_recipient` AND the branch's Force-Transfer setting ON (all server-enforced).
+ *  Reuse the SAME `clientOpId` across retries of one action for exactly-once semantics. */
+export async function forceTransfer(input: {
+  toUserId: string;
+  orderIds: string[];
+  note?: string | null;
+  clientOpId?: string;
+}): Promise<ForceTransferResult> {
+  const r = asRecord(await callPosRpc("pos_order_transfer_force", { p_payload: buildForcePayload(input) }));
+  return {
+    transferId: requireId(r.transfer_id, "pos_order_transfer_force", "transfer_id"),
+    status: toStatus(r.status),
+    idempotent: r.idempotent === true,
+    transferMode: "force",
+  };
+}
+
+/** SENDER (or a holder of `pos.transfers.cancel_others`) cancels a PENDING transfer. The orders'
+ *  ownership is unchanged; only the pending transfer is withdrawn and its claim released.
+ *  `expectedVersion` is a mandatory CAS (the transfer's pos_entity_version from the last read). */
+export async function cancelTransfer(input: {
+  transferId: string;
+  note?: string | null;
+  expectedVersion: number;
+  clientOpId?: string;
+}): Promise<TransferResult> {
+  const r = asRecord(await callPosRpc("pos_order_transfer_cancel", { p_payload: buildCancelPayload(input) }));
+  return {
+    transferId: requireId(r.transfer_id, "pos_order_transfer_cancel", "transfer_id"),
+    status: toStatus(r.status),
+    idempotent: r.idempotent === true,
+  };
+}
+
+/** Whether Force Transfer is enabled for a branch. Server returns false for a branch the caller
+ *  cannot access (no cross-OU probe), so this doubles as an access-aware capability check. */
+export async function isForceTransferEnabled(branchId: string): Promise<boolean> {
+  const r = await callPosRpc("pos_transfer_force_enabled", { p_branch: branchId });
+  return r === true;
+}
+
+export type ForceSettingResult = { branchId: string; enabled: boolean; configVersion: number };
+
+/** Pure builder for the Force-setting write payload. `expected_config_version` is included ONLY when a
+ *  real integer is supplied (optional optimistic concurrency); never sent as null/NaN. */
+export function buildForceSettingPayload(input: { branchId: string; enabled: boolean; expectedConfigVersion?: number }): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    branch_id: input.branchId,
+    force_transfer_enabled: input.enabled,
+  };
+  if (Number.isInteger(input.expectedConfigVersion)) payload.expected_config_version = input.expectedConfigVersion;
+  return payload;
+}
+
+/** B3 — set the OU-scoped Force-Transfer setting for a branch. Requires `pos.transfers.manage_force_setting`
+ *  (server-enforced); the setting is per-branch (PK tenant+branch) with NO inheritance. `expectedConfigVersion`
+ *  is an OPTIONAL optimistic-concurrency check — when provided and stale, the server refuses with
+ *  VERSION_CONFLICT; omit it to simply set (the server still audits every change). */
+export async function setForceTransferEnabled(input: {
+  branchId: string;
+  enabled: boolean;
+  expectedConfigVersion?: number;
+}): Promise<ForceSettingResult> {
+  const r = asRecord(await callPosRpc("pos_transfer_settings_set", { p_payload: buildForceSettingPayload(input) }));
+  return {
+    branchId: str(r.branch_id),
+    enabled: r.force_transfer_enabled === true,
+    configVersion: num(r.config_version),
   };
 }

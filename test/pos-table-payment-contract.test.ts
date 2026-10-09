@@ -142,7 +142,10 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
       "floor_service_layout",
       "floor_takeover_lease",
       "floor_unplaced_tables",
-      // Phase H — Analytics summary (pos.analytics.view). Sorts first among pos_*.
+      // R2 (1.0.35) — add new menu-item lines to an open unpaid DELIVERY order (pos.edit_orders).
+      // Sorts first among pos_* (add < analytics).
+      "pos_add_order_items",
+      // Phase H — Analytics summary (pos.analytics.view).
       "pos_analytics_summary",
       "pos_cash_box_shift",
       "pos_clear_table",
@@ -167,11 +170,14 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
       "pos_open_shift",
       "pos_open_table",
       // POS Final W4/W5 (Part 6) — Open-Orders Transfer: create/decide/reapprove, the reads
-      // (for_recipient/list/detail) + the recipient picker. Sort between pos_open_* and pos_pay_*.
+      // (for_recipient/list/detail) + the recipient picker. Desktop 1.0.35 (B1) adds force + cancel.
+      // Sort between pos_open_* and pos_pay_*.
+      "pos_order_transfer_cancel",
       "pos_order_transfer_create",
       "pos_order_transfer_decide",
       "pos_order_transfer_detail",
       "pos_order_transfer_eligible_recipients",
+      "pos_order_transfer_force",
       "pos_order_transfer_reapprove",
       "pos_order_transfers_for_recipient",
       "pos_order_transfers_list",
@@ -201,6 +207,9 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
       "pos_split_state",
       "pos_submit_order",
       "pos_table_map",
+      // Desktop 1.0.35 (B1/B3) — Force-Transfer capability read + OU-scoped setting write.
+      "pos_transfer_force_enabled",
+      "pos_transfer_settings_set",
       "pos_upsert_customer",
       "pos_void_order",
     ],
@@ -209,7 +218,10 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
   // 42 -> 44 in 1.0.31 for pos_merge_tables + pos_deletion_reason_report.
   // 44 -> 46 for POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list.
   // 46 -> 54 for POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders.
-  assert.equal(members.length, 54);
+  // 54 -> 58 for Desktop 1.0.35 (B1/B3): pos_order_transfer_force, pos_order_transfer_cancel,
+  //   pos_transfer_force_enabled, pos_transfer_settings_set.
+  // 58 -> 59 for Desktop 1.0.35 (R2): pos_add_order_items.
+  assert.equal(members.length, 59);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

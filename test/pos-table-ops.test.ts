@@ -323,7 +323,10 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // (payment-method management; pos.payment_methods.manage; neither moves money).
   // AND POS FINAL W4/W5 (Part 6): 46 -> 54, for the 6 transfer RPCs + eligible_recipients +
   // pos_shift_unresolved_orders (none moves money).
-  assert.equal(members.length, 54, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND DESKTOP 1.0.35 (B1/B3): 54 -> 58, for pos_order_transfer_force, pos_order_transfer_cancel,
+  // pos_transfer_force_enabled, pos_transfer_settings_set (ownership-only + an OU boolean; none moves money).
+  // 58 -> 59 for Desktop 1.0.35 (R2): pos_add_order_items.
+  assert.equal(members.length, 59, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"));
   assert.ok(members.includes("pos_deletion_reason_report"));
 });

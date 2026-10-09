@@ -357,3 +357,90 @@ export async function editOrderLine(payload: EditLinePayload): Promise<EditLineR
     idempotent: bool(row.idempotent),
   };
 }
+
+// --- R2: Delivery add-new-item (pos_add_order_items) -----------------------
+//
+// Server-authoritative. The desktop sends item IDENTITIES + quantities ONLY - never
+// a price. The SERVER resolves base price + modifier deltas from the branch menu
+// (pos_menu predicates), validates availability + modifier attachment, generates
+// kitchen tickets via the existing transition, and composes the delivery total.
+// `client_op_id` is minted once per logical add and reused on retry so a lost
+// response replays exactly-once rather than double-adding; `expected_version` is the
+// order's pos_entity_version at add time. DELIVERY only (dine-in keeps its round flow).
+
+export type AddItemModifier = {
+  /** Modifier option id. The server resolves its price and validates attachment. */
+  option_id: string;
+  name?: string;
+  quantity?: number;
+};
+
+export type AddItemInput = {
+  menu_item_id: string;
+  quantity: number;
+  modifiers?: AddItemModifier[];
+  kitchen_note?: string | null;
+  customization_json?: Record<string, unknown>;
+};
+
+export type AddItemsPayload = {
+  order_id: string;
+  items: AddItemInput[];
+  expected_version: number;
+  client_op_id: string;
+};
+
+export type AddItemsResult = {
+  order_id: string;
+  order_number: string;
+  added_count: number;
+  batch_no: number;
+  total_amount: number;
+  action: string;
+  pos_entity_version: number;
+};
+
+/**
+ * Add NEW menu-item lines to an open, unpaid DELIVERY order. Carries NO prices -
+ * the server is authoritative. Pure (shapes the request only).
+ */
+export function buildAddItemsPayload(input: {
+  orderId: string;
+  items: AddItemInput[];
+  expectedVersion: number;
+  clientOpId: string;
+}): AddItemsPayload {
+  return {
+    order_id: input.orderId,
+    items: input.items.map((it) => ({
+      menu_item_id: it.menu_item_id,
+      quantity: it.quantity,
+      ...(it.modifiers && it.modifiers.length
+        ? {
+            modifiers: it.modifiers.map((m) => ({
+              option_id: m.option_id,
+              ...(m.name ? { name: m.name } : {}),
+              ...(m.quantity != null ? { quantity: m.quantity } : {}),
+            })),
+          }
+        : {}),
+      ...(it.kitchen_note ? { kitchen_note: it.kitchen_note } : {}),
+      ...(it.customization_json ? { customization_json: it.customization_json } : {}),
+    })),
+    expected_version: input.expectedVersion,
+    client_op_id: input.clientOpId,
+  };
+}
+
+export async function addOrderItems(payload: AddItemsPayload): Promise<AddItemsResult> {
+  const row = asRecord(await callPosRpc("pos_add_order_items", { p_payload: payload }));
+  return {
+    order_id: requireId(row.order_id, "pos_add_order_items", "order_id"),
+    order_number: str(row.order_number),
+    added_count: num(row.added_count),
+    batch_no: num(row.batch_no),
+    total_amount: num(row.total_amount),
+    action: str(row.action),
+    pos_entity_version: num(row.pos_entity_version),
+  };
+}

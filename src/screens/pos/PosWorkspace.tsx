@@ -34,6 +34,7 @@ import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components/pos/ShiftDialog";
 import { TransferDialog } from "@/components/pos/TransferDialog";
 import { PendingTransfersBanner } from "@/components/pos/PendingTransfersBanner";
+import { TransferCenterModal } from "@/components/pos/TransferCenterModal";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
@@ -85,7 +86,7 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canCreateTransfer, canViewDelivery, canViewFloor, canViewTables } from "@/lib/pos/access";
+import { canApproveTransfer, canCreateTransfer, canForceTransfer, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
@@ -557,6 +558,8 @@ function PosWorkspaceInner() {
   // --- operations surfaces ---------------------------------------------------
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [openTablesOpen, setOpenTablesOpen] = useState(false);
+  // Desktop 1.0.35 (B2) — the Transfer Center surface, opened from the "Transfer" rail entry.
+  const [transferCenterOpen, setTransferCenterOpen] = useState(false);
   // Best-effort section names from the PUBLISHED floor for the Open Tables list.
   // Open Tables never DEPENDS on the floor: an empty map just means no section.
   const [openTableSections, setOpenTableSections] = useState<Map<string, string>>(new Map());
@@ -928,6 +931,13 @@ function PosWorkspaceInner() {
   const dineInActive = mode === "dine_in" && tablesGate.allowed;
   const deliveryGate = canViewDelivery(pos.access);
   const deliveryActive = mode === "delivery" && deliveryGate.allowed;
+  // Transfer Center rail gate: offered when the operator can do ANY transfer action (send/force,
+  // approve incoming, or view/manage). Per-tab gating + the server still decide what is possible.
+  const transferRailAllowed =
+    canCreateTransfer(pos.access).allowed ||
+    canForceTransfer(pos.access).allowed ||
+    canApproveTransfer(pos.access).allowed ||
+    canViewTransfers(pos.access).allowed;
   const tableStore = useTables();
   // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
   // The rail count is derived from state already in memory - no fetch of its own.
@@ -1034,6 +1044,8 @@ function PosWorkspaceInner() {
     shiftId,
     createOrders: pos.gates.createOrders,
     currency,
+    // R2 — delivery item editing reuses the shared POS menu (modifier editing on a sent line).
+    menu: roundMenu,
     cartLines: cart.lines,
     cartSelectedKey: cart.selectedKey,
     onSelectLine: cart.select,
@@ -2154,6 +2166,18 @@ function PosWorkspaceInner() {
       onSelect: openOpenTables,
     },
     {
+      // Desktop 1.0.35 (B2) — Transfer Center. Opens the consolidated transfer surface (Send /
+      // Incoming / Manage). Gated on having ANY transfer capability; per-tab + server enforce the rest.
+      key: "transfer",
+      label: "Transfer",
+      icon: "transfer",
+      to: "/pos",
+      enabled: transferRailAllowed,
+      reason: transferRailAllowed ? undefined : "You do not have permission to use transfers.",
+      active: transferCenterOpen,
+      onSelect: () => setTransferCenterOpen(true),
+    },
+    {
       // The EXISTING orders workspace, given the rail entry the approved design
       // puts it in. It opens the same modal the status bar used to, with the
       // same shift-order collection, the same manual print and the same reversal
@@ -2757,6 +2781,21 @@ function PosWorkspaceInner() {
           />
         </div>
       </div>
+
+      {/* Desktop 1.0.35 (B2) — Transfer Center: Send (Standard/Force) · Incoming · Manage. */}
+      <TransferCenterModal
+        open={transferCenterOpen}
+        shiftId={shiftId}
+        branchId={pos.branch.id}
+        userId={pos.userId}
+        access={pos.access}
+        onClose={() => setTransferCenterOpen(false)}
+        onChanged={() => {
+          void refreshShiftOrders();
+          void shiftStore.refreshCashBox();
+          void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+        }}
+      />
 
       {/* The orders are captured BEFORE the close cleared the active shift, so
           the report's route and reversal detail describes the shift it is

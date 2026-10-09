@@ -275,7 +275,11 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   // NOT money RPCs — see the tightened money-mover pattern below).
   // AND BY POS FINAL W4/W5 (Part 6): 46 -> 54, for the 6 Open-Orders Transfer RPCs +
   // pos_order_transfer_eligible_recipients + pos_shift_unresolved_orders. None moves money.
-  assert.equal(members.length, 54, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND BY DESKTOP 1.0.35 (B1/B3): 54 -> 58, for pos_order_transfer_force, pos_order_transfer_cancel,
+  // pos_transfer_force_enabled, pos_transfer_settings_set. None moves customer money (ownership-only +
+  // an OU-scoped boolean setting), each default-deny server-side.
+  // 58 -> 59 for Desktop 1.0.35 (R2): pos_add_order_items.
+  assert.equal(members.length, 59, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"), "pos_merge_tables should be in the allow-list");
   assert.ok(members.includes("pos_deletion_reason_report"), "pos_deletion_reason_report should be in the allow-list");
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");

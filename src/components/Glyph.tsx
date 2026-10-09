@@ -23,6 +23,7 @@ export type GlyphName =
   | "delivery"
   | "orders"
   | "open-tables"
+  | "transfer"
   // app navigation
   | "dashboard"
   | "menu-builder"
@@ -80,6 +81,8 @@ const GLYPHS: Record<GlyphName, string> = {
   // A till RECEIPT with a torn bottom edge - the "money still owed on a table"
   // surface. Deliberately not the flat document of `orders`: this reads as a bill.
   "open-tables": "M6 3.5h12v15l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3-2 1.3v-15M8.5 8h7M8.5 11.5h7M8.5 15h4",
+  // Transfer: two opposing horizontal arrows — one order set handed over, the mirror path back.
+  transfer: "M4 9h13M13 5l4 4-4 4M20 15H7M11 11l-4 4 4 4",
   // App sidebar. Drawn in the same idiom as everything else here, because the
   // sidebar previously used bare ASCII characters ("#", "P", "@", "*") and one
   // real glyph beside four letters reads as a rendering fault rather than as a

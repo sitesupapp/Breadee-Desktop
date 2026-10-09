@@ -24,8 +24,9 @@ import { Badge, Button, Card, EmptyState, ErrorState, Input, Skeleton } from "@/
 import { Switch } from "@/components/Switch";
 import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 import { usePosContext } from "@/state/pos";
-import { canManagePaymentMethods } from "@/lib/pos/access";
+import { canManageForceSetting, canManagePaymentMethods } from "@/lib/pos/access";
 import { PaymentMethodsSettings } from "@/components/pos/PaymentMethodsSettings";
+import { ForceTransferSettings } from "@/components/pos/ForceTransferSettings";
 import { configureTables, loadTableMap, tableNamesForCount, validateTableCount } from "@/lib/pos/tables";
 import type { TableMap } from "@/types/tables";
 import { loadServerPrinters, type ServerPrinter } from "@/lib/pos/printerRegistry";
@@ -305,6 +306,18 @@ export function PosSettings() {
       {/* Payment Methods management (Part 5). Self-hides unless the operator holds
           pos.payment_methods.manage; the server enforces it on every call. */}
       <PaymentMethodsSettings canManage={canManagePaymentMethods(pos.access).allowed} />
+
+      {/* Desktop 1.0.35 (B3) — the OU-scoped Force-Transfer setting. Gated on
+          pos.transfers.manage_force_setting (server-enforced); the switch is disabled with the reason
+          when the operator cannot manage it. */}
+      {/* Keyed by branch so a branch change REMOUNTS it with fresh state — branch A's value can never
+          render (or be acted on) for branch B, which is the OU-isolation guarantee for this toggle. */}
+      <ForceTransferSettings
+        key={branchId ?? "no-branch"}
+        branchId={branchId}
+        canManage={canManageForceSetting(pos.access).allowed}
+        reason={canManageForceSetting(pos.access).reason}
+      />
 
       {/* --- branch-wide ------------------------------------------------- */}
       <Card className="p-6">

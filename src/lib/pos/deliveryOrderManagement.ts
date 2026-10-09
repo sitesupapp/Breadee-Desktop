@@ -82,6 +82,9 @@ export type DeliveryQueueOrder = {
   notes: string | null;
   shift_id: string | null;
   created_at: string | null;
+  /** R2: optimistic-concurrency token. The item-edit RPCs require it as expected_version.
+   *  Optional so pre-R2 fixtures/callers need not set it; the reader populates it. */
+  pos_entity_version?: number | null;
 };
 
 export function isTerminal(status: string): boolean {
@@ -114,6 +117,7 @@ function toQueueOrder(raw: unknown): DeliveryQueueOrder | null {
     notes: strOrNull(r.notes),
     shift_id: strOrNull(r.shift_id),
     created_at: strOrNull(r.created_at),
+    pos_entity_version: r.pos_entity_version == null ? null : num(r.pos_entity_version),
   };
 }
 
@@ -126,7 +130,7 @@ export function todayBounds(now: Date): { start: string; end: string } {
 }
 
 const QUEUE_COLUMNS =
-  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, delivery_fee, delivery_handler_type, delivered_by_user_id, delivery_person_ref, delivery_cost, branch_id, delivery_provider_id, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at";
+  "id, order_number, status, payment_status, payment_method, subtotal, discount_amount, delivery_fee, delivery_handler_type, delivered_by_user_id, delivery_person_ref, delivery_cost, branch_id, delivery_provider_id, total_amount, primary_currency_snapshot, customer_id, address_id, notes, shift_id, created_at, pos_entity_version";
 
 /**
  * The operator's delivery queue.
@@ -184,11 +188,21 @@ export function queueCounts(orders: DeliveryQueueOrder[]): {
 
 export type DeliveryOrderLine = {
   id: string;
+  /** The catalogue item behind this line. Needed by R2 modifier editing to load the item's groups. */
+  menuItemId: string | null;
   name: string;
   quantity: number;
   lineTotal: number;
   kitchenNote: string | null;
-  modifiers: { name: string; priceDelta: number; quantity: number }[];
+  modifiers: {
+    /** R2: the canonical modifier identity, so an edit can seed the dialog and the client can mirror the
+     *  server's reason-on-removal predicate. Null on legacy rows that never recorded it. */
+    groupId: string | null;
+    optionId: string | null;
+    name: string;
+    priceDelta: number;
+    quantity: number;
+  }[];
 };
 
 /** One order's lines, read authoritatively. Never rebuilt from a cart. */
@@ -196,7 +210,7 @@ export async function loadDeliveryOrderLines(orderId: string): Promise<DeliveryO
   const { supabase } = await import("@/lib/supabase");
   const items = await supabase
     .from("pos_order_items")
-    .select("id, name_snapshot, quantity, line_total, kitchen_note")
+    .select("id, menu_item_id, name_snapshot, quantity, line_total, kitchen_note")
     .eq("order_id", orderId)
     .order("created_at");
   if (items.error) throw new Error(items.error.message);
@@ -207,7 +221,7 @@ export async function loadDeliveryOrderLines(orderId: string): Promise<DeliveryO
   if (ids.length > 0) {
     const mods = await supabase
       .from("pos_order_item_modifiers")
-      .select("order_item_id, name_snapshot, price_delta, quantity")
+      .select("order_item_id, modifier_group_id, modifier_option_id, name_snapshot, price_delta, quantity")
       .in("order_item_id", ids);
     if (mods.error) throw new Error(mods.error.message);
     for (const raw of (mods.data ?? []) as unknown[]) {
@@ -216,7 +230,13 @@ export async function loadDeliveryOrderLines(orderId: string): Promise<DeliveryO
       if (!id) continue;
       byItem.set(id, [
         ...(byItem.get(id) ?? []),
-        { name: str(r.name_snapshot, "Extra"), priceDelta: num(r.price_delta), quantity: num(r.quantity, 1) },
+        {
+          groupId: strOrNull(r.modifier_group_id),
+          optionId: strOrNull(r.modifier_option_id),
+          name: str(r.name_snapshot, "Extra"),
+          priceDelta: num(r.price_delta),
+          quantity: num(r.quantity, 1),
+        },
       ]);
     }
   }
@@ -227,6 +247,7 @@ export async function loadDeliveryOrderLines(orderId: string): Promise<DeliveryO
       if (!id) return null;
       return {
         id,
+        menuItemId: strOrNull(r.menu_item_id),
         name: str(r.name_snapshot, "Item"),
         quantity: num(r.quantity, 1),
         lineTotal: num(r.line_total),

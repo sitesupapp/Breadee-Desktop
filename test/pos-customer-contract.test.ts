@@ -169,7 +169,9 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // 33 -> 35 in POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list
   // (payment-method management; gated on pos.payment_methods.manage; no money RPC).
   // 35 -> 43 in POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders.
-  assert.equal(names.length, 43);
+  // 43 -> 47 in Desktop 1.0.35 (B1/B3): pos_order_transfer_force, pos_order_transfer_cancel,
+  //   pos_transfer_force_enabled, pos_transfer_settings_set (all pos_* names).
+  assert.equal(names.length, 48); // +pos_add_order_items (R2 1.0.35)
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_deletion_reason_report"));
   assert.ok(names.includes("pos_delivery_resolve_cost"));
@@ -220,18 +222,20 @@ test("customer writes are never queued offline", () => {
   assert.ok(customersSrc.includes("needs a connection"));
 });
 
-// RETARGETED BY LEVEL 3B. Delivery now takes orders, so it legitimately holds a
-// cart, reuses the shared cart panel and carries a shift id - all three were
-// scope statements about Level 3A, not safety properties. It still builds no
-// menu or cart of its own, which is the part that mattered: a second cart would
-// be a second place for someone else's food to end up.
+// RETARGETED BY LEVEL 3B and R2 (1.0.35). Delivery now takes orders AND edits open delivery orders, so it
+// legitimately holds a cart, reuses the shared cart panel, carries a shift id, and (R2) reuses the shared
+// ModifierDialog for changing a sent line's options. Those are scope statements, not safety properties. The
+// part that mattered still holds: it builds NO menu grid, catalogue nav or menu loader of its OWN — a second
+// menu/cart engine would be a second place for someone else's food to end up. Reuse of the canonical shared
+// components is exactly the intent; only re-implementation is forbidden.
 test("the delivery workspace re-implements neither the menu nor the cart", () => {
   const code = stripComments(workspaceSrc);
-  for (const token of ["MenuItemGrid", "CategoryNavigation", "ModifierDialog", "loadMenu"]) {
+  for (const token of ["MenuItemGrid", "CategoryNavigation", "loadMenu"]) {
     assert.equal(code.includes(token), false, `${token} must not be re-implemented for Delivery`);
   }
-  // It imports the shared panel rather than declaring one.
+  // It IMPORTS the shared panel and the shared modifier chooser rather than declaring its own.
   assert.match(code, /import \{ CartPanel \} from "@\/components\/pos\/CartPanel"/);
+  assert.match(code, /import \{ ModifierDialog \} from "@\/components\/pos\/ModifierDialog"/);
 });
 
 // RETARGETED BY LEVEL 3B for the same reason: a delivery order must carry a

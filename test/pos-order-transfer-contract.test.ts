@@ -147,8 +147,9 @@ test("decide AND reapprove each require a valid expected version (mandatory CAS)
   // non-integer version before issuing the RPC.
   assert.match(t, /A valid expected version is required to decide a transfer/);
   assert.match(t, /A valid expected version is required to re-approve a transfer/);
-  // both always send expected_version (two occurrences — one per function).
-  assert.equal((t.match(/expected_version: input\.expectedVersion/g) || []).length, 2);
+  // decide, reapprove AND (Desktop 1.0.35 B2) cancel each always send expected_version — one per
+  // function, so three occurrences since the Sender-Cancel mandatory-CAS wrapper was added.
+  assert.equal((t.match(/expected_version: input\.expectedVersion/g) || []).length, 3);
   // the recipient read surfaces pos_entity_version so a view-less recipient can still pass CAS.
   assert.match(t, /posEntityVersion: num\(r\.pos_entity_version\)/);
 });

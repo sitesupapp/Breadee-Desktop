@@ -709,7 +709,9 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // called from POS Settings (paymentMethodsAdmin), not these delivery screens.
   // 35 -> 43 for POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders,
   // all called from the shift/transfer layer, not these delivery screens.
-  assert.equal(names.length, 43);
+  // 43 -> 47 for Desktop 1.0.35 (B1/B3): force/cancel/force_enabled/settings_set, all called from the
+  // Transfer Center + POS Settings, not these delivery screens - the check below still holds.
+  assert.equal(names.length, 48); // +pos_add_order_items (R2 1.0.35)
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));
