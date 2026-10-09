@@ -1,0 +1,265 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — PRODUCTION BUILD ONLY (signed, UNPUBLISHED)
+#
+# Hardened variant of the reviewed build-only workflow, registered on the
+# TRUSTED default branch (main). It builds and SIGNS the production updater
+# artifact exactly as a real release would — same Production environment, same
+# signing key, same production-backend fail-closed guards, same
+# `--config src-tauri/tauri.release.conf.json` — but NEVER publishes:
+#
+#   • NO GitHub release is created.          • NO tag is required or created.
+#   • NO desktop channel / latest.json write.
+#
+# TRUST MODEL: unlike checking out the dispatched ref, this workflow checks out
+# ONE pinned, reviewed release SHA and refuses any other, so the Production
+# signing key can never be injected into unreviewed source. Its definition
+# lives only on the protected default branch; the Production environment keeps
+# its required-reviewer approval. `permissions: contents: read` means the job
+# token cannot write to the repo even if a step tried.
+#
+# TRIGGER: manual workflow_dispatch only.
+# FAIL CLOSED: every check exits non-zero rather than producing an unverified
+# or unsigned artifact.
+# ---------------------------------------------------------------------------
+
+name: Desktop Production Build Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'Why this build is being produced (audit trail; shown in the run)'
+        required: false
+        default: ''
+      sha:
+        description: 'Optional: must equal the pinned reviewed release SHA. Leave blank to use it.'
+        required: false
+        default: ''
+
+# Read-only: this workflow never creates a release and never pushes a channel
+# manifest, so the job token needs no write scope at all.
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-production-build-only
+  cancel-in-progress: false
+
+env:
+  EXPECTED_SHA: fb66bcb13565504c17ffc7a694e12264d3ef3ffb
+  STAGING_REF: azjxprewycygsocusxjn
+  PRODUCTION_REF: cltlqfqormkhppmbvyrv
+
+jobs:
+  build:
+    name: Build and sign (no publish)
+    runs-on: windows-latest
+    # Preserves the protected Production environment: its required-reviewer
+    # approval still gates this run before the signing key is injected.
+    environment: Production
+
+    steps:
+      # Reject any dispatch that names a source SHA other than the reviewed one.
+      - name: Reject unexpected source SHA
+        shell: bash
+        run: |
+          want="fb66bcb13565504c17ffc7a694e12264d3ef3ffb"
+          got="${{ github.event.inputs.sha }}"
+          if [ -n "$got" ] && [ "$got" != "$want" ]; then
+            echo "::error::Refusing to build: requested sha '$got' is not the reviewed release SHA $want."
+            exit 1
+          fi
+
+      - name: Checkout the pinned reviewed release SHA
+        uses: actions/checkout@v4
+        with:
+          ref: fb66bcb13565504c17ffc7a694e12264d3ef3ffb
+          fetch-depth: 0
+
+      # Prove the tree we are about to sign is exactly the reviewed SHA.
+      - name: Prove checked-out commit is the reviewed SHA
+        shell: bash
+        run: |
+          head=$(git rev-parse HEAD)
+          want="fb66bcb13565504c17ffc7a694e12264d3ef3ffb"
+          echo "HEAD=$head"
+          if [ "$head" != "$want" ]; then
+            echo "::error::Checked-out HEAD $head != reviewed SHA $want. Refusing to build."
+            exit 1
+          fi
+
+      # The build has no tag to validate against, so instead of a tag/version
+      # comparison it proves the three manifests AGREE on one SemVer. A build
+      # whose manifests disagree would sign an artifact whose in-app version,
+      # package version and crate version differ — exactly the drift the release
+      # job's tag check guards against, minus the tag.
+      - name: Derive version and prove manifest agreement
+        shell: bash
+        run: |
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "tauri.conf.json=$conf package.json=$pkg Cargo.toml=$cargo"
+          if ! printf '%s' "$conf" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$conf' is not a plain SemVer MAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          for got in "$pkg" "$cargo"; do
+            if [ "$got" != "$conf" ]; then
+              echo "::error::Version mismatch: tauri.conf.json says $conf but a manifest says $got."
+              exit 1
+            fi
+          done
+          # Confirm the product identifier is unchanged (updater identity).
+          ident=$(node -p "require('./src-tauri/tauri.conf.json').identifier")
+          if [ "$ident" != "app.breadee.desktop" ]; then
+            echo "::error::Unexpected app identifier '$ident' (expected app.breadee.desktop)."
+            exit 1
+          fi
+          echo "VERSION=$conf" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      # Same production-environment guards as the release workflow. Presence
+      # checks only — no secret value is ever printed.
+      - name: Verify production environment is configured
+        shell: bash
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::The Production environment has no Supabase URL/key. Refusing to build."
+            exit 1
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::No updater signing key in the Production environment. Refusing to produce an unsigned artifact."
+            exit 1
+          fi
+          case "$VITE_SUPABASE_URL" in
+            *"$STAGING_REF"*)
+              echo "::error::The Production environment points at the STAGING project. Refusing to build."
+              exit 1 ;;
+          esac
+          host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
+          echo "Production backend host: $host"
+
+      - name: Build frontend
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: production
+
+      - name: Verify built bundle targets production
+        shell: bash
+        run: |
+          if grep -rl "$STAGING_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle references the STAGING project. Refusing to continue."
+            exit 1
+          fi
+          if ! grep -rl "$PRODUCTION_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle does not reference the production project. Refusing to continue."
+            exit 1
+          fi
+          echo "Bundle backend target verified: production."
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The cached app crate embeds the frontend at compile time and Cargo does
+      # not invalidate it when only dist/ changes, so clean just the app crate to
+      # force a fresh embed. (Identical to the release workflow.)
+      - name: Force fresh frontend embed (bust stale app-crate cache)
+        run: cargo clean -p breadee-desktop --manifest-path src-tauri/Cargo.toml
+
+      # Build + sign. `--config src-tauri/tauri.release.conf.json` is what turns
+      # updater artifacts ON and what requires the signing key — identical to the
+      # release workflow. The password variable must be PRESENT though the key
+      # has none.
+      - name: Build and sign the production app
+        run: npm run tauri:build -- --config src-tauri/tauri.release.conf.json
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: production
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+
+      # Collect the assets and PROVE the signature exists — fail closed if not.
+      - name: Collect and verify build assets
+        shell: bash
+        run: |
+          nsis_dir=src-tauri/target/release/bundle/nsis
+          mkdir -p out
+          installer=$(ls "$nsis_dir"/*-setup.exe | head -n 1)
+          sig=$(ls "$nsis_dir"/*-setup.exe.sig 2>/dev/null | head -n 1 || true)
+          if [ -z "$sig" ] || [ ! -s "$sig" ]; then
+            echo "::error::No updater signature was produced. Refusing to upload an unsigned artifact."
+            exit 1
+          fi
+          cp "$installer" "out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe"
+          cp "$installer" "out/Breadee_${VERSION}_x64-setup.exe"
+          cp "$sig"       "out/Breadee_${VERSION}_x64-setup.exe.sig"
+          cd out
+          sha256sum Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe > SHA256SUMS.txt
+          sha256sum "Breadee_${VERSION}_x64-setup.exe" >> SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "SIGNATURE=$(cat "Breadee_${VERSION}_x64-setup.exe.sig")" >> "$GITHUB_ENV"
+
+      # The manifest a real release WOULD publish — written to an artifact for
+      # inspection, NOT to the channel branch. `unpublished: true` and the
+      # placeholder URL make it unmistakable that no terminal is being served
+      # this. Lets a human verify the exact signature/version/shape pre-release.
+      - name: Generate PREVIEW update manifest (not published)
+        shell: bash
+        run: |
+          pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > out/latest.preview.json <<JSON
+          {
+            "_preview": "UNPUBLISHED build-only artifact. NOT served to any terminal. The real release workflow writes the published latest.json.",
+            "unpublished": true,
+            "version": "${VERSION}",
+            "notes": "Breadee Desktop ${VERSION} (preview)",
+            "pub_date": "${pub_date}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${SIGNATURE}",
+                "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-prod-v${VERSION}/Breadee_${VERSION}_x64-setup.exe"
+              }
+            }
+          }
+          JSON
+          node -e "JSON.parse(require('fs').readFileSync('out/latest.preview.json','utf8'))"
+          cat out/latest.preview.json
+
+      # Private workflow artifacts only. These are visible to repo members via
+      # the run page and are never served to any client.
+      - name: Upload signed build artifacts (private)
+        uses: actions/upload-artifact@v4
+        with:
+          name: breadee-desktop-${{ env.VERSION }}-signed-unpublished
+          path: |
+            out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe
+            out/Breadee_${{ env.VERSION }}_x64-setup.exe
+            out/Breadee_${{ env.VERSION }}_x64-setup.exe.sig
+            out/SHA256SUMS.txt
+            out/latest.preview.json
+          if-no-files-found: error
+          retention-days: 14
