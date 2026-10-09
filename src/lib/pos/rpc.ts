@@ -39,6 +39,9 @@ export type PosRpcName =
   // Level 2C - table operations.
   | "pos_move_table"
   | "pos_merge_tables"
+  // R3 (1.0.35) - deterministic, shift-validated, idempotent, provenance-writing merge. Supersedes
+  // pos_merge_tables for the desktop; the legacy RPC stays server-side for backward compatibility.
+  | "pos_merge_tables_v2"
   | "pos_deletion_reason_report"
   | "pos_close_table"
   | "pos_clear_table"
@@ -80,6 +83,11 @@ export type PosRpcName =
   // fail-closed to (dine_in, sent_to_kitchen, unpaid) + pos.edit_orders, idempotent on
   // client_op_id, optimistic-concurrency via expected_version. See lib/pos/orders.ts.
   | "pos_edit_order_line"
+  // R2 (1.0.35) — add NEW menu-item lines to an open, unpaid DELIVERY order. Server-authoritative
+  // pricing (client sends item identities + quantities only, NO price), fail-closed to
+  // (delivery, sent_to_kitchen, unpaid) + pos.edit_orders, idempotent on client_op_id with a
+  // payload fingerprint, optimistic-concurrency via expected_version. See lib/pos/orders.ts.
+  | "pos_add_order_items"
   // Phase E — item/quantity Split Bill for Dine-In. A split is a SETTLEMENT, never a
   // second sale: pos_split_settle allocates items/qty on an open, unpaid bill and settles
   // through the EXISTING pos_payments ledger (POS_SALE fires once, on parent completion).
@@ -215,7 +223,19 @@ export type PosRpcName =
   // The authoritative set of orders that BLOCK End Shift for a shift (non-finalized, non-void) —
   // read here so the desktop's End-Shift "open orders → Transfer" gate lists exactly the orders
   // the server would block on. Pre-existing SECURITY DEFINER read; tenant-scoped.
-  | "pos_shift_unresolved_orders";
+  | "pos_shift_unresolved_orders"
+  // Desktop 1.0.35 Transfer Center (B1/B2). All SECURITY DEFINER, default-deny, OU-scoped, server-authoritative.
+  // `_force` (immediate reassignment of FULLY-UNPAID open orders to a recipient's single open shift;
+  // perms pos.orders.force_transfer + pos.transfers.select_recipient; the branch's Force setting must be ON;
+  // client_op_id is payload-fingerprint-bound and replay is actor+branch authorized), `_cancel` (sender or
+  // pos.transfers.cancel_others cancels a PENDING transfer; expected_version CAS; claim released; ownership
+  // unchanged), `pos_transfer_force_enabled` (OU-guarded boolean read — returns false for inaccessible
+  // branches, no cross-OU probe). `pos_transfer_settings_set` (B3) — the OU-scoped Force-setting WRITE;
+  // perm pos.transfers.manage_force_setting, PK(tenant,branch) so it is per-OU with no inheritance.
+  | "pos_order_transfer_force"
+  | "pos_order_transfer_cancel"
+  | "pos_transfer_force_enabled"
+  | "pos_transfer_settings_set";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

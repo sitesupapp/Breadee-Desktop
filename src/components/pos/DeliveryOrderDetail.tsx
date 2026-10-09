@@ -90,6 +90,25 @@ export type DeliveryOrderDetailProps = {
     personRef: string | null;
     cost: number | null;
   }) => void;
+  /**
+   * R2 — Delivery Order Item Editing. OPTIONAL: when absent (e.g. a terminal/ineligible order, or a caller
+   * that does not grant it) the Items card is rendered exactly as before — fully read-only. When present
+   * AND `gate.allowed`, per-line quantity / remove / modifier controls and an "Add items" affordance are
+   * shown. The SERVER re-enforces eligibility + permission; this only decides what the operator is offered.
+   */
+  itemEdit?: {
+    gate: Gate;
+    /** The line with a mutation in flight (its row + the whole surface lock), or null. */
+    busyLineId: string | null;
+    busy: boolean;
+    onChangeQty: (line: DeliveryOrderLine, delta: number) => void;
+    onRemove: (line: DeliveryOrderLine) => void;
+    onEditModifiers: (line: DeliveryOrderLine) => void;
+    /** True only for a line whose item currently has modifier groups (the workspace knows, via the menu). */
+    canEditModifiers: (line: DeliveryOrderLine) => boolean;
+    /** Optional: when provided, an "Add items" affordance is shown and opens the caller's picker. */
+    onAddItems?: () => void;
+  };
 };
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -105,6 +124,10 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
   const o = props.order;
   const party = props.party ?? UNKNOWN_PARTY;
   const terminal = isTerminal(o.status);
+  // R2 item editing is offered only when the caller granted it AND the order is non-terminal AND the gate
+  // allows (open + unpaid + pos.edit_orders). Otherwise the Items card stays exactly as it was — read-only.
+  const edit = props.itemEdit;
+  const canEditItems = !terminal && (edit?.gate.allowed ?? false);
   const currency = (o.currency as CurrencyCode) ?? props.currency;
   const total = o.total_amount ?? 0;
   const subtotal = o.subtotal ?? total;
@@ -200,9 +223,59 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
                   </ul>
                 )}
                 {l.kitchenNote && <p className="mt-0.5 text-[11px] italic text-sub">Note: {l.kitchenNote}</p>}
+                {canEditItems && edit && (
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={edit.busy}
+                      onClick={() => edit.onChangeQty(l, -1)}
+                      aria-label={`Reduce ${l.name}`}
+                    >
+                      -
+                    </Button>
+                    <span className="min-w-[1.75rem] text-center text-[11px] font-bold tabular-nums text-ink">
+                      {edit.busyLineId === l.id ? "..." : l.quantity}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={edit.busy}
+                      onClick={() => edit.onChangeQty(l, 1)}
+                      aria-label={`Add one ${l.name}`}
+                    >
+                      +
+                    </Button>
+                    {edit.canEditModifiers(l) && (
+                      <Button variant="ghost" size="sm" disabled={edit.busy} onClick={() => edit.onEditModifiers(l)}>
+                        Options
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={edit.busy}
+                      className="ml-auto text-red-600"
+                      onClick={() => edit.onRemove(l)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
+        )}
+
+        {canEditItems && edit?.onAddItems && (
+          <Button variant="ghost" size="md" className="mt-3 w-full" disabled={edit.busy} onClick={edit.onAddItems}>
+            Add items
+          </Button>
+        )}
+        {/* When editing is wired but the order is not eligible (e.g. no permission), say why rather than
+            silently showing a read-only card that elsewhere is editable. Terminal orders use their own note. */}
+        {!terminal && edit && !edit.gate.allowed && edit.gate.reason && (
+          <p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-[11px] font-semibold text-sub">{edit.gate.reason}</p>
         )}
 
         <div className="mt-3 space-y-1 border-t border-line pt-2">

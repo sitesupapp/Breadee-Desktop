@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 
 import { POS_PERMISSIONS, canMergeTables, type PosAccessContext } from "@/lib/pos/access";
 import { mergeableSources } from "@/lib/pos/tableOps";
+import { orderLifecycleLabel, orderLifecycleTone, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { FEATURES } from "@/lib/features";
 import type { TableSummary } from "@/types/tables";
 import { stripJsxComments } from "./source-helpers.ts";
@@ -67,22 +68,25 @@ test("F mergeableSources returns nothing without a primary", () => {
   assert.deepEqual(mergeableSources([tbl({ id: "a", orders: 1, status: "occupied" })], null), []);
 });
 
-// --- G. the RPC payload shape (what pos_merge_tables reads) ---
+// --- G. the RPC payload shape (what pos_merge_tables_v2 reads) ---
 
-test("G the merge wrapper sends primary + sources + expected + client_op_id in p_payload", () => {
+test("G the merge wrapper calls R3 v2 with primary + sources + expected, and ALWAYS a client_op_id", () => {
   const code = stripJsxComments(read("lib", "pos", "tableOps.ts"));
-  assert.match(code, /callPosRpc\("pos_merge_tables"/);
+  assert.match(code, /callPosRpc\("pos_merge_tables_v2"/);
   assert.match(code, /primary_table_id: input\.primaryTableId/);
   assert.match(code, /source_table_ids: input\.sourceTableIds/);
   assert.match(code, /expected: input\.expected/);
-  assert.match(code, /client_op_id: input\.clientOpId/);
+  // v2 REQUIRES an op id (MERGE_NO_OP otherwise): always send one, minting a fresh id if absent.
+  assert.match(code, /client_op_id: input\.clientOpId \?\? newClientOpId\(\)/);
+  // the legacy, non-deterministic pos_merge_tables RPC is no longer the desktop's merge path.
+  assert.doesNotMatch(code, /callPosRpc\("pos_merge_tables"/);
 });
 
 // --- H. the RPC is in the desktop allow-list ---
 
-test("H pos_merge_tables is in the PosRpcName union", () => {
+test("H pos_merge_tables_v2 is in the PosRpcName union", () => {
   const code = stripJsxComments(read("lib", "pos", "rpc.ts"));
-  assert.match(code, /"pos_merge_tables"/);
+  assert.match(code, /"pos_merge_tables_v2"/);
 });
 
 // --- I. the UI is wired: button + dialog + confirm ---
@@ -111,4 +115,42 @@ test("K the merge dialog offers occupied sources and is confirm-gated", () => {
   const code = stripJsxComments(read("components", "pos", "TableOpsDialogs.tsx"));
   assert.match(code, /export function MergeTablesDialog/);
   assert.match(code, /selected\.length > 0/);
+});
+
+// --- L. R3-C provenance relabel: a merged source is MERGED, never a plain void ---
+
+const lc = (o: { status: string; payment_status?: string; merged_into_order_id?: string | null }) =>
+  orderLifecycleLabel({ status: o.status, payment_status: o.payment_status ?? "unpaid", merged_into_order_id: o.merged_into_order_id ?? null } as ShiftOpenOrder);
+const tn = (o: { status: string; payment_status?: string; merged_into_order_id?: string | null }) =>
+  orderLifecycleTone({ status: o.status, payment_status: o.payment_status ?? "unpaid", merged_into_order_id: o.merged_into_order_id ?? null } as ShiftOpenOrder);
+
+test("L a merged source (voided + provenance) reads 'Merged' with a neutral tone, not a loss", () => {
+  assert.equal(lc({ status: "voided", merged_into_order_id: "primary-1" }), "Merged");
+  assert.equal(tn({ status: "voided", merged_into_order_id: "primary-1" }), "slate");
+});
+
+test("M a TRUE void (voided, no provenance) is still 'Voided' in red", () => {
+  assert.equal(lc({ status: "voided", merged_into_order_id: null }), "Voided");
+  assert.equal(tn({ status: "voided", merged_into_order_id: null }), "red");
+  // a real cancellation is unaffected
+  assert.equal(lc({ status: "cancelled" }), "Cancelled");
+  assert.equal(tn({ status: "cancelled" }), "red");
+});
+
+// --- N. the order summary carries provenance and the Orders list separates MERGED from VOIDED ---
+
+test("N loaders select merged_into_order_id and the type carries it", () => {
+  const code = read("lib", "pos", "shiftOrderSummary.ts");
+  assert.match(code, /merged_into_order_id: string \| null/);
+  // both the shift-scope and day-scope reads request the provenance column
+  const selects = code.match(/merged_into_order_id/g) ?? [];
+  assert.ok(selects.length >= 4, `expected >=4 merged_into_order_id references, saw ${selects.length}`);
+});
+
+test("O the Orders modal has a Merged filter and 'Voided' excludes merged bills", () => {
+  const code = stripJsxComments(read("components", "pos", "OrdersModal.tsx"));
+  assert.match(code, /key: "merged", label: "Merged"/);
+  // Merged => provenance present; Voided => provenance absent (true voids only).
+  assert.match(code, /o\.status === "voided" && o\.merged_into_order_id != null/);
+  assert.match(code, /o\.status === "voided" && o\.merged_into_order_id == null/);
 });

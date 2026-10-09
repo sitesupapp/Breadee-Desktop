@@ -91,11 +91,15 @@ test("the menu shortcut layer follows the menu into Delivery Add Items", () => {
 
 test("Delivery renders no menu or cart implementation of its own", () => {
   const code = stripComments(deliverySrc);
-  for (const token of ["MenuItemGrid", "CategoryNavigation", "ModifierDialog", "loadMenu"]) {
+  // R2 (1.0.35): editing an open delivery line reuses the shared ModifierDialog, so it is no longer forbidden
+  // — only a RE-IMPLEMENTED menu grid / catalogue nav / menu loader is. Reuse of canonical components is the
+  // intent; it is asserted positively below.
+  for (const token of ["MenuItemGrid", "CategoryNavigation", "loadMenu"]) {
     assert.equal(code.includes(token), false, `${token} must not be re-implemented for Delivery`);
   }
-  // It reuses the shared cart panel instead.
+  // It reuses the shared cart panel and the shared modifier chooser instead of declaring its own.
   assert.match(code, /import \{ CartPanel \}/);
+  assert.match(code, /import \{ ModifierDialog \} from "@\/components\/pos\/ModifierDialog"/);
 });
 
 test("Delivery Add Items borrows the shell's menu rather than bypassing it", () => {

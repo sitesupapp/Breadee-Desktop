@@ -545,7 +545,7 @@ test("submit is called at most once on every void path", async () => {
 test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   const rpcSrc = stripComments(read("lib", "pos", "rpc.ts"));
   const union = rpcSrc.slice(rpcSrc.indexOf("export type PosRpcName"), rpcSrc.indexOf("export class PosRpcError"));
-  const names = [...union.matchAll(/"(pos_[a-z_]+)"/g)].map((m) => m[1]);
+  const names = [...union.matchAll(/"(pos_[a-z0-9_]+)"/g)].map((m) => m[1]);
   // Level 3D took it to 15; Desktop 1.0.4's `pos_configure_tables` is the 16th;
   // Wave 2C adds the two receivables settlement RPCs (17th, 18th); Wave 3C adds
   // the Customer Accounts surface's two reads and one money write (19th-21st);
@@ -559,7 +559,10 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // 31 -> 33 in 1.0.31: pos_merge_tables + pos_deletion_reason_report. remove-item stays out.
   // 33 -> 35 for POS Final W3: pos_payment_method_save + pos_payment_methods_manage_list.
   // 35 -> 43 for POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders.
-  assert.equal(names.length, 43);
+  // 43 -> 47 for Desktop 1.0.35 (B1/B3): pos_order_transfer_force, pos_order_transfer_cancel,
+  //   pos_transfer_force_enabled, pos_transfer_settings_set (all pos_* names). remove-item stays out.
+  assert.equal(names.length, 49); // +pos_add_order_items (R2 1.0.35); +pos_merge_tables_v2 (R3 1.0.35)
+  assert.ok(names.includes("pos_merge_tables_v2"));
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));

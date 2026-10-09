@@ -296,7 +296,7 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
-  const members = Array.from(decl[1].matchAll(/"([a-z_]+)"/g)).map((m) => m[1]);
+  const members = Array.from(decl[1].matchAll(/"([a-z0-9_]+)"/g)).map((m) => m[1]);
 
   for (const rpc of ["pos_move_table", "pos_close_table", "pos_clear_table"]) {
     assert.ok(members.includes(rpc), `${rpc} should be callable in Level 2C`);
@@ -323,7 +323,13 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // (payment-method management; pos.payment_methods.manage; neither moves money).
   // AND POS FINAL W4/W5 (Part 6): 46 -> 54, for the 6 transfer RPCs + eligible_recipients +
   // pos_shift_unresolved_orders (none moves money).
-  assert.equal(members.length, 54, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // AND DESKTOP 1.0.35 (B1/B3): 54 -> 58, for pos_order_transfer_force, pos_order_transfer_cancel,
+  // pos_transfer_force_enabled, pos_transfer_settings_set (ownership-only + an OU boolean; none moves money).
+  // 58 -> 59 for Desktop 1.0.35 (R2): pos_add_order_items.
+  // 59 -> 60 for Desktop 1.0.35 (R3): pos_merge_tables_v2 (deterministic/idempotent merge). Legacy
+  //   pos_merge_tables stays allow-listed; the desktop now calls v2. Not a money RPC.
+  assert.equal(members.length, 60, `the RPC allow-list changed size: ${members.join(", ")}`);
+  assert.ok(members.includes("pos_merge_tables_v2"));
   assert.ok(members.includes("pos_merge_tables"));
   assert.ok(members.includes("pos_deletion_reason_report"));
 });

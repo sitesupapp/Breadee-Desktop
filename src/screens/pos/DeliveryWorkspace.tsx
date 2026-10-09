@@ -135,6 +135,14 @@ import {
 import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
 import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
 import { DeliveryReport } from "@/components/pos/DeliveryReport";
+// R2 — Delivery Order Item Editing (add / quantity / modifier / remove on an open, unpaid delivery order).
+import { useDeliveryItemEditing } from "@/screens/pos/useDeliveryItemEditing";
+import { DeliveryAddItemsPicker } from "@/components/pos/DeliveryAddItemsPicker";
+import { EditReasonDialog } from "@/components/pos/EditReasonDialog";
+import { ModifierDialog } from "@/components/pos/ModifierDialog";
+import { groupsForItem } from "@/lib/pos/modifiers";
+import type { RoundMenu } from "@/lib/pos/tableRounds";
+import type { ModifierOption, SelectedModifier } from "@/types/pos";
 import { EditOrderDialog, VoidOrderDialog, type EditOrderIntent } from "@/components/pos/DeliveryOrderDialogs";
 import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import { computeDiscount } from "@/lib/pos/discounts";
@@ -227,6 +235,9 @@ export function useDeliveryWorkspace(input: {
   shiftId: string | null;
   createOrders: Gate;
   currency: CurrencyCode;
+  /** R2: the shared POS menu (items/groups/options). Used to offer modifier editing on a sent line and to
+   *  resolve which lines have modifier groups. The SAME menu the dine-in editor and the cart use. */
+  menu: RoundMenu;
   cartLines: CartLine[];
   cartSelectedKey: string | null;
   onSelectLine: (key: string) => void;
@@ -601,7 +612,12 @@ export function useDeliveryWorkspace(input: {
       return;
     }
 
-    const decision = decideCreate({ query: term, candidates });
+    // R6 (1.0.35): Desktop customer creation is NOT limited to phone. A non-phone
+    // term is treated as a NAME and may be created name-only. The debounced search
+    // already shows any matching customers in the shortlist, so the operator can
+    // pick an existing one; names are deliberately NOT auto-merged (intended
+    // duplicates are allowed), so a name term opens the create form pre-filled.
+    const decision = decideCreate({ query: term, candidates, allowNameOnly: true });
 
     if (decision.kind === "select") {
       // Already on file, however it was typed. Open them; never insert.
@@ -623,7 +639,7 @@ export function useDeliveryWorkspace(input: {
     }
 
     if (decision.kind === "refused") {
-      // Name-only searches land here: a shortlist, and no create offered.
+      // With name-only allowed, only an empty or invalid-phone term lands here.
       useCustomers.setState({ results: candidates });
       if (candidates.length === 0) toast.push({ tone: "info", message: decision.reason });
       return;
@@ -634,7 +650,11 @@ export function useDeliveryWorkspace(input: {
       return;
     }
     setDialogError(null);
-    setDialog({ kind: "customer", mode: "create", initial: { ...EMPTY_CUSTOMER_FORM, phone: decision.phone ?? "" } });
+    setDialog({
+      kind: "customer",
+      mode: "create",
+      initial: { ...EMPTY_CUSTOMER_FORM, phone: decision.phone ?? "", name: decision.name ?? "" },
+    });
   }, [lookupGate.allowed, toast, writeGate.allowed, writeGate.reason]);
 
   const submitCreate = useCallback(
@@ -648,6 +668,9 @@ export function useDeliveryWorkspace(input: {
           phone: values.phone,
           name: values.name,
           notes: values.notes,
+          // R6: permit a name-only create (phone blank). buildCreatePayload still
+          // rejects a create with neither a valid phone nor a name.
+          allowNameOnly: true,
         });
         const outcome = await performCustomerCreate({
           payload,
@@ -1132,6 +1155,44 @@ export function useDeliveryWorkspace(input: {
       void refreshDetail(order.id);
     },
     [refreshDetail],
+  );
+
+  // R2 — Delivery Order Item Editing. The hook owns the mutation lifecycle (serialize, op-id replay, reason
+  // gating); the workspace supplies the menu-derived modifier context. Every success re-reads via reloadDetail.
+  const reloadDetail = useCallback(
+    () => (detail ? refreshDetail(detail.id) : Promise.resolve()),
+    [detail, refreshDetail],
+  );
+  const itemEditing = useDeliveryItemEditing({ order: detail, access: pos.access, reload: reloadDetail, toast });
+  const [addPickerOpen, setAddPickerOpen] = useState(false);
+  const canEditLineModifiers = useCallback(
+    (line: DeliveryOrderLine) =>
+      !!line.menuItemId && groupsForItem(line.menuItemId, input.menu.groupsByItem, input.menu.groups).length > 0,
+    [input.menu.groupsByItem, input.menu.groups],
+  );
+  const editModItem = useMemo(() => {
+    const l = itemEditing.modifierLine;
+    return l?.menuItemId ? input.menu.items.find((m) => m.id === l.menuItemId) ?? null : null;
+  }, [itemEditing.modifierLine, input.menu.items]);
+  const editModGroups = useMemo(
+    () => (editModItem ? groupsForItem(editModItem.id, input.menu.groupsByItem, input.menu.groups) : []),
+    [editModItem, input.menu.groupsByItem, input.menu.groups],
+  );
+  const editModOptionsByGroup = useMemo(() => {
+    const map: Record<string, ModifierOption[]> = {};
+    for (const o of input.menu.options) (map[o.modifier_group_id] ??= []).push(o);
+    return map;
+  }, [input.menu.options]);
+  const editModInitial = useMemo<SelectedModifier[]>(
+    () =>
+      (itemEditing.modifierLine?.modifiers ?? []).map((m) => ({
+        group_id: m.groupId,
+        option_id: m.optionId,
+        name: m.name,
+        price_delta: m.priceDelta,
+        quantity: m.quantity,
+      })),
+    [itemEditing.modifierLine],
   );
 
   // Save the internal delivery ops through the ONE server authority
@@ -2177,6 +2238,18 @@ export function useDeliveryWorkspace(input: {
             voidGate={voidGate}
             payGate={payGate}
             receiptBusy={receiptBusy}
+            /* R2 — item editing on an open, unpaid delivery order. The server re-enforces eligibility +
+               permission; this only offers the controls. Add-item picker is wired separately. */
+            itemEdit={{
+              gate: itemEditing.gate,
+              busyLineId: itemEditing.busyLineId,
+              busy: itemEditing.busy,
+              onChangeQty: itemEditing.changeQuantity,
+              onRemove: itemEditing.removeLine,
+              onEditModifiers: itemEditing.editModifiers,
+              canEditModifiers: canEditLineModifiers,
+              onAddItems: () => setAddPickerOpen(true),
+            }}
             manageDeliveryGate={input.manageDelivery}
             opsEditing={opsEditing}
             opsBusy={opsBusy}
@@ -2374,6 +2447,55 @@ export function useDeliveryWorkspace(input: {
           setVoidError(null);
         }}
         onConfirm={(reason) => void submitOrderVoid(reason)}
+      />
+
+      {/* R2 — change a SENT delivery line's options. The SAME shared chooser the add/dine-in flows use,
+          pre-filled with the line's current modifiers; confirm sends op=change_modifiers for this line. */}
+      <ModifierDialog
+        open={Boolean(itemEditing.modifierLine && editModItem)}
+        item={editModItem}
+        basePrice={Number(editModItem?.price ?? 0)}
+        groups={editModGroups}
+        optionsByGroup={editModOptionsByGroup}
+        currency={input.currency}
+        rate={input.rate}
+        ingredientCustomization={false}
+        seedKey={itemEditing.modifierLine ? `deliv-edit:${itemEditing.modifierLine.id}` : null}
+        initialModifiers={editModInitial}
+        initialQuantity={itemEditing.modifierLine?.quantity ?? 1}
+        confirmLabel="Save changes"
+        onCancel={itemEditing.closeModifier}
+        onConfirm={(result) => itemEditing.reviewModifiers(result)}
+      />
+      {/* R2 — the mandatory reason for a persisted removal/reduction/modifier-drop on a delivery line. The
+          reason is sent on the SAME edit RPC and audited server-side (mirrors pos_edit_order_line_core). */}
+      <EditReasonDialog
+        open={itemEditing.reasonPrompt !== null}
+        busy={itemEditing.busy}
+        title={
+          itemEditing.reasonPrompt?.kind === "modifier"
+            ? "Why change these options?"
+            : itemEditing.reasonForRemoval
+              ? "Why remove this item?"
+              : "Why reduce this item?"
+        }
+        subtitle="A reason is required and recorded in the activity log."
+        onConfirm={itemEditing.submitReason}
+        onCancel={itemEditing.cancelReason}
+      />
+      {/* R2 — Add items to this open delivery order. Reuses the canonical MenuItemGrid + ModifierDialog;
+          commits identities + quantities ONLY through the idempotent addOrderItems path (server prices). */}
+      <DeliveryAddItemsPicker
+        open={addPickerOpen}
+        menu={input.menu}
+        currency={input.currency}
+        rate={input.rate}
+        busy={itemEditing.busy}
+        onClose={() => setAddPickerOpen(false)}
+        onConfirm={(items) => {
+          setAddPickerOpen(false);
+          void itemEditing.addItems(items);
+        }}
       />
 
       <CustomerHistoryDialog

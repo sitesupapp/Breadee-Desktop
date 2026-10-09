@@ -46,10 +46,13 @@ export function isOpenOrder(order: Pick<ShiftOpenOrder, "status" | "payment_stat
  * and an unrecognised status falls through to itself rather than being coerced
  * into a label that would be a guess.
  */
-export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "payment_status">): string {
+export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "payment_status" | "merged_into_order_id">): string {
   switch (order.status) {
     case "voided":
-      return "Voided";
+      // R3: a merged source carries status='voided' only as a folding marker; it is
+      // NOT a cancellation. Show it as "Merged" so the operator never reads a folded
+      // bill as a lost one. Canonical: provenance set => merged, else a true void.
+      return order.merged_into_order_id ? "Merged" : "Voided";
     case "refunded":
       return "Refunded";
     case "cancelled":
@@ -64,7 +67,10 @@ export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "paym
 }
 
 /** Badge tone per lifecycle: money in green, reversal in red, work in amber. */
-export function orderLifecycleTone(order: Pick<ShiftOpenOrder, "status" | "payment_status">): "green" | "amber" | "red" | "slate" {
+export function orderLifecycleTone(order: Pick<ShiftOpenOrder, "status" | "payment_status" | "merged_into_order_id">): "green" | "amber" | "red" | "slate" {
+  // R3: a merged source is neither money nor a reversal; a neutral tone keeps it
+  // visually distinct from a true void/cancellation (red).
+  if (order.status === "voided" && order.merged_into_order_id) return "slate";
   if (order.status === "voided" || order.status === "cancelled" || order.status === "refunded") return "red";
   if (order.payment_status === "paid") return "green";
   if (order.status === OPEN_ORDER_STATUS) return "amber";
@@ -84,6 +90,8 @@ export type ShiftOpenOrder = {
   total_amount: number | null;
   currency: CurrencyCode | null;
   table_id: string | null;
+  /** R3 provenance: set when this bill was folded into a primary by a table merge. */
+  merged_into_order_id: string | null;
   customer_id: string | null;
   /** Delivery only, resolved separately: the caller's name, nothing else. */
   customer_name: string | null;
@@ -136,7 +144,7 @@ export async function loadShiftOrders(input: {
   const { data, error } = await supabase
     .from("pos_orders")
     .select(
-      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at",
+      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, merged_into_order_id, customer_id, cashier_user_id, notes, created_at",
     )
     .eq("tenant_id", input.tenantId)
     .eq("shift_id", input.shiftId)
@@ -164,6 +172,7 @@ function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
     total_amount: numOrNull(r.total_amount),
     currency: currency === "LBP" ? "LBP" : currency === "USD" ? "USD" : null,
     table_id: strOrNull(r.table_id),
+    merged_into_order_id: strOrNull(r.merged_into_order_id),
     customer_id: strOrNull(r.customer_id),
     customer_name: null,
     customer_phone: null,
@@ -281,7 +290,7 @@ export async function loadOrdersForDay(input: {
   let query = supabase
     .from("pos_orders")
     .select(
-      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at",
+      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, merged_into_order_id, customer_id, cashier_user_id, notes, created_at",
     )
     .eq("tenant_id", input.tenantId)
     .gte("created_at", from.toISOString())

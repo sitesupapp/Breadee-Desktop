@@ -52,7 +52,12 @@ export function CustomerFormDialog(props: CustomerFormDialogProps) {
 
   const phoneChanged = props.mode === "edit" && values.phone.trim() !== props.initial.phone.trim();
   const normalized = normalizePhoneE164(values.phone);
-  const phoneValid = values.phone.trim() === "" ? props.mode === "edit" : normalized !== null;
+  const nameFilled = values.name.trim() !== "";
+  // R6 (1.0.35): customer creation is NOT limited to phone. A create is valid with
+  // a valid phone, OR with a name only (phone left blank). A non-empty phone must
+  // still be a valid number. Edit keeps its prior rule (a blank phone leaves it).
+  const phoneValid =
+    values.phone.trim() === "" ? props.mode === "edit" || nameFilled : normalized !== null;
   const canSubmit = phoneValid && !props.saving;
 
   const set = (patch: Partial<CustomerFormValues>) => setValues((v) => ({ ...v, ...patch }));
@@ -62,7 +67,7 @@ export function CustomerFormDialog(props: CustomerFormDialogProps) {
       open={props.open}
       size="sm"
       title={props.mode === "create" ? "New customer" : "Edit customer"}
-      subtitle={props.mode === "create" ? "Only the phone number is required." : null}
+      subtitle={props.mode === "create" ? "Enter a name, a phone number, or both." : null}
       onClose={props.onClose}
       footer={
         <div className="flex justify-end gap-2">

@@ -88,7 +88,7 @@ test("J a name-only payload contains only allowed, non-forbidden keys", () => {
 
 // --- C. wiring: only the A-R picker opts in; delivery does not ---
 
-test("K the A-R on-account picker opts into name-only; delivery does not", () => {
+test("K the A-R on-account picker AND (R6, 1.0.35) the delivery create surface both opt into name-only", () => {
   const picker = stripJsxComments(read("state", "customerPicker.ts"));
   // The picker allows name-only in both the decision and the search surface.
   assert.match(picker, /decideCreate\(\{ query: term, candidates, allowNameOnly: true \}\)/);
@@ -97,15 +97,18 @@ test("K the A-R on-account picker opts into name-only; delivery does not", () =>
   assert.match(picker, /buildCreatePayload\(\{ branchId, phone: decision\.phone, name: decision\.name, allowNameOnly: true \}\)/);
 
   const delivery = stripJsxComments(read("screens", "pos", "DeliveryWorkspace.tsx"));
-  // Delivery's decideCreate must NOT pass allowNameOnly (phone stays required there).
-  assert.match(delivery, /decideCreate\(\{ query: term, candidates \}\)/);
-  assert.equal(/decideCreate\([^)]*allowNameOnly/.test(delivery), false, "delivery must not enable name-only");
+  // R6 (1.0.35): delivery's create surface NOW opts into name-only too — the server already supports
+  // allow_name_only, so a delivery customer can be created by name when the phone is left blank. (The
+  // debounced search still surfaces existing customers to pick; names are never auto-merged.)
+  assert.match(delivery, /decideCreate\(\{ query: term, candidates, allowNameOnly: true \}\)/);
+  assert.match(delivery, /allowNameOnly: true,/); // carried into buildCreatePayload too
 });
 
-test("L the delivery customer form keeps its phone-required create gate", () => {
+test("L the customer form allows name-only create (R6, 1.0.35): a blank phone is valid WITH a name", () => {
   const form = stripJsxComments(read("components", "pos", "CustomerDialogs.tsx"));
-  // create-mode: a blank phone is not valid (unchanged by Phase 3).
-  assert.match(form, /values\.phone\.trim\(\) === "" \? props\.mode === "edit" : normalized !== null/);
+  // R6: a create is valid with a valid phone OR a name only (phone blank). A non-empty phone must still
+  // normalize; edit-mode keeps its prior "a blank phone leaves it" rule.
+  assert.match(form, /values\.phone\.trim\(\) === "" \? props\.mode === "edit" \|\| nameFilled : normalized !== null/);
 });
 
 // --- D. soft duplicate-name warning is a non-blocking confirm (never auto-merge) ---

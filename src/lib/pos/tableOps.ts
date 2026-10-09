@@ -38,6 +38,7 @@
 // refusal is surfaced, never worked around.
 
 import { asRecord, bool, callPosRpc, num, str } from "@/lib/pos/rpc";
+import { newClientOpId } from "@/lib/pos/orders";
 import type { TableSummary } from "@/types/tables";
 import type { Gate } from "@/components/ui";
 
@@ -150,14 +151,17 @@ export async function moveTable(input: { fromTableId: string; toTableId: string 
   return { ok: bool(row.ok), orders_moved: num(row.orders_moved) };
 }
 
-// --- merge (1.0.31) ----------------------------------------------------------
+// --- merge (1.0.31; R3 v2 in 1.0.35) -----------------------------------------
 
 export type MergeResult = {
   ok: boolean;
   merge_id: string;
+  primary_order_id: string;
   primary_order_number: string;
   subtotal: number;
+  total_amount: number;
   sources_merged: number;
+  pos_entity_version: number;
 };
 
 /**
@@ -172,9 +176,13 @@ export function mergeableSources(tables: TableSummary[], primary: TableSummary |
 
 /**
  * Fold one or more source tables' open bills into the primary table, in ONE
- * server transaction. `expected` carries the tables' pos_entity_versions so a
- * stale floor is refused; `clientOpId` makes a lost response replay rather than
- * merge twice. The desktop only shapes the request and re-reads the bill after.
+ * server transaction, via the R3 `pos_merge_tables_v2`. `expected` carries the
+ * tables' pos_entity_versions so a stale floor is refused; `client_op_id` is
+ * ALWAYS sent (v2 requires it) so a lost response replays rather than merging
+ * twice. The desktop only shapes the request and re-reads the bill after. v2
+ * also fixes the silent bill selection (MERGE_AMBIGUOUS_BILL), the false
+ * same-shift error, and open-shift / currency validation, and records merge
+ * provenance so a merged source is never shown as a plain void.
  */
 export async function mergeTables(input: {
   primaryTableId: string;
@@ -183,21 +191,24 @@ export async function mergeTables(input: {
   clientOpId?: string;
 }): Promise<MergeResult> {
   const row = asRecord(
-    await callPosRpc("pos_merge_tables", {
+    await callPosRpc("pos_merge_tables_v2", {
       p_payload: {
         primary_table_id: input.primaryTableId,
         source_table_ids: input.sourceTableIds,
         ...(input.expected ? { expected: input.expected } : {}),
-        ...(input.clientOpId ? { client_op_id: input.clientOpId } : {}),
+        client_op_id: input.clientOpId ?? newClientOpId(),
       },
     }),
   );
   return {
     ok: bool(row.ok),
     merge_id: str(row.merge_id),
+    primary_order_id: str(row.primary_order_id),
     primary_order_number: str(row.primary_order_number),
     subtotal: num(row.subtotal),
+    total_amount: num(row.total_amount),
     sources_merged: num(row.sources_merged),
+    pos_entity_version: num(row.pos_entity_version),
   };
 }
 

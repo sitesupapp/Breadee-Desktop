@@ -69,6 +69,13 @@ export const POS_PERMISSIONS = {
   TRANSFERS_APPROVE: "pos.transfers.approve",
   TRANSFERS_REJECT: "pos.transfers.reject",
   TRANSFERS_REAPPROVE: "pos.transfers.reapprove",
+  // Desktop 1.0.35 (B1/B2/B3) — Force Transfer + Sender Cancel + OU Force-setting management. Each key is
+  // re-enforced default-deny server-side. FORCE_TRANSFER lives on the pos.orders.* namespace (it is an
+  // order-ownership action) and additionally needs the branch's Force setting ON; CANCEL_OTHERS lets a
+  // manager withdraw a pending transfer they did not create; MANAGE_FORCE_SETTING (B3) gates the OU toggle.
+  ORDERS_FORCE_TRANSFER: "pos.orders.force_transfer",
+  TRANSFERS_CANCEL_OTHERS: "pos.transfers.cancel_others",
+  TRANSFERS_MANAGE_FORCE_SETTING: "pos.transfers.manage_force_setting",
   // Dine-In tables. VIEW and OPEN are used in Level 2A; MOVE/CLEAR/CLOSE are
   // declared now so the keys live in one place, but nothing calls them yet -
   // their RPCs are not even in the `PosRpcName` union.
@@ -220,6 +227,29 @@ export function canViewTransfers(ctx: PosAccessContext): Gate {
 }
 export function canReapproveTransfer(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_REAPPROVE), "You do not have permission to re-approve transfers.");
+}
+/**
+ * Desktop 1.0.35 (B1) — FORCE a transfer (immediate reassignment, no recipient acceptance). This gate
+ * only covers the operator's PERMISSIONS (force_transfer AND select_recipient, exactly as
+ * pos_order_transfer_force_core checks). The branch's Force-Transfer setting must ALSO be ON — read
+ * separately via isForceTransferEnabled(branch) — before the control is offered.
+ */
+export function canForceTransfer(ctx: PosAccessContext): Gate {
+  const g = gate(perm(ctx, POS_PERMISSIONS.ORDERS_FORCE_TRANSFER), "You do not have permission to force a transfer.");
+  if (!g.allowed) return g;
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_SELECT_RECIPIENT), "You do not have permission to choose a transfer recipient.");
+}
+/**
+ * Cancel a PENDING transfer you did NOT create (a manager withdrawal). A sender can always cancel their
+ * own pending transfer; this key is needed only to cancel someone else's — matching
+ * pos_order_transfer_cancel_core (sender OR pos.transfers.cancel_others).
+ */
+export function canCancelOthersTransfer(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_CANCEL_OTHERS), "You do not have permission to cancel other users' transfers.");
+}
+/** Desktop 1.0.35 (B3) — manage the branch's OU-scoped Force-Transfer setting; matches pos_transfer_settings_set. */
+export function canManageForceSetting(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_MANAGE_FORCE_SETTING), "You do not have permission to manage the force transfer setting.");
 }
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {

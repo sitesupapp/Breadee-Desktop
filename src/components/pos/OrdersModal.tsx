@@ -35,6 +35,7 @@ const STATUS_FILTERS = [
   { key: "sent_to_kitchen", label: "Sent to kitchen" },
   { key: "completed", label: "Completed" },
   { key: "voided", label: "Voided" },
+  { key: "merged", label: "Merged" },
   { key: "cancelled", label: "Cancelled" },
   { key: "refunded", label: "Refunded" },
 ] as const;
@@ -122,7 +123,17 @@ export function OrdersModal(props: {
     () =>
       [...source]
         .filter((o) => (type === "all" ? true : o.order_type === type))
-        .filter((o) => (status === "all" ? true : o.status === status))
+        // R3: "Merged" selects folded bills (voided + provenance); "Voided" shows TRUE
+        // voids only (provenance null), so a merged bill is never counted as a cancellation.
+        .filter((o) =>
+          status === "all"
+            ? true
+            : status === "merged"
+              ? o.status === "voided" && o.merged_into_order_id != null
+              : status === "voided"
+                ? o.status === "voided" && o.merged_into_order_id == null
+                : o.status === status,
+        )
         .reverse(),
     [source, type, status],
   );
