@@ -711,7 +711,11 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // all called from the shift/transfer layer, not these delivery screens.
   // 43 -> 47 for Desktop 1.0.35 (B1/B3): force/cancel/force_enabled/settings_set, all called from the
   // Transfer Center + POS Settings, not these delivery screens - the check below still holds.
-  assert.equal(names.length, 48); // +pos_add_order_items (R2 1.0.35)
+  // 47 -> 48 for Desktop 1.0.35 (R2): pos_add_order_items.
+  // 48 -> 50 for Desktop 1.0.36 (R7): pos_end_shift_approval_required + pos_shift_approval_set
+  //   (both pos_* — End-Shift approval getter + setter; pos.settings.manage; no money RPC).
+  //   R3's pos_merge_tables_v3 has a digit, so this pos_[a-z_]+ list excludes it by design.
+  assert.equal(names.length, 50);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));

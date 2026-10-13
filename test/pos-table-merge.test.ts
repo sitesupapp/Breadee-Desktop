@@ -14,7 +14,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { POS_PERMISSIONS, canMergeTables, type PosAccessContext } from "@/lib/pos/access";
-import { mergeableSources } from "@/lib/pos/tableOps";
+import {
+  buildMergeExpected,
+  mergeAttemptSignature,
+  mergeableSources,
+  stableMergeOpId,
+} from "@/lib/pos/tableOps";
 import { FEATURES } from "@/lib/features";
 import type { TableSummary } from "@/types/tables";
 import { stripJsxComments } from "./source-helpers.ts";
@@ -130,11 +135,62 @@ test("J the dine-in workspace opens the merge dialog and confirms through the se
   assert.match(code, /<MergeTablesDialog/);
   assert.match(code, /opDialog === "merge"/);
   assert.match(code, /mergeableSources\(tables\.map\.tables, selected\)/);
-  // confirmMerge calls through the shared merge wrapper with a replay-safe client_op_id.
+  // confirmMerge builds the stale-floor `expected` version map and a HOISTED,
+  // retry-stable client_op_id (not a fresh UUID minted inline per call).
   assert.match(code, /mergeTables\(\{/);
-  assert.match(code, /clientOpId: crypto\.randomUUID\(\)/);
+  assert.match(code, /buildMergeExpected\(selected, sources\)/);
+  assert.match(code, /expected,/);
+  assert.match(code, /stableMergeOpId\(mergeOpId\.current, sig\)/);
+  assert.match(code, /clientOpId,/);
+  // The inline per-call UUID is GONE from the MERGE call specifically — the id now lives in
+  // the mergeOpId ref. Scoped to the merge via its unique `sourceTableIds,` line so the other
+  // ops in this screen that legitimately mint their own client_op_id (split/edit/void) don't
+  // trip this assertion.
+  assert.doesNotMatch(code, /sourceTableIds,\s*clientOpId: crypto\.randomUUID\(\)/);
   // merge is a success-toned op routed through the shared runOp.
   assert.match(code, /runOp\("merge"/);
+});
+
+// --- O. the stale-floor `expected` version map (migration 20261013200551) ---
+
+test("O buildMergeExpected maps the primary + every selected source to its version", () => {
+  const primary = tbl({ id: "p", orders: 1, status: "occupied", pos_entity_version: 7 });
+  const s1 = tbl({ id: "a", orders: 1, status: "occupied", pos_entity_version: 3 });
+  const s2 = tbl({ id: "b", orders: 2, status: "occupied", pos_entity_version: 9 });
+  assert.deepEqual(buildMergeExpected(primary, [s1, s2]), { p: 7, a: 3, b: 9 });
+});
+
+test("P buildMergeExpected omits a 0/absent version (older server), never sends 0", () => {
+  const primary = tbl({ id: "p", orders: 1, status: "occupied", pos_entity_version: 0 });
+  const s1 = tbl({ id: "a", orders: 1, status: "occupied", pos_entity_version: 4 });
+  assert.deepEqual(buildMergeExpected(primary, [s1]), { a: 4 });
+});
+
+// --- Q. the retry-stable client_op_id (mint once, reuse on transport retry) ---
+
+test("Q a retry of the SAME merge reuses the client_op_id; a different set mints a new one", () => {
+  let n = 0;
+  const mint = () => `id-${++n}`;
+  const sigAB = mergeAttemptSignature("p", ["a", "b"]);
+  const first = stableMergeOpId(null, sigAB, mint);
+  // Same target set (order-independent) → SAME id (transport retry dedupes).
+  const retry = stableMergeOpId(first, mergeAttemptSignature("p", ["b", "a"]), mint);
+  assert.equal(retry.id, first.id);
+  assert.equal(n, 1);
+  // A different target set → a fresh id (a new operation).
+  const other = stableMergeOpId(retry, mergeAttemptSignature("p", ["c"]), mint);
+  assert.notEqual(other.id, first.id);
+  assert.equal(n, 2);
+});
+
+// --- R. a merge VERSION_CONFLICT surfaces the reload-and-retry UX ---
+
+test("R a VERSION_CONFLICT from the merge path maps to the reload-the-floor message", async () => {
+  const { classifyError } = await import("@/lib/pos/errors");
+  const c = classifyError(new Error("VERSION_CONFLICT: A table changed since the merge was opened. Reload the floor."));
+  assert.equal(c.kind, "version_conflict");
+  assert.equal(c.expected, true);
+  assert.match(c.hint ?? "", /reload|floor/i);
 });
 
 test("K the merge dialog offers occupied sources and is confirm-gated", () => {

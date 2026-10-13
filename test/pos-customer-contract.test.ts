@@ -43,9 +43,13 @@ const deliverySources = [customersSrc, workspaceSrc, stateSrc];
 test("the payload has exactly the keys the RPC reads", () => {
   // 1.0.31 Phase 3 adds `allow_name_only`: a general Customer-Accounts/A-R create
   // sets it to opt into name-only identity; the server keeps phone required otherwise.
+  // Desktop 1.0.36 (R6) adds `conflict_token`: the verify-and-link confirmation key sent
+  // back on a CUSTOMER_IDENTITY_CONFLICT to deliberately link to the existing customer
+  // (see the "surfaced conflict carries the token" tests below). Still server-derived
+  // fields stay forbidden.
   assert.deepEqual(
     [...CUSTOMER_PAYLOAD_KEYS],
-    ["branch_id", "id", "phone", "name", "notes", "address", "allow_name_only"],
+    ["branch_id", "id", "phone", "name", "notes", "address", "allow_name_only", "conflict_token"],
   );
 });
 
@@ -171,7 +175,11 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // 35 -> 43 in POS Final W4/W5 (Part 6): 6 transfer RPCs + eligible_recipients + unresolved_orders.
   // 43 -> 47 in Desktop 1.0.35 (B1/B3): pos_order_transfer_force, pos_order_transfer_cancel,
   //   pos_transfer_force_enabled, pos_transfer_settings_set (all pos_* names).
-  assert.equal(names.length, 48); // +pos_add_order_items (R2 1.0.35)
+  // 47 -> 48 for Desktop 1.0.35 (R2): pos_add_order_items.
+  // 48 -> 50 for Desktop 1.0.36 (R7): pos_end_shift_approval_required + pos_shift_approval_set
+  //   (both pos_* — End-Shift approval getter + setter; pos.settings.manage; no money RPC).
+  //   R3's pos_merge_tables_v3 has a digit, so this pos_[a-z_]+ list excludes it by design.
+  assert.equal(names.length, 50);
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_deletion_reason_report"));
   assert.ok(names.includes("pos_delivery_resolve_cost"));

@@ -60,6 +60,9 @@ function toTable(raw: unknown): TableSummary | null {
     merged_sources: Array.isArray(r.merged_sources)
       ? (r.merged_sources as unknown[]).map((x) => str(x)).filter((s) => s !== "")
       : [],
+    // 1.0.36 (migration 20261013200551): optimistic-concurrency token for the
+    // merge stale-dialog guard. num() defaults to 0 when an older server omits it.
+    pos_entity_version: num(r.pos_entity_version),
   };
 }
 
