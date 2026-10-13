@@ -59,6 +59,9 @@ export const POS_PERMISSIONS = {
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
   APPROVE_SHIFTS: "pos.approve_shifts",
+  // R7 (1.0.36) — manage POS settings (incl. the OU End-Shift Approval toggle). Re-enforced
+  // server-side by pos_shift_approval_set; owner/admin by default.
+  SETTINGS_MANAGE: "pos.settings.manage",
   // POS Final W4/W5 (Part 6) — Open-Orders Transfer. Tenant-level keys; the transfer RPCs
   // re-enforce each server-side. Recipient eligibility is TRANSFERS_APPROVE (the "receive"
   // permission). REAPPROVE is the website authorised-user key (W6); CREATE needs both
@@ -250,6 +253,12 @@ export function canCancelOthersTransfer(ctx: PosAccessContext): Gate {
 /** Desktop 1.0.35 (B3) — manage the branch's OU-scoped Force-Transfer setting; matches pos_transfer_settings_set. */
 export function canManageForceSetting(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_MANAGE_FORCE_SETTING), "You do not have permission to manage the force transfer setting.");
+}
+
+/** R7 (1.0.36) — manage the OU End-Shift Approval setting. Server re-enforces pos.settings.manage
+ *  in pos_shift_approval_set; this only offers the control where the server would honour it. */
+export function canManageShiftApproval(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.SETTINGS_MANAGE), "You do not have permission to manage POS settings.");
 }
 
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
