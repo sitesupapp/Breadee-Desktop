@@ -55,6 +55,10 @@ export const POS_PERMISSIONS = {
   // Phase H — POS Analytics. VIEW gates the dashboard (pos_analytics_summary checks it); EXPORT the PDF.
   ANALYTICS_VIEW: "pos.analytics.view",
   ANALYTICS_EXPORT: "pos.analytics.export",
+  // R5 (1.0.36) — independent Owner POS Sales access. DEFAULT OFF; an OWNER must additionally hold
+  // this key to reach POS Sales (pos_analytics_summary re-enforces it server-side). Manager/cashier
+  // are NOT affected (the server gate is guarded by current_user_is_owner()).
+  SALES_OWNER_ACCESS: "pos.sales.owner_access",
   APPLY_DISCOUNTS: "pos.apply_discounts",
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
@@ -331,6 +335,22 @@ export function canExportAnalytics(ctx: PosAccessContext): Gate {
   const view = canViewAnalytics(ctx);
   if (!view.allowed) return view;
   return gate(perm(ctx, POS_PERMISSIONS.ANALYTICS_EXPORT), "You do not have permission to export analytics.");
+}
+
+/**
+ * R5 (1.0.36) — Owner POS Sales access. Everything canViewAnalytics requires, PLUS: an OWNER must
+ * additionally hold pos.sales.owner_access (DEFAULT OFF). This MIRRORS the server gate in
+ * pos_analytics_summary (guarded by current_user_is_owner()), so manager/cashier are unaffected and
+ * keep their existing pos.analytics.view behaviour exactly. The UI uses this to hide the Sales entry
+ * and fail its route closed; the server remains authoritative.
+ */
+export function canViewOwnerSales(ctx: PosAccessContext): Gate {
+  const view = canViewAnalytics(ctx);
+  if (!view.allowed) return view;
+  if (ctx.membership?.role === "owner" && !perm(ctx, POS_PERMISSIONS.SALES_OWNER_ACCESS)) {
+    return { allowed: false, reason: "Owner POS Sales access is not enabled for your account." };
+  }
+  return { allowed: true, reason: null };
 }
 
 /**

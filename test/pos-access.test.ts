@@ -16,6 +16,7 @@ import {
   canReviewShift,
   canTakePayments,
   canUseOrderType,
+  canViewOwnerSales,
   isOperationalRole,
   posAccessDenialReason,
   type PosAccessContext,
@@ -137,4 +138,43 @@ test("a disabled sub-feature closes that order type only", () => {
   const c = ctx();
   assert.equal(canUseOrderType(c, FEATURES.POS_TAKEAWAY), true);
   assert.equal(canUseOrderType(c, FEATURES.POS_DINE_IN), false);
+});
+
+// --- R5 (1.0.36): Owner POS Sales access --------------------------------------
+
+const withAnalytics = (extra: Record<string, boolean> = {}) => ({ ...ALL_PERMS, "pos.analytics.view": true, ...extra });
+
+test("R5: an OWNER without pos.sales.owner_access is denied POS Sales (default OFF)", () => {
+  const owner = ctx({ membership: { role: "owner", status: "active" }, permissions: withAnalytics() });
+  const g = canViewOwnerSales(owner);
+  assert.equal(g.allowed, false);
+  assert.match(g.reason ?? "", /Owner POS Sales access is not enabled/);
+});
+
+test("R5: an OWNER WITH pos.sales.owner_access is allowed", () => {
+  const owner = ctx({
+    membership: { role: "owner", status: "active" },
+    permissions: withAnalytics({ "pos.sales.owner_access": true }),
+  });
+  assert.equal(canViewOwnerSales(owner).allowed, true);
+});
+
+test("R5: a MANAGER with analytics.view is unaffected (no owner key required)", () => {
+  const mgr = ctx({ membership: { role: "manager", status: "active" }, permissions: withAnalytics() });
+  assert.equal(canViewOwnerSales(mgr).allowed, true);
+});
+
+test("R5: a CASHIER without analytics.view is denied by the PRE-EXISTING gate, not R5", () => {
+  const cashier = ctx({ membership: { role: "cashier", status: "active" }, permissions: { ...ALL_PERMS } });
+  const g = canViewOwnerSales(cashier);
+  assert.equal(g.allowed, false);
+  assert.match(g.reason ?? "", /permission to view analytics/);
+});
+
+test("R5: an owner with the key but a FROZEN membership is still denied (membership gate first)", () => {
+  const frozen = ctx({
+    membership: { role: "owner", status: "frozen" },
+    permissions: withAnalytics({ "pos.sales.owner_access": true }),
+  });
+  assert.equal(canViewOwnerSales(frozen).allowed, false);
 });

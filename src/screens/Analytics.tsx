@@ -17,7 +17,7 @@ import { usePosContext } from "@/state/pos";
 import { Badge, Button, Card, EmptyState, GatedButton, Skeleton } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
-import { canViewAnalytics, canExportAnalytics } from "@/lib/pos/access";
+import { canViewOwnerSales, canExportAnalytics } from "@/lib/pos/access";
 import {
   loadAnalytics,
   presetRange,
@@ -48,7 +48,9 @@ async function loadBranches(tenantId: string): Promise<BranchOpt[]> {
 export function Analytics() {
   const pos = usePosContext();
   const session = useSession();
-  const viewGate = canViewAnalytics(pos.access);
+  // R5 (1.0.36): owners additionally need pos.sales.owner_access (default OFF); manager/cashier
+  // keep their existing pos.analytics.view behaviour. Mirrors the server gate; server stays authoritative.
+  const viewGate = canViewOwnerSales(pos.access);
   const exportGate = canExportAnalytics(pos.access);
 
   const [preset, setPreset] = useState<PresetKey>("today");
