@@ -24,10 +24,13 @@ import {
   customerWriteGate,
   decideCreate,
   performCustomerCreate,
+  resolveCustomerConflict,
   searchCustomers,
   upsertCustomer,
+  CustomerIdentityConflictError,
   type CustomerLatch,
   type CustomerMatch,
+  type CustomerUpsertPayload,
 } from "@/lib/pos/customers";
 import {
   canCreateOrders,
@@ -41,10 +44,23 @@ import { SEARCH_DEBOUNCE_MS } from "@/state/customers";
 /** The minimal customer identity the payment dialog and the receipt need. */
 export type PickedCustomer = { id: string; name: string | null; phone: string | null };
 
+export type CustomerConflictPrompt = {
+  open: boolean;
+  existingName: string | null;
+  incomingName: string | null;
+  saving: boolean;
+  error: string | null;
+  /** Link to the matched customer (resolveCustomerConflict with the token). */
+  onUseExisting: () => void;
+  onCancel: () => void;
+};
+
 export type CustomerPicker = {
   selected: PickedCustomer | null;
   searchProps: CustomerSearchProps;
   clearSelection: () => void;
+  /** R6 (1.0.36): render a CustomerConflictDialog from this when `open` is true. */
+  conflict: CustomerConflictPrompt;
 };
 
 /** POS access is already established at the workspace; the customer gates take a
@@ -67,6 +83,16 @@ export function useCustomerPicker(input: {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [selected, setSelected] = useState<PickedCustomer | null>(null);
+  // R6 (1.0.36): a live CUSTOMER_IDENTITY_CONFLICT awaiting the operator's verify-and-link.
+  // We keep the ORIGINAL submitted payload so the link re-sends exactly it plus the token.
+  const [conflict, setConflict] = useState<{
+    error: CustomerIdentityConflictError;
+    payload: CustomerUpsertPayload;
+    name: string | null;
+    phone: string | null;
+  } | null>(null);
+  const [conflictSaving, setConflictSaving] = useState(false);
+  const [conflictError, setConflictError] = useState<string | null>(null);
   const latch = useRef<CustomerLatch>(createCustomerLatch());
   // The latest term the operator has typed, read back after an async search so a
   // response that lost the race is dropped rather than overwriting fresh results.
@@ -84,6 +110,9 @@ export function useCustomerPicker(input: {
       setSearching(false);
       setError(null);
       setSelected(null);
+      setConflict(null);
+      setConflictSaving(false);
+      setConflictError(null);
       nameConfirmRef.current = null;
     }
   }, [enabled]);
@@ -201,9 +230,10 @@ export function useCustomerPicker(input: {
       nameConfirmRef.current = null;
       setSaving(true);
       setError(null);
+      const payload = buildCreatePayload({ branchId, phone: decision.phone, name: decision.name, allowNameOnly: true });
       try {
         const outcome = await performCustomerCreate({
-          payload: buildCreatePayload({ branchId, phone: decision.phone, name: decision.name, allowNameOnly: true }),
+          payload,
           submit: upsertCustomer,
           recoverSearch: (phone) => searchCustomers(phone),
           latch: latch.current,
@@ -211,6 +241,10 @@ export function useCustomerPicker(input: {
         if (outcome.ok) {
           setSelected({ id: outcome.customerId, name: decision.name ?? null, phone: decision.phone ?? null });
           setResults(null);
+        } else if (outcome.conflict) {
+          // R6: same-OU number already held by a differently-named customer. Verify-and-link,
+          // never silently reuse — keep the original payload so the link re-sends exactly it.
+          setConflict({ error: outcome.conflict, payload, name: decision.name ?? null, phone: decision.phone ?? null });
         } else {
           const message = outcome.error instanceof Error ? outcome.error.message : "Could not add the customer.";
           setError(message);
@@ -243,6 +277,44 @@ export function useCustomerPicker(input: {
 
   const clearSelection = useCallback(() => setSelected(null), []);
 
-  return { selected, searchProps, clearSelection };
+  const confirmConflict = useCallback(() => {
+    void (async () => {
+      if (!conflict) return;
+      setConflictSaving(true);
+      setConflictError(null);
+      try {
+        const r = await resolveCustomerConflict(conflict.payload, conflict.error.conflictToken);
+        setSelected({ id: r.customer_id, name: conflict.name, phone: conflict.phone });
+        setConflict(null);
+        setResults(null);
+        setError(null);
+      } catch (e) {
+        // A stale/invalid token or a changed record — surface it; the operator reloads and retries.
+        setConflictError(e instanceof Error ? e.message : "Could not link to the existing customer.");
+      } finally {
+        setConflictSaving(false);
+      }
+    })();
+  }, [conflict]);
+
+  const cancelConflict = useCallback(() => {
+    setConflict(null);
+    setConflictError(null);
+  }, []);
+
+  return {
+    selected,
+    searchProps,
+    clearSelection,
+    conflict: {
+      open: conflict !== null,
+      existingName: conflict?.error.existingName ?? null,
+      incomingName: conflict?.error.incomingName ?? conflict?.name ?? null,
+      saving: conflictSaving,
+      error: conflictError,
+      onUseExisting: confirmConflict,
+      onCancel: cancelConflict,
+    },
+  };
 }
 

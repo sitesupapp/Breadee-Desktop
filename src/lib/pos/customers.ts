@@ -603,7 +603,12 @@ export function createCustomerLatch(): CustomerLatch {
 
 export type CreateOutcome =
   | { ok: true; customerId: string; recovered: boolean }
-  | { ok: false; error: unknown; retryable: boolean };
+  /** R6 (1.0.36): the server returned CUSTOMER_IDENTITY_CONFLICT. NOT retryable and NOT
+   *  recovered-by-search (that would silently link to the matched customer without the
+   *  operator verifying the differing name). The caller must show a verify-and-link prompt
+   *  and, on confirm, call resolveCustomerConflict(payload, conflict.conflictToken). */
+  | { ok: false; error: unknown; retryable: boolean; conflict: CustomerIdentityConflictError }
+  | { ok: false; error: unknown; retryable: boolean; conflict?: undefined };
 
 /**
  * Create one customer, once.
@@ -628,6 +633,12 @@ export async function performCustomerCreate(input: {
     try {
       result = await input.submit(input.payload);
     } catch (error) {
+      // R6 (1.0.36): a same-OU identity conflict must NOT be recovered by search — that would
+      // link to the matched customer without the operator verifying the differing name. Surface
+      // it to the caller's verify-and-link prompt instead.
+      if (error instanceof CustomerIdentityConflictError) {
+        return { ok: false, error, retryable: false, conflict: error };
+      }
       const phone = input.payload.phone;
       if (!phone) return { ok: false, error, retryable: true };
       let found: CustomerMatch[];

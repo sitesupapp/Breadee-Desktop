@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import {
   CustomerCreateAmbiguousError,
   CustomerCreateInProgressError,
+  CustomerIdentityConflictError,
   DuplicatePhoneError,
   createCustomerLatch,
   performCustomerCreate,
@@ -207,4 +208,58 @@ test("the recovery search is given the phone that was actually sent", async () =
     },
   });
   assert.equal(asked, "03 123 456");
+});
+
+// --- R6 (1.0.36): CUSTOMER_IDENTITY_CONFLICT -------------------------------------
+
+const conflict = () =>
+  new CustomerIdentityConflictError({
+    conflictToken: "tok-123",
+    existingCustomerId: "existing-1",
+    existingName: "Ali",
+    incomingName: "Omar",
+    reason: "A different customer has this number in this operating unit.",
+  });
+
+test("a CUSTOMER_IDENTITY_CONFLICT is surfaced for verify-and-link, NEVER recover-searched", async () => {
+  // The critical R6 correctness guarantee: a same-OU name clash must NOT be resolved by the
+  // phone recovery path (which would silently link to the matched customer). recoverSearch must
+  // not even run; the outcome carries the conflict for the UI's verify-and-link prompt.
+  const outcome = await performCustomerCreate({
+    payload,
+    submit: async () => {
+      throw conflict();
+    },
+    recoverSearch: never,
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(!outcome.ok && outcome.retryable, false);
+  assert.ok(!outcome.ok && outcome.conflict instanceof CustomerIdentityConflictError);
+});
+
+test("the surfaced conflict carries the token and the existing name for the link", async () => {
+  const outcome = await performCustomerCreate({
+    payload,
+    submit: async () => {
+      throw conflict();
+    },
+    recoverSearch: never,
+  });
+  const c = !outcome.ok ? outcome.conflict : undefined;
+  assert.equal(c?.conflictToken, "tok-123");
+  assert.equal(c?.existingName, "Ali");
+  assert.equal(c?.existingCustomerId, "existing-1");
+});
+
+test("the latch is released after a conflict, so a verified link can proceed", async () => {
+  const latch = createCustomerLatch();
+  await performCustomerCreate({
+    payload,
+    submit: async () => {
+      throw conflict();
+    },
+    recoverSearch: never,
+    latch,
+  });
+  assert.equal(latch.held(), false);
 });
