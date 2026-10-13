@@ -35,13 +35,14 @@ function ctx(permissions: Record<string, boolean>): PosAccessContext {
 
 // --- A. the four RPCs are in the desktop allow-list ---
 
-test("A the four force-end RPCs are allow-listed in rpc.ts", () => {
+test("A the five force-end RPCs are allow-listed in rpc.ts", () => {
   const rpc = stripJsxComments(read("src/lib/pos/rpc.ts"));
   for (const name of [
     "pos_force_end_shift_request",
     "pos_force_end_shift_decide",
     "pos_force_end_shift_cancel",
     "pos_force_end_shift_finalize",
+    "pos_force_end_eligible_recipients",
   ]) {
     assert.match(rpc, new RegExp(`\\|\\s*"${name}"`), `${name} must be allow-listed`);
   }
@@ -93,11 +94,22 @@ test("F the data layer calls all four force-end RPCs with p_payload", () => {
   assert.match(t, /callPosRpc\("pos_force_end_shift_decide", \{ p_payload:/);
   assert.match(t, /callPosRpc\("pos_force_end_shift_cancel", \{ p_payload:/);
   assert.match(t, /callPosRpc\("pos_force_end_shift_finalize", \{ p_payload:/);
-  // reads the hand-over row directly under RLS (no reader RPC) and reuses the eligible-recipient reader
+  // reads the hand-over row directly under RLS (no reader RPC) and uses the Force-End recipient reader
   assert.match(t, /\.from\("pos_shift_force_close"\)/);
-  assert.match(t, /callPosRpc\("pos_order_transfer_eligible_recipients"/);
+  assert.match(t, /callPosRpc\("pos_force_end_eligible_recipients"/);
+  // the recipient picker must NOT fall back to the transfer-flow reader (Konan BLOCKER fix)
+  assert.doesNotMatch(t, /callPosRpc\("pos_order_transfer_eligible_recipients"/);
   // finalize maps the close report through the SHARED shiftReportFromRow (one source of truth)
   assert.match(t, /shiftReportFromRow\(r, "pos_force_end_shift_finalize"\)/);
+});
+
+test("F2 the recipient picker uses the Force-End-specific reader, not the transfer reader", () => {
+  const t = read("src/lib/pos/forceEndShift.ts");
+  // listForceEndRecipientCandidates binds to pos_force_end_eligible_recipients with { p_branch }
+  assert.match(
+    t,
+    /listForceEndRecipientCandidates[\s\S]{0,200}callPosRpc\("pos_force_end_eligible_recipients", \{ p_branch: branchId \}\)/,
+  );
 });
 
 // --- G. the payload builders emit EXACTLY the keys the live RPCs read ---

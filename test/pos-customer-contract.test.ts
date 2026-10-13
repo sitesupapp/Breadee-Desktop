@@ -182,7 +182,9 @@ test("the RPC allow-list is 16 names and includes pos_upsert_customer", () => {
   // 50 -> 54 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
   //   _cancel / _finalize (all pos_* — supervised hand-over of a blocked shift + finalize-close; no
   //   NEW money RPC beyond the R7-aware end-shift path they reuse).
-  assert.equal(names.length, 54);
+  // 54 -> 55 for Desktop 1.0.36 (R4) the Force-End recipient reader pos_force_end_eligible_recipients
+  //   (pos_* read; select_recipient-gated; no money RPC).
+  assert.equal(names.length, 55);
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_deletion_reason_report"));
   assert.ok(names.includes("pos_delivery_resolve_cost"));

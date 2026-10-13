@@ -331,7 +331,9 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   //   has a digit and is excluded from this [a-z_]+ members list by design.
   // 61 -> 65 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
   //   _cancel / _finalize (supervised hand-over + finalize-close; none moves money directly).
-  assert.equal(members.length, 65, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // 65 -> 66 for Desktop 1.0.36 (R4) the Force-End recipient reader pos_force_end_eligible_recipients
+  //   (select_recipient-gated; not a money RPC).
+  assert.equal(members.length, 66, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"));
   assert.ok(members.includes("pos_deletion_reason_report"));
 });

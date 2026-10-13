@@ -17,9 +17,9 @@
 // DISCOVERY READS: there is no reader RPC. `pos_shift_force_close` carries a branch-scoped SELECT
 // RLS policy (tenant_id = current_tenant_id() AND can_access_branch(branch_id)), so the recipient's
 // pending hand-overs and the requester's own hand-overs are read directly under RLS — the same
-// direct-read pattern findOpenShift uses for pos_shifts. The RECIPIENT CANDIDATE list reuses
-// pos_order_transfer_eligible_recipients (the only branch-scoped recipient reader; see the caveat
-// on listForceEndRecipientCandidates). The server re-validates the chosen recipient regardless.
+// direct-read pattern findOpenShift uses for pos_shifts. The RECIPIENT CANDIDATE list uses the
+// Force-End-specific reader pos_force_end_eligible_recipients (caller needs select_recipient; returns
+// active branch members with exactly one open shift). The server re-validates the recipient regardless.
 
 import { callPosRpc, asRecord, requireId, str, strOrNull, num } from "@/lib/pos/rpc";
 import { shiftReportFromRow } from "@/lib/pos/shifts";
@@ -143,18 +143,13 @@ export async function listMyForceEndRequests(userId: string): Promise<ForceEndRe
 /**
  * The recipient candidate list for the hand-over picker.
  *
- * CAVEAT (resolved, documented): the Force-End backend has NO recipient reader of its own. This
- * reuses `pos_order_transfer_eligible_recipients`, exactly as the 1.0.35 Force Transfer picker does
- * for a flow that likewise requires the recipient to hold a single open shift. It is branch-scoped
- * and server-authoritative, but it is not a perfect match for Force-End: it requires the CALLER to
- * hold pos.transfers.create and filters candidates on pos.transfers.approve, whereas the Force-End
- * request RPC instead validates the recipient as active + branch-accessible + exactly-one-open-shift
- * (no approve permission). The mismatch only ever fails CLOSED — a candidate the server would reject
- * is refused with a mapped FORCE_END_* message, and a valid recipient who lacks approve is simply not
- * offered. The server remains authoritative; this list is a convenience, never an authority.
+ * Uses the Force-End-specific reader `pos_force_end_eligible_recipients`, which matches the request
+ * RPC's contract exactly: the caller needs `pos.transfers.select_recipient` (NOT transfers.create),
+ * and it returns active branch members (excluding the caller) who have EXACTLY ONE open shift on the
+ * branch. The server remains authoritative — this list is a convenience, never an authority.
  */
 export async function listForceEndRecipientCandidates(branchId: string): Promise<EligibleRecipient[]> {
-  const rows = await callPosRpc("pos_order_transfer_eligible_recipients", { p_branch: branchId });
+  const rows = await callPosRpc("pos_force_end_eligible_recipients", { p_branch: branchId });
   if (!Array.isArray(rows)) return [];
   return rows.map((raw) => {
     const r = asRecord(raw);

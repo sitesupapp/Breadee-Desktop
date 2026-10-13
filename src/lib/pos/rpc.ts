@@ -270,11 +270,14 @@ export type PosRpcName =
   // _RECIPIENT_MISMATCH / _RECIPIENT_INELIGIBLE / _RECIPIENT_INACTIVE / _RECIPIENT_SHIFT_AMBIGUOUS /
   // _SNAPSHOT_CHANGED / _HAS_PAID_ORDERS / _NOT_PENDING / _NOT_CANCELLABLE — mapped to guidance in lib/pos/errors.ts.
   // The pos_shift_force_close row is read directly under its branch-scoped SELECT RLS (no reader RPC);
-  // the recipient candidate list reuses pos_order_transfer_eligible_recipients (see lib/pos/forceEndShift.ts).
+  // the recipient candidate list uses the Force-End-specific reader below (see lib/pos/forceEndShift.ts).
   | "pos_force_end_shift_request"
   | "pos_force_end_shift_decide"
   | "pos_force_end_shift_cancel"
-  | "pos_force_end_shift_finalize";
+  | "pos_force_end_shift_finalize"
+  // Force-End recipient picker: active branch members (excluding the caller) with EXACTLY ONE open
+  // shift; caller needs pos.transfers.select_recipient (NOT transfers.create). Matches the request RPC.
+  | "pos_force_end_eligible_recipients";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

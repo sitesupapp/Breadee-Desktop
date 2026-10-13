@@ -166,8 +166,9 @@ test("the RPC allow-list contains exactly the sixty-one expected names", () => {
       "pos_end_shift",
       // Desktop 1.0.36 (R7) — per-branch End-Shift approval requirement getter.
       "pos_end_shift_approval_required",
-      // Desktop 1.0.36 (R4) — Force End Shift hand-over: request / decide / cancel / finalize.
-      // Sort between pos_end_shift_* and pos_merge_tables (force < merge).
+      // Desktop 1.0.36 (R4) — Force End Shift: the recipient picker + the hand-over request / decide
+      // / cancel / finalize. Sort between pos_end_shift_* and pos_merge_tables (eligible < shift < merge).
+      "pos_force_end_eligible_recipients",
       "pos_force_end_shift_cancel",
       "pos_force_end_shift_decide",
       "pos_force_end_shift_finalize",
@@ -237,7 +238,10 @@ test("the RPC allow-list contains exactly the sixty-one expected names", () => {
   // 61 -> 65 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
   //   _cancel / _finalize (supervised hand-over of a blocked shift's unpaid orders + finalize-close;
   //   self → pos.end_own_shift, other → pos.close_other_shifts, + pos.transfers.select_recipient).
-  assert.equal(members.length, 65);
+  // 65 -> 66 for Desktop 1.0.36 (R4) the Force-End-specific recipient reader
+  //   pos_force_end_eligible_recipients (caller needs select_recipient; active branch members with
+  //   exactly one open shift). No digit, so this [a-z_]+ list counts it.
+  assert.equal(members.length, 66);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {
