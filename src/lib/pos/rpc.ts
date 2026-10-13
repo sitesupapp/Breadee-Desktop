@@ -247,7 +247,34 @@ export type PosRpcName =
   | "pos_order_transfer_force"
   | "pos_order_transfer_cancel"
   | "pos_transfer_force_enabled"
-  | "pos_transfer_settings_set";
+  | "pos_transfer_settings_set"
+  // R4 (1.0.36) — Force End Shift (supervised hand-over + finalize). All SECURITY DEFINER,
+  // server-authoritative, OU-scoped. A supervisor (or the cashier themselves) hands a blocked open
+  // shift's UNPAID open orders to a recipient who has exactly one open shift on the branch, the
+  // recipient accepts, then the supervisor finalizes — one atomic txn that re-validates + re-scans
+  // the snapshot, moves the orders, and closes the source via the R7-aware end-shift path.
+  //   `_request`  — supervisor/self starts the hand-over (self → pos.end_own_shift, other →
+  //                 pos.close_other_shifts; PLUS pos.transfers.select_recipient). Isolates paid/
+  //                 part-paid/split orders (FORCE_END_HAS_PAID_ORDERS), snapshots the unpaid open
+  //                 orders + their versions, validates the recipient (active + branch + exactly-one
+  //                 open shift). Payload { shift_id, recipient_user_id, note?, client_op_id? }.
+  //   `_decide`   — the RECIPIENT accepts or rejects; moves no orders. Payload { request_id, accept, reason? }.
+  //   `_cancel`   — the requester (or pos.close_other_shifts) cancels a pending/accepted hand-over.
+  //                 Payload { request_id, reason? }.
+  //   `_finalize` — the supervisor finalizes an ACCEPTED hand-over: locks + re-validates (source open,
+  //                 recipient shift open + belongs to recipient + branch + eligible + exactly-one open
+  //                 shift), re-scans the snapshot (FORCE_END_SNAPSHOT_CHANGED), moves the unpaid orders,
+  //                 closes the source. IDEMPOTENT (a repeat returns the stored close report). Payload
+  //                 { request_id, actual_cash_counted, currency?, delivery_fee_cash_treatment?, notes? }.
+  // Business refusals via pos_op_error: FORCE_END_NOT_ACCEPTED / _SOURCE_NOT_OPEN / _RECIPIENT_SHIFT_CLOSED /
+  // _RECIPIENT_MISMATCH / _RECIPIENT_INELIGIBLE / _RECIPIENT_INACTIVE / _RECIPIENT_SHIFT_AMBIGUOUS /
+  // _SNAPSHOT_CHANGED / _HAS_PAID_ORDERS / _NOT_PENDING / _NOT_CANCELLABLE — mapped to guidance in lib/pos/errors.ts.
+  // The pos_shift_force_close row is read directly under its branch-scoped SELECT RLS (no reader RPC);
+  // the recipient candidate list reuses pos_order_transfer_eligible_recipients (see lib/pos/forceEndShift.ts).
+  | "pos_force_end_shift_request"
+  | "pos_force_end_shift_decide"
+  | "pos_force_end_shift_cancel"
+  | "pos_force_end_shift_finalize";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

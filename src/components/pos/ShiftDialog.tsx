@@ -102,6 +102,7 @@ export function EndShiftDialog({
   onCancel,
   onConfirm,
   onTransferOpenOrders,
+  onForceEndShift,
 }: {
   open: boolean;
   busy: boolean;
@@ -114,6 +115,9 @@ export function EndShiftDialog({
   /** POS Final W5 (Part 6) — present only when End Shift is blocked by open orders AND the
    *  operator may transfer; offers the Transfer action (§6.2). */
   onTransferOpenOrders?: () => void;
+  /** R4 (1.0.36) — present only when End Shift is blocked by open orders AND the operator may
+   *  force-end their shift; offers the Force-End hand-over (hand orders to a colleague + close). */
+  onForceEndShift?: () => void;
 }) {
   const [actual, setActual] = useState("");
   const [notes, setNotes] = useState("");
@@ -153,6 +157,11 @@ export function EndShiftDialog({
             {onTransferOpenOrders && (
               <Button variant="primary" size="lg" onClick={onTransferOpenOrders} disabled={busy}>
                 Transfer open orders
+              </Button>
+            )}
+            {onForceEndShift && (
+              <Button variant="ghost" size="lg" onClick={onForceEndShift} disabled={busy}>
+                Force end shift
               </Button>
             )}
             <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>

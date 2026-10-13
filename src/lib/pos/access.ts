@@ -63,6 +63,13 @@ export const POS_PERMISSIONS = {
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
   APPROVE_SHIFTS: "pos.approve_shifts",
+  // R4 (1.0.36) — Force End Shift. Ending ANOTHER cashier's shift (via the Force-End hand-over) needs
+  // this key; the Force-End RPCs (pos_force_end_shift_request / _finalize) check it for themselves when
+  // the source shift is not the caller's own. DISTINCT from pos.approve_shifts (reviewing a CLOSED shift)
+  // — this authorises force-closing a still-OPEN one. A cashier force-ending their OWN blocked shift needs
+  // only pos.end_own_shift (plus pos.transfers.select_recipient to choose a recipient), exactly as the
+  // request RPC branches on self vs other. DEFAULT-DENY; the server remains authoritative.
+  CLOSE_OTHER_SHIFTS: "pos.close_other_shifts",
   // R7 (1.0.36) — manage POS settings (incl. the OU End-Shift Approval toggle). Re-enforced
   // server-side by pos_shift_approval_set; owner/admin by default.
   SETTINGS_MANAGE: "pos.settings.manage",
@@ -559,6 +566,46 @@ export function canReviewShift(ctx: PosAccessContext, isOwnShift: boolean): Gate
     return { allowed: false, reason: "You cannot approve your own shift - a manager must review it." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.APPROVE_SHIFTS), "You do not have permission to review shifts.");
+}
+
+/**
+ * R4 (1.0.36) — starting a Force End Shift hand-over (pos_force_end_shift_request).
+ *
+ * Mirrors exactly what the request RPC checks: for the operator's OWN shift, pos.end_own_shift; for
+ * ANOTHER cashier's shift, pos.close_other_shifts. In BOTH cases the requester also needs
+ * pos.transfers.select_recipient to choose the recipient (the RPC re-enforces it). Not a security
+ * boundary — the SECURITY DEFINER RPC re-checks every rule, plus paid-order isolation and recipient
+ * eligibility; this only decides whether the Force-End control is offered. Fail-closed.
+ */
+export function canRequestForceEndShift(ctx: PosAccessContext, isOwnShift: boolean): Gate {
+  const base = isOwnShift
+    ? gate(perm(ctx, POS_PERMISSIONS.END_OWN_SHIFT), "You do not have permission to end your shift.")
+    : gate(
+        perm(ctx, POS_PERMISSIONS.CLOSE_OTHER_SHIFTS),
+        "Only a manager with the close-other-shifts permission can force-end another cashier's shift.",
+      );
+  if (!base.allowed) return base;
+  return gate(
+    perm(ctx, POS_PERMISSIONS.TRANSFERS_SELECT_RECIPIENT),
+    "You do not have permission to choose a recipient for the hand-over.",
+  );
+}
+
+/**
+ * R4 (1.0.36) — finalizing a Force End Shift hand-over (pos_force_end_shift_finalize).
+ *
+ * The finalize RPC checks the SAME self/other shift-close permission as request (self →
+ * pos.end_own_shift, other → pos.close_other_shifts) but NOT select_recipient (the recipient was
+ * already chosen at request time). The server re-validates everything atomically; this only decides
+ * whether the Finalize control is offered. Fail-closed.
+ */
+export function canFinalizeForceEndShift(ctx: PosAccessContext, isOwnShift: boolean): Gate {
+  return isOwnShift
+    ? gate(perm(ctx, POS_PERMISSIONS.END_OWN_SHIFT), "You do not have permission to end your shift.")
+    : gate(
+        perm(ctx, POS_PERMISSIONS.CLOSE_OTHER_SHIFTS),
+        "Only a manager with the close-other-shifts permission can finalize a force-end.",
+      );
 }
 
 // --- Dine-In tables ----------------------------------------------------------

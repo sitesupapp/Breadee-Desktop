@@ -35,6 +35,8 @@ import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components
 import { TransferDialog } from "@/components/pos/TransferDialog";
 import { PendingTransfersBanner } from "@/components/pos/PendingTransfersBanner";
 import { TransferCenterModal } from "@/components/pos/TransferCenterModal";
+import { ForceEndShiftModal } from "@/components/pos/ForceEndShiftModal";
+import { ForceEndIncomingBanner } from "@/components/pos/ForceEndIncomingBanner";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
@@ -87,7 +89,7 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canApproveTransfer, canCreateTransfer, canForceTransfer, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
+import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
@@ -561,6 +563,8 @@ function PosWorkspaceInner() {
   const [openTablesOpen, setOpenTablesOpen] = useState(false);
   // Desktop 1.0.35 (B2) — the Transfer Center surface, opened from the "Transfer" rail entry.
   const [transferCenterOpen, setTransferCenterOpen] = useState(false);
+  // R4 (1.0.36) — the Force End Shift surface, opened from the blocked End-Shift dialog.
+  const [forceEndOpen, setForceEndOpen] = useState(false);
   // Best-effort section names from the PUBLISHED floor for the Open Tables list.
   // Open Tables never DEPENDS on the floor: an empty map just means no section.
   const [openTableSections, setOpenTableSections] = useState<Map<string, string>>(new Map());
@@ -939,6 +943,10 @@ function PosWorkspaceInner() {
     canForceTransfer(pos.access).allowed ||
     canApproveTransfer(pos.access).allowed ||
     canViewTransfers(pos.access).allowed;
+  // R4 (1.0.36) — Force End Shift gates. The desktop operates only the signed-in operator's OWN
+  // shift, so these are the SELF variants (isOwnShift = true), matching the request/finalize RPCs.
+  const forceEndRequestGate = canRequestForceEndShift(pos.access, true);
+  const forceEndFinalizeGate = canFinalizeForceEndShift(pos.access, true);
   const tableStore = useTables();
   // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
   // The rail count is derived from state already in memory - no fetch of its own.
@@ -2762,6 +2770,14 @@ function PosWorkspaceInner() {
               }
             : undefined
         }
+        onForceEndShift={
+          endShiftBlocked && forceEndRequestGate.allowed
+            ? () => {
+                setEndShiftOpen(false);
+                setForceEndOpen(true);
+              }
+            : undefined
+        }
       />
 
       {/* POS Final W5 (Part 6) — sender's Transfer flow, opened from the blocked End-Shift dialog. */}
@@ -2784,10 +2800,19 @@ function PosWorkspaceInner() {
       {/* POS Final W5 (Part 6) — incoming transfers to this operator, shown on Open Shift (§6.7).
           Fixed, top-centered, below modals; self-hides when there is no open shift or nothing pending. */}
       <div className="pointer-events-none fixed inset-x-0 top-2 z-40 flex justify-center px-4">
-        <div className="pointer-events-auto w-full max-w-2xl">
+        <div className="pointer-events-auto w-full max-w-2xl space-y-2">
           <PendingTransfersBanner
             openShiftId={shiftId}
             onApproved={() => {
+              void refreshShiftOrders();
+              void shiftStore.refreshCashBox();
+              void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+            }}
+          />
+          {/* R4 (1.0.36) — Force End Shift hand-overs addressed to this operator (accept/reject). */}
+          <ForceEndIncomingBanner
+            userId={pos.userId}
+            onAccepted={() => {
               void refreshShiftOrders();
               void shiftStore.refreshCashBox();
               void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
@@ -2808,6 +2833,36 @@ function PosWorkspaceInner() {
           void refreshShiftOrders();
           void shiftStore.refreshCashBox();
           void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+        }}
+      />
+
+      {/* R4 (1.0.36) — Force End Shift: hand this shift's open orders to a colleague, then finalize
+          to close it. Opened from the blocked End-Shift dialog; self-shift only on the desktop. */}
+      <ForceEndShiftModal
+        open={forceEndOpen}
+        shiftId={shiftId}
+        branchId={pos.branch.id}
+        userId={pos.userId}
+        currency={currency}
+        requestGate={forceEndRequestGate}
+        finalizeGate={forceEndFinalizeGate}
+        onClose={() => setForceEndOpen(false)}
+        onChanged={() => {
+          void refreshShiftOrders();
+          void shiftStore.refreshCashBox();
+        }}
+        onFinalized={(result) => {
+          setForceEndOpen(false);
+          // The source shift (this operator's own) is now closed server-side — re-read so the UI
+          // reflects "no open shift" rather than a stale open one, and drop the local cart/order view.
+          if (tenantId && userId) void shiftStore.refresh(tenantId, userId, pos.branch.id);
+          newOrder();
+          void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+          toast.push({
+            tone: "success",
+            message: `Shift force-ended — ${result.ordersMoved} order${result.ordersMoved === 1 ? "" : "s"} moved to the recipient.`,
+            detail: "The shift was closed and sent for manager review.",
+          });
         }}
       />
 

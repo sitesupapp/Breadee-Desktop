@@ -62,6 +62,12 @@ export type RefusalKind =
   | "merge_source_empty"
   // Open-Orders Transfer (Part 6)
   | "transfer_conflict"
+  // Force End Shift (R4 1.0.36)
+  | "force_end_has_paid_orders"
+  | "force_end_snapshot_changed"
+  | "force_end_not_accepted"
+  | "force_end_recipient_ineligible"
+  | "force_end_conflict"
   // Dine-In rounds (Level 2B)
   | "empty_round"
   | "modifier_required"
@@ -307,6 +313,52 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     kind: "transfer_conflict",
     test: /this transfer (was|is) already|only a rejected transfer can be re-approved/i,
     hint: "This transfer already moved on. Reload the transfers list to see its current state.",
+    expected: true,
+  },
+  // --- Force End Shift (R4 1.0.36). Listed BEFORE the generic branch / shift / permission rules
+  // because several messages contain "branch" or "shift" that those rules would otherwise swallow.
+  // These match the server's HUMAN wording (pos_op_error puts the FORCE_END_* code in `detail`, not
+  // in the message the client reads), grouped into one plain next step the operator can act on.
+  {
+    kind: "force_end_not_accepted",
+    test: /recipient has not accepted this hand-over/i,
+    hint: "Wait for the recipient to accept the hand-over, then finalize the force-end.",
+    expected: true,
+  },
+  {
+    kind: "force_end_has_paid_orders",
+    test: /paid or part-paid orders that must be settled or voided before a force-end/i,
+    hint: "Settle, void or refund the paid and part-paid orders first — only fully-unpaid orders can be handed over.",
+    expected: true,
+  },
+  {
+    kind: "force_end_snapshot_changed",
+    test: /open orders changed since the hand-over was requested/i,
+    hint: "The shift's open orders changed. Cancel this hand-over and start a new force-end with the current orders.",
+    expected: true,
+  },
+  {
+    kind: "force_end_recipient_ineligible",
+    test: /recipient (has no |is not |is no longer |can no longer |no longer has |has more than one )|recipient shift (is no longer open|no longer belongs|must differ)/i,
+    hint: "Pick a recipient who is active in this branch and has exactly one open shift, then try again.",
+    expected: true,
+  },
+  {
+    kind: "force_end_conflict",
+    test: /cannot hand orders to yourself/i,
+    hint: "Choose another cashier as the recipient — you cannot hand your own orders to yourself.",
+    expected: true,
+  },
+  {
+    kind: "force_end_conflict",
+    test: /end it normally instead of forcing|no transferable open orders found/i,
+    hint: "This shift has no unpaid open orders to hand over — end it the normal way instead.",
+    expected: true,
+  },
+  {
+    kind: "force_end_conflict",
+    test: /source shift is no longer open|that shift is not open|this hand-over is no longer pending|this hand-over can no longer be cancelled/i,
+    hint: "This hand-over already moved on. Reload the force-end list to see its current state.",
     expected: true,
   },
   // --- Merge Tables v3 (1.0.36). The server raises these when a source bill cannot

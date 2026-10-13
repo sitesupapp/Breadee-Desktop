@@ -329,7 +329,9 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // 59 -> 61 for Desktop 1.0.36 (R7): pos_end_shift_approval_required + pos_shift_approval_set
   //   (End-Shift approval getter + setter; pos.settings.manage; no money). R3's pos_merge_tables_v3
   //   has a digit and is excluded from this [a-z_]+ members list by design.
-  assert.equal(members.length, 61, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // 61 -> 65 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
+  //   _cancel / _finalize (supervised hand-over + finalize-close; none moves money directly).
+  assert.equal(members.length, 65, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"));
   assert.ok(members.includes("pos_deletion_reason_report"));
 });

@@ -715,7 +715,10 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // 48 -> 50 for Desktop 1.0.36 (R7): pos_end_shift_approval_required + pos_shift_approval_set
   //   (both pos_* — End-Shift approval getter + setter; pos.settings.manage; no money RPC).
   //   R3's pos_merge_tables_v3 has a digit, so this pos_[a-z_]+ list excludes it by design.
-  assert.equal(names.length, 50);
+  // 50 -> 54 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
+  //   _cancel / _finalize, all called from the shift/force-end layer, not these delivery screens -
+  //   the no-direct-callPosRpc check below still holds.
+  assert.equal(names.length, 54);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));
