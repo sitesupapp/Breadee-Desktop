@@ -384,8 +384,9 @@ export function MergeTablesDialog({
       ) : (
         <>
           <p className="mb-2 text-xs text-sub">
-            Choose the tables whose bills should move onto {primary?.name}. A bill that is paid, split,
-            on account, adjusted or on another shift will be refused by the server.
+            Choose the tables whose bills should move onto {primary?.name}. A part-paid bill can be folded in;
+            one that is fully paid, split, on account, adjusted or on another shift will be refused by the server,
+            with the reason shown here.
           </p>
           <ul className="grid max-h-[40vh] grid-cols-1 gap-2 overflow-y-auto overscroll-contain">
             {sources.map((t) => {

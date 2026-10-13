@@ -39,6 +39,17 @@ export type PosRpcName =
   // Level 2C - table operations.
   | "pos_move_table"
   | "pos_merge_tables"
+  // 1.0.36 - v3 of the table merge. SAME payload shape as pos_merge_tables
+  // (primary_table_id + source_table_ids + client_op_id + optional per-table
+  // `expected` versions) and it handles the clean, fully-unpaid case identically,
+  // but v3 ALSO folds eligible PARTIALLY-PAID dine-in bills and returns the primary
+  // order id, the running total and the primary table's new pos_entity_version. The
+  // v2 name above is kept callable (older/queued paths); new merges call v3. An
+  // ineligible source raises UNSUPPORTED_STATE carrying a `reason:` token, plus the
+  // coded refusals VERSION_CONFLICT / MERGE_SHIFT_BUSY / MERGE_CROSS_SHIFT /
+  // MERGE_CROSS_CURRENCY / MERGE_AMBIGUOUS_BILL / MERGE_PRIMARY_EMPTY /
+  // MERGE_SOURCE_EMPTY - all mapped to cashier guidance in lib/pos/errors.ts.
+  | "pos_merge_tables_v3"
   | "pos_deletion_reason_report"
   | "pos_close_table"
   | "pos_clear_table"

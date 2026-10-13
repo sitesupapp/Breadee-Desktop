@@ -52,6 +52,14 @@ export type RefusalKind =
   // Dine-In line edits (1.0.31 Phase 2)
   | "reason_required"
   | "version_conflict"
+  // Merge Tables v3 (1.0.36) — folding partially-paid bills
+  | "merge_unsupported"
+  | "merge_shift_busy"
+  | "merge_cross_shift"
+  | "merge_cross_currency"
+  | "merge_ambiguous_bill"
+  | "merge_primary_empty"
+  | "merge_source_empty"
   // Open-Orders Transfer (Part 6)
   | "transfer_conflict"
   // Dine-In rounds (Level 2B)
@@ -71,6 +79,44 @@ export type ClassifiedError = {
   /** Expected refusals are amber guidance; faults are red. */
   expected: boolean;
 };
+
+/**
+ * pos_merge_tables_v3 refuses an ineligible source bill with an UNSUPPORTED_STATE
+ * whose message carries a `reason:` token naming WHY that bill cannot be folded.
+ * Each token maps to one plain sentence a cashier can act on; an unrecognised token
+ * falls back to the server's own wording. These replace the cryptic token the
+ * server sends with guidance, they never override a refusal.
+ */
+export const MERGE_REASON_HINTS: Record<string, string> = {
+  partial_line:
+    "One of the selected tables has a part-paid line. Finish settling or split that bill before merging it in.",
+  combo_partial:
+    "A combo on one of the selected tables is only part paid. Settle it as a whole before merging.",
+  settled_with_adjustments:
+    "A selected bill was settled with adjustments, so it can no longer be folded into another table.",
+  on_account:
+    "A selected bill is on a customer account. Collect or clear the account first — on-account bills are not merged.",
+  consumed:
+    "One of the selected tables was already merged or settled. Reload the floor to see where its bill went.",
+  amount_mismatch:
+    "The amount already paid on a selected table does not match its bill. Reload the floor and review that bill first.",
+  tender_mismatch:
+    "The payments on a selected table do not reconcile with its bill. Review that table before merging.",
+  over_allocation:
+    "A selected table has more paid against it than its bill. Review that payment before merging.",
+  nothing_to_merge:
+    "There is nothing left to merge — the selected tables have no open amount to fold in.",
+  kitchen_active:
+    "A selected table still has items active in the kitchen. Wait for the kitchen, or fire/void them, before merging.",
+  payment_residue:
+    "A selected table has leftover payment that must be resolved before its bill can be merged.",
+};
+
+/** Pull the `reason:` token out of a v3 UNSUPPORTED_STATE merge refusal, if present. */
+export function mergeRefusalReason(message: string): string | null {
+  const m = /\breason:\s*([a-z_]+)/i.exec(message);
+  return m ? m[1].toLowerCase() : null;
+}
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
   // --- Delivery customers (Level 3A). Listed first: several contain words the
@@ -263,6 +309,54 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     hint: "This transfer already moved on. Reload the transfers list to see its current state.",
     expected: true,
   },
+  // --- Merge Tables v3 (1.0.36). The server raises these when a source bill cannot
+  // be folded into the primary. The UNSUPPORTED_STATE `reason:` tokens are mapped
+  // separately in classifyError via MERGE_REASON_HINTS; the rules here cover the
+  // coded, reason-less refusals. VERSION_CONFLICT is a SEPARATE merge rule (its own
+  // wording and hint) so the dine-in bill / payment-method / transfer version rules
+  // above are left exactly as they were.
+  {
+    kind: "version_conflict",
+    test: /changed since the merge was opened|a table changed since the merge/i,
+    hint: "The floor was reloaded with the latest table state. Review it, then open the merge again.",
+    expected: true,
+  },
+  {
+    kind: "merge_shift_busy",
+    test: /MERGE_SHIFT_BUSY/i,
+    hint: "A table in this merge is being changed on another till right now. Try again in a moment.",
+    expected: true,
+  },
+  {
+    kind: "merge_cross_shift",
+    test: /MERGE_CROSS_SHIFT/i,
+    hint: "These bills belong to different shifts. A bill cannot be merged across two shifts — settle them separately.",
+    expected: true,
+  },
+  {
+    kind: "merge_cross_currency",
+    test: /MERGE_CROSS_CURRENCY/i,
+    hint: "These bills use different currencies. The server will not fold raw USD into raw LBP — settle them separately.",
+    expected: true,
+  },
+  {
+    kind: "merge_ambiguous_bill",
+    test: /MERGE_AMBIGUOUS_BILL/i,
+    hint: "A selected table has more than one open bill, so the merge is ambiguous. Reload the floor and review that table.",
+    expected: true,
+  },
+  {
+    kind: "merge_primary_empty",
+    test: /MERGE_PRIMARY_EMPTY/i,
+    hint: "The table you are merging into has no open bill. Open or seat it first, or merge into a different table.",
+    expected: true,
+  },
+  {
+    kind: "merge_source_empty",
+    test: /MERGE_SOURCE_EMPTY/i,
+    hint: "One of the selected tables has no open bill to merge. Reload the floor and pick an occupied table.",
+    expected: true,
+  },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before
   // a request is made, so they are listed first and matched on our own wording.
   {
@@ -416,6 +510,15 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
 export function classifyError(error: unknown): ClassifiedError {
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : "Something went wrong.";
+  // Merge Tables v3: an UNSUPPORTED_STATE refusal carries a `reason:` token naming
+  // WHY a source bill could not be folded. Map it to one plain sentence; an
+  // unrecognised token still shows the server's own message. Guarded so a stray
+  // "reason:" elsewhere is not swallowed: the message must be an UNSUPPORTED_STATE
+  // or the token must be one we recognise.
+  const reason = mergeRefusalReason(message);
+  if (reason && (/unsupported_state/i.test(message) || reason in MERGE_REASON_HINTS)) {
+    return { kind: "merge_unsupported", message, hint: MERGE_REASON_HINTS[reason] ?? null, expected: true };
+  }
   for (const rule of RULES) {
     if (rule.test.test(message)) {
       return { kind: rule.kind, message, hint: rule.hint, expected: rule.expected };

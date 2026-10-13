@@ -1,7 +1,8 @@
 // Phase 4 (Desktop 1.0.31): Merge Tables.
 //
 // Folds other occupied tables' open bills into a primary table in ONE server
-// transaction (pos_merge_tables). The desktop only shapes the request, gates the
+// transaction (pos_merge_tables_v3, which also folds eligible partially-paid bills).
+// The desktop only shapes the request, gates the
 // button on pos.tables.merge, and offers occupied tables as sources; the server
 // owns every eligibility rule and the atomic fold. These tests pin the permission
 // key + gate, the source picker, the RPC payload shape, and the UI wiring.
@@ -71,7 +72,9 @@ test("F mergeableSources returns nothing without a primary", () => {
 
 test("G the merge wrapper sends primary + sources + expected + client_op_id in p_payload", () => {
   const code = stripJsxComments(read("lib", "pos", "tableOps.ts"));
-  assert.match(code, /callPosRpc\("pos_merge_tables"/);
+  // 1.0.36: the wrapper now calls v3 (folds partially-paid bills too); the payload
+  // shape is unchanged from v2.
+  assert.match(code, /callPosRpc\("pos_merge_tables_v3"/);
   assert.match(code, /primary_table_id: input\.primaryTableId/);
   assert.match(code, /source_table_ids: input\.sourceTableIds/);
   assert.match(code, /expected: input\.expected/);
@@ -80,9 +83,36 @@ test("G the merge wrapper sends primary + sources + expected + client_op_id in p
 
 // --- H. the RPC is in the desktop allow-list ---
 
-test("H pos_merge_tables is in the PosRpcName union", () => {
+test("H pos_merge_tables_v3 is in the PosRpcName union (v2 name kept callable)", () => {
   const code = stripJsxComments(read("lib", "pos", "rpc.ts"));
+  assert.match(code, /"pos_merge_tables_v3"/);
   assert.match(code, /"pos_merge_tables"/);
+});
+
+// --- L. v3 partial-payment refusals surface as cashier guidance ---
+
+test("L an UNSUPPORTED_STATE reason maps to a plain cashier sentence", async () => {
+  const { classifyError, MERGE_REASON_HINTS } = await import("@/lib/pos/errors");
+  const c = classifyError(new Error("UNSUPPORTED_STATE: cannot merge (reason: partial_line)"));
+  assert.equal(c.kind, "merge_unsupported");
+  assert.equal(c.expected, true);
+  assert.equal(c.hint, MERGE_REASON_HINTS.partial_line);
+});
+
+test("M an unknown reason token still falls back to the server message", async () => {
+  const { classifyError } = await import("@/lib/pos/errors");
+  const c = classifyError(new Error("UNSUPPORTED_STATE (reason: brand_new_token)"));
+  assert.equal(c.kind, "merge_unsupported");
+  assert.equal(c.hint, null);
+  assert.match(c.message, /brand_new_token/);
+});
+
+test("N a coded merge refusal (cross-currency) classifies with a hint", async () => {
+  const { classifyError } = await import("@/lib/pos/errors");
+  const c = classifyError(new Error("MERGE_CROSS_CURRENCY: tables use different currencies"));
+  assert.equal(c.kind, "merge_cross_currency");
+  assert.equal(c.expected, true);
+  assert.match(c.hint ?? "", /different currencies/i);
 });
 
 // --- I. the UI is wired: button + dialog + confirm ---
