@@ -75,6 +75,7 @@ import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
+import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import type { DiscountType } from "@/lib/pos/discounts";
 import { getShiftExpected } from "@/lib/pos/shifts";
 import { classifyError } from "@/lib/pos/errors";
@@ -2657,6 +2658,19 @@ function PosWorkspaceInner() {
           <p className="text-sub">Press Pay instead if the customer is settling now.</p>
         </div>
       </Modal>
+
+      {/* R6 (1.0.36): the on-account customer picker's verify-and-link prompt. Driven by the
+          picker's exposed conflict surface so a same-OU phone clash is operator-verified, never
+          silently linked. */}
+      <CustomerConflictDialog
+        open={customerPicker.conflict.open}
+        existingName={customerPicker.conflict.existingName}
+        incomingName={customerPicker.conflict.incomingName}
+        saving={customerPicker.conflict.saving}
+        error={customerPicker.conflict.error}
+        onUseExisting={customerPicker.conflict.onUseExisting}
+        onClose={customerPicker.conflict.onCancel}
+      />
 
       <ModifierDialog
         open={Boolean(pickerItem)}

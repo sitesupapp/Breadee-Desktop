@@ -99,6 +99,7 @@ import {
   type OnAccountVerdict,
 } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
+import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
@@ -1654,6 +1655,17 @@ export function useDineInWorkspace(input: {
         error={payError}
         onCancel={() => setPayOpen(false)}
         onConfirm={(i) => void confirmPay(i)}
+      />
+
+      {/* R6 (1.0.36): on-account customer picker verify-and-link prompt (same-OU phone clash). */}
+      <CustomerConflictDialog
+        open={customerPicker.conflict.open}
+        existingName={customerPicker.conflict.existingName}
+        incomingName={customerPicker.conflict.incomingName}
+        saving={customerPicker.conflict.saving}
+        error={customerPicker.conflict.error}
+        onUseExisting={customerPicker.conflict.onUseExisting}
+        onClose={customerPicker.conflict.onCancel}
       />
 
       <MoveTableDialog

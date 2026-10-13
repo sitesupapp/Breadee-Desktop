@@ -103,6 +103,10 @@ export type PosRpcName =
   // Phase H — POS Analytics. ONE server-aggregated report over a bounded date range,
   // gated pos.analytics.view. READ-only; the SAME response drives the dashboard AND PDF.
   | "pos_analytics_summary"
+  // R7 (1.0.36) — End-Shift Approval setting. The getter reads the per-branch requirement
+  // (default TRUE); the setter writes it (gated pos.settings.manage). See lib/pos/shiftApproval.ts.
+  | "pos_end_shift_approval_required"
+  | "pos_shift_approval_set"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by
