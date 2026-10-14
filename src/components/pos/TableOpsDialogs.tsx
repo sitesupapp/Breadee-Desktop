@@ -351,7 +351,12 @@ export function MergeTablesDialog({
   const outstandingOf = (t: TableSummary | null) => (t ? t.outstanding ?? t.total ?? 0 : 0);
   const collectedOf = (t: TableSummary | null) => t?.collected ?? 0;
   const selectedSources = sources.filter((s) => selected.includes(s.id));
-  const summaryCurrency = primary?.currency ?? selectedSources.find((s) => s.currency)?.currency ?? null;
+  // The summary is only meaningful when the primary and every selected source share ONE non-mixed
+  // currency — never sum across currencies. (The server likewise refuses a cross-currency merge.)
+  const summaryCurrency = primary?.currency ?? null;
+  const mergeParties = primary ? [primary, ...selectedSources] : selectedSources;
+  const summarySingleCurrency =
+    !!summaryCurrency && mergeParties.every((t) => t.currency === summaryCurrency && !t.mixed_currency);
   const toCollect = outstandingOf(primary) + selectedSources.reduce((a, s) => a + outstandingOf(s), 0);
   const alreadyPaid = collectedOf(primary) + selectedSources.reduce((a, s) => a + collectedOf(s), 0);
 
@@ -403,7 +408,9 @@ export function MergeTablesDialog({
             {sources.map((t) => {
               const on = selected.includes(t.id);
               const paid = collectedOf(t);
-              const partPaid = paid > 0;
+              // Part-paid = SOME paid AND SOME still owed. A fully-settled bill (owed 0) is not part-paid
+              // (and the server excludes fully-paid bills from the map anyway).
+              const partPaid = paid > 0 && outstandingOf(t) > 0;
               return (
                 <li key={t.id}>
                   <button
@@ -435,8 +442,9 @@ export function MergeTablesDialog({
               );
             })}
           </ul>
-          {/* R3 merge summary: what the combined bill will still collect, and what is already settled. */}
-          {selectedSources.length > 0 && summaryCurrency && (
+          {/* R3 merge summary: what the combined bill will still collect, and what is already settled.
+              Shown only when the primary + every selected source share one non-mixed currency. */}
+          {selectedSources.length > 0 && summarySingleCurrency && summaryCurrency && (
             <div className="mt-3 rounded-xl border border-line bg-slate-50 px-3 py-2">
               <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-sub">After merge</p>
               <div className="flex items-baseline justify-between">

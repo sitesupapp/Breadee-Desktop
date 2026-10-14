@@ -23,7 +23,7 @@ import { getUnresolvedOrders } from "@/lib/pos/transfers";
 import { listOpenBranchShifts, resolveUserNames, type OpenBranchShift } from "@/lib/pos/forceEndShift";
 import { ForceEndShiftModal } from "@/components/pos/ForceEndShiftModal";
 
-type Row = OpenBranchShift & { cashierName: string; blockingCount: number };
+type Row = OpenBranchShift & { cashierName: string; blockingCount: number | null };
 
 export function ForceEndShiftBrowser({
   open,
@@ -56,9 +56,12 @@ export function ForceEndShiftBrowser({
   const finalizeGate = useMemo(() => canFinalizeForceEndShift(access, false), [access]);
 
   const load = useCallback(async () => {
-    if (!branchId) {
+    // Fail closed without an actor id: the caller's own shift cannot be excluded without userId, so we
+    // must not list anything (listing with a null filter would present the caller's own shift here).
+    if (!branchId || !userId) {
       setRows([]);
       setLoading(false);
+      setLoadError(!userId ? "No signed-in operator — cannot list shifts to force-end." : null);
       return;
     }
     const seq = (seqRef.current += 1);
@@ -67,13 +70,14 @@ export function ForceEndShiftBrowser({
     try {
       const shifts = (await listOpenBranchShifts(branchId)).filter((s) => s.cashierUserId !== userId);
       const names = await resolveUserNames(shifts.map((s) => s.cashierUserId));
-      // Blocking-order counts, in parallel. A per-shift read failure must not sink the whole list —
-      // it falls back to 0 (the server re-checks at request/finalize anyway).
+      // Blocking-order counts, in parallel. A per-shift read failure is shown as UNKNOWN (null), never
+      // silently 0 — the server re-checks at request/finalize, but the supervisor must not see a false
+      // "No open orders".
       const counts = await Promise.all(
         shifts.map((s) =>
           getUnresolvedOrders(s.shiftId)
-            .then((o) => o.length)
-            .catch(() => 0),
+            .then((o) => o.length as number | null)
+            .catch(() => null),
         ),
       );
       if (seq !== seqRef.current) return;
@@ -144,8 +148,10 @@ export function ForceEndShiftBrowser({
                 <span className="block truncate text-[11px] text-sub">
                   Open {elapsedSince(r.openedAt, now)}
                   {" · "}
-                  <span className={cn(r.blockingCount > 0 ? "font-semibold text-amber-700" : "")}>
-                    {r.blockingCount} blocking order{r.blockingCount === 1 ? "" : "s"}
+                  <span className={cn(r.blockingCount && r.blockingCount > 0 ? "font-semibold text-amber-700" : "")}>
+                    {r.blockingCount === null
+                      ? "blocking orders: unknown"
+                      : `${r.blockingCount} blocking order${r.blockingCount === 1 ? "" : "s"}`}
                   </span>
                 </span>
               </span>
