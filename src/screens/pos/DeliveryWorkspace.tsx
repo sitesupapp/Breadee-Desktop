@@ -2442,6 +2442,13 @@ export function useDeliveryWorkspace(input: {
           customerName: payTarget.order ? customerDisplayName(receiptIdentity(payTarget.order).customerName, receiptIdentity(payTarget.order).customerPhone, "Customer") : "Customer",
           address: payTarget.order ? receiptIdentity(payTarget.order).addressText : null,
         }}
+        onAccountDisabledReason={
+          pos.gates.takeOnAccount.allowed && online
+            ? null
+            : !pos.gates.takeOnAccount.allowed
+              ? pos.gates.takeOnAccount.reason
+              : "On-account sales need an internet connection."
+        }
         onAccount={(() => {
           const o = payTarget.order;
           if (!pos.gates.takeOnAccount.allowed || !online || !o || !o.customer_id) return undefined;

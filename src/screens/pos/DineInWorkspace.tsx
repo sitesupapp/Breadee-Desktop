@@ -1661,6 +1661,13 @@ export function useDineInWorkspace(input: {
             ? { tableName: selected.name, seats: selected.seats, orderCount: tables.bill?.orders.length ?? 0 }
             : null
         }
+        onAccountDisabledReason={
+          pos.gates.takeOnAccount.allowed && input.online
+            ? null
+            : !pos.gates.takeOnAccount.allowed
+              ? pos.gates.takeOnAccount.reason
+              : "On-account sales need an internet connection."
+        }
         onAccount={
           pos.gates.takeOnAccount.allowed && input.online
             ? {

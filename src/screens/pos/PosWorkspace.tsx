@@ -2750,6 +2750,13 @@ function PosWorkspaceInner() {
             : (cart.savedOrder?.order_number ?? null)
         }
         error={payError}
+        onAccountDisabledReason={
+          pos.gates.takeOnAccount.allowed && online
+            ? null
+            : !pos.gates.takeOnAccount.allowed
+              ? pos.gates.takeOnAccount.reason
+              : "On-account sales need an internet connection."
+        }
         onAccount={
           pos.gates.takeOnAccount.allowed && online
             ? {

@@ -111,6 +111,15 @@ export type PaymentDialogProps = {
    */
   onAccount?: PaymentDialogOnAccount;
   /**
+   * R6 discoverability: when on-account is NOT available to this operator/tenant,
+   * the workspace passes WHY (the `canTakeOnAccount` gate reason). The Settlement
+   * control is then still shown, with "Partial"/"On account" DISABLED and this
+   * reason as their tooltip — so the path is visible and explained instead of
+   * silently omitted (which read as a missing feature during QA). Behaviour is
+   * unchanged: the mode stays "full", no customer slot renders, nothing is bypassed.
+   */
+  onAccountDisabledReason?: string | null;
+  /**
    * Delivery settlement only: the fee already persisted on the order (entered
    * during the delivery order flow). The dialog PRE-FILLS its fee input with this
    * so settlement REUSES the one canonical fee rather than asking for it a second
@@ -356,10 +365,13 @@ export function PaymentDialog(props: PaymentDialogProps) {
           stacks into a tall single column at a till width. */}
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_212px]">
         <div className="space-y-3">
-          {/* Settlement mode. Rendered ONLY when Customer Receivables is enabled;
-              otherwise there is no control and the dialog is its full-pay self. */}
-          {accountEnabled && (
-            <Field label="Settlement">
+          {/* Settlement mode. Shown when Customer Receivables is enabled, OR — R6 —
+              when the workspace supplied a reason it is NOT (so the path is visible
+              and explained: "Partial"/"On account" are DISABLED with the reason as a
+              tooltip). When neither holds there is no control and the dialog is its
+              full-pay self. */}
+          {(accountEnabled || props.onAccountDisabledReason) && (
+            <Field label="Settlement" hint={!accountEnabled ? props.onAccountDisabledReason ?? undefined : undefined}>
               <div className="flex gap-2">
                 {(
                   [
@@ -367,11 +379,25 @@ export function PaymentDialog(props: PaymentDialogProps) {
                     ["partial", "Partial"],
                     ["account", "On account"],
                   ] as [SettlementMode, string][]
-                ).map(([value, label]) => (
-                  <Choice key={value} active={mode === value} onClick={() => setMode(value)}>
-                    {label}
-                  </Choice>
-                ))}
+                ).map(([value, label]) => {
+                  // When on-account is unavailable only "Pay now" is usable; the other
+                  // two are locked and carry the reason. Nothing bypasses the gate —
+                  // effectiveMode stays "full", so no customer slot ever appears.
+                  const locked = !accountEnabled && value !== "full";
+                  return (
+                    <Choice
+                      key={value}
+                      active={effectiveMode === value}
+                      disabled={locked}
+                      title={locked ? props.onAccountDisabledReason ?? undefined : undefined}
+                      onClick={() => {
+                        if (!locked) setMode(value);
+                      }}
+                    >
+                      {label}
+                    </Choice>
+                  );
+                })}
               </div>
             </Field>
           )}
