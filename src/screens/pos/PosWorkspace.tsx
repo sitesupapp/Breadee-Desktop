@@ -36,6 +36,7 @@ import { TransferDialog } from "@/components/pos/TransferDialog";
 import { PendingTransfersBanner } from "@/components/pos/PendingTransfersBanner";
 import { TransferCenterModal } from "@/components/pos/TransferCenterModal";
 import { ForceEndShiftModal } from "@/components/pos/ForceEndShiftModal";
+import { ForceEndShiftBrowser } from "@/components/pos/ForceEndShiftBrowser";
 import { ForceEndIncomingBanner } from "@/components/pos/ForceEndIncomingBanner";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
@@ -565,6 +566,9 @@ function PosWorkspaceInner() {
   const [transferCenterOpen, setTransferCenterOpen] = useState(false);
   // R4 (1.0.36) — the Force End Shift surface, opened from the blocked End-Shift dialog.
   const [forceEndOpen, setForceEndOpen] = useState(false);
+  // R4 (1.0.36) — the supervisor Force-End-a-shift browser (another cashier's stuck shift), opened
+  // from the "Force-End" rail entry (gated on pos.close_other_shifts + select_recipient).
+  const [forceEndBrowserOpen, setForceEndBrowserOpen] = useState(false);
   // Best-effort section names from the PUBLISHED floor for the Open Tables list.
   // Open Tables never DEPENDS on the floor: an empty map just means no section.
   const [openTableSections, setOpenTableSections] = useState<Map<string, string>>(new Map());
@@ -943,10 +947,13 @@ function PosWorkspaceInner() {
     canForceTransfer(pos.access).allowed ||
     canApproveTransfer(pos.access).allowed ||
     canViewTransfers(pos.access).allowed;
-  // R4 (1.0.36) — Force End Shift gates. The desktop operates only the signed-in operator's OWN
-  // shift, so these are the SELF variants (isOwnShift = true), matching the request/finalize RPCs.
+  // R4 (1.0.36) — Force End Shift gates. The SELF variants (isOwnShift = true) gate the own-shift path
+  // reached from the blocked End-Shift dialog, matching the request/finalize RPCs.
   const forceEndRequestGate = canRequestForceEndShift(pos.access, true);
   const forceEndFinalizeGate = canFinalizeForceEndShift(pos.access, true);
+  // The supervisor Force-End browser (another cashier's stuck shift) is gated on the OTHER variant
+  // (close_other_shifts + select_recipient). Fail-closed: without it the rail entry is not shown.
+  const forceEndBrowserAllowed = canRequestForceEndShift(pos.access, false).allowed;
   const tableStore = useTables();
   // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
   // The rail count is derived from state already in memory - no fetch of its own.
@@ -2186,6 +2193,22 @@ function PosWorkspaceInner() {
       active: transferCenterOpen,
       onSelect: () => setTransferCenterOpen(true),
     },
+    ...(forceEndBrowserAllowed
+      ? [
+          {
+            // R4 (1.0.36) — supervisor Force-End browser. Lists the branch's OPEN shifts and force-ends
+            // another cashier's stuck shift. Gated on pos.close_other_shifts + select_recipient; the
+            // server (and pos_shifts_list's own owner/view_all_shifts gate) re-enforce everything.
+            key: "force_end",
+            label: "Force-End",
+            icon: "clock" as const,
+            to: "/pos",
+            enabled: true,
+            active: forceEndBrowserOpen,
+            onSelect: () => setForceEndBrowserOpen(true),
+          },
+        ]
+      : []),
     {
       // The EXISTING orders workspace, given the rail entry the approved design
       // puts it in. It opens the same modal the status bar used to, with the
@@ -2863,6 +2886,22 @@ function PosWorkspaceInner() {
             message: `Shift force-ended — ${result.ordersMoved} order${result.ordersMoved === 1 ? "" : "s"} moved to the recipient.`,
             detail: "The shift was closed and sent for manager review.",
           });
+        }}
+      />
+
+      {/* R4 (1.0.36) — supervisor Force-End browser: list the branch's open shifts and force-end
+          ANOTHER cashier's stuck shift (isOwnShift = false inside). Gated on pos.close_other_shifts. */}
+      <ForceEndShiftBrowser
+        open={forceEndBrowserOpen}
+        branchId={pos.branch.id}
+        userId={pos.userId}
+        currency={currency}
+        access={pos.access}
+        onClose={() => setForceEndBrowserOpen(false)}
+        onChanged={() => {
+          void refreshShiftOrders();
+          void shiftStore.refreshCashBox();
+          void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
         }}
       />
 

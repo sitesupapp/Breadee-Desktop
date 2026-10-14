@@ -287,7 +287,8 @@ test("settlement joined PosRpcName exactly once, and nothing else came with it",
   //   reuses the R7-aware end-shift path. line removal (pos_remove_order_item) STILL stays out.
   // 65 -> 66 for Desktop 1.0.36 (R4) the Force-End recipient reader pos_force_end_eligible_recipients
   //   (select_recipient-gated; not a money RPC).
-  assert.equal(members.length, 66, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // 66 -> 67 for Desktop 1.0.36 (R4) pos_shifts_list (supervisor Force-End browser read; not money).
+  assert.equal(members.length, 67, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"), "pos_merge_tables should be in the allow-list");
   assert.ok(members.includes("pos_deletion_reason_report"), "pos_deletion_reason_report should be in the allow-list");
   assert.equal(members.includes("pos_remove_order_item"), false, "line removal is deferred past Level 3D");

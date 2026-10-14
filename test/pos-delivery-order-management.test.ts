@@ -568,7 +568,8 @@ test("the RPC allow-list grows 13 -> 18, and remove-item stays out", () => {
   // 50 -> 54 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
   //   _cancel / _finalize (supervised hand-over + finalize-close). remove-item still stays out.
   // 54 -> 55 for Desktop 1.0.36 (R4) the Force-End recipient reader pos_force_end_eligible_recipients.
-  assert.equal(names.length, 55);
+  // 55 -> 56 for Desktop 1.0.36 (R4) pos_shifts_list (supervisor Force-End browser read). remove-item stays out.
+  assert.equal(names.length, 56);
   assert.ok(names.includes("pos_merge_tables"));
   assert.ok(names.includes("pos_receivable_collect"));
   assert.ok(names.includes("pos_edit_order"));

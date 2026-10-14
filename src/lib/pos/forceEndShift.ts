@@ -162,6 +162,61 @@ export async function listForceEndRecipientCandidates(branchId: string): Promise
   });
 }
 
+/** An open shift on the branch, for the supervisor Force-End browser. */
+export type OpenBranchShift = {
+  shiftId: string;
+  cashierUserId: string;
+  openedAt: string | null;
+  branchId: string;
+  status: string;
+};
+
+/**
+ * The branch's OPEN shifts (for the supervisor Force-End browser), via pos_shifts_list. The server
+ * decides visibility: owner / pos.view_all_shifts see every cashier's shift, otherwise only the
+ * caller's own — the correct gate for a browser that force-ends OTHER cashiers' stuck shifts. Filtered
+ * to status 'open' client-side (the RPC returns all statuses); the server stays authoritative.
+ */
+export async function listOpenBranchShifts(branchId: string): Promise<OpenBranchShift[]> {
+  const rows = await callPosRpc("pos_shifts_list", { p_branch: branchId, p_limit: 200 });
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((raw) => {
+      const r = asRecord(raw);
+      return {
+        shiftId: str(r.id),
+        cashierUserId: str(r.cashier_user_id),
+        openedAt: strOrNull(r.opened_at),
+        branchId: str(r.branch_id),
+        status: str(r.status),
+      };
+    })
+    .filter((s) => s.shiftId !== "" && s.status === "open");
+}
+
+/**
+ * Resolve display names for a set of user ids, reusing the SAME source the status bar / receipt use
+ * (profiles.full_name ?? email). Read directly under RLS (profiles is in database.types). Missing or
+ * unreadable ids fall back to a short id so the browser always shows something stable.
+ */
+export async function resolveUserNames(userIds: string[]): Promise<Record<string, string>> {
+  const ids = [...new Set(userIds.filter((id) => id !== ""))];
+  if (ids.length === 0) return {};
+  const { supabase } = await import("@/lib/supabase");
+  const { data, error } = await supabase.from("profiles").select("id, full_name, email").in("id", ids);
+  const out: Record<string, string> = {};
+  for (const id of ids) out[id] = id.slice(0, 8);
+  if (error || !Array.isArray(data)) return out;
+  for (const raw of data) {
+    const r = asRecord(raw);
+    const id = str(r.id);
+    if (id === "") continue;
+    const name = (strOrNull(r.full_name) ?? "").trim() || (strOrNull(r.email) ?? "").trim();
+    if (name) out[id] = name;
+  }
+  return out;
+}
+
 // --- Pure payload builders (extracted so the shape + exactly-once contract is unit-testable) -----
 
 /** REQUEST payload. `client_op_id` is the exactly-once key (reuse the SAME id across retries of one

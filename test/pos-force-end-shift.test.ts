@@ -112,6 +112,15 @@ test("F2 the recipient picker uses the Force-End-specific reader, not the transf
   );
 });
 
+test("F3 the supervisor browser reader lists shifts via pos_shifts_list and resolves names from profiles", () => {
+  const t = read("src/lib/pos/forceEndShift.ts");
+  // the open-shift browser read calls pos_shifts_list and filters to status 'open'
+  assert.match(t, /callPosRpc\("pos_shifts_list", \{ p_branch: branchId, p_limit: 200 \}\)/);
+  assert.match(t, /status === "open"/);
+  // display names come from the SAME source the status bar uses (profiles.full_name ?? email)
+  assert.match(t, /\.from\("profiles"\)[\s\S]{0,120}full_name/);
+});
+
 // --- G. the payload builders emit EXACTLY the keys the live RPCs read ---
 
 test("G request payload: shift_id, recipient_user_id, client_op_id (+ optional note)", () => {
@@ -230,6 +239,44 @@ test("O the supervisor modal requests + finalizes through the server with a type
   assert.match(m, /listForceEndRecipientCandidates\(/);
   // exactly-once request key via the shared nextOpId
   assert.match(m, /nextOpId\(/);
+  // GENERALIZED: the modal takes an isOwnShift flag (own vs another cashier's shift) with a doc comment
+  assert.match(m, /isOwnShift\?: boolean/);
+});
+
+test("C2 the request/finalize gates branch on isOwnShift to the matching backend permission", () => {
+  // own shift → end_own_shift path; another cashier's shift → close_other_shifts path. Pins that the
+  // generalized modal's gates (computed by the caller with isOwnShift) map to the right permission.
+  assert.equal(canRequestForceEndShift(ctx({ "pos.close_other_shifts": true, "pos.transfers.select_recipient": true }), false).allowed, true);
+  assert.equal(canRequestForceEndShift(ctx({ "pos.end_own_shift": true, "pos.transfers.select_recipient": true }), false).allowed, false);
+  assert.equal(canFinalizeForceEndShift(ctx({ "pos.close_other_shifts": true }), false).allowed, true);
+  assert.equal(canFinalizeForceEndShift(ctx({ "pos.close_other_shifts": true }), true).allowed, false);
+});
+
+test("Q the supervisor browser lists OPEN shifts and opens the modal targeting another cashier (isOwnShift=false)", () => {
+  const b = stripJsxComments(readSrc("components", "pos", "ForceEndShiftBrowser.tsx"));
+  // lists the branch's open shifts + resolves names + counts blocking orders
+  assert.match(b, /listOpenBranchShifts\(/);
+  assert.match(b, /resolveUserNames\(/);
+  assert.match(b, /getUnresolvedOrders\(/);
+  // excludes the caller's OWN open shift (that has the self path) — fail-closed on the close-other gate
+  assert.match(b, /cashierUserId !== userId/);
+  assert.match(b, /canRequestForceEndShift\(access, false\)/);
+  assert.match(b, /canFinalizeForceEndShift\(access, false\)/);
+  // opens the GENERALIZED modal targeting the chosen shift with isOwnShift={false}
+  assert.match(b, /<ForceEndShiftModal/);
+  assert.match(b, /isOwnShift=\{false\}/);
+  // the entry is hidden entirely without the close-other request gate (fail-closed)
+  assert.match(b, /!requestGate\.allowed/);
+});
+
+test("R the workspace exposes a discoverable supervisor Force-End entry, gated on close-other", () => {
+  const ws = stripJsxComments(readSrc("screens", "pos", "PosWorkspace.tsx"));
+  // the rail entry + browser are gated on canRequestForceEndShift(access, false) (close-other)
+  assert.match(ws, /canRequestForceEndShift\(pos\.access, false\)\.allowed/);
+  assert.match(ws, /<ForceEndShiftBrowser/);
+  // the rail "Force-End" entry only appears when that gate passes (fail-closed)
+  assert.match(ws, /forceEndBrowserAllowed/);
+  assert.match(ws, /key: "force_end"/);
 });
 
 test("P the recipient banner accepts/rejects via decide, self-scoped + polling", () => {

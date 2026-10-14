@@ -213,6 +213,9 @@ test("the RPC allow-list contains exactly the sixty-one expected names", () => {
       // POS Final W4/W5 (Part 6) — the End-Shift open-orders blocker set, read to populate the
       // Transfer gate. Pre-existing read, now client-callable.
       "pos_shift_unresolved_orders",
+      // Desktop 1.0.36 (R4) — the branch's shifts for the supervisor Force-End browser. Sorts after
+      // pos_shift_* (the trailing 's' in "shifts" orders after "shift_") and before pos_split_*.
+      "pos_shifts_list",
       // Phase E — item/quantity Split Bill (pos.split_bill). Read + settle.
       "pos_split_settle",
       "pos_split_state",
@@ -241,7 +244,9 @@ test("the RPC allow-list contains exactly the sixty-one expected names", () => {
   // 65 -> 66 for Desktop 1.0.36 (R4) the Force-End-specific recipient reader
   //   pos_force_end_eligible_recipients (caller needs select_recipient; active branch members with
   //   exactly one open shift). No digit, so this [a-z_]+ list counts it.
-  assert.equal(members.length, 66);
+  // 66 -> 67 for Desktop 1.0.36 (R4) pos_shifts_list — the branch's shifts for the supervisor
+  //   Force-End browser (owner / pos.view_all_shifts gate server-side; not a money RPC).
+  assert.equal(members.length, 67);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

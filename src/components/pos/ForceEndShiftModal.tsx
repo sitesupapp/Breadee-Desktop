@@ -1,20 +1,22 @@
 // R4 (Desktop 1.0.36) — Force End Shift (supervisor surface).
 //
-// Opened from the blocked End-Shift dialog when a shift cannot be closed because open orders remain
-// and the operator may force-end it. It gathers the supervisor's half of the hand-over in one place,
-// mirroring the Transfer Center's two-step, server-authoritative shape:
-//   • Hand over — snapshot the shift's UNPAID open orders and hand them to a recipient who has a
-//                 single open shift on the branch (pos_force_end_shift_request). The shift stays OPEN;
-//                 nothing moves until finalize. A typed FORCE-END confirmation guards the request.
+// Force-ends an ARBITRARY source shift — the operator's OWN blocked shift (reached from the blocked
+// End-Shift dialog), or ANOTHER cashier's stuck shift (reached from the supervisor Force-End browser).
+// It gathers the requester's half of the hand-over in one place, mirroring the Transfer Center's
+// two-step, server-authoritative shape:
+//   • Hand over — snapshot the target shift's UNPAID open orders and hand them to a recipient who has
+//                 a single open shift on the branch (pos_force_end_shift_request). The shift stays
+//                 OPEN; nothing moves until finalize. A typed FORCE-END confirmation guards it.
 //   • Finalize  — once the recipient has ACCEPTED, close the source shift and move the orders in one
 //                 atomic server transaction (pos_force_end_shift_finalize), entering the counted cash
 //                 exactly as the normal End Shift collects it. A pending hand-over can be cancelled.
 //
-// The desktop operates only the signed-in operator's OWN shift, so this is always a SELF force-end
-// (isOwnShift = true): gated on pos.end_own_shift + pos.transfers.select_recipient to request, and
-// pos.end_own_shift to finalize — exactly what the RPCs check. Ending ANOTHER cashier's shift
-// (pos.close_other_shifts) is supported by the wrappers/gates but has no shift-picker surface here.
-// NO authority lives in this component; every rule is enforced by the SECURITY DEFINER RPCs.
+// `isOwnShift` selects which permission the backend enforces (self → pos.end_own_shift; other →
+// pos.close_other_shifts) — the CALLER passes the matching requestGate/finalizeGate (computed via
+// canRequestForceEndShift / canFinalizeForceEndShift with the same flag), and this component uses the
+// flag only for wording. The recipient is always chosen from pos_force_end_eligible_recipients, which
+// needs pos.transfers.select_recipient. NO authority lives here; every rule is enforced by the
+// SECURITY DEFINER RPCs (and finalize re-validates + re-scans the snapshot atomically).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "@/components/overlays";
@@ -63,6 +65,7 @@ export function ForceEndShiftModal({
   branchId,
   userId,
   currency,
+  isOwnShift = true,
   requestGate,
   finalizeGate,
   onClose,
@@ -70,14 +73,17 @@ export function ForceEndShiftModal({
   onChanged,
 }: {
   open: boolean;
-  /** The operator's own OPEN shift — the source of the hand-over. Null = no open shift (self-only desktop). */
+  /** The OPEN source shift to force-end (the operator's own, or another cashier's). Null = none. */
   shiftId: string | null;
   branchId: string | null;
+  /** The signed-in operator = the REQUESTER (whose listMyForceEndRequests the Finalize tab reads). */
   userId: string | null;
   currency: CurrencyCode;
-  /** canRequestForceEndShift(access, true) — gates Hand over. */
+  /** True when the source shift is the operator's own (self force-end); false for another cashier's. */
+  isOwnShift?: boolean;
+  /** canRequestForceEndShift(access, isOwnShift) — gates Hand over. */
   requestGate: Gate;
-  /** canFinalizeForceEndShift(access, true) — gates Finalize. */
+  /** canFinalizeForceEndShift(access, isOwnShift) — gates Finalize. */
   finalizeGate: Gate;
   onClose: () => void;
   /** Fired after a successful finalize (the source shift is now closed) so the workspace can refresh. */
@@ -98,8 +104,8 @@ export function ForceEndShiftModal({
   return (
     <Modal
       open={open}
-      title="Force end shift"
-      subtitle="Hand this shift's open orders to another cashier, then finalize to close it. The server moves the orders and closes the shift."
+      title={isOwnShift ? "Force end your shift" : "Force end this cashier's shift"}
+      subtitle="Hand the open orders to another cashier, then finalize to close the shift. The server moves the orders and closes the shift."
       size="lg"
       onClose={onClose}
     >
@@ -182,8 +188,8 @@ function HandOverTab({
     setLoadError(null);
     setRecipientsError(null);
     try {
-      // The orders preview must not fail the whole tab if the recipient reader refuses (it requires
-      // pos.transfers.create — see listForceEndRecipientCandidates); capture that refusal separately.
+      // The orders preview must not fail the whole tab if the recipient reader refuses (it needs
+      // pos.transfers.select_recipient — see listForceEndRecipientCandidates); capture that separately.
       const ordersP = getUnresolvedOrders(shiftId);
       const recipientsP = listForceEndRecipientCandidates(branchId).catch((e) => {
         if (seq === seqRef.current) setRecipientsError(classifyError(e).message);

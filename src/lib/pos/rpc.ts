@@ -277,7 +277,11 @@ export type PosRpcName =
   | "pos_force_end_shift_finalize"
   // Force-End recipient picker: active branch members (excluding the caller) with EXACTLY ONE open
   // shift; caller needs pos.transfers.select_recipient (NOT transfers.create). Matches the request RPC.
-  | "pos_force_end_eligible_recipients";
+  | "pos_force_end_eligible_recipients"
+  // R4 (1.0.36) — the branch's shifts as a JSON array, for the supervisor Force-End browser (lists
+  // OPEN shifts to hand over). SECURITY DEFINER: seeing OTHER cashiers' shifts needs owner or
+  // pos.view_all_shifts, otherwise only the caller's own — the correct server gate for the browser.
+  | "pos_shifts_list";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {
