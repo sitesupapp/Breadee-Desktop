@@ -38,6 +38,13 @@ export type TableSummary = {
   opened_at: string | null;
   /** Bill total. NULL when the server refuses to sum mixed currencies. */
   total: number | null;
+  /** 1.0.36 (migration r3_table_map_collected_outstanding) — amount already collected on this table's
+   *  open bill via PAID split settlements (partially-paid bills), and the remaining outstanding
+   *  (total − collected). Both NULL when the server refuses to sum mixed currencies. collected is 0 for
+   *  an ordinary fully-unpaid bill. Surfaced in the Merge dialog so a part-paid source shows what has
+   *  been paid and what is still owed, and the merge summary totals the outstanding correctly. */
+  collected: number | null;
+  outstanding: number | null;
   currency: CurrencyCode | null;
   /** True when the table's open orders span more than one currency snapshot. */
   mixed_currency: boolean;

@@ -55,6 +55,10 @@ function toTable(raw: unknown): TableSummary | null {
     opened_at: strOrNull(r.opened_at),
     // Null is meaningful: the server refuses to sum a mixed-currency bill.
     total: numOrNull(r.total),
+    // 1.0.36: partially-paid breakdown (PAID split settlements vs remaining). numOrNull leaves them
+    // null on an older server / mixed currency; a fully-unpaid bill reports collected 0.
+    collected: numOrNull(r.collected),
+    outstanding: numOrNull(r.outstanding),
     currency: toCurrency(r.currency),
     mixed_currency: bool(r.mixed_currency),
     merged_sources: Array.isArray(r.merged_sources)
