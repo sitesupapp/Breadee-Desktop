@@ -116,11 +116,24 @@ export function isAlreadyPaid(message: string): boolean {
  * Injectable server calls. Production uses the shipped RPC wrappers; tests pass
  * fakes to prove the exactly-once / guard / classification logic without a network.
  */
+/** Payload for pos_open_table (Phase-C dine-in open). client_op_id enables op-id dedup. */
+export type OpenTablePayload = {
+  branch_id: string | null;
+  name: string;
+  seats: number | null;
+  client_op_id: string;
+  expected_version?: number | null;
+};
+
 export type PosTxnSyncDeps = {
   submit: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string }>;
   pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown> }) => Promise<unknown>;
   /** Open (or adopt) the shift for an offline-opened Case-2 shift, exactly once. */
   openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string }) => Promise<{ shiftId: string; reused: boolean }>;
+  /** Phase-C: occupy a table / establish the session (pos_open_table, op-id + version CAS). */
+  openTable: (payload: OpenTablePayload) => Promise<{ table_id: string; pos_entity_version: number | null }>;
+  /** Phase-C: send a dine-in round (pos_submit_order; expected_order_id binds rounds >=2). */
+  submitRound: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string; batch_no: number; appended: boolean; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -141,6 +154,16 @@ export const defaultDeps: PosTxnSyncDeps = {
   openShift: async (args) => {
     const { openShiftWithOp } = await import("@/lib/pos/shifts");
     return openShiftWithOp(args);
+  },
+  openTable: async (payload) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_open_table", { p_payload: payload })) as Record<string, unknown>;
+    return { table_id: String(row.table_id), pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
+  },
+  submitRound: async (payload) => {
+    const { submitOrder } = await import("@/lib/pos/orders");
+    const r = await submitOrder(payload);
+    return { order_id: r.order_id, order_number: r.order_number, batch_no: r.batch_no ?? 1, appended: r.appended ?? true, idempotent: r.idempotent ?? false };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

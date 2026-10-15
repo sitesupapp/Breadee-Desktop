@@ -70,6 +70,15 @@ function labelFor(op: OfflineOperation): string {
   if (op.operation_type === "takeaway_sale") {
     return (op.payload as { payment_intent?: unknown } | null)?.payment_intent ? "Takeaway Cash Sale" : "Takeaway Order";
   }
+  if (op.operation_type === "dinein_open_table") {
+    const name = (op.payload as { name?: string } | null)?.name;
+    return name ? `Open Table ${name}` : "Open Table";
+  }
+  if (op.operation_type === "dinein_send_round") {
+    const p = (op.payload as { table_name?: string; round_seq?: number } | null) ?? {};
+    const where = p.table_name ? ` — Table ${p.table_name}` : "";
+    return `Kitchen round${where}`;
+  }
   return String(op.operation_type);
 }
 
@@ -253,7 +262,12 @@ export async function drainOperations(
           if (op.local_entity_id && result.canonicalId) {
             await resolveEntity({
               local_entity_id: op.local_entity_id,
-              entity_type: op.operation_type === "open_shift" ? "shift" : "order",
+              entity_type:
+                op.operation_type === "open_shift"
+                  ? "shift"
+                  : op.operation_type === "dinein_open_table"
+                    ? "table"
+                    : "order",
               canonical_id: result.canonicalId,
               resolved_at: new Date().toISOString(),
               tenant_id: op.scope.tenant_id,
@@ -357,6 +371,8 @@ export async function drainOffline(
     const report = await drainOperations(ctx, triggeredBy, deps, { assumeLocked: true });
     try {
       await reconcileLegacyFromOperations();
+      const { reconcileDineDraftsFromOperations } = await import("@/lib/offline/dineinOffline");
+      await reconcileDineDraftsFromOperations();
     } catch (e) {
       reconcileError = e instanceof Error ? e.message : String(e);
     }

@@ -171,6 +171,80 @@ export interface CachedCustomer {
   cached_at: string;
 }
 
+// ---------------------------------------------------------------------------
+// Phase C (schema version 6) — offline Dine-In local projection.
+// ---------------------------------------------------------------------------
+
+/** A line in a local Dine-In bill. `sent_round` is null while unsent (editable),
+ *  else the round sequence it was committed in (immutable once sent). */
+export interface DineDraftLine {
+  line_id: string; // stable local id (deterministic op-id input)
+  menu_item_id: string | null;
+  name: string;
+  /** Captured selling price — honoured by the server on replay (snapshot, never repriced). */
+  base_price: number;
+  quantity: number;
+  modifiers: { group_id?: string | null; option_id?: string | null; name: string; price_delta: number; quantity: number }[];
+  kitchen_note: string | null;
+  customization_json?: unknown;
+  /** null = unsent draft line; else the round seq it was sent in. */
+  sent_round: number | null;
+}
+
+/** Local print state of a sent round — tracked SEPARATELY from server sync state. */
+export type DineRoundPrintState = "not_printed" | "printed" | "print_failed";
+
+/** One committed round of a local Dine-In session. Each maps 1:1 to a
+ *  `dinein_send_round` operation (operation_id) and is a node in the replay chain. */
+export interface DineDraftRound {
+  round_local_id: string; // local entity id (the op's local_entity_id)
+  operation_id: string; // the dinein_send_round op
+  seq: number; // 1, 2, 3 ...
+  line_ids: string[]; // the draft lines captured in this round
+  print_state: DineRoundPrintState;
+  sent_at: string;
+}
+
+/** Lifecycle of a local Dine-In session (local-only; never a replayable op itself). */
+export type DineDraftStatus = "open" | "closed";
+
+/**
+ * The durable LOCAL Dine-In projection — the active bill the operator sees and edits
+ * offline. It is NOT a replay queue (that is `operations`); it is the local-only state
+ * that lets the UI restore the exact table/bill/round view after a restart, and the
+ * source the "send round" action turns into a `dinein_send_round` operation. Carries the
+ * FULL immutable offline scope (tenant+branch/OU+cashier+device+terminal) so a different
+ * context can never attach to it.
+ */
+export interface DineDraft {
+  local_session_id: string; // PK — stable local id minted at open
+  tenant_id: string;
+  branch_id: string | null; // the operating unit (OU)
+  cashier_user_id: string;
+  device_id: string;
+  terminal_id: string | null;
+  floor_id: string | null;
+  section_id: string | null;
+  table_id: string; // canonical table id (from the cached map/floor) for configured tables
+  table_name: string;
+  /** The dinein_open_table op that establishes/occupies the table. */
+  open_operation_id: string;
+  /** Resolved once round 1 syncs — the session's canonical server order; rounds >=2 pin it. */
+  canonical_order_id: string | null;
+  /** 'online' = a table opened while online then serviced offline; 'offline' = opened offline. */
+  origin: "offline" | "online";
+  /** Server order version captured at hydration (conflict detection for online-opened tables). */
+  base_order_version: number | null;
+  status: DineDraftStatus;
+  lines: DineDraftLine[];
+  rounds: DineDraftRound[];
+  /** Monotonic; bumped on every mutation. A deterministic client_op_id input for a send. */
+  draft_revision: number;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
@@ -188,6 +262,8 @@ class BreadeeDB extends Dexie {
   entityMap!: Table<EntityMapping, string>;
   // Phase B (v5). Durable operator-facing sync history. Keyed by ++id.
   syncHistory!: Table<SyncHistoryEvent, number>;
+  // Phase C (schema version 6). Durable local Dine-In projection. Keyed by local_session_id.
+  dineDrafts!: Table<DineDraft, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -226,6 +302,12 @@ class BreadeeDB extends Dexie {
       operations: "operation_id, status, operation_type, created_at, client_op_id, local_entity_id",
       entityMap: "local_entity_id, entity_type, tenant_id",
       syncHistory: "++id, operation_id, tenant_id, branch_id, at, status",
+    });
+    // Version 6 - Phase C, ADDITIVE. Adds ONLY the dineDrafts store (the local Dine-In
+    // projection). Every prior store (v1..v5) carries forward UNTOUCHED; a v1..v5 database
+    // upgrades in place with all data preserved. No destructive change, no data migration.
+    this.version(6).stores({
+      dineDrafts: "local_session_id, tenant_id, branch_id, table_id, status, cashier_user_id, device_id, updated_at",
     });
   }
 }
@@ -483,4 +565,99 @@ export async function updatePendingShift(localShiftId: string, patch: Partial<Pe
 /** Drop a pending shift (e.g. once reconciled to a canonical server shift). */
 export async function deletePendingShift(localShiftId: string): Promise<void> {
   await localdb.pendingShifts.delete(localShiftId);
+}
+
+// ---------------------------------------------------------------------------
+// Phase C — Floor + Bill read-snapshot cache (hydration), reusing `snapshots`.
+// These make the Floor Map and an open bill viewable OFFLINE. Written ONLY on a
+// successful authoritative online load (a SUCCESSFUL empty/null result replaces the
+// stale snapshot; only a FAILED load preserves the prior snapshot — the caller must
+// not call these on failure). Scope-checked on read so no other tenant/branch leaks.
+// ---------------------------------------------------------------------------
+
+const floorKey = (branchId: string | null) => `floor:${branchId ?? "none"}`;
+const billKey = (branchId: string | null, tableId: string) => `bill:${branchId ?? "none"}:${tableId}`;
+
+/** Cache the authoritative floor layout for a branch (call only after a successful load;
+ *  pass the authoritative value even if it is "no published floor" so offline reflects it). */
+export async function cacheFloor(layout: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({ key: floorKey(branchId), tenant_id: tenantId, branch_id: branchId, data: layout, cached_at: new Date().toISOString() });
+}
+
+/** The cached floor layout for a branch, or null. Scope-checked. */
+export async function readCachedFloor(tenantId: string | null, branchId: string | null): Promise<{ layout: unknown; cachedAt: number } | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(floorKey(branchId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { layout: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
+/** Cache an authoritative open bill for a table (call only after a successful online load). */
+export async function cacheBill(tableId: string, bill: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
+  if (!tenantId || !tableId) return;
+  await localdb.snapshots.put({ key: billKey(branchId, tableId), tenant_id: tenantId, branch_id: branchId, data: bill, cached_at: new Date().toISOString() });
+}
+
+/** The cached open bill for a table, or null. Scope-checked. */
+export async function readCachedBill(tableId: string, tenantId: string | null, branchId: string | null): Promise<{ bill: unknown; cachedAt: number } | null> {
+  if (!tenantId || !tableId) return null;
+  const row = await localdb.snapshots.get(billKey(branchId, tableId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { bill: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
+// ---------------------------------------------------------------------------
+// Phase C — Dine-In local projection (dineDrafts, v6)
+// ---------------------------------------------------------------------------
+
+/** Durably write a new local Dine-In session projection. */
+export async function addDineDraft(draft: DineDraft): Promise<string> {
+  await localdb.dineDrafts.add(draft);
+  return draft.local_session_id;
+}
+
+/** One local session by id. */
+export async function getDineDraft(localSessionId: string): Promise<DineDraft | undefined> {
+  return localdb.dineDrafts.get(localSessionId);
+}
+
+/** Patch one local session by id. */
+export async function updateDineDraft(localSessionId: string, patch: Partial<DineDraft>): Promise<void> {
+  await localdb.dineDrafts.update(localSessionId, patch);
+}
+
+/** Drop a local session (e.g. after it is closed and fully reconciled). */
+export async function deleteDineDraft(localSessionId: string): Promise<void> {
+  await localdb.dineDrafts.delete(localSessionId);
+}
+
+/**
+ * Open local Dine-In sessions for the EXACT live context (tenant + branch/OU + cashier +
+ * device + terminal). The isolation boundary for the offline floor projection: a session
+ * from a sibling OU, another cashier, device, or terminal can never surface here. The
+ * `terminal` dimension is enforced only when a live terminal is supplied (production always
+ * does), mirroring the orchestrator's scope rule.
+ */
+export async function listDineDrafts(scope: {
+  tenantId: string | null;
+  branchId: string | null;
+  cashierUserId: string | null;
+  deviceId: string | null;
+  terminalId?: string | null;
+}): Promise<DineDraft[]> {
+  if (!scope.tenantId || !scope.cashierUserId || !scope.deviceId) return [];
+  const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
+  return all
+    .filter(
+      (d) =>
+        (d.branch_id ?? null) === (scope.branchId ?? null) &&
+        d.cashier_user_id === scope.cashierUserId &&
+        d.device_id === scope.deviceId &&
+        (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId) &&
+        d.status === "open",
+    )
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }

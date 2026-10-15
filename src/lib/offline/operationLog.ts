@@ -25,7 +25,10 @@ import { localdb } from "@/lib/offline/db";
  *  new offline business capability. Future phases register new types here. */
 export type OperationType =
   | "open_shift" // Case-2 offline-opened shift (was pendingShifts)
-  | "takeaway_sale"; // offline Takeaway/Delivery-cached sale: submit (+ optional cash pay) (was posOfflineTxns)
+  | "takeaway_sale" // offline Takeaway/Delivery-cached sale: submit (+ optional cash pay) (was posOfflineTxns)
+  // Phase C — offline Dine-In service continuity (certified Track-A contracts only):
+  | "dinein_open_table" // occupy a table / establish the local session (→ pos_open_table)
+  | "dinein_send_round"; // send a round to the table's open order (→ pos_submit_order, expected_order_id-bound)
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

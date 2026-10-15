@@ -82,6 +82,13 @@ export type SubmitOrderPayload = {
    * total: the client sends only the fee. Absent for takeaway and dine-in.
    */
   delivery_fee?: number;
+  /**
+   * Dine-in offline multi-round only. Pins the append to THIS session's open order so
+   * the server (pos_save_order's expected-order guard) refuses — EXPECTED_ORDER_MISMATCH —
+   * rather than silently joining a remotely-closed/replaced bill. Omitted for round 1,
+   * takeaway and delivery, so those payloads are byte-identical to before.
+   */
+  expected_order_id?: string;
   items: SubmitOrderItem[];
 };
 
