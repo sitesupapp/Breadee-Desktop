@@ -115,6 +115,7 @@ import {
   draftLineFromCart,
   getDineDraftForTable,
   setRoundPrintState,
+  billFromDraft,
 } from "@/lib/offline/dineinOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -664,6 +665,30 @@ export function useDineInWorkspace(input: {
       }),
     [gateCtx, roundLines, input.createOrders, input.menu],
   );
+
+  // Phase C — the PROVISIONAL offline bill for the selected table, derived from its local
+  // draft (sent rounds). Used only when offlineCapture is live; the online store's bill
+  // remains authoritative otherwise. Recomputed when the selection or a capture settles.
+  const [offlineBill, setOfflineBill] = useState<TableBill | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (!offlineCapture || !selected || !input.offlineScope) {
+      setOfflineBill(null);
+      return;
+    }
+    void getDineDraftForTable(input.offlineScope, selected.id)
+      .then((d) => {
+        if (live) setOfflineBill(d ? billFromDraft(d) : null);
+      })
+      .catch(() => {
+        if (live) setOfflineBill(null);
+      });
+    return () => {
+      live = false;
+    };
+    // roundBusy/busy toggle false after an offline open/send → re-derive the local bill.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offlineCapture, selected, input.offlineScope, roundBusy, busy]);
 
   /**
    * Enter Add Items. The bill is RE-READ first: the operator is about to build a
@@ -1640,9 +1665,9 @@ export function useDineInWorkspace(input: {
     () => (
       <TableBillPanel
         table={selected}
-        bill={tables.bill}
-        loading={tables.billLoading}
-        error={tables.billError}
+        bill={offlineCapture ? (offlineBill ?? tables.bill) : tables.bill}
+        loading={offlineCapture ? false : tables.billLoading}
+        error={offlineCapture ? null : tables.billError}
         openGate={openGate}
         addItemsGate={addItemsGate}
         shiftOpen={hasOpenShift}
@@ -1666,7 +1691,7 @@ export function useDineInWorkspace(input: {
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
+    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, offlineBill, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
   );
 
   const roundPanel = useCallback(
