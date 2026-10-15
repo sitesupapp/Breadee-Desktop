@@ -84,10 +84,21 @@ Replay class result shapes carry `idempotent` + `result_code`
 (VERSION_CONFLICT, CROSS_BRANCH_REPLAY_REJECTED, CROSS_ACTOR_REPLAY_REJECTED,
 IDEMPOTENCY_PAYLOAD_MISMATCH) the orchestrator maps to retry classes.
 
+### Applied Track-A guard (2026-10-15, staging, Konan impl PASS sess_08778193)
+`pos_save_order` now accepts an OPTIONAL `expected_order_id` in its payload (migration
+`trackc_offline_expected_order_guard`, see `migrations/`). In the dine-in append branch,
+under the existing `pos_table_bill` advisory lock + open-order `FOR UPDATE`, if
+`expected_order_id` is provided and the table's current open order differs (or none is open),
+it raises `EXPECTED_ORDER_MISMATCH` (22023). This gives Track C an ATOMIC server-side
+expected-order binding so a later offline round cannot append to a remotely-closed/replaced
+bill. Backward compatible (absent → unchanged); only Track-C offline rounds send it. Staging
+only — prod unchanged; rollback = restore the prior definition (opt-in, zero data impact).
+
 ### Rules for Track C
 1. **Never call `pos_save_order` directly for a replayable op** — always `pos_submit_order` with a `client_op_id`.
-2. Dine-in round append targets the table's open order server-side; the dependency chain
-   must resolve the canonical **table** id (from DINEIN_OPEN_TABLE) before a round replays.
+2. Dine-in round append targets the table's open order server-side; round 1 establishes the
+   session's canonical **order_id**, and rounds ≥2 MUST pass `expected_order_id` = that order_id
+   so the server atomically binds the append (or refuses with `EXPECTED_ORDER_MISMATCH`).
 3. MOVE / MERGE are Class B but conflict-sensitive → Phase-C conflict model (C9/C11), not
    a blind last-writer-wins.
 4. Actual payment / split-settle (C10) stays OUT of Phase C by the GO (scope), not by

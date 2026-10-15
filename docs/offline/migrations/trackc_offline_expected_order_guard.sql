@@ -1,0 +1,38 @@
+-- Track C (offline Dine-In 1.0.37) — Track-A server guard.
+-- APPLIED TO STAGING azjxprewycygsocusxjn as migration `trackc_offline_expected_order_guard`
+-- (2026-10-15). NOT applied to production. Konan implementation review = PASS (sess_08778193).
+--
+-- RECONCILIATION: this is the authoritative applied source. At integration it must be copied
+-- into the WEB repo supabase/migrations/<timestamp>_trackc_offline_expected_order_guard.sql
+-- (the desktop repo does not hold Supabase migrations). Live staging is the source of truth.
+--
+-- WHAT IT DOES: adds an OPTIONAL p_payload->>'expected_order_id' to pos_save_order. In the
+-- EXISTING dine-in append branch, after the advisory lock + open-order FOR UPDATE select, if
+-- expected_order_id is provided and the locked open order differs (or none is open), it raises
+-- a structured EXPECTED_ORDER_MISMATCH. Additive, backward compatible (absent => unchanged),
+-- no signature/grant/RLS/table change. Only the Track-C offline multi-round replay sends it.
+--
+-- VERIFIED (staging, rolled-back DO block, zero residue): match->append same order;
+-- wrong->EXPECTED_ORDER_MISMATCH; closed-bill->EXPECTED_ORDER_MISMATCH; absent->creates new
+-- order (backward compatible). Grants (anon/authenticated/postgres/service_role EXECUTE) and
+-- SECURITY DEFINER + search_path preserved.
+--
+-- ============================ FORWARD (applied) ============================
+-- See apply_migration body for the full CREATE OR REPLACE FUNCTION public.pos_save_order(jsonb).
+-- The ONLY two deltas vs the prior live definition are:
+--   declare:  v_expected_order uuid := nullif(p_payload->>'expected_order_id','')::uuid;
+--   append branch, after the open-order select + v_append/v_batch:
+--     if v_expected_order is not null and v_id is distinct from v_expected_order then
+--       raise exception 'This table''s bill changed since it was opened offline and cannot take this round'
+--         using errcode = '22023', detail = json_build_object('pos_error_code','EXPECTED_ORDER_MISMATCH')::text;
+--     end if;
+--
+-- (Full forward SQL is the body applied via MCP apply_migration on 2026-10-15; reproduce from
+--  the live definition when authoring the web-repo migration file, keeping ONLY these two deltas.)
+--
+-- ============================ ROLLBACK ============================
+-- Re-apply CREATE OR REPLACE FUNCTION public.pos_save_order(jsonb) with the ORIGINAL definition
+-- (identical minus the two deltas above): drop the v_expected_order declaration and the
+-- EXPECTED_ORDER_MISMATCH guard block. No data to revert (function-only, additive). Because the
+-- guard is opt-in (no caller sends expected_order_id except Track-C offline rounds), rollback is
+-- safe at any time and affects no existing online/offline flow.
