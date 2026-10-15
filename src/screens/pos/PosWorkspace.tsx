@@ -102,6 +102,7 @@ import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { getDeviceIdentity } from "@/lib/device";
+import { evaluateDineinOfflineReady, type DineinScope } from "@/lib/offline/dineinOffline";
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
 import type { CartLine, DeliveryFeeCashTreatment, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
@@ -1011,12 +1012,51 @@ function PosWorkspaceInner() {
     () => ({ groupsByItem: menu.groupsByItem, groups: menu.groups, options: menu.options, items: menu.items }),
     [menu.groupsByItem, menu.groups, menu.options, menu.items],
   );
+  // Phase C — offline Dine-In readiness + the ONE immutable capture scope. The scope MUST
+  // match the drain scope (same tenant/branch/cashier/device/terminal the reconnect drain
+  // uses) so captured Dine-In ops replay in this session. hasFloor/hasTableMap are served by
+  // the floor/tables stores' own offline caches; readiness here gates on what the shell owns
+  // (an open shift, menu, branch, pricing). Readiness is evaluated regardless of connectivity;
+  // the Dine-In gates only ACT on it when the backend is unreachable.
+  const offlineReadiness = useMemo(
+    () =>
+      evaluateDineinOfflineReady({
+        tenantId,
+        branchId: pos.branch.id,
+        hasFloor: true,
+        hasTableMap: true,
+        hasMenu: menu.items.length > 0,
+        hasOpenShift: Boolean(shiftId),
+        hasPricingConfig: rate != null,
+        needsPrinter: false,
+        hasPrinterRouting: true,
+      }),
+    [tenantId, pos.branch.id, menu.items.length, shiftId, rate],
+  );
+  const offlineScope = useMemo<DineinScope | undefined>(
+    () =>
+      tenantId && userId
+        ? {
+            tenantId,
+            branchId: pos.branch.id,
+            cashierUserId: userId,
+            deviceId: getDeviceIdentity().device_id,
+            terminalId: getDeviceIdentity().terminal_id,
+            shiftId,
+          }
+        : undefined,
+    [tenantId, pos.branch.id, userId, shiftId],
+  );
+
   const dineIn = useDineInWorkspace({
     pos,
     hasOpenShift: Boolean(shiftId),
     shiftId,
     active: dineInActive,
     online,
+    offlineReady: offlineReadiness.ready,
+    offlineReadyMissing: offlineReadiness.missing,
+    offlineScope,
     menu: roundMenu,
     createOrders: pos.gates.createOrders,
     currency,

@@ -107,6 +107,15 @@ import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
 import { useFloor } from "@/state/floor";
+import {
+  type DineinScope,
+  openTableOffline,
+  addDraftLine,
+  sendRoundOffline,
+  draftLineFromCart,
+  getDineDraftForTable,
+  setRoundPrintState,
+} from "@/lib/offline/dineinOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
@@ -148,6 +157,14 @@ export function useDineInWorkspace(input: {
   shiftId: string | null;
   active: boolean;
   online: boolean;
+  /** Phase C — backend unreachable AND the device is hydrated for offline Dine-In. When
+   *  true (and online is false), open/add/send route into the local Track-C engine. */
+  offlineReady?: boolean;
+  /** Human-readable list of what is missing when offline and NOT ready (for the UI reason). */
+  offlineReadyMissing?: string[];
+  /** The ONE immutable offline scope built by PosWorkspace — MUST equal the drain scope
+   *  (tenant+branch/OU+cashier+device+terminal) so captured ops replay in this session. */
+  offlineScope?: DineinScope;
   menu: RoundMenu;
   createOrders: Gate;
   currency: CurrencyCode;
@@ -335,12 +352,20 @@ export function useDineInWorkspace(input: {
     if (!base.allowed) return base;
     if (!selected) return { allowed: false, reason: "Select a table first." };
     if (!isOpenable(selected)) return { allowed: false, reason: "This table already has an open bill." };
-    // Opening a table is a non-idempotent server write (pos_open_table) with no
-    // offline queue in this hotfix - Dine-In offline is READ continuity only. Block
-    // it with a clear reason rather than letting a click surface "Failed to fetch".
-    if (!input.online) return { allowed: false, reason: "Opening a table needs a connection." };
+    // Phase C: offline open routes into the local Track-C engine (durable op + dineDraft),
+    // but ONLY when the device is hydrated for offline Dine-In. Otherwise block with a clear
+    // readiness reason rather than letting a click surface "Failed to fetch".
+    if (!input.online) {
+      if (input.offlineReady && input.offlineScope) return { allowed: true, reason: null };
+      return {
+        allowed: false,
+        reason: input.offlineReadyMissing && input.offlineReadyMissing.length
+          ? `Offline — this device isn't ready for Dine-In (${input.offlineReadyMissing.join(", ")}).`
+          : "Opening a table needs a connection.",
+      };
+    }
     return { allowed: true, reason: null };
-  }, [pos.access, hasOpenShift, selected, input.online]);
+  }, [pos.access, hasOpenShift, selected, input.online, input.offlineReady, input.offlineReadyMissing, input.offlineScope]);
 
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
@@ -508,6 +533,30 @@ export function useDineInWorkspace(input: {
       setBusy(true);
       setOpenError(null);
       try {
+        // PHASE C — OFFLINE branch. When the backend is unreachable and the device is
+        // ready, capture the open durably into the local engine (no backend call). The
+        // online branch below is unchanged.
+        if (!input.online && input.offlineReady && input.offlineScope) {
+          const localTableId = selected?.id ?? name; // canonical id for a mapped tap; name for an ad-hoc open
+          const existing = await getDineDraftForTable(input.offlineScope, localTableId);
+          if (!existing) {
+            await openTableOffline({
+              scope: input.offlineScope,
+              tableId: localTableId,
+              tableName: selected?.name ?? name,
+              seats,
+              currency: input.currency,
+              baseOrderVersion: selected?.pos_entity_version ?? null,
+            });
+          }
+          setSeatOpen(false);
+          setManualOpen(false);
+          await tables.refresh(ctx);
+          if (selected?.id) await tables.select(selected.id, ctx);
+          setFocusedId(selected?.id ?? null);
+          toast.push({ tone: "success", message: `${selected?.name ?? name} opened offline`, detail: "Saved on this device — it will sync when you reconnect." });
+          return;
+        }
         const result = await openTable({ branchId: ctx.branchId, name, seats });
         setSeatOpen(false);
         setManualOpen(false);
@@ -530,7 +579,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, openGate.allowed, ctx, toast],
+    [selected, openGate.allowed, ctx, toast, input.online, input.offlineReady, input.offlineScope, input.currency],
   );
 
   // Phase F — refresh the branch's auto-seat setting from the canonical row when
@@ -576,8 +625,18 @@ export function useDineInWorkspace(input: {
   const hasUnsentRound = roundLines.length > 0;
   const roundSubtotal = useMemo(() => selectSubtotal(roundLines), [roundLines]);
 
+  // Phase C — offline capture is live when the backend is unreachable AND the device is
+  // hydrated for offline Dine-In. The round GATES then treat connectivity as satisfied
+  // (so add/send are allowed), while the HANDLERS below still branch on the real
+  // input.online to route into the local engine rather than the server.
+  const offlineCapture = !input.online && input.offlineReady === true && input.offlineScope != null;
+  const gateCtx: RoundContext = useMemo(
+    () => (offlineCapture ? { ...roundCtx, online: true } : roundCtx),
+    [offlineCapture, roundCtx],
+  );
+
   const addItemsGate: Gate = useMemo(() => {
-    const base = computeAddItemsGate({ ctx: roundCtx, createOrders: input.createOrders });
+    const base = computeAddItemsGate({ ctx: gateCtx, createOrders: input.createOrders });
     if (!base.allowed) return base;
     // The buffer is shared with Takeaway on purpose (one cart, one round at a
     // time). If someone else's work is in it, say whose rather than merging.
@@ -593,17 +652,17 @@ export function useDineInWorkspace(input: {
       return { allowed: false, reason: "Another table has an unsent round. Send or discard it first." };
     }
     return base;
-  }, [roundCtx, input.createOrders, input.cartLines.length, cart.owner, selected]);
+  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, selected]);
 
   const submitGate: Gate = useMemo(
     () =>
       submitRoundGate({
-        ctx: roundCtx,
+        ctx: gateCtx,
         lines: roundLines,
         createOrders: input.createOrders,
         menu: input.menu,
       }),
-    [roundCtx, roundLines, input.createOrders, input.menu],
+    [gateCtx, roundLines, input.createOrders, input.menu],
   );
 
   /**
@@ -614,12 +673,15 @@ export function useDineInWorkspace(input: {
     if (!selected || !addItemsGate.allowed) return;
     if (!cart.claim({ kind: "table", tableId: selected.id })) return;
     setBillChange(null);
-    const before = useTables.getState().bill;
-    await tables.loadBill(ctx);
-    setBillChange(describeBillChange(before, useTables.getState().bill));
+    // Offline: no server bill re-read (the local draft is the source); online unchanged.
+    if (!offlineCapture) {
+      const before = useTables.getState().bill;
+      await tables.loadBill(ctx);
+      setBillChange(describeBillChange(before, useTables.getState().bill));
+    }
     setView("add_items");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, addItemsGate.allowed, ctx]);
+  }, [selected, addItemsGate.allowed, ctx, offlineCapture]);
 
   /** Leave Add Items. An unsent round is never discarded silently. */
   const requestLeaveAddItems = useCallback(() => {
@@ -658,6 +720,49 @@ export function useDineInWorkspace(input: {
     roundInFlight.current = true;
     setRoundBusy(true);
     try {
+      // PHASE C — OFFLINE branch. Freeze the current cart into a local round through the
+      // Track-C engine (durable op + draft), print locally, then clear the cart ONLY after
+      // the durable capture succeeded. The online branch below is unchanged.
+      if (offlineCapture && input.offlineScope) {
+        const submitted = useCart.getState().lines;
+        let draft = await getDineDraftForTable(input.offlineScope, selected.id);
+        if (!draft) {
+          draft = await openTableOffline({
+            scope: input.offlineScope,
+            tableId: selected.id,
+            tableName: selected.name,
+            seats: selected.seats ?? null,
+            currency: input.currency,
+            baseOrderVersion: selected.pos_entity_version ?? null,
+          });
+        }
+        for (const l of submitted) await addDraftLine(draft.local_session_id, draftLineFromCart(l));
+        const updated = await sendRoundOffline(draft.local_session_id); // durable capture (atomic)
+        const round = updated.rounds[updated.rounds.length - 1];
+        // Local kitchen print — independent of server sync; failure never reverses the round.
+        try {
+          await input.onKitchenBatch({
+            source: "dine_in",
+            orderId: updated.canonical_order_id ?? draft.local_session_id,
+            orderNumber: round ? `Round ${round.seq}` : "OFFLINE",
+            batchNo: round?.seq ?? null,
+            tableName: selected.name,
+            lines: submitted.map((l) => ({
+              name: l.name,
+              qty: l.quantity,
+              modifiers: l.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })),
+              note: l.kitchen_note,
+              menuItemId: l.menu_item_id,
+            })),
+          });
+          if (round) await setRoundPrintState(updated.local_session_id, round.round_local_id, "printed");
+        } catch {
+          if (round) await setRoundPrintState(updated.local_session_id, round.round_local_id, "print_failed");
+        }
+        useCart.getState().reset(); // clear ONLY after the durable capture succeeded
+        toast.push({ tone: "success", message: "Round sent (offline)", detail: "Saved on this device — it will sync when you reconnect." });
+        return;
+      }
       const before: TableBill | null = useTables.getState().bill;
       const opId = useCart.getState().ensureOpId();
       // The round as it is about to be SENT, snapshotted before the buffer is
@@ -725,7 +830,7 @@ export function useDineInWorkspace(input: {
       setRoundBusy(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast]);
+  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch]);
 
   // --- Level 2D: settlement ---------------------------------------------------
 
