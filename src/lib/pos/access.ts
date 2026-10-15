@@ -162,9 +162,12 @@ export const POS_PERMISSIONS = {
   DELIVERY_SETTLEMENTS_MANAGE: "pos.delivery.settlements.manage",
 } as const;
 
-/** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
-export function isOperationalRole(role: TenantRole | null | undefined): boolean {
-  return role !== "owner";
+/** POLICY 2026-10-15 (owner-approved): every role (owner included) is eligible to operate POS; the real
+ *  gate is the `pos.access` permission + the `pos` feature (checked by callers below and by
+ *  pos_assert_operator server-side, which no longer blocks owners). Kept as a function so callers read
+ *  unchanged; owners are still bound by active membership + subscription + pos.access + branch/OU authority. */
+export function isOperationalRole(_role: TenantRole | null | undefined): boolean {
+  return true;
 }
 
 function baseEligible(m: PosMembership | null | undefined): boolean {
@@ -345,19 +348,14 @@ export function canExportAnalytics(ctx: PosAccessContext): Gate {
 }
 
 /**
- * R5 (1.0.36) — Owner POS Sales access. Everything canViewAnalytics requires, PLUS: an OWNER must
- * additionally hold pos.sales.owner_access (DEFAULT OFF). This MIRRORS the server gate in
- * pos_analytics_summary (guarded by current_user_is_owner()), so manager/cashier are unaffected and
- * keep their existing pos.analytics.view behaviour exactly. The UI uses this to hide the Sales entry
- * and fail its route closed; the server remains authoritative.
+ * POLICY 2026-10-15 (owner-approved): owners receive POS Sales/Analytics by DEFAULT. The former
+ * pos.sales.owner_access opt-in is removed here and in the server gate (pos_analytics_summary now
+ * requires only pos.analytics.view). Access is therefore exactly canViewAnalytics — identical for owner,
+ * manager and cashier (active membership + pos feature + pos.analytics.view). Kept as a named export so
+ * nav.ts / Analytics.tsx read unchanged; the pos.sales.owner_access key is now inert (no stored grant removed).
  */
 export function canViewOwnerSales(ctx: PosAccessContext): Gate {
-  const view = canViewAnalytics(ctx);
-  if (!view.allowed) return view;
-  if (ctx.membership?.role === "owner" && !perm(ctx, POS_PERMISSIONS.SALES_OWNER_ACCESS)) {
-    return { allowed: false, reason: "Owner POS Sales access is not enabled for your account." };
-  }
-  return { allowed: true, reason: null };
+  return canViewAnalytics(ctx);
 }
 
 /**
