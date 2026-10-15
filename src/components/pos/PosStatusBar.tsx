@@ -24,6 +24,12 @@ import type { LayoutSpec } from "@/lib/layout";
 export type PosStatusBarProps = {
   tenantName: string;
   branchName: string;
+  // R5 policy: an all-branches operator (owner/admin) picks which branch this POS session operates in.
+  // When set, the branch label becomes a selector; shifts/orders then use the chosen branch.
+  allBranches?: boolean;
+  branchId?: string | null;
+  branchOptions?: { id: string; name: string }[];
+  onSelectBranch?: (branchId: string) => void;
   operatorName: string;
   roleLabel: string;
   shift: ActiveShift | null;
@@ -80,9 +86,24 @@ export function PosStatusBar(props: PosStatusBarProps) {
       <div className="flex min-w-0 items-center gap-2">
         <span className="truncate text-sm font-extrabold text-ink">{props.tenantName}</span>
         <span className="text-slate-300">/</span>
-        <span className="truncate text-sm font-semibold text-ink" title={props.branchName}>
-          {props.branchName}
-        </span>
+        {props.allBranches && (props.branchOptions?.length ?? 0) > 0 ? (
+          <select
+            value={props.branchId ?? ""}
+            onChange={(e) => props.onSelectBranch?.(e.target.value)}
+            title="Operating unit — the branch this POS session opens shifts and creates orders in"
+            className="max-w-[170px] truncate rounded-md border border-line bg-white px-1.5 py-1 text-sm font-semibold text-ink outline-none"
+          >
+            {props.branchOptions!.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="truncate text-sm font-semibold text-ink" title={props.branchName}>
+            {props.branchName}
+          </span>
+        )}
       </div>
 
       {!compact && (

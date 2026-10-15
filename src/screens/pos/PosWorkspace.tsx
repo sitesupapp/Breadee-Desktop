@@ -2277,6 +2277,10 @@ function PosWorkspaceInner() {
           <PosStatusBar
             tenantName={pos.tenantName}
             branchName={pos.branch.name}
+            allBranches={pos.allBranches}
+            branchId={pos.branch.id}
+            branchOptions={pos.branchOptions}
+            onSelectBranch={pos.setOperationalBranch}
             operatorName={pos.userName}
             roleLabel={roleLabel(pos.role)}
             shift={shiftStore.shift}
