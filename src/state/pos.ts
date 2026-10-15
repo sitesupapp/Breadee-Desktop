@@ -93,20 +93,50 @@ export function usePosContext(): PosContext {
     let active = true;
     setContextLoaded(false);
     (async () => {
-      // All-branches operator with no pin yet: default to the branch of their OWN open shift (so an existing
-      // shift is used and the status bar/orders agree), else Main (resolveBranchId's fallback).
-      let effectiveSelected = selectedBranch;
-      if (allBranches && !effectiveSelected && tenantId && userId) {
+      // Read THIS tenant's ACTIVE branches first: they populate the picker AND bound the operational-branch
+      // selection. A persisted pin that is no longer an active branch of this tenant (e.g. the branch was
+      // disabled after it was picked) must never be used — pos_resolve_operational_branch validates tenant
+      // membership, not status, so it would otherwise be accepted. This mirrors the web server component,
+      // which validates the pos_op_branch cookie against active branches before trusting it.
+      let activeBranches: { id: string; name: string }[] = [];
+      let branchesKnown = false;
+      if (allBranches && tenantId) {
         try {
-          const sh = await findOpenShift(tenantId, userId);
-          if (sh?.branch_id) {
-            effectiveSelected = sh.branch_id;
-            setBranchInStore(tenantId, userId, sh.branch_id);
-          }
+          const { supabase } = await import("@/lib/supabase");
+          const { data } = await supabase.from("branches").select("id, name").eq("tenant_id", tenantId).eq("status", "active").order("name");
+          activeBranches = ((data as { id: string; name: string }[] | null) ?? []).map((x) => ({ id: x.id, name: x.name }));
+          branchesKnown = true;
         } catch {
-          /* offline / unreadable: fall through to Main */
+          /* offline: cannot validate; trust the last-good pin below (server re-validates on sync) */
         }
       }
+      const isActiveBranch = (id: string | null | undefined): boolean => !!id && activeBranches.some((x) => x.id === id);
+
+      // The operational branch for an all-branches operator:
+      //  - offline (list unknown): trust the persisted pin as-is — it was validated when set, and the server
+      //    re-validates every mutation; falling back to Main offline would strand them on the wrong branch.
+      //  - online: a still-active persisted pin wins; else the branch of their OWN open shift IF it is active;
+      //    else null → Main (resolveBranchId's fallback). An invalid pin is never used.
+      let effectiveSelected: string | null = null;
+      if (allBranches) {
+        if (!branchesKnown) {
+          effectiveSelected = selectedBranch;
+        } else if (isActiveBranch(selectedBranch)) {
+          effectiveSelected = selectedBranch;
+        } else if (tenantId && userId) {
+          try {
+            const sh = await findOpenShift(tenantId, userId);
+            if (sh?.branch_id && isActiveBranch(sh.branch_id)) effectiveSelected = sh.branch_id;
+          } catch {
+            /* offline / unreadable: fall through to Main */
+          }
+          // Repair a stale/invalid pin so the store, picker and resolved branch agree.
+          if (effectiveSelected && effectiveSelected !== selectedBranch && tenantId && userId) {
+            setBranchInStore(tenantId, userId, effectiveSelected);
+          }
+        }
+      }
+
       const [b, name] = await Promise.all([
         loadBranchContext(session.tenant, session.membership, { currency, selectedBranchId: effectiveSelected }).catch(() => UNKNOWN_BRANCH),
         loadOperatorName(userId, email).catch(() => email ?? "Cashier"),
@@ -114,18 +144,7 @@ export function usePosContext(): PosContext {
       if (!active) return;
       setBranch(b);
       setOperatorName(name);
-      // Active branches for the picker (all-branches operators only).
-      if (allBranches && tenantId) {
-        try {
-          const { supabase } = await import("@/lib/supabase");
-          const { data } = await supabase.from("branches").select("id, name").eq("tenant_id", tenantId).eq("status", "active").order("name");
-          if (active) setBranchOptions(((data as { id: string; name: string }[] | null) ?? []).map((x) => ({ id: x.id, name: x.name })));
-        } catch {
-          /* ignore: picker simply has no options offline */
-        }
-      } else if (active) {
-        setBranchOptions([]);
-      }
+      setBranchOptions(allBranches ? activeBranches : []);
     })().finally(() => {
       if (active) setContextLoaded(true);
     });
