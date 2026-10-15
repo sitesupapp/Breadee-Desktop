@@ -103,9 +103,14 @@ export function usePosContext(): PosContext {
       if (allBranches && tenantId) {
         try {
           const { supabase } = await import("@/lib/supabase");
-          const { data } = await supabase.from("branches").select("id, name").eq("tenant_id", tenantId).eq("status", "active").order("name");
-          activeBranches = ((data as { id: string; name: string }[] | null) ?? []).map((x) => ({ id: x.id, name: x.name }));
-          branchesKnown = true;
+          // PostgREST returns { data, error } WITHOUT throwing for most failures, so an unreadable list must
+          // be detected via `error` too — not only via a thrown transport error. Only treat the list as KNOWN
+          // when there is no error; otherwise leave branchesKnown=false so the last-good pin is trusted.
+          const { data, error } = await supabase.from("branches").select("id, name").eq("tenant_id", tenantId).eq("status", "active").order("name");
+          if (!error) {
+            activeBranches = ((data as { id: string; name: string }[] | null) ?? []).map((x) => ({ id: x.id, name: x.name }));
+            branchesKnown = true;
+          }
         } catch {
           /* offline: cannot validate; trust the last-good pin below (server re-validates on sync) */
         }
@@ -113,24 +118,31 @@ export function usePosContext(): PosContext {
       const isActiveBranch = (id: string | null | undefined): boolean => !!id && activeBranches.some((x) => x.id === id);
 
       // The operational branch for an all-branches operator:
-      //  - offline (list unknown): trust the persisted pin as-is — it was validated when set, and the server
-      //    re-validates every mutation; falling back to Main offline would strand them on the wrong branch.
-      //  - online: a still-active persisted pin wins; else the branch of their OWN open shift IF it is active;
-      //    else null → Main (resolveBranchId's fallback). An invalid pin is never used.
+      //  - list unknown (offline / query error): trust the persisted pin as-is — it was validated when set,
+      //    and the server re-validates every mutation; falling back to Main here would strand them.
+      //  - online: a still-active persisted pin wins; else the branch of their OWN active open shift; else Main
+      //    (if active) else the first active branch. The resolved branch is written back to the store so a
+      //    stale/invalid pin is genuinely repaired and the picker/store/branch all agree.
       let effectiveSelected: string | null = null;
       if (allBranches) {
         if (!branchesKnown) {
           effectiveSelected = selectedBranch;
         } else if (isActiveBranch(selectedBranch)) {
           effectiveSelected = selectedBranch;
-        } else if (tenantId && userId) {
-          try {
-            const sh = await findOpenShift(tenantId, userId);
-            if (sh?.branch_id && isActiveBranch(sh.branch_id)) effectiveSelected = sh.branch_id;
-          } catch {
-            /* offline / unreadable: fall through to Main */
+        } else {
+          if (tenantId && userId) {
+            try {
+              const sh = await findOpenShift(tenantId, userId);
+              if (sh?.branch_id && isActiveBranch(sh.branch_id)) effectiveSelected = sh.branch_id;
+            } catch {
+              /* unreadable: fall through to Main / first active */
+            }
           }
-          // Repair a stale/invalid pin so the store, picker and resolved branch agree.
+          if (!effectiveSelected) {
+            const mainId = session.tenant?.main_branch_id ?? null;
+            effectiveSelected = isActiveBranch(mainId) ? mainId : (activeBranches[0]?.id ?? null);
+          }
+          // Repair the stale/invalid persisted pin so the store, picker and resolved branch all agree.
           if (effectiveSelected && effectiveSelected !== selectedBranch && tenantId && userId) {
             setBranchInStore(tenantId, userId, effectiveSelected);
           }
