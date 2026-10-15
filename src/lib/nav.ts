@@ -8,7 +8,7 @@
 // tenant owners, whom `pos_assert_operator` rejects server-side.
 
 import { FEATURES, hasFeature, type FeatureMap } from "@/lib/features";
-import { canOperatePOS, canViewReceivables, canViewAnalytics, canViewPayouts } from "@/lib/pos/access";
+import { canOperatePOS, canViewReceivables, canViewOwnerSales, canViewPayouts } from "@/lib/pos/access";
 import { canViewMenuBuilder } from "@/lib/menu/access";
 import type { GlyphName } from "@/components/Glyph";
 import type { TenantRole, UserStatus } from "@/lib/types";
@@ -62,13 +62,14 @@ export const NAV_ITEMS: NavItem[] = [
   },
   {
     // Phase H — Analytics is a FIRST-CLASS main-dashboard module (not inside the
-    // cashier layout). Owners see it too (management view; the RPC runs no operator
-    // assertion). Hidden unless the user holds `pos.analytics.view`.
+    // cashier layout). Hidden unless the user holds `pos.analytics.view`; R5 (1.0.36) adds that an
+    // OWNER must ALSO hold `pos.sales.owner_access` (default OFF) — manager/cashier are unaffected.
+    // Mirrors the server gate in pos_analytics_summary so the rail never offers what the server refuses.
     to: "/analytics",
     label: "Analytics",
     glyph: "analytics",
     show: (ctx) =>
-      canViewAnalytics({
+      canViewOwnerSales({
         membership: { role: ctx.role, status: ctx.status },
         permissions: ctx.permissions,
         features: ctx.features,

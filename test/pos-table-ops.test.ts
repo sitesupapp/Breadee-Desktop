@@ -326,7 +326,15 @@ test("the operation RPCs are callable, and settlement joined them exactly once",
   // AND DESKTOP 1.0.35 (B1/B3): 54 -> 58, for pos_order_transfer_force, pos_order_transfer_cancel,
   // pos_transfer_force_enabled, pos_transfer_settings_set (ownership-only + an OU boolean; none moves money).
   // 58 -> 59 for Desktop 1.0.35 (R2): pos_add_order_items.
-  assert.equal(members.length, 59, `the RPC allow-list changed size: ${members.join(", ")}`);
+  // 59 -> 61 for Desktop 1.0.36 (R7): pos_end_shift_approval_required + pos_shift_approval_set
+  //   (End-Shift approval getter + setter; pos.settings.manage; no money). R3's pos_merge_tables_v3
+  //   has a digit and is excluded from this [a-z_]+ members list by design.
+  // 61 -> 65 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
+  //   _cancel / _finalize (supervised hand-over + finalize-close; none moves money directly).
+  // 65 -> 66 for Desktop 1.0.36 (R4) the Force-End recipient reader pos_force_end_eligible_recipients
+  //   (select_recipient-gated; not a money RPC).
+  // 66 -> 67 for Desktop 1.0.36 (R4) pos_shifts_list (supervisor Force-End browser read; not money).
+  assert.equal(members.length, 67, `the RPC allow-list changed size: ${members.join(", ")}`);
   assert.ok(members.includes("pos_merge_tables"));
   assert.ok(members.includes("pos_deletion_reason_report"));
 });

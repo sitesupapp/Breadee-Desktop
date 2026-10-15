@@ -118,7 +118,7 @@ const result = (over: Partial<TablePaymentResult> = {}): TablePaymentResult => (
 // RETARGETED BY DELIVERY SETTLEMENT 1.0.23: `pos_delivery_resolve_cost` (post-close
 // cost resolution, cash-inert) was added, so the expected set grows by exactly one
 // more reviewed name. (Floor-map RPCs are deliberately NOT part of this release.)
-test("the RPC allow-list contains exactly the fifty-four expected names", () => {
+test("the RPC allow-list contains exactly the sixty-one expected names", () => {
   const source = read("lib", "pos", "rpc.ts").replace(/\/\/.*$/gm, "");
   const decl = /export type PosRpcName\s*=([\s\S]*?);/.exec(source);
   assert.ok(decl, "the PosRpcName union could not be located");
@@ -164,6 +164,15 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
       // Phase D — open dine-in sent-line editing (pos.edit_orders).
       "pos_edit_order_line",
       "pos_end_shift",
+      // Desktop 1.0.36 (R7) — per-branch End-Shift approval requirement getter.
+      "pos_end_shift_approval_required",
+      // Desktop 1.0.36 (R4) — Force End Shift: the recipient picker + the hand-over request / decide
+      // / cancel / finalize. Sort between pos_end_shift_* and pos_merge_tables (eligible < shift < merge).
+      "pos_force_end_eligible_recipients",
+      "pos_force_end_shift_cancel",
+      "pos_force_end_shift_decide",
+      "pos_force_end_shift_finalize",
+      "pos_force_end_shift_request",
       // 1.0.31 — fold other occupied tables' bills into one (pos.tables.merge).
       "pos_merge_tables",
       "pos_move_table",
@@ -198,10 +207,15 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
       // Delivery Management: the internal Delivered-By / Delivery-Cost write
       // (pos.delivery.manage). Never a customer-money RPC.
       "pos_set_delivery_ops",
+      // Desktop 1.0.36 (R7) — the End-Shift approval setter (pos.settings.manage).
+      "pos_shift_approval_set",
       "pos_shift_expected",
       // POS Final W4/W5 (Part 6) — the End-Shift open-orders blocker set, read to populate the
       // Transfer gate. Pre-existing read, now client-callable.
       "pos_shift_unresolved_orders",
+      // Desktop 1.0.36 (R4) — the branch's shifts for the supervisor Force-End browser. Sorts after
+      // pos_shift_* (the trailing 's' in "shifts" orders after "shift_") and before pos_split_*.
+      "pos_shifts_list",
       // Phase E — item/quantity Split Bill (pos.split_bill). Read + settle.
       "pos_split_settle",
       "pos_split_state",
@@ -221,7 +235,18 @@ test("the RPC allow-list contains exactly the fifty-four expected names", () => 
   // 54 -> 58 for Desktop 1.0.35 (B1/B3): pos_order_transfer_force, pos_order_transfer_cancel,
   //   pos_transfer_force_enabled, pos_transfer_settings_set.
   // 58 -> 59 for Desktop 1.0.35 (R2): pos_add_order_items.
-  assert.equal(members.length, 59);
+  // 59 -> 61 for Desktop 1.0.36 (R7): pos_end_shift_approval_required + pos_shift_approval_set
+  //   (per-branch End-Shift approval getter + setter; gated pos.settings.manage; no money RPC).
+  //   R3's pos_merge_tables_v3 contains a digit, so this [a-z_]+ list excludes it by design.
+  // 61 -> 65 for Desktop 1.0.36 (R4) Force End Shift: pos_force_end_shift_request / _decide /
+  //   _cancel / _finalize (supervised hand-over of a blocked shift's unpaid orders + finalize-close;
+  //   self → pos.end_own_shift, other → pos.close_other_shifts, + pos.transfers.select_recipient).
+  // 65 -> 66 for Desktop 1.0.36 (R4) the Force-End-specific recipient reader
+  //   pos_force_end_eligible_recipients (caller needs select_recipient; active branch members with
+  //   exactly one open shift). No digit, so this [a-z_]+ list counts it.
+  // 66 -> 67 for Desktop 1.0.36 (R4) pos_shifts_list — the branch's shifts for the supervisor
+  //   Force-End browser (owner / pos.view_all_shifts gate server-side; not a money RPC).
+  assert.equal(members.length, 67);
 });
 
 test("pos_pay_table is present, and is the only new settlement name", () => {

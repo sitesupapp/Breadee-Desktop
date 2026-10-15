@@ -24,10 +24,17 @@ export type BranchContext = {
 
 export const UNKNOWN_BRANCH: BranchContext = { id: null, name: "No branch", pinned: false };
 
-/** The branch id this session operates in. Pure - no I/O. */
-export function resolveBranchId(tenant: Tenant | null, membership: Membership | null): string | null {
+/** The branch id this session operates in. Pure - no I/O.
+ *  R5 policy: an ALL-BRANCHES operator (owner/admin, branch_id NULL) is no longer hard-pinned to Main — a
+ *  session-pinned `selectedBranchId` (from the in-POS branch picker) wins, defaulting to Main only when none
+ *  is chosen yet. Single-branch operators are unchanged. The server re-validates, so this cannot widen access. */
+export function resolveBranchId(
+  tenant: Tenant | null,
+  membership: Membership | null,
+  selectedBranchId?: string | null,
+): string | null {
   if (!membership) return null;
-  if (membership.all_branches) return tenant?.main_branch_id ?? null;
+  if (membership.all_branches) return selectedBranchId ?? tenant?.main_branch_id ?? null;
   return membership.branch_id ?? tenant?.main_branch_id ?? null;
 }
 
@@ -55,9 +62,9 @@ function cachedBranchName(branchId: string, tenantId: string, deviceId: string):
 export async function loadBranchContext(
   tenant: Tenant | null,
   membership: Membership | null,
-  opts?: { currency?: string },
+  opts?: { currency?: string; selectedBranchId?: string | null },
 ): Promise<BranchContext> {
-  const id = resolveBranchId(tenant, membership);
+  const id = resolveBranchId(tenant, membership, opts?.selectedBranchId);
   if (!id || !tenant) return UNKNOWN_BRANCH;
   const pinned = !membership?.all_branches;
   const deviceId = getDeviceIdentity().device_id;

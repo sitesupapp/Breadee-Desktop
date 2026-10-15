@@ -58,14 +58,17 @@ import { Glyph } from "@/components/Glyph";
 import { readPosFeatures, writePosFeatures } from "@/lib/pos/posFeatures";
 import { ClearTableDialog, CloseTableDialog, MergeTablesDialog, MoveTableDialog } from "@/components/pos/TableOpsDialogs";
 import {
+  buildMergeExpected,
   clearOutcomeMessage,
   clearTable,
   closeOutcomeMessage,
   closeTable,
   mergeableSources,
+  mergeAttemptSignature,
   mergeTables,
   moveOutcomeMessage,
   moveTable,
+  stableMergeOpId,
   tableOpGate,
   type TableOpKind,
 } from "@/lib/pos/tableOps";
@@ -99,6 +102,7 @@ import {
   type OnAccountVerdict,
 } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
+import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
@@ -266,6 +270,10 @@ export function useDineInWorkspace(input: {
   // Its own latch: moving, closing and clearing must not be double-fired, and
   // must not be blocked by an unrelated round submission.
   const opInFlight = useRef(false);
+  // Holds the client_op_id for the CURRENT merge attempt (keyed by its target set),
+  // so a transport retry of the same merge reuses the id and the server dedupes
+  // rather than merging twice. Reset to null once an attempt resolves successfully.
+  const mergeOpId = useRef<{ sig: string; id: string } | null>(null);
 
   // --- Level 2D settlement ----------------------------------------------------
   const [payOpen, setPayOpen] = useState(false);
@@ -446,25 +454,38 @@ export function useDineInWorkspace(input: {
     [selected, opGates.clear.allowed, runOp],
   );
 
-  // Phase 4 (1.0.31) — fold other occupied tables' bills into this one. The server
-  // locks and re-checks every table and order under the transaction and enforces all
-  // eligibility; a stable client_op_id makes a lost response replay rather than
-  // merge twice. (The pos_table_map row carries no entity version, so the optional
-  // per-table stale guard is left to the server's own locked re-read.)
+  // Phase 4 (1.0.31) + v3 (1.0.36) — fold other occupied tables' bills into this one.
+  // The server locks and re-checks every table and order under the transaction and
+  // enforces all eligibility. Two client-side guards ride along:
+  //   • `expected` — the primary's and every selected source's pos_entity_version
+  //     from the loaded map (migration 20261013200551), so a floor that changed since
+  //     the dialog opened is refused with VERSION_CONFLICT → the reload-and-retry UX.
+  //   • a STABLE client_op_id held across retries of the SAME target set, so a lost
+  //     response replays rather than merging twice.
   const confirmMerge = useCallback(
     (sourceTableIds: string[]) => {
       if (!selected || !opGates.merge.allowed || sourceTableIds.length === 0) return;
       const primaryName = selected.name;
+      const sources = sourceTableIds
+        .map((id) => tables.map.tables.find((t) => t.id === id))
+        .filter((t): t is TableSummary => t != null);
+      const expected = buildMergeExpected(selected, sources);
+      const sig = mergeAttemptSignature(selected.id, sourceTableIds);
+      mergeOpId.current = stableMergeOpId(mergeOpId.current, sig);
+      const clientOpId = mergeOpId.current.id;
       void runOp("merge", async () => {
         const r = await mergeTables({
           primaryTableId: selected.id,
           sourceTableIds,
-          clientOpId: crypto.randomUUID(),
+          expected,
+          clientOpId,
         });
+        // Attempt resolved — a later merge of the same tables mints a fresh id.
+        mergeOpId.current = null;
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
-    [selected, opGates.merge.allowed, runOp],
+    [selected, opGates.merge.allowed, tables.map.tables, runOp],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -1640,6 +1661,13 @@ export function useDineInWorkspace(input: {
             ? { tableName: selected.name, seats: selected.seats, orderCount: tables.bill?.orders.length ?? 0 }
             : null
         }
+        onAccountDisabledReason={
+          pos.gates.takeOnAccount.allowed && input.online
+            ? null
+            : !pos.gates.takeOnAccount.allowed
+              ? pos.gates.takeOnAccount.reason
+              : "On-account sales need an internet connection."
+        }
         onAccount={
           pos.gates.takeOnAccount.allowed && input.online
             ? {
@@ -1654,6 +1682,17 @@ export function useDineInWorkspace(input: {
         error={payError}
         onCancel={() => setPayOpen(false)}
         onConfirm={(i) => void confirmPay(i)}
+      />
+
+      {/* R6 (1.0.36): on-account customer picker verify-and-link prompt (same-OU phone clash). */}
+      <CustomerConflictDialog
+        open={customerPicker.conflict.open}
+        existingName={customerPicker.conflict.existingName}
+        incomingName={customerPicker.conflict.incomingName}
+        saving={customerPicker.conflict.saving}
+        error={customerPicker.conflict.error}
+        onUseExisting={customerPicker.conflict.onUseExisting}
+        onClose={customerPicker.conflict.onCancel}
       />
 
       <MoveTableDialog

@@ -99,6 +99,36 @@ export class CustomerCreateInProgressError extends Error {
   }
 }
 
+/**
+ * R6 (1.0.36): the server found a DIFFERENT customer already holding this
+ * canonical phone in THIS operating unit (same OU + same normalised number +
+ * a conflicting name). The write was NOT applied. The operator must verify and
+ * either LINK to the existing customer (re-submit carrying `conflict_token`) or
+ * cancel and correct the number. The token is single-use, OU-scoped and
+ * expires; it is honoured only for the same operator and the same matched
+ * customer, so it can never silently reassign one person's number to another.
+ */
+export class CustomerIdentityConflictError extends Error {
+  readonly conflictToken: string;
+  readonly existingCustomerId: string | null;
+  readonly existingName: string | null;
+  readonly incomingName: string | null;
+  constructor(input: {
+    conflictToken: string;
+    existingCustomerId: string | null;
+    existingName: string | null;
+    incomingName: string | null;
+    reason?: string | null;
+  }) {
+    super(input.reason?.trim() || "A different customer already has this number in this operating unit.");
+    this.name = "CustomerIdentityConflictError";
+    this.conflictToken = input.conflictToken;
+    this.existingCustomerId = input.existingCustomerId;
+    this.existingName = input.existingName;
+    this.incomingName = input.incomingName;
+  }
+}
+
 /** The create response was lost and the re-read could not settle what happened. */
 export class CustomerCreateAmbiguousError extends Error {
   readonly cause: unknown;
@@ -352,6 +382,11 @@ export type CustomerUpsertPayload = {
   /** Phase 3 (1.0.31): opt a general A-R create into name-only identity. The server
    *  keeps phone REQUIRED unless this is true AND a name is present. */
   allow_name_only?: boolean;
+  /** R6 (1.0.36): single-use token returned by a prior CUSTOMER_IDENTITY_CONFLICT.
+   *  Re-submitting the SAME capture with this token links to the matched customer
+   *  after the operator has verified it. The server validates the token (same
+   *  operator, same matched customer, same OU, same canonical number, unexpired). */
+  conflict_token?: string;
 };
 
 export type AddressPayload = {
@@ -366,7 +401,7 @@ export type AddressPayload = {
   is_default?: boolean;
 };
 
-export const CUSTOMER_PAYLOAD_KEYS = ["branch_id", "id", "phone", "name", "notes", "address", "allow_name_only"] as const;
+export const CUSTOMER_PAYLOAD_KEYS = ["branch_id", "id", "phone", "name", "notes", "address", "allow_name_only", "conflict_token"] as const;
 
 /**
  * Fields the desktop must never send.
@@ -503,11 +538,40 @@ export type CustomerUpsertResult = {
 
 export async function upsertCustomer(payload: CustomerUpsertPayload): Promise<CustomerUpsertResult> {
   const row = asRecord(await callPosRpc("pos_upsert_customer", { p_payload: payload }));
+  // R6 (1.0.36): the server signals an unresolved same-OU identity clash with a
+  // `conflict` envelope instead of a customer_id. Surface it as a typed error the
+  // UI can turn into a verify-and-link prompt; NEVER treat it as a saved customer.
+  if (bool(row.conflict) || str(row.code) === "CUSTOMER_IDENTITY_CONFLICT") {
+    const token = strOrNull(row.conflict_token);
+    if (!token) {
+      throw new Error(strOrNull(row.reason) ?? "A different customer already has this number in this operating unit.");
+    }
+    throw new CustomerIdentityConflictError({
+      conflictToken: token,
+      existingCustomerId: strOrNull(row.existing_customer_id),
+      existingName: strOrNull(row.existing_name),
+      incomingName: strOrNull(payload.name) ?? null,
+      reason: strOrNull(row.reason),
+    });
+  }
   return {
     customer_id: requireId(row.customer_id, "pos_upsert_customer", "customer_id"),
     address_id: strOrNull(row.address_id),
     is_new: bool(row.is_new),
   };
+}
+
+/**
+ * R6 (1.0.36): resolve a CUSTOMER_IDENTITY_CONFLICT by LINKING to the matched
+ * customer. Re-submits the ORIGINAL capture plus the single-use `conflict_token`.
+ * The server re-validates the token and returns the linked customer; a stale or
+ * mismatched token is rejected (surfaced as a normal error to retry from scratch).
+ */
+export async function resolveCustomerConflict(
+  payload: CustomerUpsertPayload,
+  conflictToken: string,
+): Promise<CustomerUpsertResult> {
+  return upsertCustomer({ ...payload, conflict_token: conflictToken });
 }
 
 // --- the create latch (mirrors Level 2D) -------------------------------------
@@ -539,7 +603,12 @@ export function createCustomerLatch(): CustomerLatch {
 
 export type CreateOutcome =
   | { ok: true; customerId: string; recovered: boolean }
-  | { ok: false; error: unknown; retryable: boolean };
+  /** R6 (1.0.36): the server returned CUSTOMER_IDENTITY_CONFLICT. NOT retryable and NOT
+   *  recovered-by-search (that would silently link to the matched customer without the
+   *  operator verifying the differing name). The caller must show a verify-and-link prompt
+   *  and, on confirm, call resolveCustomerConflict(payload, conflict.conflictToken). */
+  | { ok: false; error: unknown; retryable: boolean; conflict: CustomerIdentityConflictError }
+  | { ok: false; error: unknown; retryable: boolean; conflict?: undefined };
 
 /**
  * Create one customer, once.
@@ -564,6 +633,12 @@ export async function performCustomerCreate(input: {
     try {
       result = await input.submit(input.payload);
     } catch (error) {
+      // R6 (1.0.36): a same-OU identity conflict must NOT be recovered by search — that would
+      // link to the matched customer without the operator verifying the differing name. Surface
+      // it to the caller's verify-and-link prompt instead.
+      if (error instanceof CustomerIdentityConflictError) {
+        return { ok: false, error, retryable: false, conflict: error };
+      }
       const phone = input.payload.phone;
       if (!phone) return { ok: false, error, retryable: true };
       let found: CustomerMatch[];

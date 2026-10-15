@@ -345,6 +345,21 @@ export function MergeTablesDialog({
 
   const canConfirm = !busy && gate.allowed && selected.length > 0;
 
+  // 1.0.36 (R3): partially-paid breakdown. Outstanding = what is still owed (what the merged bill will
+  // collect); collected = what was already paid (stays settled on the original bill, never re-charged).
+  // Fall back to the full total when the server didn't send a breakdown (older server / mixed currency).
+  const outstandingOf = (t: TableSummary | null) => (t ? t.outstanding ?? t.total ?? 0 : 0);
+  const collectedOf = (t: TableSummary | null) => t?.collected ?? 0;
+  const selectedSources = sources.filter((s) => selected.includes(s.id));
+  // The summary is only meaningful when the primary and every selected source share ONE non-mixed
+  // currency — never sum across currencies. (The server likewise refuses a cross-currency merge.)
+  const summaryCurrency = primary?.currency ?? null;
+  const mergeParties = primary ? [primary, ...selectedSources] : selectedSources;
+  const summarySingleCurrency =
+    !!summaryCurrency && mergeParties.every((t) => t.currency === summaryCurrency && !t.mixed_currency);
+  const toCollect = outstandingOf(primary) + selectedSources.reduce((a, s) => a + outstandingOf(s), 0);
+  const alreadyPaid = collectedOf(primary) + selectedSources.reduce((a, s) => a + collectedOf(s), 0);
+
   return (
     <Modal
       open={open && !!primary}
@@ -384,12 +399,18 @@ export function MergeTablesDialog({
       ) : (
         <>
           <p className="mb-2 text-xs text-sub">
-            Choose the tables whose bills should move onto {primary?.name}. A bill that is paid, split,
-            on account, adjusted or on another shift will be refused by the server.
+            Choose the tables whose bills should move onto {primary?.name}. A part-paid bill can be folded in —
+            what was already paid stays on its original bill and is never charged again; only the unpaid remainder
+            moves. A bill that is fully paid, split, on account, adjusted or on another shift is refused by the
+            server, with the reason shown here.
           </p>
           <ul className="grid max-h-[40vh] grid-cols-1 gap-2 overflow-y-auto overscroll-contain">
             {sources.map((t) => {
               const on = selected.includes(t.id);
+              const paid = collectedOf(t);
+              // Part-paid = SOME paid AND SOME still owed. A fully-settled bill (owed 0) is not part-paid
+              // (and the server excludes fully-paid bills from the map anyway).
+              const partPaid = paid > 0 && outstandingOf(t) > 0;
               return (
                 <li key={t.id}>
                   <button
@@ -397,15 +418,23 @@ export function MergeTablesDialog({
                     onClick={() => toggle(t.id)}
                     aria-pressed={on}
                     className={cn(
-                      "flex min-h-[52px] w-full items-center justify-between gap-2 rounded-xl border-2 px-3 text-left",
+                      "flex min-h-[52px] w-full items-center justify-between gap-3 rounded-xl border-2 px-3 py-2 text-left",
                       on ? "border-brand bg-brand-soft/40" : "border-line bg-white hover:bg-slate-50",
                     )}
                   >
-                    <span className="truncate text-sm font-bold text-ink">{t.name}</span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-bold text-ink">{t.name}</span>
+                      {partPaid && t.currency && (
+                        <span className="block truncate text-[11px] font-semibold text-amber-700">
+                          Part-paid · paid {formatMoney(paid, t.currency)} · owed {formatMoney(outstandingOf(t), t.currency)}
+                        </span>
+                      )}
+                    </span>
                     <span className="flex shrink-0 items-center gap-2">
                       {t.total != null && t.currency && (
                         <span className="text-xs font-semibold tabular-nums text-sub">{formatMoney(t.total, t.currency)}</span>
                       )}
+                      {partPaid && <Badge tone="amber">Part-paid</Badge>}
                       {on && <Badge tone="green">Selected</Badge>}
                     </span>
                   </button>
@@ -413,6 +442,23 @@ export function MergeTablesDialog({
               );
             })}
           </ul>
+          {/* R3 merge summary: what the combined bill will still collect, and what is already settled.
+              Shown only when the primary + every selected source share one non-mixed currency. */}
+          {selectedSources.length > 0 && summarySingleCurrency && summaryCurrency && (
+            <div className="mt-3 rounded-xl border border-line bg-slate-50 px-3 py-2">
+              <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-sub">After merge</p>
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm text-ink">To collect on {primary?.name}</span>
+                <span className="text-base font-extrabold tabular-nums text-ink">{formatMoney(toCollect, summaryCurrency)}</span>
+              </div>
+              {alreadyPaid > 0 && (
+                <div className="mt-0.5 flex items-baseline justify-between">
+                  <span className="text-xs text-sub">Already paid (stays on the original bills)</span>
+                  <span className="text-xs font-semibold tabular-nums text-sub">{formatMoney(alreadyPaid, summaryCurrency)}</span>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </Modal>

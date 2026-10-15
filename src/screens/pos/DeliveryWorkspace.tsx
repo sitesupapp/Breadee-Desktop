@@ -66,10 +66,14 @@ import {
   customerWriteGate,
   decideCreate,
   performCustomerCreate,
+  resolveCustomerConflict,
   searchCustomers,
   upsertCustomer,
+  CustomerIdentityConflictError,
   type CustomerMatch,
+  type CustomerUpsertPayload,
 } from "@/lib/pos/customers";
+import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { customerCreateLatch, SEARCH_DEBOUNCE_MS, selectedAddress, useCustomers } from "@/state/customers";
 import {
   buildDeliveryPayload,
@@ -648,6 +652,17 @@ export function useDeliveryWorkspace(input: {
     setDialog({ kind: "customer", mode: "create", initial: { ...EMPTY_CUSTOMER_FORM, phone: decision.phone ?? "" } });
   }, [lookupGate.allowed, toast, writeGate.allowed, writeGate.reason]);
 
+  // R6 (1.0.36): a live CUSTOMER_IDENTITY_CONFLICT from a create, awaiting the operator's
+  // verify-and-link. The original payload is kept so the link re-sends exactly it plus the token.
+  const [custConflict, setCustConflict] = useState<{
+    error: CustomerIdentityConflictError;
+    payload: CustomerUpsertPayload;
+    name: string | null;
+    phone: string | null;
+  } | null>(null);
+  const [custConflictSaving, setCustConflictSaving] = useState(false);
+  const [custConflictError, setCustConflictError] = useState<string | null>(null);
+
   const submitCreate = useCallback(
     async (values: CustomerFormValues) => {
       if (!writeGate.allowed) return;
@@ -680,6 +695,14 @@ export function useDeliveryWorkspace(input: {
           return;
         }
 
+        if (outcome.conflict) {
+          // R6: a same-OU number already held by a differently-named customer. Verify-and-link,
+          // never silently reuse — keep the original payload so the link re-sends exactly it.
+          setCustConflictError(null);
+          setCustConflict({ error: outcome.conflict, payload, name: values.name || null, phone: values.phone || null });
+          return;
+        }
+
         const classified = classifyError(outcome.error);
         setDialogError(classified.hint ? `${classified.message} ${classified.hint}` : classified.message);
         if (!outcome.retryable) {
@@ -696,6 +719,32 @@ export function useDeliveryWorkspace(input: {
     },
     [branchId, toast, writeGate.allowed],
   );
+
+  // R6 (1.0.36): resolve the conflict by LINKING to the matched customer — re-send the original
+  // capture plus the single-use token. Cancel changes nothing (nothing was written on conflict).
+  const confirmCustConflict = useCallback(() => {
+    void (async () => {
+      if (!custConflict) return;
+      setCustConflictSaving(true);
+      setCustConflictError(null);
+      try {
+        const r = await resolveCustomerConflict(custConflict.payload, custConflict.error.conflictToken);
+        await useCustomers.getState().select(r.customer_id);
+        setCustConflict(null);
+        setDialog({ kind: "none" });
+        toast.push({ tone: "success", message: "Linked to the existing customer" });
+      } catch (e) {
+        setCustConflictError(classifyError(e).message);
+      } finally {
+        setCustConflictSaving(false);
+      }
+    })();
+  }, [custConflict, toast]);
+
+  const cancelCustConflict = useCallback(() => {
+    setCustConflict(null);
+    setCustConflictError(null);
+  }, []);
 
   // --- edit ------------------------------------------------------------------
 
@@ -2341,6 +2390,18 @@ export function useDeliveryWorkspace(input: {
         }}
       />
 
+      {/* R6 (1.0.36): delivery customer create verify-and-link prompt (same-OU phone + differing
+          name). Shown instead of silently linking; confirm links to the matched customer. */}
+      <CustomerConflictDialog
+        open={custConflict !== null}
+        existingName={custConflict?.error.existingName ?? null}
+        incomingName={custConflict?.error.incomingName ?? custConflict?.name ?? null}
+        saving={custConflictSaving}
+        error={custConflictError}
+        onUseExisting={confirmCustConflict}
+        onClose={cancelCustConflict}
+      />
+
       <AddressDialog
         open={dialog.kind === "address"}
         mode={dialog.kind === "address" ? dialog.mode : "create"}
@@ -2381,6 +2442,13 @@ export function useDeliveryWorkspace(input: {
           customerName: payTarget.order ? customerDisplayName(receiptIdentity(payTarget.order).customerName, receiptIdentity(payTarget.order).customerPhone, "Customer") : "Customer",
           address: payTarget.order ? receiptIdentity(payTarget.order).addressText : null,
         }}
+        onAccountDisabledReason={
+          pos.gates.takeOnAccount.allowed && online
+            ? null
+            : !pos.gates.takeOnAccount.allowed
+              ? pos.gates.takeOnAccount.reason
+              : "On-account sales need an internet connection."
+        }
         onAccount={(() => {
           const o = payTarget.order;
           if (!pos.gates.takeOnAccount.allowed || !online || !o || !o.customer_id) return undefined;

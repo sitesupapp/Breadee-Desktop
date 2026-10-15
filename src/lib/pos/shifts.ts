@@ -207,8 +207,19 @@ export async function endShift(input: {
       },
     }),
   );
+  return shiftReportFromRow(row, "pos_end_shift");
+}
+
+/**
+ * Map a shift close-report row (the jsonb `pos_end_shift` / `pos_end_shift_core` returns) into a
+ * typed `ShiftReport`. Extracted so the R4 Force End Shift finalize — which closes the source shift
+ * through the SAME R7-aware end-shift path and returns the SAME report shape merged with its own
+ * `{ok,status,orders_moved,recipient_shift_id}` envelope — maps it identically, with one source of
+ * truth for every money figure. `rpc` only tags the requireId error so a changed contract is honest.
+ */
+export function shiftReportFromRow(row: Record<string, unknown>, rpc: "pos_end_shift" | "pos_force_end_shift_finalize"): ShiftReport {
   return {
-    shift_id: requireId(row.shift_id, "pos_end_shift", "shift_id"),
+    shift_id: requireId(row.shift_id, rpc, "shift_id"),
     orders: num(row.orders),
     gross_sales: num(row.gross_sales),
     discounts: num(row.discounts),

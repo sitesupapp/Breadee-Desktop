@@ -155,9 +155,15 @@ export async function moveTable(input: { fromTableId: string; toTableId: string 
 export type MergeResult = {
   ok: boolean;
   merge_id: string;
+  /** v3: the primary order the source bills were folded into. */
+  primary_order_id: string;
   primary_order_number: string;
   subtotal: number;
+  /** v3: the primary bill's running total after the fold. */
+  total_amount: number;
   sources_merged: number;
+  /** v3: the primary table's new optimistic-concurrency token. */
+  pos_entity_version: number;
 };
 
 /**
@@ -171,10 +177,66 @@ export function mergeableSources(tables: TableSummary[], primary: TableSummary |
 }
 
 /**
+ * The optimistic stale-dialog guard for a merge: the pos_entity_version of the
+ * PRIMARY table and EVERY selected source, as read from the currently-loaded table
+ * map. pos_merge_tables_v3 refuses with VERSION_CONFLICT if any of them changed
+ * since the floor was loaded, which the UI turns into its "reload the floor and
+ * retry" path. A 0/absent version (an older server that predates migration
+ * 20261013200551) is OMITTED rather than sent as 0, so the server's own locked
+ * re-read stays the backstop and no spurious conflict is raised.
+ */
+export function buildMergeExpected(primary: TableSummary, sources: TableSummary[]): Record<string, number> {
+  const expected: Record<string, number> = {};
+  const add = (t: TableSummary) => {
+    if (t.pos_entity_version > 0) expected[t.id] = t.pos_entity_version;
+  };
+  add(primary);
+  for (const s of sources) add(s);
+  return expected;
+}
+
+/**
+ * A stable identity for one merge ATTEMPT: the target set (primary + the chosen
+ * sources), order-independent. Re-submitting the SAME set is a transport retry and
+ * must reuse the client_op_id so the server dedupes; a different set is a new
+ * operation and earns a fresh id.
+ */
+export function mergeAttemptSignature(primaryTableId: string, sourceTableIds: string[]): string {
+  return [primaryTableId, ...sourceTableIds].slice().sort().join("|");
+}
+
+/**
+ * Mint a client_op_id once per merge attempt and hold it, exactly as
+ * pos_receivable_collect / pos_submit_order do: given the previously-held
+ * `{ sig, id }` and the current attempt signature, reuse the id when the signature
+ * matches (a retry of the same merge) and mint a new one otherwise. Pure, so the
+ * reuse rule is testable without React; the screen keeps the holder in a ref.
+ */
+export function stableMergeOpId(
+  prior: { sig: string; id: string } | null,
+  sig: string,
+  mint: () => string = newMergeOpId,
+): { sig: string; id: string } {
+  return prior && prior.sig === sig ? prior : { sig, id: mint() };
+}
+
+/** A fresh merge client_op_id. crypto.randomUUID where present, with a plain fallback. */
+export function newMergeOpId(): string {
+  const c = typeof globalThis !== "undefined" ? (globalThis.crypto as Crypto | undefined) : undefined;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return `merge-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
  * Fold one or more source tables' open bills into the primary table, in ONE
- * server transaction. `expected` carries the tables' pos_entity_versions so a
- * stale floor is refused; `clientOpId` makes a lost response replay rather than
- * merge twice. The desktop only shapes the request and re-reads the bill after.
+ * server transaction (pos_merge_tables_v3). v3 handles the clean, fully-unpaid
+ * case exactly as v2 did AND additionally folds eligible PARTIALLY-PAID bills;
+ * the server owns every eligibility rule and the atomic fold. `expected` carries
+ * the tables' pos_entity_versions so a stale floor is refused when the caller has
+ * them (the desktop table map does not expose a per-table version, so this is
+ * normally omitted and the server's own locked re-read + VERSION_CONFLICT is the
+ * guard); `clientOpId` makes a lost response replay rather than merge twice. The
+ * desktop only shapes the request and re-reads the bill after.
  */
 export async function mergeTables(input: {
   primaryTableId: string;
@@ -183,7 +245,7 @@ export async function mergeTables(input: {
   clientOpId?: string;
 }): Promise<MergeResult> {
   const row = asRecord(
-    await callPosRpc("pos_merge_tables", {
+    await callPosRpc("pos_merge_tables_v3", {
       p_payload: {
         primary_table_id: input.primaryTableId,
         source_table_ids: input.sourceTableIds,
@@ -195,9 +257,12 @@ export async function mergeTables(input: {
   return {
     ok: bool(row.ok),
     merge_id: str(row.merge_id),
+    primary_order_id: str(row.primary_order_id),
     primary_order_number: str(row.primary_order_number),
     subtotal: num(row.subtotal),
+    total_amount: num(row.total_amount),
     sources_merged: num(row.sources_merged),
+    pos_entity_version: num(row.pos_entity_version),
   };
 }
 

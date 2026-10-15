@@ -54,8 +54,13 @@ function availableSummary(id: string, name: string, seats: number | null): Table
     order_number: null,
     opened_at: null,
     total: null,
+    collected: null,
+    outstanding: null,
     currency: null,
     mixed_currency: false,
+    // A draft preview has no live bill, so no real concurrency token. 0 = unknown;
+    // buildMergeExpected never asserts a 0 version, and previews cannot be merged.
+    pos_entity_version: 0,
   };
 }
 

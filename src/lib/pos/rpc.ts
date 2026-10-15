@@ -39,6 +39,17 @@ export type PosRpcName =
   // Level 2C - table operations.
   | "pos_move_table"
   | "pos_merge_tables"
+  // 1.0.36 - v3 of the table merge. SAME payload shape as pos_merge_tables
+  // (primary_table_id + source_table_ids + client_op_id + optional per-table
+  // `expected` versions) and it handles the clean, fully-unpaid case identically,
+  // but v3 ALSO folds eligible PARTIALLY-PAID dine-in bills and returns the primary
+  // order id, the running total and the primary table's new pos_entity_version. The
+  // v2 name above is kept callable (older/queued paths); new merges call v3. An
+  // ineligible source raises UNSUPPORTED_STATE carrying a `reason:` token, plus the
+  // coded refusals VERSION_CONFLICT / MERGE_SHIFT_BUSY / MERGE_CROSS_SHIFT /
+  // MERGE_CROSS_CURRENCY / MERGE_AMBIGUOUS_BILL / MERGE_PRIMARY_EMPTY /
+  // MERGE_SOURCE_EMPTY - all mapped to cashier guidance in lib/pos/errors.ts.
+  | "pos_merge_tables_v3"
   | "pos_deletion_reason_report"
   | "pos_close_table"
   | "pos_clear_table"
@@ -103,6 +114,10 @@ export type PosRpcName =
   // Phase H — POS Analytics. ONE server-aggregated report over a bounded date range,
   // gated pos.analytics.view. READ-only; the SAME response drives the dashboard AND PDF.
   | "pos_analytics_summary"
+  // R7 (1.0.36) — End-Shift Approval setting. The getter reads the per-branch requirement
+  // (default TRUE); the setter writes it (gated pos.settings.manage). See lib/pos/shiftApproval.ts.
+  | "pos_end_shift_approval_required"
+  | "pos_shift_approval_set"
   // Customer Receivables / On Account. Two STATE-GUARDED RPCs with NO idempotency
   // key - the same shape as `pos_pay_order` / `pos_pay_table`: the client submits
   // once and recovers a lost response by an authoritative re-read rather than by
@@ -232,7 +247,41 @@ export type PosRpcName =
   | "pos_order_transfer_force"
   | "pos_order_transfer_cancel"
   | "pos_transfer_force_enabled"
-  | "pos_transfer_settings_set";
+  | "pos_transfer_settings_set"
+  // R4 (1.0.36) — Force End Shift (supervised hand-over + finalize). All SECURITY DEFINER,
+  // server-authoritative, OU-scoped. A supervisor (or the cashier themselves) hands a blocked open
+  // shift's UNPAID open orders to a recipient who has exactly one open shift on the branch, the
+  // recipient accepts, then the supervisor finalizes — one atomic txn that re-validates + re-scans
+  // the snapshot, moves the orders, and closes the source via the R7-aware end-shift path.
+  //   `_request`  — supervisor/self starts the hand-over (self → pos.end_own_shift, other →
+  //                 pos.close_other_shifts; PLUS pos.transfers.select_recipient). Isolates paid/
+  //                 part-paid/split orders (FORCE_END_HAS_PAID_ORDERS), snapshots the unpaid open
+  //                 orders + their versions, validates the recipient (active + branch + exactly-one
+  //                 open shift). Payload { shift_id, recipient_user_id, note?, client_op_id? }.
+  //   `_decide`   — the RECIPIENT accepts or rejects; moves no orders. Payload { request_id, accept, reason? }.
+  //   `_cancel`   — the requester (or pos.close_other_shifts) cancels a pending/accepted hand-over.
+  //                 Payload { request_id, reason? }.
+  //   `_finalize` — the supervisor finalizes an ACCEPTED hand-over: locks + re-validates (source open,
+  //                 recipient shift open + belongs to recipient + branch + eligible + exactly-one open
+  //                 shift), re-scans the snapshot (FORCE_END_SNAPSHOT_CHANGED), moves the unpaid orders,
+  //                 closes the source. IDEMPOTENT (a repeat returns the stored close report). Payload
+  //                 { request_id, actual_cash_counted, currency?, delivery_fee_cash_treatment?, notes? }.
+  // Business refusals via pos_op_error: FORCE_END_NOT_ACCEPTED / _SOURCE_NOT_OPEN / _RECIPIENT_SHIFT_CLOSED /
+  // _RECIPIENT_MISMATCH / _RECIPIENT_INELIGIBLE / _RECIPIENT_INACTIVE / _RECIPIENT_SHIFT_AMBIGUOUS /
+  // _SNAPSHOT_CHANGED / _HAS_PAID_ORDERS / _NOT_PENDING / _NOT_CANCELLABLE — mapped to guidance in lib/pos/errors.ts.
+  // The pos_shift_force_close row is read directly under its branch-scoped SELECT RLS (no reader RPC);
+  // the recipient candidate list uses the Force-End-specific reader below (see lib/pos/forceEndShift.ts).
+  | "pos_force_end_shift_request"
+  | "pos_force_end_shift_decide"
+  | "pos_force_end_shift_cancel"
+  | "pos_force_end_shift_finalize"
+  // Force-End recipient picker: active branch members (excluding the caller) with EXACTLY ONE open
+  // shift; caller needs pos.transfers.select_recipient (NOT transfers.create). Matches the request RPC.
+  | "pos_force_end_eligible_recipients"
+  // R4 (1.0.36) — the branch's shifts as a JSON array, for the supervisor Force-End browser (lists
+  // OPEN shifts to hand over). SECURITY DEFINER: seeing OTHER cashiers' shifts needs owner or
+  // pos.view_all_shifts, otherwise only the caller's own — the correct server gate for the browser.
+  | "pos_shifts_list";
 
 /** Raised for any server-side refusal, carrying the server's own wording. */
 export class PosRpcError extends Error {

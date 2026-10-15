@@ -55,10 +55,24 @@ export const POS_PERMISSIONS = {
   // Phase H — POS Analytics. VIEW gates the dashboard (pos_analytics_summary checks it); EXPORT the PDF.
   ANALYTICS_VIEW: "pos.analytics.view",
   ANALYTICS_EXPORT: "pos.analytics.export",
+  // R5 (1.0.36) — independent Owner POS Sales access. DEFAULT OFF; an OWNER must additionally hold
+  // this key to reach POS Sales (pos_analytics_summary re-enforces it server-side). Manager/cashier
+  // are NOT affected (the server gate is guarded by current_user_is_owner()).
+  SALES_OWNER_ACCESS: "pos.sales.owner_access",
   APPLY_DISCOUNTS: "pos.apply_discounts",
   OPEN_SHIFT: "pos.open_shift",
   END_OWN_SHIFT: "pos.end_own_shift",
   APPROVE_SHIFTS: "pos.approve_shifts",
+  // R4 (1.0.36) — Force End Shift. Ending ANOTHER cashier's shift (via the Force-End hand-over) needs
+  // this key; the Force-End RPCs (pos_force_end_shift_request / _finalize) check it for themselves when
+  // the source shift is not the caller's own. DISTINCT from pos.approve_shifts (reviewing a CLOSED shift)
+  // — this authorises force-closing a still-OPEN one. A cashier force-ending their OWN blocked shift needs
+  // only pos.end_own_shift (plus pos.transfers.select_recipient to choose a recipient), exactly as the
+  // request RPC branches on self vs other. DEFAULT-DENY; the server remains authoritative.
+  CLOSE_OTHER_SHIFTS: "pos.close_other_shifts",
+  // R7 (1.0.36) — manage POS settings (incl. the OU End-Shift Approval toggle). Re-enforced
+  // server-side by pos_shift_approval_set; owner/admin by default.
+  SETTINGS_MANAGE: "pos.settings.manage",
   // POS Final W4/W5 (Part 6) — Open-Orders Transfer. Tenant-level keys; the transfer RPCs
   // re-enforce each server-side. Recipient eligibility is TRANSFERS_APPROVE (the "receive"
   // permission). REAPPROVE is the website authorised-user key (W6); CREATE needs both
@@ -148,9 +162,12 @@ export const POS_PERMISSIONS = {
   DELIVERY_SETTLEMENTS_MANAGE: "pos.delivery.settlements.manage",
 } as const;
 
-/** Owners are deliberately not operational POS users - same rule as pos_assert_operator. */
-export function isOperationalRole(role: TenantRole | null | undefined): boolean {
-  return role !== "owner";
+/** POLICY 2026-10-15 (owner-approved): every role (owner included) is eligible to operate POS; the real
+ *  gate is the `pos.access` permission + the `pos` feature (checked by callers below and by
+ *  pos_assert_operator server-side, which no longer blocks owners). Kept as a function so callers read
+ *  unchanged; owners are still bound by active membership + subscription + pos.access + branch/OU authority. */
+export function isOperationalRole(_role: TenantRole | null | undefined): boolean {
+  return true;
 }
 
 function baseEligible(m: PosMembership | null | undefined): boolean {
@@ -252,6 +269,12 @@ export function canManageForceSetting(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.TRANSFERS_MANAGE_FORCE_SETTING), "You do not have permission to manage the force transfer setting.");
 }
 
+/** R7 (1.0.36) — manage the OU End-Shift Approval setting. Server re-enforces pos.settings.manage
+ *  in pos_shift_approval_set; this only offers the control where the server would honour it. */
+export function canManageShiftApproval(ctx: PosAccessContext): Gate {
+  return gate(perm(ctx, POS_PERMISSIONS.SETTINGS_MANAGE), "You do not have permission to manage POS settings.");
+}
+
 export function canApplyDiscounts(ctx: PosAccessContext): Gate {
   return gate(perm(ctx, POS_PERMISSIONS.APPLY_DISCOUNTS), "You do not have permission to apply discounts.");
 }
@@ -322,6 +345,17 @@ export function canExportAnalytics(ctx: PosAccessContext): Gate {
   const view = canViewAnalytics(ctx);
   if (!view.allowed) return view;
   return gate(perm(ctx, POS_PERMISSIONS.ANALYTICS_EXPORT), "You do not have permission to export analytics.");
+}
+
+/**
+ * POLICY 2026-10-15 (owner-approved): owners receive POS Sales/Analytics by DEFAULT. The former
+ * pos.sales.owner_access opt-in is removed here and in the server gate (pos_analytics_summary now
+ * requires only pos.analytics.view). Access is therefore exactly canViewAnalytics — identical for owner,
+ * manager and cashier (active membership + pos feature + pos.analytics.view). Kept as a named export so
+ * nav.ts / Analytics.tsx read unchanged; the pos.sales.owner_access key is now inert (no stored grant removed).
+ */
+export function canViewOwnerSales(ctx: PosAccessContext): Gate {
+  return canViewAnalytics(ctx);
 }
 
 /**
@@ -530,6 +564,46 @@ export function canReviewShift(ctx: PosAccessContext, isOwnShift: boolean): Gate
     return { allowed: false, reason: "You cannot approve your own shift - a manager must review it." };
   }
   return gate(perm(ctx, POS_PERMISSIONS.APPROVE_SHIFTS), "You do not have permission to review shifts.");
+}
+
+/**
+ * R4 (1.0.36) — starting a Force End Shift hand-over (pos_force_end_shift_request).
+ *
+ * Mirrors exactly what the request RPC checks: for the operator's OWN shift, pos.end_own_shift; for
+ * ANOTHER cashier's shift, pos.close_other_shifts. In BOTH cases the requester also needs
+ * pos.transfers.select_recipient to choose the recipient (the RPC re-enforces it). Not a security
+ * boundary — the SECURITY DEFINER RPC re-checks every rule, plus paid-order isolation and recipient
+ * eligibility; this only decides whether the Force-End control is offered. Fail-closed.
+ */
+export function canRequestForceEndShift(ctx: PosAccessContext, isOwnShift: boolean): Gate {
+  const base = isOwnShift
+    ? gate(perm(ctx, POS_PERMISSIONS.END_OWN_SHIFT), "You do not have permission to end your shift.")
+    : gate(
+        perm(ctx, POS_PERMISSIONS.CLOSE_OTHER_SHIFTS),
+        "Only a manager with the close-other-shifts permission can force-end another cashier's shift.",
+      );
+  if (!base.allowed) return base;
+  return gate(
+    perm(ctx, POS_PERMISSIONS.TRANSFERS_SELECT_RECIPIENT),
+    "You do not have permission to choose a recipient for the hand-over.",
+  );
+}
+
+/**
+ * R4 (1.0.36) — finalizing a Force End Shift hand-over (pos_force_end_shift_finalize).
+ *
+ * The finalize RPC checks the SAME self/other shift-close permission as request (self →
+ * pos.end_own_shift, other → pos.close_other_shifts) but NOT select_recipient (the recipient was
+ * already chosen at request time). The server re-validates everything atomically; this only decides
+ * whether the Finalize control is offered. Fail-closed.
+ */
+export function canFinalizeForceEndShift(ctx: PosAccessContext, isOwnShift: boolean): Gate {
+  return isOwnShift
+    ? gate(perm(ctx, POS_PERMISSIONS.END_OWN_SHIFT), "You do not have permission to end your shift.")
+    : gate(
+        perm(ctx, POS_PERMISSIONS.CLOSE_OTHER_SHIFTS),
+        "Only a manager with the close-other-shifts permission can finalize a force-end.",
+      );
 }
 
 // --- Dine-In tables ----------------------------------------------------------

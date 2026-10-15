@@ -52,8 +52,22 @@ export type RefusalKind =
   // Dine-In line edits (1.0.31 Phase 2)
   | "reason_required"
   | "version_conflict"
+  // Merge Tables v3 (1.0.36) — folding partially-paid bills
+  | "merge_unsupported"
+  | "merge_shift_busy"
+  | "merge_cross_shift"
+  | "merge_cross_currency"
+  | "merge_ambiguous_bill"
+  | "merge_primary_empty"
+  | "merge_source_empty"
   // Open-Orders Transfer (Part 6)
   | "transfer_conflict"
+  // Force End Shift (R4 1.0.36)
+  | "force_end_has_paid_orders"
+  | "force_end_snapshot_changed"
+  | "force_end_not_accepted"
+  | "force_end_recipient_ineligible"
+  | "force_end_conflict"
   // Dine-In rounds (Level 2B)
   | "empty_round"
   | "modifier_required"
@@ -71,6 +85,44 @@ export type ClassifiedError = {
   /** Expected refusals are amber guidance; faults are red. */
   expected: boolean;
 };
+
+/**
+ * pos_merge_tables_v3 refuses an ineligible source bill with an UNSUPPORTED_STATE
+ * whose message carries a `reason:` token naming WHY that bill cannot be folded.
+ * Each token maps to one plain sentence a cashier can act on; an unrecognised token
+ * falls back to the server's own wording. These replace the cryptic token the
+ * server sends with guidance, they never override a refusal.
+ */
+export const MERGE_REASON_HINTS: Record<string, string> = {
+  partial_line:
+    "One of the selected tables has a part-paid line. Finish settling or split that bill before merging it in.",
+  combo_partial:
+    "A combo on one of the selected tables is only part paid. Settle it as a whole before merging.",
+  settled_with_adjustments:
+    "A selected bill was settled with adjustments, so it can no longer be folded into another table.",
+  on_account:
+    "A selected bill is on a customer account. Collect or clear the account first — on-account bills are not merged.",
+  consumed:
+    "One of the selected tables was already merged or settled. Reload the floor to see where its bill went.",
+  amount_mismatch:
+    "The amount already paid on a selected table does not match its bill. Reload the floor and review that bill first.",
+  tender_mismatch:
+    "The payments on a selected table do not reconcile with its bill. Review that table before merging.",
+  over_allocation:
+    "A selected table has more paid against it than its bill. Review that payment before merging.",
+  nothing_to_merge:
+    "There is nothing left to merge — the selected tables have no open amount to fold in.",
+  kitchen_active:
+    "A selected table still has items active in the kitchen. Wait for the kitchen, or fire/void them, before merging.",
+  payment_residue:
+    "A selected table has leftover payment that must be resolved before its bill can be merged.",
+};
+
+/** Pull the `reason:` token out of a v3 UNSUPPORTED_STATE merge refusal, if present. */
+export function mergeRefusalReason(message: string): string | null {
+  const m = /\breason:\s*([a-z_]+)/i.exec(message);
+  return m ? m[1].toLowerCase() : null;
+}
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
   // --- Delivery customers (Level 3A). Listed first: several contain words the
@@ -263,6 +315,100 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     hint: "This transfer already moved on. Reload the transfers list to see its current state.",
     expected: true,
   },
+  // --- Force End Shift (R4 1.0.36). Listed BEFORE the generic branch / shift / permission rules
+  // because several messages contain "branch" or "shift" that those rules would otherwise swallow.
+  // These match the server's HUMAN wording (pos_op_error puts the FORCE_END_* code in `detail`, not
+  // in the message the client reads), grouped into one plain next step the operator can act on.
+  {
+    kind: "force_end_not_accepted",
+    test: /recipient has not accepted this hand-over/i,
+    hint: "Wait for the recipient to accept the hand-over, then finalize the force-end.",
+    expected: true,
+  },
+  {
+    kind: "force_end_has_paid_orders",
+    test: /paid or part-paid orders that must be settled or voided before a force-end/i,
+    hint: "Settle, void or refund the paid and part-paid orders first — only fully-unpaid orders can be handed over.",
+    expected: true,
+  },
+  {
+    kind: "force_end_snapshot_changed",
+    test: /open orders changed since the hand-over was requested/i,
+    hint: "The shift's open orders changed. Cancel this hand-over and start a new force-end with the current orders.",
+    expected: true,
+  },
+  {
+    kind: "force_end_recipient_ineligible",
+    test: /recipient (has no |is not |is no longer |can no longer |no longer has |has more than one )|recipient shift (is no longer open|no longer belongs|must differ)/i,
+    hint: "Pick a recipient who is active in this branch and has exactly one open shift, then try again.",
+    expected: true,
+  },
+  {
+    kind: "force_end_conflict",
+    test: /cannot hand orders to yourself/i,
+    hint: "Choose another cashier as the recipient — you cannot hand your own orders to yourself.",
+    expected: true,
+  },
+  {
+    kind: "force_end_conflict",
+    test: /end it normally instead of forcing|no transferable open orders found/i,
+    hint: "This shift has no unpaid open orders to hand over — end it the normal way instead.",
+    expected: true,
+  },
+  {
+    kind: "force_end_conflict",
+    test: /source shift is no longer open|that shift is not open|this hand-over is no longer pending|this hand-over can no longer be cancelled/i,
+    hint: "This hand-over already moved on. Reload the force-end list to see its current state.",
+    expected: true,
+  },
+  // --- Merge Tables v3 (1.0.36). The server raises these when a source bill cannot
+  // be folded into the primary. The UNSUPPORTED_STATE `reason:` tokens are mapped
+  // separately in classifyError via MERGE_REASON_HINTS; the rules here cover the
+  // coded, reason-less refusals. VERSION_CONFLICT is a SEPARATE merge rule (its own
+  // wording and hint) so the dine-in bill / payment-method / transfer version rules
+  // above are left exactly as they were.
+  {
+    kind: "version_conflict",
+    test: /changed since the merge was opened|a table changed since the merge/i,
+    hint: "The floor was reloaded with the latest table state. Review it, then open the merge again.",
+    expected: true,
+  },
+  {
+    kind: "merge_shift_busy",
+    test: /MERGE_SHIFT_BUSY/i,
+    hint: "A table in this merge is being changed on another till right now. Try again in a moment.",
+    expected: true,
+  },
+  {
+    kind: "merge_cross_shift",
+    test: /MERGE_CROSS_SHIFT/i,
+    hint: "These bills belong to different shifts. A bill cannot be merged across two shifts — settle them separately.",
+    expected: true,
+  },
+  {
+    kind: "merge_cross_currency",
+    test: /MERGE_CROSS_CURRENCY/i,
+    hint: "These bills use different currencies. The server will not fold raw USD into raw LBP — settle them separately.",
+    expected: true,
+  },
+  {
+    kind: "merge_ambiguous_bill",
+    test: /MERGE_AMBIGUOUS_BILL/i,
+    hint: "A selected table has more than one open bill, so the merge is ambiguous. Reload the floor and review that table.",
+    expected: true,
+  },
+  {
+    kind: "merge_primary_empty",
+    test: /MERGE_PRIMARY_EMPTY/i,
+    hint: "The table you are merging into has no open bill. Open or seat it first, or merge into a different table.",
+    expected: true,
+  },
+  {
+    kind: "merge_source_empty",
+    test: /MERGE_SOURCE_EMPTY/i,
+    hint: "One of the selected tables has no open bill to merge. Reload the floor and pick an occupied table.",
+    expected: true,
+  },
   // --- Dine-In rounds (Level 2B). These are client-side refusals raised before
   // a request is made, so they are listed first and matched on our own wording.
   {
@@ -416,6 +562,15 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
 export function classifyError(error: unknown): ClassifiedError {
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : "Something went wrong.";
+  // Merge Tables v3: an UNSUPPORTED_STATE refusal carries a `reason:` token naming
+  // WHY a source bill could not be folded. Map it to one plain sentence; an
+  // unrecognised token still shows the server's own message. Guarded so a stray
+  // "reason:" elsewhere is not swallowed: the message must be an UNSUPPORTED_STATE
+  // or the token must be one we recognise.
+  const reason = mergeRefusalReason(message);
+  if (reason && (/unsupported_state/i.test(message) || reason in MERGE_REASON_HINTS)) {
+    return { kind: "merge_unsupported", message, hint: MERGE_REASON_HINTS[reason] ?? null, expected: true };
+  }
   for (const rule of RULES) {
     if (rule.test.test(message)) {
       return { kind: rule.kind, message, hint: rule.hint, expected: rule.expected };

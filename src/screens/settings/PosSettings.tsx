@@ -24,9 +24,10 @@ import { Badge, Button, Card, EmptyState, ErrorState, Input, Skeleton } from "@/
 import { Switch } from "@/components/Switch";
 import { readPosFeatures, writePosFeatures, type PosFeatures } from "@/lib/pos/posFeatures";
 import { usePosContext } from "@/state/pos";
-import { canManageForceSetting, canManagePaymentMethods } from "@/lib/pos/access";
+import { canManageForceSetting, canManagePaymentMethods, canManageShiftApproval } from "@/lib/pos/access";
 import { PaymentMethodsSettings } from "@/components/pos/PaymentMethodsSettings";
 import { ForceTransferSettings } from "@/components/pos/ForceTransferSettings";
+import { EndShiftApprovalSettings } from "@/components/pos/EndShiftApprovalSettings";
 import { configureTables, loadTableMap, tableNamesForCount, validateTableCount } from "@/lib/pos/tables";
 import type { TableMap } from "@/types/tables";
 import { loadServerPrinters, type ServerPrinter } from "@/lib/pos/printerRegistry";
@@ -317,6 +318,17 @@ export function PosSettings() {
         branchId={branchId}
         canManage={canManageForceSetting(pos.access).allowed}
         reason={canManageForceSetting(pos.access).reason}
+      />
+
+      {/* R7 (1.0.36) — OU-scoped End-Shift Approval toggle. Gated on pos.settings.manage
+          (server-enforced by pos_shift_approval_set). Keyed by branch so a branch change REMOUNTS
+          it with fresh state — the OU-isolation guarantee for this toggle. Default OFF (switch)
+          = approval required = today's behaviour. */}
+      <EndShiftApprovalSettings
+        key={`esa-${branchId ?? "no-branch"}`}
+        branchId={branchId}
+        canManage={canManageShiftApproval(pos.access).allowed}
+        reason={canManageShiftApproval(pos.access).reason}
       />
 
       {/* --- branch-wide ------------------------------------------------- */}

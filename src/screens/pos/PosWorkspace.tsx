@@ -35,6 +35,9 @@ import { EndShiftDialog, OpenShiftDialog, ShiftReportDialog } from "@/components
 import { TransferDialog } from "@/components/pos/TransferDialog";
 import { PendingTransfersBanner } from "@/components/pos/PendingTransfersBanner";
 import { TransferCenterModal } from "@/components/pos/TransferCenterModal";
+import { ForceEndShiftModal } from "@/components/pos/ForceEndShiftModal";
+import { ForceEndShiftBrowser } from "@/components/pos/ForceEndShiftBrowser";
+import { ForceEndIncomingBanner } from "@/components/pos/ForceEndIncomingBanner";
 import { ReceiptModal } from "@/screens/pos/ReceiptPreview";
 import { KitchenTicketLayer } from "@/screens/pos/KitchenTicketPreview";
 import { Modal } from "@/components/overlays";
@@ -75,6 +78,7 @@ import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
 import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
+import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import type { DiscountType } from "@/lib/pos/discounts";
 import { getShiftExpected } from "@/lib/pos/shifts";
 import { classifyError } from "@/lib/pos/errors";
@@ -86,7 +90,7 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canApproveTransfer, canCreateTransfer, canForceTransfer, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
+import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { useCustomers } from "@/state/customers";
@@ -560,6 +564,11 @@ function PosWorkspaceInner() {
   const [openTablesOpen, setOpenTablesOpen] = useState(false);
   // Desktop 1.0.35 (B2) — the Transfer Center surface, opened from the "Transfer" rail entry.
   const [transferCenterOpen, setTransferCenterOpen] = useState(false);
+  // R4 (1.0.36) — the Force End Shift surface, opened from the blocked End-Shift dialog.
+  const [forceEndOpen, setForceEndOpen] = useState(false);
+  // R4 (1.0.36) — the supervisor Force-End-a-shift browser (another cashier's stuck shift), opened
+  // from the "Force-End" rail entry (gated on pos.close_other_shifts + select_recipient).
+  const [forceEndBrowserOpen, setForceEndBrowserOpen] = useState(false);
   // Best-effort section names from the PUBLISHED floor for the Open Tables list.
   // Open Tables never DEPENDS on the floor: an empty map just means no section.
   const [openTableSections, setOpenTableSections] = useState<Map<string, string>>(new Map());
@@ -938,6 +947,13 @@ function PosWorkspaceInner() {
     canForceTransfer(pos.access).allowed ||
     canApproveTransfer(pos.access).allowed ||
     canViewTransfers(pos.access).allowed;
+  // R4 (1.0.36) — Force End Shift gates. The SELF variants (isOwnShift = true) gate the own-shift path
+  // reached from the blocked End-Shift dialog, matching the request/finalize RPCs.
+  const forceEndRequestGate = canRequestForceEndShift(pos.access, true);
+  const forceEndFinalizeGate = canFinalizeForceEndShift(pos.access, true);
+  // The supervisor Force-End browser (another cashier's stuck shift) is gated on the OTHER variant
+  // (close_other_shifts + select_recipient). Fail-closed: without it the rail entry is not shown.
+  const forceEndBrowserAllowed = canRequestForceEndShift(pos.access, false).allowed;
   const tableStore = useTables();
   // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
   // The rail count is derived from state already in memory - no fetch of its own.
@@ -1211,6 +1227,21 @@ function PosWorkspaceInner() {
     // Back to the draft panel: "new order" means the thing being built now.
     setViewingSavedOrder(false);
   }, [cart]);
+
+  // When an all-branches operator switches the operational branch, the per-branch menu re-fetches, so an
+  // UNSENT cart built against the previous branch must not carry across — otherwise items/prices resolved for
+  // one branch could be submitted under another. A server-ACCEPTED unpaid order is deliberately NOT dropped
+  // (dropping its reference is what once made an order uncollectable); it stays for the operator to resolve.
+  // Guarded by a ref so this never fires on the initial branch resolution, only on a genuine change.
+  const prevOperationalBranchRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevOperationalBranchRef.current;
+    const next = pos.branch.id;
+    prevOperationalBranchRef.current = next;
+    if (prev && next && prev !== next && !useCart.getState().savedOrder) {
+      newOrder();
+    }
+  }, [pos.branch.id, newOrder]);
 
   /**
    * Create the order if it does not exist yet, reusing the SAME client_op_id for
@@ -2177,6 +2208,22 @@ function PosWorkspaceInner() {
       active: transferCenterOpen,
       onSelect: () => setTransferCenterOpen(true),
     },
+    ...(forceEndBrowserAllowed
+      ? [
+          {
+            // R4 (1.0.36) — supervisor Force-End browser. Lists the branch's OPEN shifts and force-ends
+            // another cashier's stuck shift. Gated on pos.close_other_shifts + select_recipient; the
+            // server (and pos_shifts_list's own owner/view_all_shifts gate) re-enforce everything.
+            key: "force_end",
+            label: "Force-End",
+            icon: "clock" as const,
+            to: "/pos",
+            enabled: true,
+            active: forceEndBrowserOpen,
+            onSelect: () => setForceEndBrowserOpen(true),
+          },
+        ]
+      : []),
     {
       // The EXISTING orders workspace, given the rail entry the approved design
       // puts it in. It opens the same modal the status bar used to, with the
@@ -2245,6 +2292,10 @@ function PosWorkspaceInner() {
           <PosStatusBar
             tenantName={pos.tenantName}
             branchName={pos.branch.name}
+            allBranches={pos.allBranches}
+            branchId={pos.branch.id}
+            branchOptions={pos.branchOptions}
+            onSelectBranch={pos.setOperationalBranch}
             operatorName={pos.userName}
             roleLabel={roleLabel(pos.role)}
             shift={shiftStore.shift}
@@ -2658,6 +2709,19 @@ function PosWorkspaceInner() {
         </div>
       </Modal>
 
+      {/* R6 (1.0.36): the on-account customer picker's verify-and-link prompt. Driven by the
+          picker's exposed conflict surface so a same-OU phone clash is operator-verified, never
+          silently linked. */}
+      <CustomerConflictDialog
+        open={customerPicker.conflict.open}
+        existingName={customerPicker.conflict.existingName}
+        incomingName={customerPicker.conflict.incomingName}
+        saving={customerPicker.conflict.saving}
+        error={customerPicker.conflict.error}
+        onUseExisting={customerPicker.conflict.onUseExisting}
+        onClose={customerPicker.conflict.onCancel}
+      />
+
       <ModifierDialog
         open={Boolean(pickerItem)}
         item={pickerItem?.item ?? null}
@@ -2705,6 +2769,13 @@ function PosWorkspaceInner() {
             : (cart.savedOrder?.order_number ?? null)
         }
         error={payError}
+        onAccountDisabledReason={
+          pos.gates.takeOnAccount.allowed && online
+            ? null
+            : !pos.gates.takeOnAccount.allowed
+              ? pos.gates.takeOnAccount.reason
+              : "On-account sales need an internet connection."
+        }
         onAccount={
           pos.gates.takeOnAccount.allowed && online
             ? {
@@ -2748,6 +2819,14 @@ function PosWorkspaceInner() {
               }
             : undefined
         }
+        onForceEndShift={
+          endShiftBlocked && forceEndRequestGate.allowed
+            ? () => {
+                setEndShiftOpen(false);
+                setForceEndOpen(true);
+              }
+            : undefined
+        }
       />
 
       {/* POS Final W5 (Part 6) — sender's Transfer flow, opened from the blocked End-Shift dialog. */}
@@ -2770,10 +2849,19 @@ function PosWorkspaceInner() {
       {/* POS Final W5 (Part 6) — incoming transfers to this operator, shown on Open Shift (§6.7).
           Fixed, top-centered, below modals; self-hides when there is no open shift or nothing pending. */}
       <div className="pointer-events-none fixed inset-x-0 top-2 z-40 flex justify-center px-4">
-        <div className="pointer-events-auto w-full max-w-2xl">
+        <div className="pointer-events-auto w-full max-w-2xl space-y-2">
           <PendingTransfersBanner
             openShiftId={shiftId}
             onApproved={() => {
+              void refreshShiftOrders();
+              void shiftStore.refreshCashBox();
+              void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+            }}
+          />
+          {/* R4 (1.0.36) — Force End Shift hand-overs addressed to this operator (accept/reject). */}
+          <ForceEndIncomingBanner
+            userId={pos.userId}
+            onAccepted={() => {
               void refreshShiftOrders();
               void shiftStore.refreshCashBox();
               void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
@@ -2790,6 +2878,52 @@ function PosWorkspaceInner() {
         userId={pos.userId}
         access={pos.access}
         onClose={() => setTransferCenterOpen(false)}
+        onChanged={() => {
+          void refreshShiftOrders();
+          void shiftStore.refreshCashBox();
+          void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+        }}
+      />
+
+      {/* R4 (1.0.36) — Force End Shift: hand this shift's open orders to a colleague, then finalize
+          to close it. Opened from the blocked End-Shift dialog; self-shift only on the desktop. */}
+      <ForceEndShiftModal
+        open={forceEndOpen}
+        shiftId={shiftId}
+        branchId={pos.branch.id}
+        userId={pos.userId}
+        currency={currency}
+        requestGate={forceEndRequestGate}
+        finalizeGate={forceEndFinalizeGate}
+        onClose={() => setForceEndOpen(false)}
+        onChanged={() => {
+          void refreshShiftOrders();
+          void shiftStore.refreshCashBox();
+        }}
+        onFinalized={(result) => {
+          setForceEndOpen(false);
+          // The source shift (this operator's own) is now closed server-side — re-read so the UI
+          // reflects "no open shift" rather than a stale open one, and drop the local cart/order view.
+          if (tenantId && userId) void shiftStore.refresh(tenantId, userId, pos.branch.id);
+          newOrder();
+          void useTables.getState().refresh({ tenantId, branchId: pos.branch.id });
+          toast.push({
+            tone: "success",
+            message: `Shift force-ended — ${result.ordersMoved} order${result.ordersMoved === 1 ? "" : "s"} moved to the recipient.`,
+            detail: "The shift was closed and sent for manager review.",
+          });
+        }}
+      />
+
+      {/* R4 (1.0.36) — supervisor Force-End browser: list the branch's open shifts and force-end
+          ANOTHER cashier's stuck shift (isOwnShift = false inside). Gated on pos.close_other_shifts. */}
+      <ForceEndShiftBrowser
+        open={forceEndBrowserOpen}
+        branchId={pos.branch.id}
+        userId={pos.userId}
+        currency={currency}
+        access={pos.access}
+        onClose={() => setForceEndBrowserOpen(false)}
         onChanged={() => {
           void refreshShiftOrders();
           void shiftStore.refreshCashBox();

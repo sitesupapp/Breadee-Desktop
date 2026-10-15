@@ -38,6 +38,13 @@ export type TableSummary = {
   opened_at: string | null;
   /** Bill total. NULL when the server refuses to sum mixed currencies. */
   total: number | null;
+  /** 1.0.36 (migration r3_table_map_collected_outstanding) — amount already collected on this table's
+   *  open bill via PAID split settlements (partially-paid bills), and the remaining outstanding
+   *  (total − collected). Both NULL when the server refuses to sum mixed currencies. collected is 0 for
+   *  an ordinary fully-unpaid bill. Surfaced in the Merge dialog so a part-paid source shows what has
+   *  been paid and what is still owed, and the merge summary totals the outstanding correctly. */
+  collected: number | null;
+  outstanding: number | null;
   currency: CurrencyCode | null;
   /** True when the table's open orders span more than one currency snapshot. */
   mixed_currency: boolean;
@@ -46,6 +53,12 @@ export type TableSummary = {
    *  Optional so geometry-only previews need not supply it; the pos_table_map
    *  parser always sets it, and consumers default it to []. */
   merged_sources?: string[];
+  /** 1.0.36 (migration 20261013200551) — the table's optimistic-concurrency token,
+   *  returned on every pos_table_map row. Used to build the `expected` version map
+   *  sent to pos_merge_tables_v3 so a stale merge dialog is refused with
+   *  VERSION_CONFLICT. Defaults to 0 when an older server omits it (the parser
+   *  falls back to 0, and 0 is treated as "unknown" and never asserted). */
+  pos_entity_version: number;
 };
 
 /** The full `pos_table_map` response, including its aggregate counters. */

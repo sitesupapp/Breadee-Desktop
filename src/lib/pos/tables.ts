@@ -55,11 +55,18 @@ function toTable(raw: unknown): TableSummary | null {
     opened_at: strOrNull(r.opened_at),
     // Null is meaningful: the server refuses to sum a mixed-currency bill.
     total: numOrNull(r.total),
+    // 1.0.36: partially-paid breakdown (PAID split settlements vs remaining). numOrNull leaves them
+    // null on an older server / mixed currency; a fully-unpaid bill reports collected 0.
+    collected: numOrNull(r.collected),
+    outstanding: numOrNull(r.outstanding),
     currency: toCurrency(r.currency),
     mixed_currency: bool(r.mixed_currency),
     merged_sources: Array.isArray(r.merged_sources)
       ? (r.merged_sources as unknown[]).map((x) => str(x)).filter((s) => s !== "")
       : [],
+    // 1.0.36 (migration 20261013200551): optimistic-concurrency token for the
+    // merge stale-dialog guard. num() defaults to 0 when an older server omits it.
+    pos_entity_version: num(r.pos_entity_version),
   };
 }
 
