@@ -227,6 +227,8 @@ export interface DineDraft {
   section_id: string | null;
   table_id: string; // canonical table id (from the cached map/floor) for configured tables
   table_name: string;
+  /** Operational currency captured at open (display only for the local provisional bill). */
+  currency: string;
   /** The dinein_open_table op that establishes/occupies the table. */
   open_operation_id: string;
   /** Resolved once round 1 syncs — the session's canonical server order; rounds >=2 pin it. */

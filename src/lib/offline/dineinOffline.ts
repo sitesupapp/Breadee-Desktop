@@ -20,6 +20,9 @@ import {
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
+import type { CartLine, SelectedModifier } from "@/types/pos";
+import type { CurrencyCode } from "@/lib/currency";
+import { type TableBill, type BillLine, type BillOrder } from "@/types/tables";
 
 const nid = () => crypto.randomUUID();
 
@@ -112,6 +115,7 @@ export async function openTableOffline(args: {
   tableId: string; // canonical table id (configured tables) — known from the cached map/floor
   tableName: string;
   seats: number | null;
+  currency: string;
   floorId?: string | null;
   sectionId?: string | null;
   origin?: "offline" | "online";
@@ -151,6 +155,7 @@ export async function openTableOffline(args: {
     section_id: args.sectionId ?? null,
     table_id: args.tableId,
     table_name: args.tableName,
+    currency: args.currency,
     open_operation_id: openOpId,
     canonical_order_id: null,
     origin: args.origin ?? "offline",
@@ -331,4 +336,109 @@ export async function reconcileDineDraftsFromOperations(): Promise<void> {
       await localdb.dineDrafts.update(d.local_session_id, { canonical_order_id: op.canonical_entity_id, updated_at: new Date().toISOString() });
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// UI adapters — map the cart/draft to the shapes the live Dine-In UI already uses,
+// so the existing components render offline with NO change to the components.
+// ---------------------------------------------------------------------------
+
+/** Map a live cart line to a draft line (captured prices preserved). */
+export function draftLineFromCart(c: CartLine): Omit<DineDraftLine, "line_id" | "sent_round"> & { line_id: string } {
+  return {
+    line_id: c.key,
+    menu_item_id: c.menu_item_id,
+    name: c.name,
+    base_price: c.base_price,
+    quantity: c.quantity,
+    kitchen_note: c.kitchen_note,
+    modifiers: (c.modifiers as SelectedModifier[]).map((m) => ({
+      group_id: (m as { group_id?: string | null }).group_id ?? null,
+      option_id: (m as { option_id?: string | null }).option_id ?? null,
+      name: m.name,
+      price_delta: (m as { price_delta?: number }).price_delta ?? 0,
+      quantity: (m as { quantity?: number }).quantity ?? 1,
+    })),
+    ...(c.removed_ingredients && c.removed_ingredients.length > 0 ? { customization_json: { removed_menu_ingredients: c.removed_ingredients } } : {}),
+  };
+}
+
+/**
+ * A PROVISIONAL local TableBill derived from a draft's SENT rounds, so the existing bill
+ * panel / check-bill render offline from the local projection. It is explicitly provisional:
+ * the order number is the canonical one once resolved, else a local "OFFLINE" marker, and
+ * the authoritative bill (with server modifiers/finance) replaces it on reconnect. Modifiers
+ * are folded into the unit price (shown as a total), not itemised, in this provisional view.
+ */
+export function billFromDraft(draft: DineDraft): TableBill {
+  const sent = draft.lines.filter((l) => l.sent_round !== null);
+  const ccy = draft.currency as CurrencyCode;
+  const lines: BillLine[] = sent.map((l) => {
+    const modTotal = l.modifiers.reduce((s, m) => s + m.price_delta * m.quantity, 0);
+    const unit = l.base_price + modTotal;
+    return {
+      id: l.line_id,
+      menu_item_id: l.menu_item_id,
+      name: l.name,
+      quantity: l.quantity,
+      base_price: l.base_price,
+      modifiers_total: modTotal,
+      final_unit_price: unit,
+      line_total: unit * l.quantity,
+      kitchen_note: l.kitchen_note,
+      batch_no: l.sent_round ?? 1,
+      modifiers: [],
+    };
+  });
+  const subtotal = lines.reduce((s, l) => s + l.line_total, 0);
+  const order: BillOrder = {
+    id: draft.canonical_order_id ?? draft.local_session_id,
+    order_number: draft.canonical_order_id ? "" : "OFFLINE",
+    status: "sent_to_kitchen",
+    payment_status: "unpaid",
+    pos_entity_version: 0,
+    shift_id: null,
+    branch_id: draft.branch_id,
+    tenant_id: draft.tenant_id,
+    subtotal,
+    discount_amount: 0,
+    total_amount: subtotal,
+    currency: ccy,
+    exchange_rate: null,
+    created_at: draft.created_at,
+    lines,
+  };
+  return {
+    tableId: draft.table_id,
+    orders: lines.length > 0 ? [order] : [],
+    subtotal: lines.length > 0 ? subtotal : null,
+    total: lines.length > 0 ? subtotal : null,
+    currency: lines.length > 0 ? ccy : null,
+    mixedCurrency: false,
+    splitShift: false,
+    batches: Array.from(new Set(sent.map((l) => l.sent_round ?? 1))).sort((a, b) => a - b),
+  };
+}
+
+/** Find the OPEN local session for a table in the given scope (offline bill/selection). */
+export async function getDineDraftForTable(scope: {
+  tenantId: string | null;
+  branchId: string | null;
+  cashierUserId: string | null;
+  deviceId: string | null;
+  terminalId?: string | null;
+}, tableId: string): Promise<DineDraft | null> {
+  if (!scope.tenantId || !tableId) return null;
+  const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
+  return (
+    all.find(
+      (d) =>
+        d.table_id === tableId &&
+        d.status === "open" &&
+        (d.branch_id ?? null) === (scope.branchId ?? null) &&
+        d.cashier_user_id === scope.cashierUserId &&
+        d.device_id === scope.deviceId &&
+        (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
+    ) ?? null
+  );
 }
