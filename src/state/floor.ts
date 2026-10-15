@@ -15,6 +15,7 @@ import { create } from "zustand";
 import { EMPTY_FLOOR_LAYOUT, loadFloorLayout, type FloorLayout } from "@/lib/pos/floor";
 import { resolveActiveSection } from "@/lib/pos/floorSections";
 import type { Transform } from "@/lib/pos/floorGeometry";
+import { cacheFloor, readCachedFloor } from "@/lib/offline/db";
 
 /** How long a loaded floor is considered fresh before a sensible re-fetch. */
 export const FLOOR_STALE_AFTER_MS = 60_000;
@@ -30,6 +31,8 @@ type FloorState = {
   loading: boolean;
   refreshing: boolean;
   error: string | null;
+  /** True when the rendered layout came from the offline cache (backend unreachable). */
+  offline: boolean;
   lastLoadedAt: number | null;
   context: Context;
 
@@ -50,6 +53,7 @@ export const useFloor = create<FloorState>((set, get) => ({
   loading: false,
   refreshing: false,
   error: null,
+  offline: false,
   lastLoadedAt: null,
   context: { tenantId: null, branchId: null },
 
@@ -78,9 +82,34 @@ export const useFloor = create<FloorState>((set, get) => ({
         context: ctx,
         loading: false,
         refreshing: false,
+        offline: false,
         lastLoadedAt: Date.now(),
       });
+      // Write-through cache so the floor stays renderable offline. Fire-and-forget; a
+      // cache-write failure must never affect the (successful) online load.
+      void cacheFloor(layout, ctx.tenantId, ctx.branchId);
     } catch (e) {
+      // OFFLINE FALLBACK: the backend was unreachable. Render the last hydrated floor from
+      // the cache instead of an error, so the Floor Map stays active offline. Only this
+      // (failure) branch changes; the online success path above is unchanged.
+      const cached = await readCachedFloor(ctx.tenantId, ctx.branchId).catch(() => null);
+      const cachedLayout = cached?.layout as FloorLayout | undefined;
+      if (cachedLayout && cachedLayout.sections) {
+        const nextActive = resolveActiveSection(cachedLayout.sections, get().activeSectionId);
+        const activeChanged = nextActive !== get().activeSectionId;
+        set({
+          layout: cachedLayout,
+          activeSectionId: nextActive,
+          transform: activeChanged ? null : get().transform,
+          context: ctx,
+          loading: false,
+          refreshing: false,
+          offline: true,
+          error: null,
+          lastLoadedAt: Date.now(),
+        });
+        return;
+      }
       set({
         loading: false,
         refreshing: false,
@@ -107,6 +136,7 @@ export const useFloor = create<FloorState>((set, get) => ({
       loading: false,
       refreshing: false,
       error: null,
+      offline: false,
       lastLoadedAt: null,
       context: { tenantId: null, branchId: null },
     }),
