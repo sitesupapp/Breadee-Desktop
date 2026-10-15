@@ -1,4 +1,7 @@
 import Dexie, { type Table } from "dexie";
+import type { OfflineOperation } from "@/lib/offline/operationLog";
+import type { EntityMapping } from "@/lib/offline/entityMap";
+import type { SyncHistoryEvent } from "@/lib/offline/syncHistory";
 
 // Local offline store. Holds ONLY required operational data + a durable outbox of
 // actions to sync. No raw passwords, no secrets, no service keys. Snapshots are
@@ -178,6 +181,13 @@ class BreadeeDB extends Dexie {
   posCustomers!: Table<CachedCustomer, string>;
   // Added in schema version 4 (see below). Keyed by local_shift_id.
   pendingShifts!: Table<PendingShift, string>;
+  // Phase B (schema version 5). The generalized offline operation log — the single
+  // durable queue the one orchestrator drains. Keyed by operation_id.
+  operations!: Table<OfflineOperation, string>;
+  // Phase B (v5). Durable local->canonical entity-id map. Keyed by local_entity_id.
+  entityMap!: Table<EntityMapping, string>;
+  // Phase B (v5). Durable operator-facing sync history. Keyed by ++id.
+  syncHistory!: Table<SyncHistoryEvent, number>;
 
   constructor() {
     super("breadee-desktop");
@@ -205,6 +215,17 @@ class BreadeeDB extends Dexie {
     // v1/v2/v3 database upgrades in place with all data preserved.
     this.version(4).stores({
       pendingShifts: "local_shift_id, client_op_id, tenant_id, branch_id, status, cashier_user_id, opened_at",
+    });
+    // Version 5 - Phase B, ADDITIVE. Adds the generalized operation log, the generic
+    // entity-id map, and the durable sync-history store. Every prior store carries
+    // forward UNTOUCHED; a v1..v4 database upgrades in place with all data preserved.
+    // The content migration of pendingShifts/posOfflineTxns INTO `operations` is a
+    // controlled, crash-resumable, idempotent step run explicitly (see migration.ts) —
+    // NOT a Dexie upgrade function — so it can verify counts and be rollback-safe.
+    this.version(5).stores({
+      operations: "operation_id, status, operation_type, created_at, client_op_id, local_entity_id",
+      entityMap: "local_entity_id, entity_type, tenant_id",
+      syncHistory: "++id, operation_id, tenant_id, branch_id, at, status",
     });
   }
 }

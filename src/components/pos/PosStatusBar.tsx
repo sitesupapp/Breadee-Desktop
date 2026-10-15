@@ -17,6 +17,7 @@ import { Badge, Button, StatusDot, cn } from "@/components/ui";
 import { CASH_CONTRACT_CURRENCY, formatMoney, type CurrencyCode } from "@/lib/currency";
 import { elapsedSince } from "@/lib/pos/shifts";
 import { TopBarPopover } from "@/components/pos/TopBarPopover";
+import { SyncCenter } from "@/components/pos/SyncCenter";
 import { orderLifecycleLabel, orderLifecycleTone, orderRouteLabel, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { ActiveShift, CashBox } from "@/types/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -27,6 +28,8 @@ export type PosStatusBarProps = {
   // R5 policy: an all-branches operator (owner/admin) picks which branch this POS session operates in.
   // When set, the branch label becomes a selector; shifts/orders then use the chosen branch.
   allBranches?: boolean;
+  /** Active tenant — scopes the Sync Center's history/summary to this tenant. */
+  tenantId?: string | null;
   branchId?: string | null;
   branchOptions?: { id: string; name: string }[];
   onSelectBranch?: (branchId: string) => void;
@@ -287,6 +290,10 @@ export function PosStatusBar(props: PosStatusBarProps) {
             No internet
           </Badge>
         )}
+        {/* Sync Center — opens the durable offline history (what synced, what is
+            pending, what needs attention). Additive: the "to sync" badge above is the
+            at-a-glance count; this chip is the gateway to the detail. */}
+        {!compact && props.tenantId && <SyncCenter tenantId={props.tenantId} branchId={props.branchId ?? null} />}
         {!compact && (
           <span className="w-14 text-right text-xs font-semibold text-sub">
             {now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}

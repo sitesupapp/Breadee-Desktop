@@ -327,7 +327,7 @@ function PosWorkspaceInner() {
         },
         sync: (c) =>
           syncPosTxns(
-            { tenantId: c.tenantId, branchId: c.branchId, cashierUserId: c.userId, deviceId: getDeviceIdentity().device_id, online: true },
+            { tenantId: c.tenantId, branchId: c.branchId, cashierUserId: c.userId, deviceId: getDeviceIdentity().device_id, terminalId: getDeviceIdentity().terminal_id, online: true },
             trigger,
           ).then(() => undefined),
         refreshQueue: async (c, isCurrent) => {
@@ -2278,6 +2278,7 @@ function PosWorkspaceInner() {
             tenantName={pos.tenantName}
             branchName={pos.branch.name}
             allBranches={pos.allBranches}
+            tenantId={tenantId}
             branchId={pos.branch.id}
             branchOptions={pos.branchOptions}
             onSelectBranch={pos.setOperationalBranch}

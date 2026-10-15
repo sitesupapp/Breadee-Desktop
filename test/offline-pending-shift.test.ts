@@ -20,6 +20,7 @@ import {
 } from "@/lib/offline/db";
 import { createLocalPendingShift, pendingShiftToActiveShift } from "@/lib/offline/pendingShift";
 import { syncPosTxns, type PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
+import { __resetDrainLockForTests } from "@/lib/offline/orchestrator";
 
 // device.ts reads localStorage; a Map shim keeps createLocalPendingShift pure here.
 class MemStorage {
@@ -97,6 +98,12 @@ function deps(c: Counters, over: Partial<PosTxnSyncDeps> = {}): PosTxnSyncDeps {
 beforeEach(async () => {
   await localdb.posOfflineTxns.clear();
   await localdb.pendingShifts.clear();
+  // Phase B: the drain now flows through the generalized operation log. Clear its stores
+  // and release the single-flight lock between cases so no state leaks across tests.
+  await localdb.operations.clear();
+  await localdb.entityMap.clear();
+  await localdb.syncHistory.clear();
+  __resetDrainLockForTests();
 });
 
 test("createLocalPendingShift persists; it projects to an OPEN ActiveShift usable by POS", async () => {
@@ -254,8 +261,11 @@ test("a dependent order whose pending shift is out of scope is parked, never ope
   const report = await syncPosTxns(ctx, "reconnect", deps(c));
   assert.equal(c.opens, 0, "scope mismatch must not open the shift");
   assert.equal(c.submits, 0, "and must not submit the order against a foreign shift");
+  // The out-of-scope shift is deferred (not ours to open here); the in-scope order
+  // whose only prerequisite is that foreign-scope shift fails CLOSED to needs_attention
+  // (a cross-context dependency can never resolve) — it is never submitted.
   assert.equal(report.needsAttention.length, 1);
-  assert.equal(report.needsAttention[0].reason, "shift_scope_mismatch");
+  assert.equal(report.needsAttention[0].reason, "dependency_failed");
   assert.equal((await localdb.posOfflineTxns.toArray())[0].status, "needs_attention");
 });
 
@@ -319,7 +329,9 @@ test("an already-synced pending shift is STILL rejected on a device/OU mismatch 
   assert.equal(c.submits, 0, "a foreign synced shift id is never submitted");
   assert.ok(!c.submittedShiftIds.includes("LEAK-SRV"), "the foreign canonical id never leaks into replay");
   assert.equal(report.needsAttention.length, 1);
-  assert.equal(report.needsAttention[0].reason, "shift_scope_mismatch");
+  // The dependency scope-guard fails closed: a prerequisite in another scope (even an
+  // already-synced one) can never satisfy a dependent — no cross-context canonical leak.
+  assert.equal(report.needsAttention[0].reason, "dependency_failed");
 });
 
 test("post-switch context: replay under a NEW branch/OU never opens or submits the old OU's work", async () => {
@@ -333,7 +345,10 @@ test("post-switch context: replay under a NEW branch/OU never opens or submits t
   const report = await syncPosTxns(b2ctx, "backend-returned", deps(c));
   assert.equal(c.opens, 0, "the b1 shift is not opened under the b2 context");
   assert.equal(c.submits, 0, "the b1 sale is not submitted under the b2 context");
-  assert.deepEqual(report.deferred, [(await localdb.posOfflineTxns.toArray())[0].local_txn_id], "the b1 sale is deferred, not parked");
+  // Both the b1 shift op and the b1 sale op are out of the b2 scope → deferred (never run).
+  const txnLocal = (await localdb.posOfflineTxns.toArray())[0].local_txn_id;
+  assert.ok(report.deferred.includes(txnLocal), "the b1 sale is deferred, not parked");
+  assert.ok(report.deferred.includes("L-b1"), "the b1 shift is deferred too");
   assert.equal((await getPendingShift("L-b1"))?.status, "pending_sync", "the b1 shift is left intact for its own context");
 });
 

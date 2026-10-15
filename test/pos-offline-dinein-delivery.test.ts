@@ -10,6 +10,19 @@
 import "fake-indexeddb/auto";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+
+// The Phase-B replay adapter stages legacy rows through the migration, which stamps the
+// device identity (localStorage-backed) — the same global the browser/Tauri webview always
+// provides in production. Supply it so the one-drainer path runs exactly as it ships.
+class MemStorage {
+  private m = new Map<string, string>();
+  getItem(k: string) { return this.m.has(k) ? (this.m.get(k) as string) : null; }
+  setItem(k: string, v: string) { this.m.set(k, String(v)); }
+  removeItem(k: string) { this.m.delete(k); }
+  clear() { this.m.clear(); }
+}
+(globalThis as unknown as { localStorage: MemStorage }).localStorage = new MemStorage();
+
 import {
   localdb,
   cacheTableMap,
@@ -36,10 +49,13 @@ import {
 import { SEARCH_LIMIT } from "@/lib/pos/customers";
 import { buildDeliveryPayload } from "@/lib/pos/deliveryOrder";
 import { syncPosTxns, type PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
+import { __resetDrainLockForTests } from "@/lib/offline/orchestrator";
 import type { CartLine } from "@/types/pos";
 
 const scope: CustomerScope = { tenantId: "t1", branchId: "b1" };
-const ctx = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", online: true };
+// deviceId matches the seeded txns' device ("dev1"): the Phase-B engine scopes replay to
+// the exact tenant+branch+cashier+device, exactly as production supplies it.
+const ctx = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", online: true };
 
 const cust = (over: Partial<CachedCustomer> = {}): CachedCustomer => ({
   id: over.id ?? "c1",
@@ -142,6 +158,12 @@ beforeEach(async () => {
   await localdb.posOfflineTxns.clear();
   await localdb.posCustomers.clear();
   await localdb.snapshots.clear();
+  // Phase-B generalized log is the replay source now: isolate it between cases so one
+  // test's migrated ops never leak into the next (and reset the module single-flight lock).
+  await localdb.operations.clear();
+  await localdb.entityMap.clear();
+  await localdb.syncHistory.clear();
+  __resetDrainLockForTests();
 });
 
 // === A. Dine-In table map cache (READ continuity) ============================
