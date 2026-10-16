@@ -1,0 +1,43 @@
+name: desktop-1036-updater-kit
+
+# Assembles the disposable-QA-VM updater test kit into ONE verifiable artifact:
+# one-click setup script + QA manifest + README + the EXACT signed 1.0.36 installer/.sig
+# + SHA256SUMS. Scans for production secrets (fails if any). No channel changes.
+on:
+  push:
+    branches: [ "ci/desktop-1036-updater-kit" ]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: "38817031890"
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: ci/desktop-1036-updater-kit }
+      - name: Assemble kit
+        run: |
+          set -e
+          mkdir -p out
+          cp kit/qa_oneclick_test.ps1 kit/qa_latest.json kit/QA_UPDATER_TEST.md out/
+          gh run download "$RUN_ID" -R sitesupapp/Breadee-Desktop -n breadee-desktop-1.0.36-signed-unpublished -D dl
+          cp "dl/Breadee_1.0.36_x64-setup.exe" out/
+          cp "dl/Breadee_1.0.36_x64-setup.exe.sig" out/
+          ( cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt )
+      - name: Secret scan (fail if any production secret present)
+        run: |
+          set -e
+          # the word "password" appears only in human login instructions / a LOCAL cert passphrase ('qa') - both fine.
+          if grep -rIlE '(-----BEGIN [A-Z ]*PRIVATE KEY-----|OPENAI_API_KEY|SUPABASE_SERVICE_ROLE|service_role.*eyJ|TAURI_SIGNING_PRIVATE_KEY *= *[^ ]|sk-[A-Za-z0-9]{20})' out; then
+            echo "::error::possible production secret in kit"; exit 1; fi
+          echo "secret scan: clean (public signature + local 'qa' cert passphrase only)"
+      - name: Upload kit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: breadee-1036-updater-test-kit
+          path: out/**
+          if-no-files-found: error
