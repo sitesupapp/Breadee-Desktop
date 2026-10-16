@@ -1,0 +1,134 @@
+name: desktop-1036-updater-autotest
+
+# Automated, ISOLATED in-app updater test on an EPHEMERAL Windows runner.
+# Installs the UNMODIFIED production 1.0.35, redirects the baked updater endpoint to a
+# local trusted-TLS server serving the verified 1.0.36 manifest+installer, launches the
+# real app, and captures its real updater behaviour (manifest fetch, and - best effort -
+# download/install/relaunch). Zero fleet exposure; the runner is destroyed after.
+on:
+  push:
+    branches: [ "ci/desktop-1036-updater-autotest" ]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  autotest:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: "38817031890"
+      HOST: raw.githubusercontent.com
+      CHANNEL_PATH: sitesupapp/Breadee-Desktop/desktop-production-channel
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: ci/desktop-1036-updater-autotest }
+
+      - name: Download 1.0.35 (prod) + 1.0.36 (signed artifact)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force serve\$env:CHANNEL_PATH | Out-Null
+          gh release download desktop-prod-v1.0.35 -R sitesupapp/Breadee-Desktop -p "*setup.exe" -D v135 2>&1
+          gh run download $env:RUN_ID -R sitesupapp/Breadee-Desktop -n breadee-desktop-1.0.36-signed-unpublished -D v136 2>&1
+          Get-ChildItem -Recurse v135, v136 | Select-Object FullName,Length | Format-Table -Auto
+
+      - name: Build QA manifest + place 1.0.36 installer under the channel path
+        shell: pwsh
+        run: |
+          $sig = Get-Content (Get-ChildItem v136 -Filter *.sig -Recurse | Select-Object -First 1).FullName -Raw
+          $exe = (Get-ChildItem v136 -Filter 'Breadee_1.0.36_x64-setup.exe' -Recurse | Select-Object -First 1).FullName
+          Copy-Item $exe "serve\$env:CHANNEL_PATH\Breadee_1.0.36_x64-setup.exe"
+          $m = [ordered]@{ version='1.0.36'; notes='QA isolated test'; pub_date='2026-10-16T08:37:45Z';
+                platforms=@{ 'windows-x86_64'=@{ signature=$sig.Trim(); url="https://$env:HOST/$env:CHANNEL_PATH/Breadee_1.0.36_x64-setup.exe" } } }
+          ($m | ConvertTo-Json -Depth 6) | Set-Content "serve\$env:CHANNEL_PATH\latest.json" -Encoding utf8
+          Get-Content "serve\$env:CHANNEL_PATH\latest.json"
+
+      - name: Trusted self-signed cert for the endpoint host
+        shell: pwsh
+        run: |
+          $c = New-SelfSignedCertificate -DnsName $env:HOST -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
+          $pwd = ConvertTo-SecureString 'qa' -AsPlainText -Force
+          Export-PfxCertificate -Cert $c -FilePath cert.pfx -Password $pwd | Out-Null
+          Export-Certificate -Cert $c -FilePath cert.cer | Out-Null
+          Import-Certificate -FilePath cert.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          # convert to PEM for python (openssl ships with git)
+          & "C:\Program Files\Git\usr\bin\openssl.exe" pkcs12 -in cert.pfx -nocerts -nodes -passin pass:qa -out key.pem
+          & "C:\Program Files\Git\usr\bin\openssl.exe" pkcs12 -in cert.pfx -clcerts -nokeys -passin pass:qa -out crt.pem
+          "cert ready"
+
+      - name: Redirect endpoint host -> local, start logging HTTPS server (443)
+        shell: pwsh
+        run: |
+          Add-Content -Path "$env:windir\System32\drivers\etc\hosts" -Value "`n127.0.0.1 $env:HOST"
+          @'
+          import http.server, ssl, functools, datetime
+          class H(http.server.SimpleHTTPRequestHandler):
+              def log_message(self, fmt, *args):
+                  open("access.log","a").write(datetime.datetime.utcnow().isoformat()+" "+(fmt%args)+"\n")
+          h = functools.partial(H, directory="serve")
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("crt.pem","key.pem")
+          s = http.server.HTTPServer(("127.0.0.1",443), h); s.socket = ctx.wrap_socket(s.socket, server_side=True)
+          s.serve_forever()
+          '@ | Set-Content serve.py -Encoding utf8
+          Start-Process python -ArgumentList 'serve.py' -WindowStyle Hidden
+          Start-Sleep 4
+          "self-test fetch of QA manifest via the redirected host:"
+          try { (Invoke-WebRequest -UseBasicParsing "https://$env:HOST/$env:CHANNEL_PATH/latest.json").Content } catch { "self-test: $($_.Exception.Message)" }
+
+      - name: Install unmodified prod 1.0.35 (silent) + record version
+        shell: pwsh
+        run: |
+          $i = (Get-ChildItem v135 -Filter *setup.exe -Recurse | Select-Object -First 1).FullName
+          Start-Process $i -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          $exe = Get-ChildItem "$env:LOCALAPPDATA","$env:ProgramFiles","${env:ProgramFiles(x86)}" -Recurse -Filter '*.exe' -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -match 'Breadee' -and $_.FullName -notmatch 'setup' } | Select-Object -First 1
+          if($exe){ "installed exe: $($exe.FullName)"; "fileversion: $((Get-Item $exe.FullName).VersionInfo.FileVersion)"; $exe.FullName | Set-Content installed_exe.txt }
+          else { "INSTALLED EXE NOT FOUND"; Get-ChildItem "$env:LOCALAPPDATA\Programs" -ErrorAction SilentlyContinue | Format-Table }
+
+      - name: Launch app; let the startup updater check hit the endpoint; capture evidence
+        shell: pwsh
+        run: |
+          if(Test-Path installed_exe.txt){
+            $p = Get-Content installed_exe.txt -Raw
+            Start-Process $p.Trim()
+            Start-Sleep 45
+            # best-effort: bring to front + send keyboard to accept an update prompt if shown
+            Add-Type -AssemblyName System.Windows.Forms
+            [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+            Start-Sleep 60
+          } else { "app not launched (exe not found)" }
+          "---- SERVER ACCESS LOG ----"
+          if(Test-Path access.log){ Get-Content access.log } else { "no access log" }
+
+      - name: Screenshot + post-state
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size)
+          $bmp.Save("$PWD\screen.png"); "screenshot saved"
+          if(Test-Path installed_exe.txt){ $p=(Get-Content installed_exe.txt -Raw).Trim(); if(Test-Path $p){ "post-run fileversion: $((Get-Item $p).VersionInfo.FileVersion)" } }
+          Copy-Item access.log access_final.log -ErrorAction SilentlyContinue
+
+      - name: Cleanup (runner is ephemeral but be explicit)
+        if: always()
+        shell: pwsh
+        run: |
+          (Get-Content "$env:windir\System32\drivers\etc\hosts") -notmatch 'raw.githubusercontent.com' | Set-Content "$env:windir\System32\drivers\etc\hosts"
+          Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -match 'raw.githubusercontent.com' } | Remove-Item -Force -ErrorAction SilentlyContinue
+          "cleaned"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-autotest-evidence
+          path: |
+            access_final.log
+            access.log
+            screen.png
+            serve/**/latest.json
+          if-no-files-found: ignore
