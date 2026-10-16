@@ -104,10 +104,16 @@ export function tableOpGate(input: {
   table: TableSummary | null;
   hasOpenShift: boolean;
   online: boolean;
+  /** Phase E: the POS is offline-ready + scope present, so a MOVE or MERGE (canonical tables, CAS)
+   *  can be CAPTURED offline. Close/Clear and order Transfer stay online-only. Default false. */
+  offlineCapable?: boolean;
 }): Gate {
   if (!input.permitted.allowed) return input.permitted;
   if (!input.table) return { allowed: false, reason: "Select a table first." };
-  if (!input.online) return { allowed: false, reason: "Table operations need a connection." };
+  // Move and Merge are offline-capturable (server CAS catches drift); everything else needs a
+  // connection (Close/Clear complete/void against unseen server state; Transfer needs mediation).
+  const offlineOk = input.offlineCapable === true && (input.kind === "move" || input.kind === "merge");
+  if (!input.online && !offlineOk) return { allowed: false, reason: "Table operations need a connection." };
   if (!input.hasOpenShift) {
     return { allowed: false, reason: `Open a shift before you ${input.kind} a table.` };
   }

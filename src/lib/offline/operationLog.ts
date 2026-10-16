@@ -67,7 +67,15 @@ export type OperationType =
   // (the bill changed since it was loaded) → CONFLICT → needs_attention, never a blind re-apply. The
   // target order may be canonical (hydrated) or offline-created (order_local → canonical remap).
   | "edit_order_line"
-  | "add_order_items";
+  | "add_order_items"
+  // Phase E — offline dine-in TABLE RESTRUCTURE of CANONICAL (hydrated) tables with open bills.
+  // move_table → pos_move_table (CAS expected_version); merge_tables → pos_merge_tables_v3 (CAS
+  // version-map). Both replay-safe on client_op_id + atomic server-side. Any version drift (a bill
+  // changed/settled since the floor was loaded) → CONFLICT → needs_attention, never a silent
+  // destructive move/merge. (Order TRANSFER stays online — its cross-cashier approval needs the
+  // server to mediate.)
+  | "move_table"
+  | "merge_tables";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

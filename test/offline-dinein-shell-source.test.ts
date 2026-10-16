@@ -40,12 +40,14 @@ test("offlineCapture is exactly backend-unreachable AND ready AND scope present"
   assert.match(src, /const offlineCapture = !input\.online && input\.offlineReady === true && input\.offlineScope != null;/);
 });
 
-test("advanced table ops (move/merge/close/clear) stay WALLED offline", () => {
+test("Phase E: Move/Merge are offline-capturable; Close/Clear stay WALLED offline", () => {
   const src = ts(DW);
-  // The shared op context is online-only (no offline readiness/capture), and each tableOpGate
-  // call's OWN braces never consult offline.
-  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online \};/);
-  assert.ok(!/tableOpGate\(\{[^}]{0,120}offline/.test(src), "no tableOpGate call consults offline");
+  // The shared op context now carries offlineCapable (the gate honours it ONLY for move/merge).
+  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: offlineTableOp \};/);
+  // Move and Merge capture durably offline; Close and Clear have NO offline capture branch.
+  assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,400}captureMoveTableOffline\(/, "move captures offline");
+  assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,400}captureMergeTablesOffline\(/, "merge captures offline");
+  assert.ok(!/captureCloseTableOffline|captureClearTableOffline/.test(src), "Close/Clear are NOT offline-capturable");
 });
 
 test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a server charge offline)", () => {

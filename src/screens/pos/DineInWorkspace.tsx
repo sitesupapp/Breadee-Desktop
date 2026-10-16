@@ -72,6 +72,7 @@ import {
   tableOpGate,
   type TableOpKind,
 } from "@/lib/pos/tableOps";
+import { captureMoveTableOffline, captureMergeTablesOffline } from "@/lib/offline/tableOpOffline";
 import {
   addItemsGate as computeAddItemsGate,
   describeBillChange,
@@ -381,14 +382,18 @@ export function useDineInWorkspace(input: {
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
   const opGates = useMemo(() => {
-    const common = { table: selected, hasOpenShift, online: input.online };
+    // Move/Merge are offline-capturable (server CAS catches drift) when the POS is offline-ready +
+    // scope present; Close/Clear stay online-only. (Same flag as `offlineCapture` below, inlined
+    // here because that const is declared after this memo.)
+    const offlineTableOp = !input.online && input.offlineReady === true && input.offlineScope != null;
+    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: offlineTableOp };
     return {
       move: tableOpGate({ kind: "move", permitted: canMoveTable(pos.access), ...common }),
       close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
       merge: tableOpGate({ kind: "merge", permitted: canMergeTables(pos.access), ...common }),
     };
-  }, [pos.access, selected, hasOpenShift, input.online]);
+  }, [pos.access, selected, hasOpenShift, input.online, input.offlineReady, input.offlineScope]);
 
   // Phase C/D — offline capture is live when the backend is unreachable AND the device is
   // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
@@ -446,7 +451,7 @@ export function useDineInWorkspace(input: {
    * screen would invite a second clear of a bill that is already void.
    */
   const runOp = useCallback(
-    async (kind: TableOpKind, run: () => Promise<string>, options?: { selectAfter?: string | null }) => {
+    async (kind: TableOpKind, run: () => Promise<string>, options?: { selectAfter?: string | null; offline?: boolean }) => {
       if (opInFlight.current) return;
       opInFlight.current = true;
       setOpBusy(true);
@@ -454,6 +459,12 @@ export function useDineInWorkspace(input: {
       try {
         const message = await run();
         setOpDialog(null);
+        // OFFLINE: the restructure was durably CAPTURED (not applied on a server), so there is no
+        // authoritative floor to re-read — it reconciles on sync. Skip the server refresh/select.
+        if (options?.offline) {
+          toast.push({ tone: "info", message, detail: null });
+          return;
+        }
         await tables.refresh(ctx);
         // Move follows the bill to its new table; Close and Clear leave the
         // operator on a table that is now free, which is what they just did.
@@ -481,6 +492,20 @@ export function useDineInWorkspace(input: {
       if (!selected || !opGates.move.allowed) return;
       const from = selected.name;
       const to = tables.map.tables.find((t) => t.id === destinationId)?.name ?? "the new table";
+      // OFFLINE: capture a durable move_table op (CAS on the from-table's version) — it replays
+      // exactly-once on reconnect; a floor drift → needs_attention. Online path unchanged.
+      if (offlineCapture && input.offlineScope) {
+        const scope = input.offlineScope;
+        void runOp(
+          "move",
+          async () => {
+            await captureMoveTableOffline({ scope, fromTableId: selected.id, toTableId: destinationId, expectedVersion: selected.pos_entity_version > 0 ? selected.pos_entity_version : null });
+            return `Move of ${from} to ${to} saved offline — it will apply when the connection returns.`;
+          },
+          { offline: true },
+        );
+        return;
+      }
       void runOp(
         "move",
         async () => moveOutcomeMessage(await moveTable({ fromTableId: selected.id, toTableId: destinationId }), from, to),
@@ -488,7 +513,7 @@ export function useDineInWorkspace(input: {
         { selectAfter: destinationId },
       );
     },
-    [selected, opGates.move.allowed, tables.map.tables, runOp],
+    [selected, opGates.move.allowed, tables.map.tables, runOp, offlineCapture, input.offlineScope],
   );
 
   const confirmClose = useCallback(() => {
@@ -523,6 +548,22 @@ export function useDineInWorkspace(input: {
         .filter((t): t is TableSummary => t != null);
       const expected = buildMergeExpected(selected, sources);
       const sig = mergeAttemptSignature(selected.id, sourceTableIds);
+      // OFFLINE: capture a durable merge_tables op keyed by the stable target-set signature (so a
+      // re-submit of the SAME set is idempotent), carrying the per-table version-map CAS. The server
+      // re-checks every table atomically on replay; any drift → needs_attention, never a silent
+      // destructive merge. Online path unchanged.
+      if (offlineCapture && input.offlineScope) {
+        const scope = input.offlineScope;
+        void runOp(
+          "merge",
+          async () => {
+            await captureMergeTablesOffline({ scope, primaryTableId: selected.id, sourceTableIds, expected, clientOpId: sig });
+            return `Merge of ${sources.length} table${sources.length === 1 ? "" : "s"} into ${primaryName} saved offline — it will apply when the connection returns.`;
+          },
+          { offline: true },
+        );
+        return;
+      }
       mergeOpId.current = stableMergeOpId(mergeOpId.current, sig);
       const clientOpId = mergeOpId.current.id;
       void runOp("merge", async () => {
@@ -537,7 +578,7 @@ export function useDineInWorkspace(input: {
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
-    [selected, opGates.merge.allowed, tables.map.tables, runOp],
+    [selected, opGates.merge.allowed, tables.map.tables, runOp, offlineCapture, input.offlineScope],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */

@@ -229,6 +229,12 @@ export type PosTxnSyncDeps = {
   editOrderLine: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-E: add new lines to an open delivery order (pos_add_order_items). Same payload contract. */
   addOrderItems: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  /** Phase-E: move a table's open bill to another table (pos_move_table). client_op_id → exactly-once;
+   *  expectedVersion is the CAS on the from-table. */
+  moveTable: (args: { fromTableId: string; toTableId: string; expectedVersion: number | null; clientOpId: string }) => Promise<{ ok: boolean; orders_moved: number; idempotent: boolean }>;
+  /** Phase-E: merge source table bills into a primary (pos_merge_tables_v3). client_op_id →
+   *  exactly-once; `expected` is the per-table version-map CAS. */
+  mergeTables: (args: { primaryTableId: string; sourceTableIds: string[]; expected: Record<string, number>; clientOpId: string }) => Promise<{ ok: boolean; merge_id: string; sources_merged: number; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -422,6 +428,30 @@ export const defaultDeps: PosTxnSyncDeps = {
     const row = (await callPosRpc("pos_add_order_items", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok !== false, idempotent };
+  },
+  moveTable: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_move_table", {
+      p_from: args.fromTableId,
+      p_to: args.toTableId,
+      p_client_op_id: args.clientOpId,
+      ...(args.expectedVersion == null ? {} : { p_expected_version: args.expectedVersion }),
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: row.ok !== false, orders_moved: row.orders_moved == null ? 0 : Number(row.orders_moved), idempotent };
+  },
+  mergeTables: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_merge_tables_v3", {
+      p_payload: {
+        primary_table_id: args.primaryTableId,
+        source_table_ids: args.sourceTableIds,
+        client_op_id: args.clientOpId,
+        ...(Object.keys(args.expected).length > 0 ? { expected: args.expected } : {}),
+      },
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: row.ok !== false, merge_id: String(row.merge_id ?? ""), sources_merged: row.sources_merged == null ? 0 : Number(row.sources_merged), idempotent };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

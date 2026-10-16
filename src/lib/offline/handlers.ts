@@ -889,6 +889,73 @@ export const addOrderItemsHandler: OperationHandler = {
   },
 };
 
+/** A table-restructure refusal that means the floor changed since it was loaded — a stale version,
+ *  a source no longer occupied / already settled / split / on-account, or a bill that moved. All are
+ *  CONFLICTS the operator resolves (reload the floor + redo), never a hot retry and never a silent
+ *  destructive move/merge; the server's locked re-read + client_op_id replay guarantee exactly-once. */
+function isTableOpConflict(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    isConflictMessage(message) ||
+    m.includes("no open bill") ||
+    m.includes("no open order") ||
+    m.includes("not occupied") ||
+    m.includes("not eligible") ||
+    m.includes("already") ||
+    m.includes("not part of") ||
+    m.includes("same table")
+  );
+}
+
+type MoveTablePayload = { from_table_id: string; to_table_id: string; expected_version: number | null };
+
+/** move_table — move an open bill between CANONICAL tables offline (pos_move_table), exactly-once on
+ *  client_op_id. CAS on the from-table; a floor drift → CONFLICT → needs_attention. */
+export const moveTableHandler: OperationHandler = {
+  type: "move_table",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as MoveTablePayload;
+    if (!p.from_table_id || !p.to_table_id) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_table", message: "no table id" };
+    try {
+      const r = await ctx.deps.moveTable({ fromTableId: p.from_table_id, toTableId: p.to_table_id, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: p.to_table_id, resultMeta: { orders_moved: r.orders_moved, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "move_table: transport", message: msg };
+      if (isTableOpConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "move_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
+type MergeTablesPayload = { primary_table_id: string; source_table_ids: string[]; expected: Record<string, number> };
+
+/** merge_tables — fold source table bills into a primary offline (pos_merge_tables_v3), exactly-once
+ *  on client_op_id, atomic server-side. CAS version-map on every table; any drift → CONFLICT →
+ *  needs_attention, never a silent destructive merge. */
+export const mergeTablesHandler: OperationHandler = {
+  type: "merge_tables",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as MergeTablesPayload;
+    if (!p.primary_table_id || !Array.isArray(p.source_table_ids) || p.source_table_ids.length === 0) {
+      return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_merge_target", message: "no primary or sources" };
+    }
+    try {
+      const r = await ctx.deps.mergeTables({ primaryTableId: p.primary_table_id, sourceTableIds: p.source_table_ids, expected: p.expected ?? {}, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: p.primary_table_id, resultMeta: { merge_id: r.merge_id, sources_merged: r.sources_merged, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "merge_tables: transport", message: msg };
+      if (isTableOpConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "merge_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -907,6 +974,8 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${customerUpsertHandler.type}@${customerUpsertHandler.schemaVersion}`]: customerUpsertHandler,
   [`${editOrderLineHandler.type}@${editOrderLineHandler.schemaVersion}`]: editOrderLineHandler,
   [`${addOrderItemsHandler.type}@${addOrderItemsHandler.schemaVersion}`]: addOrderItemsHandler,
+  [`${moveTableHandler.type}@${moveTableHandler.schemaVersion}`]: moveTableHandler,
+  [`${mergeTablesHandler.type}@${mergeTablesHandler.schemaVersion}`]: mergeTablesHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {
