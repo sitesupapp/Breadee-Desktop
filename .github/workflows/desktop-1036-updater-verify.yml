@@ -73,24 +73,24 @@ jobs:
           cat prod_pub.key >> "$R"
           PK=$(grep -vE '^untrusted comment' prod_pub.key | head -1)
           echo "prod pubkey line: $PK" >> "$R"
-          mkdir -p verifier/src
-          printf '%s\n' '[package]' 'name = "v"' 'version = "0.0.0"' 'edition = "2021"' '[dependencies]' 'minisign-verify = "0.2"' > verifier/Cargo.toml
-          printf '%s\n' \
-            'use minisign_verify::{PublicKey, Signature};' \
-            'use std::fs;' \
-            'fn main() {' \
-            '    let a: Vec<String> = std::env::args().collect();' \
-            '    let pk = PublicKey::from_base64(fs::read_to_string(&a[1]).unwrap().trim()).expect("pk");' \
-            '    let sig = Signature::decode(&fs::read_to_string(&a[2]).unwrap()).expect("sig");' \
-            '    let data = fs::read(&a[3]).unwrap();' \
-            '    pk.verify(&data, &sig, false).expect("VERIFY FAILED");' \
-            '    println!("VERIFIED");' \
-            '}' > verifier/src/main.rs
-          printf '%s' "$PK" > pk_line.txt
-          if (cd verifier && cargo run --quiet --release -- ../pk_line.txt ../art/Breadee_1.0.36_x64-setup.exe.sig ../art/Breadee_1.0.36_x64-setup.exe) >> "$R" 2>&1; then
-            echo "PROD-PUBKEY SIGNATURE: VERIFIED (minisign-verify crate)" >> "$R"; PROD_OK=1
+          echo "--- raw .sig file (hexdump head + content) ---" >> "$R"
+          wc -c "art/Breadee_1.0.36_x64-setup.exe.sig" >> "$R"
+          cat "art/Breadee_1.0.36_x64-setup.exe.sig" >> "$R"
+          echo "--- installing rsign2 (robust minisign verifier) ---" >> "$R"
+          cargo install rsign2 --quiet 2>>"$R" || cargo install rsign2 2>>"$R" || true
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if rsign verify -p prod_pub.key -x "art/Breadee_1.0.36_x64-setup.exe.sig" "art/Breadee_1.0.36_x64-setup.exe" >> "$R" 2>&1; then
+            echo "PROD-PUBKEY SIGNATURE: VERIFIED (rsign2)" >> "$R"; PROD_OK=1
           else
-            echo "PROD-PUBKEY SIGNATURE: FAILED (minisign-verify crate)" >> "$R"; PROD_OK=0
+            echo "PROD-PUBKEY SIGNATURE: rsign2 path failed; trying minisign-verify crate fallback" >> "$R"
+            mkdir -p verifier/src
+            printf '%s\n' '[package]' 'name = "v"' 'version = "0.0.0"' 'edition = "2021"' '[dependencies]' 'minisign-verify = "0.2"' > verifier/Cargo.toml
+            printf '%s\n' 'use minisign_verify::{PublicKey, Signature};' 'use std::fs;' 'fn main(){' '  let a:Vec<String>=std::env::args().collect();' '  let pkfile=fs::read_to_string(&a[1]).unwrap();' '  let pk=PublicKey::decode(&pkfile).or_else(|_|PublicKey::from_base64(pkfile.lines().last().unwrap().trim())).expect("pk");' '  let sig=Signature::decode(&fs::read_to_string(&a[2]).unwrap()).expect("sigdecode");' '  let d=fs::read(&a[3]).unwrap();' '  pk.verify(&d,&sig,false).expect("VERIFY FAILED");' '  println!("CRATE VERIFIED");' '}' > verifier/src/main.rs
+            if (cd verifier && cargo run --quiet --release -- ../prod_pub.key ../art/Breadee_1.0.36_x64-setup.exe.sig ../art/Breadee_1.0.36_x64-setup.exe) >> "$R" 2>&1; then
+              echo "PROD-PUBKEY SIGNATURE: VERIFIED (minisign-verify crate)" >> "$R"; PROD_OK=1
+            else
+              echo "PROD-PUBKEY SIGNATURE: FAILED (both verifiers)" >> "$R"; PROD_OK=0
+            fi
           fi
           if [ -s staging_pubkey.b64 ]; then
             base64 -d staging_pubkey.b64 > staging_pub.key
