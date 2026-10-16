@@ -183,6 +183,14 @@ export type PosTxnSyncDeps = {
     discount?: { discount_type?: string; discount_value?: number };
     clientOpId: string;
   }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  /** Phase-D: canonically END a shift (pos_end_shift) — replays LAST, after every shift op. */
+  endShiftOp: (args: {
+    shiftId: string;
+    actualCashCounted: number;
+    notes: string | null;
+    deliveryFeeCashTreatment?: string;
+    clientOpId: string;
+  }) => Promise<{ shift_id: string; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -284,6 +292,20 @@ export const defaultDeps: PosTxnSyncDeps = {
     const row = (await callPosRpc("pos_complete_on_account", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: true, idempotent };
+  },
+  endShiftOp: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_end_shift", {
+      p_payload: {
+        shift_id: args.shiftId,
+        actual_cash_counted: Number(args.actualCashCounted) || 0,
+        notes: args.notes && args.notes.trim() !== "" ? args.notes.trim() : null,
+        delivery_fee_cash_treatment: args.deliveryFeeCashTreatment ?? "included",
+        client_op_id: args.clientOpId,
+      },
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { shift_id: String(row.shift_id ?? args.shiftId), idempotent };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

@@ -45,7 +45,11 @@ export type OperationType =
   | "on_account_order"
   // Phase D — offline PAYOUT (petty-cash out of the drawer) → pos_payout_create (replay-safe,
   // records payout_id). Reduces the local drawer projection immediately; exactly-once on reconnect.
-  | "payout";
+  | "payout"
+  // Phase D — offline END SHIFT → pos_end_shift (replay-safe). Carries a dependency barrier on
+  // EVERY prior shift-affecting op so the canonical close replays LAST, after all sales/payments/
+  // refunds/payouts of the shift have synced. Local shift = ENDED_PENDING_SYNC until then.
+  | "end_shift";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

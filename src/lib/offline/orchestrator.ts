@@ -100,6 +100,8 @@ function labelFor(op: OfflineOperation): string {
     const p = (op.payload as { order_number?: string } | null) ?? {};
     return p.order_number ? `On account — order #${p.order_number}` : "On account — order";
   }
+  if (op.operation_type === "payout") return "Cash payout";
+  if (op.operation_type === "end_shift") return "End shift";
   return String(op.operation_type);
 }
 

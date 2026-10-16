@@ -496,6 +496,50 @@ export const onAccountOrderHandler: OperationHandler = {
   },
 };
 
+type EndShiftPayload = {
+  shift_id: string | null;
+  /** Local open-shift entity id to remap to the canonical shift (offline-opened shift). */
+  shift_local: string | null;
+  actual_cash_counted: number;
+  notes: string | null;
+  delivery_fee_cash_treatment?: string;
+};
+
+/** end_shift — canonically close a shift offline (pos_end_shift), exactly-once on client_op_id.
+ *  The orchestrator's dependency gate (dependency_ids = every prior shift op) guarantees this runs
+ *  LAST; here we only remap an offline-opened shift + classify. A shift changed/closed on the
+ *  server meanwhile → CONFLICT/shift_closed → needs_attention (never a silent reopen/reclose). */
+export const endShiftHandler: OperationHandler = {
+  type: "end_shift",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as EndShiftPayload;
+    let shiftId = p.shift_id;
+    if (p.shift_local) {
+      const c = await ctx.canonicalFor(p.shift_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "shift_unresolved", message: "shift not yet synced" };
+      shiftId = c;
+    }
+    if (!shiftId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_shift", message: "no shift id" };
+    try {
+      const r = await ctx.deps.endShiftOp({
+        shiftId,
+        actualCashCounted: p.actual_cash_counted,
+        notes: p.notes,
+        deliveryFeeCashTreatment: p.delivery_fee_cash_treatment,
+        clientOpId: op.client_op_id,
+      });
+      return { ok: true, canonicalId: r.shift_id, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "end_shift: transport", message: msg };
+      if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "shift_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -508,6 +552,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${payOrderHandler.type}@${payOrderHandler.schemaVersion}`]: payOrderHandler,
   [`${onAccountTableHandler.type}@${onAccountTableHandler.schemaVersion}`]: onAccountTableHandler,
   [`${onAccountOrderHandler.type}@${onAccountOrderHandler.schemaVersion}`]: onAccountOrderHandler,
+  [`${endShiftHandler.type}@${endShiftHandler.schemaVersion}`]: endShiftHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {
