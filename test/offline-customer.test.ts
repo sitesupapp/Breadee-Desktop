@@ -101,6 +101,9 @@ test("E2E create: drain → pos_upsert_customer with client_op_id; local custome
   // The orchestrator resolved the local customer id; the handler resolved the local address id.
   assert.equal(await canonicalIdForInScope(cap.localCustomerId as string, OPSCOPE), "SRV-CUST");
   assert.equal(await canonicalIdForInScope(cap.localAddressId as string, OPSCOPE), "SRV-ADDR");
+  // The pending-local picker row is dropped on sync (no stale local customer lingers), while the
+  // local→canonical mapping remains in the entityMap for any not-yet-replayed dependent.
+  assert.equal((await listPendingLocalCustomers("t1", "b1")).length, 0);
 });
 
 test("KEYSTONE: a dependent on_account_order remaps customer_local → canonical after the customer syncs", async () => {

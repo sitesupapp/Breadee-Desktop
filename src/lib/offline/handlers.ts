@@ -759,6 +759,14 @@ export const customerUpsertHandler: OperationHandler = {
     try {
       const r = await ctx.deps.upsertCustomer({ payload: p.upsert, clientOpId: op.client_op_id });
       if (!r.customer_id) return { ok: false, retryClass: "SERVER_RETRYABLE", code: "no_customer_id", message: "no customer id returned" };
+      // Drop the pending-local picker row now it has a canonical id — the local→canonical mapping
+      // lives in the entityMap (so any not-yet-replayed dependent still resolves), and the canonical
+      // customer is re-cached by the normal online search/profile mirror. Prevents a stale local row
+      // lingering as selectable after sync. Best-effort; a create carries its local id in local_entity_id.
+      if (op.local_entity_id) {
+        const { deletePendingLocalCustomer } = await import("@/lib/offline/db");
+        await deletePendingLocalCustomer(op.local_entity_id).catch(() => undefined);
+      }
       // Record the address mapping (create-with-address) so a dependent order resolves address_local.
       if (p.local_address_id && r.address_id) {
         await resolveEntity({
