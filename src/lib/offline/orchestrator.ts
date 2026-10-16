@@ -295,7 +295,9 @@ export async function drainOperations(
                   ? "shift"
                   : op.operation_type === "dinein_open_table"
                     ? "table"
-                    : "order",
+                    : op.operation_type === "customer_upsert"
+                      ? "customer"
+                      : "order",
               canonical_id: result.canonicalId,
               resolved_at: new Date().toISOString(),
               tenant_id: op.scope.tenant_id,

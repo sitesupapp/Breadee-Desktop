@@ -22,6 +22,8 @@ import {
 import {
   searchCustomers,
   loadCustomerProfile,
+  upsertCustomer,
+  CustomerWriteOfflineError,
   SEARCH_LIMIT,
   type CustomerAddress,
   type CustomerMatch,
@@ -42,6 +44,23 @@ export async function currentCustomerScope(): Promise<CustomerScope> {
   const { resolveBranchId } = await import("@/lib/branch");
   const s = useSession.getState();
   return { tenantId: s.tenant?.id ?? null, branchId: resolveBranchId(s.tenant, s.membership) };
+}
+
+/** The immutable 5-D scope an offline customer WRITE is captured under (the same dimensions the
+ *  drain replays by). Lazy imports for the same test-safety reason as currentCustomerScope. */
+export async function currentCustomerOpScope(): Promise<{
+  tenantId: string | null;
+  branchId: string | null;
+  cashierUserId: string | null;
+  deviceId: string | null;
+  terminalId: string | null;
+}> {
+  const base = await currentCustomerScope();
+  const { useSession } = await import("@/state/session");
+  const { getDeviceIdentity } = await import("@/lib/device");
+  const s = useSession.getState();
+  const dev = getDeviceIdentity();
+  return { ...base, cashierUserId: s.userId ?? null, deviceId: dev.device_id, terminalId: dev.terminal_id };
 }
 
 /** Thrown offline when the selected customer has no cached full profile (no
@@ -132,6 +151,45 @@ export async function searchCustomersOfflineAware(query: string): Promise<Custom
   }
   const rows = await listCachedCustomers(scope.tenantId, scope.branchId).catch(() => []);
   return matchCachedCustomers(rows, query);
+}
+
+/** The result of an offline-aware customer write — the online CustomerUpsertResult, plus a
+ *  `pending_local` flag when it was CAPTURED offline (customer_id is then a LOCAL id). */
+export type OfflineAwareUpsertResult = { customer_id: string; address_id: string | null; is_new: boolean; pending_local: boolean };
+
+/**
+ * Create/edit a customer OFFLINE-AWARE. ONLINE: the production upsertCustomer authority is used
+ * UNCHANGED (duplicate/conflict/latch logic intact). OFFLINE: capture a durable customer_upsert op
+ * and return the LOCAL ids so the UI flow continues; the op syncs exactly-once on reconnect and a
+ * same-OU conflict surfaces as needs_attention. `payload` is the pos_upsert_customer shape WITHOUT
+ * client_op_id. The caller mints `clientOpId` once per save (reused on retry).
+ */
+export async function upsertCustomerOfflineAware(
+  payload: Record<string, unknown>,
+  clientOpId: string,
+): Promise<OfflineAwareUpsertResult> {
+  if (await isBackendReachable()) {
+    const r = await upsertCustomer(payload as never);
+    return { customer_id: r.customer_id, address_id: r.address_id, is_new: r.is_new, pending_local: false };
+  }
+  const scope = await currentCustomerOpScope();
+  if (!scope.tenantId || !scope.cashierUserId || !scope.deviceId) {
+    throw new CustomerWriteOfflineError();
+  }
+  const { captureCustomerUpsertOffline } = await import("@/lib/offline/customerOffline");
+  const cap = await captureCustomerUpsertOffline({
+    scope: { tenantId: scope.tenantId, branchId: scope.branchId, cashierUserId: scope.cashierUserId, deviceId: scope.deviceId, terminalId: scope.terminalId },
+    upsert: payload,
+    clientOpId,
+    display: { name: typeof payload.name === "string" ? payload.name : null, phone: typeof payload.phone === "string" ? payload.phone : null, phone_e164: null },
+  });
+  const isEdit = typeof payload.id === "string" && (payload.id as string).length > 0;
+  return {
+    customer_id: cap.localCustomerId ?? (payload.id as string),
+    address_id: cap.localAddressId,
+    is_new: !isEdit,
+    pending_local: cap.localCustomerId != null,
+  };
 }
 
 export async function loadCustomerProfileOfflineAware(customerId: string): Promise<CustomerProfile> {

@@ -157,7 +157,7 @@ export interface PendingShift {
  * address, so a compact-only record cannot yet be ordered against offline.
  */
 export interface CachedCustomer {
-  id: string; // server customer id (PK)
+  id: string; // server customer id (PK) — OR a LOCAL id when pending_local (offline-created, Phase E)
   tenant_id: string;
   branch_id: string | null;
   name: string | null;
@@ -169,6 +169,13 @@ export interface CachedCustomer {
   /** True once the full profile (with addresses) was cached, not just a match. */
   has_profile: boolean;
   cached_at: string;
+  /** Phase E: true when this is an OFFLINE-CREATED customer whose `id` is a LOCAL id, not yet synced.
+   *  A dependent offline order/on-account chains to it via customer_local; the customer_upsert op
+   *  resolves it to the canonical id on reconnect. Absent/false for a real server customer. */
+  pending_local?: boolean;
+  /** Phase E: the local id of the first address captured with an offline-created customer, so a
+   *  dependent delivery order can chain address_local → canonical. Absent when no address was added. */
+  local_address_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +511,29 @@ export async function purgeForeignCachedCustomers(tenantId: string | null, branc
 /** Sign-out cleanup: drop the whole customer cache (privacy - phones/addresses). */
 export async function clearCachedCustomers(): Promise<void> {
   await localdb.posCustomers.clear();
+}
+
+// --- Phase E — offline-created (pending-local) customers ---------------------
+
+/** Cache an OFFLINE-CREATED customer under its LOCAL id so the picker can select it offline. The
+ *  record carries pending_local:true; a dependent order chains to it via customer_local, and the
+ *  customer_upsert op resolves it to a canonical id on reconnect. */
+export async function cachePendingLocalCustomer(c: CachedCustomer): Promise<void> {
+  if (!c.tenant_id || !c.id) return;
+  await localdb.posCustomers.put({ ...c, pending_local: true, cached_at: c.cached_at || new Date().toISOString() });
+}
+
+/** Every offline-created (pending-local) customer for a tenant+branch scope. */
+export async function listPendingLocalCustomers(tenantId: string | null, branchId: string | null): Promise<CachedCustomer[]> {
+  if (!tenantId) return [];
+  const all = await localdb.posCustomers.where("tenant_id").equals(tenantId).toArray();
+  return all.filter((c) => c.pending_local === true && (c.branch_id ?? null) === (branchId ?? null));
+}
+
+/** Drop a pending-local customer once it has synced (the canonical record is cached by the normal
+ *  online search/profile mirror). Best-effort; never throws on a missing row. */
+export async function deletePendingLocalCustomer(localId: string): Promise<void> {
+  await localdb.posCustomers.delete(localId).catch(() => undefined);
 }
 
 // ---------------------------------------------------------------------------

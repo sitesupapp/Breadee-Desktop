@@ -523,6 +523,9 @@ function PosWorkspaceInner() {
     branchId: pos.branch.id,
     online,
     enabled: onAccountReachable,
+    // Offline customer CREATE needs only the tenant+cashier (+device, from the device identity)
+    // scope the capture resolves — no open shift — so readiness here is simply "authenticated".
+    offlineReady: Boolean(tenantId && userId),
     onError: (message) => setPayError(message),
   });
   const [openShiftOpen, setOpenShiftOpen] = useState(false);

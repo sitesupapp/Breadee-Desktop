@@ -330,6 +330,7 @@ export function useDineInWorkspace(input: {
     branchId: pos.branch.id,
     online: input.online,
     enabled: onAccountReachable,
+    offlineReady: input.offlineReady === true && input.offlineScope != null,
     onError: (message) => setPayError(message),
   });
 

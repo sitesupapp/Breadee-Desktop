@@ -734,6 +734,58 @@ export const payoutHandler: OperationHandler = {
   },
 };
 
+type CustomerUpsertPayload = {
+  /** The exact pos_upsert_customer payload (branch_id + optional id/phone/name/notes/address). */
+  upsert: Record<string, unknown>;
+  /** Local address id to resolve to the canonical address_id on success (create-with-address), or
+   *  null. Lets a later offline delivery order chain to this address via entityMap. */
+  local_address_id: string | null;
+};
+
+/** customer_upsert — create/edit a customer (+ optional address) offline via pos_upsert_customer,
+ *  exactly-once on client_op_id. A CREATE resolves its local customer id → canonical (orchestrator)
+ *  and this handler ALSO records the local address id → canonical address_id so a dependent delivery
+ *  order can remap both. A same-OU identity clash (a DIFFERENT customer already holds the number) is
+ *  a CONFLICT the operator resolves (needs_attention) — never a silent duplicate, never a silent
+ *  re-link to the matched customer. */
+export const customerUpsertHandler: OperationHandler = {
+  type: "customer_upsert",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as CustomerUpsertPayload;
+    if (!p.upsert || typeof p.upsert !== "object") {
+      return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no customer payload" };
+    }
+    try {
+      const r = await ctx.deps.upsertCustomer({ payload: p.upsert, clientOpId: op.client_op_id });
+      if (!r.customer_id) return { ok: false, retryClass: "SERVER_RETRYABLE", code: "no_customer_id", message: "no customer id returned" };
+      // Record the address mapping (create-with-address) so a dependent order resolves address_local.
+      if (p.local_address_id && r.address_id) {
+        await resolveEntity({
+          local_entity_id: p.local_address_id,
+          entity_type: "address",
+          canonical_id: r.address_id,
+          resolved_at: new Date().toISOString(),
+          tenant_id: op.scope.tenant_id,
+          branch_id: op.scope.branch_id,
+          device_id: op.scope.device_id,
+          cashier_user_id: op.scope.cashier_user_id,
+          terminal_id: op.scope.terminal_id,
+        });
+      }
+      return { ok: true, canonicalId: r.customer_id, resultMeta: { customer_id: r.customer_id, address_id: r.address_id, is_new: r.is_new } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "customer_upsert: transport", message: msg };
+      if (msg.toLowerCase().includes("customer_identity_conflict")) {
+        return { ok: false, retryClass: "CONFLICT", code: "customer_identity_conflict", message: msg };
+      }
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -749,6 +801,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${endShiftHandler.type}@${endShiftHandler.schemaVersion}`]: endShiftHandler,
   [`${splitSettleHandler.type}@${splitSettleHandler.schemaVersion}`]: splitSettleHandler,
   [`${payoutHandler.type}@${payoutHandler.schemaVersion}`]: payoutHandler,
+  [`${customerUpsertHandler.type}@${customerUpsertHandler.schemaVersion}`]: customerUpsertHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

@@ -215,6 +215,14 @@ export type PosTxnSyncDeps = {
     note: string | null;
     clientOpId: string;
   }) => Promise<{ payout_id: string; amount: number; amount_usd: number; idempotent: boolean }>;
+  /** Phase-E: create/edit a customer (+ optional address) via pos_upsert_customer. client_op_id →
+   *  exactly-once (server replay wrapper). A same-OU identity clash surfaces as a CUSTOMER_IDENTITY_
+   *  CONFLICT the handler maps to needs_attention (never a silent duplicate / silent re-link). The
+   *  payload is the pos_upsert_customer shape (branch_id, optional id/phone/name/notes/address). */
+  upsertCustomer: (args: {
+    payload: Record<string, unknown>;
+    clientOpId: string;
+  }) => Promise<{ customer_id: string; address_id: string | null; is_new: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -379,6 +387,22 @@ export const defaultDeps: PosTxnSyncDeps = {
       amount: row.amount == null ? 0 : Number(row.amount),
       amount_usd: row.amount_usd == null ? 0 : Number(row.amount_usd),
       idempotent,
+    };
+  },
+  upsertCustomer: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_upsert_customer", {
+      p_payload: { ...args.payload, client_op_id: args.clientOpId },
+    })) as Record<string, unknown>;
+    // A same-OU identity clash returns a conflict envelope, never a customer_id — raise a message
+    // the handler classifies as a CONFLICT (needs_attention), never a silent duplicate / re-link.
+    if (row.conflict === true || row.code === "CUSTOMER_IDENTITY_CONFLICT") {
+      throw new Error(`CUSTOMER_IDENTITY_CONFLICT: ${String(row.reason ?? "a different customer already has this number")}`);
+    }
+    return {
+      customer_id: String(row.customer_id ?? ""),
+      address_id: row.address_id == null ? null : String(row.address_id),
+      is_new: row.is_new === true,
     };
   },
   isTransport: isTransportFailure,

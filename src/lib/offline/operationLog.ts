@@ -54,7 +54,13 @@ export type OperationType =
   // is server-derived from the allocated order-item quantities. Legs replay strictly in order
   // (each depends on the previous). Offline requires server order_item_ids (a hydrated/cached bill);
   // over-allocation / not-splittable / version drift → needs_attention. expected_version NULL offline.
-  | "split_settle";
+  | "split_settle"
+  // Phase E — offline CUSTOMER upsert (create / edit / add-or-edit address) → pos_upsert_customer
+  // (replay-safe on client_op_id). A CREATE mints a local customer id (local_entity_id) resolved to
+  // the canonical id on reconnect so a later offline delivery/on-account can chain to it; an EDIT
+  // carries the canonical id and creates no local entity. A same-OU identity conflict replays as a
+  // CONFLICT → needs_attention (never a silent duplicate / silent re-link).
+  | "customer_upsert";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

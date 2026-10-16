@@ -40,7 +40,8 @@ import {
 } from "@/lib/pos/access";
 import type { CustomerSearchProps } from "@/components/pos/CustomerSearch";
 import { SEARCH_DEBOUNCE_MS } from "@/state/customers";
-import { searchCustomersOfflineAware } from "@/lib/offline/customerCache";
+import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
+import { deterministicUuid } from "@/lib/offline/dineinOffline";
 
 /** The minimal customer identity the payment dialog and the receipt need. */
 export type PickedCustomer = { id: string; name: string | null; phone: string | null };
@@ -74,9 +75,12 @@ export function useCustomerPicker(input: {
   online: boolean;
   /** True only while the on-account slot is actually reachable (dialog open). */
   enabled: boolean;
+  /** Phase E: the POS is offline-ready (scope hydrated) so a NEW customer can be CAPTURED offline
+   *  against a durable customer_upsert op (resolved to a canonical id on reconnect). */
+  offlineReady?: boolean;
   onError?: (message: string) => void;
 }): CustomerPicker {
-  const { access, branchId, online, enabled, onError } = input;
+  const { access, branchId, online, enabled, offlineReady = false, onError } = input;
 
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CustomerMatch[] | null>(null);
@@ -155,18 +159,23 @@ export function useCustomerPicker(input: {
     () => customerLookupGate({ deliveryAccess: ALLOWED, canView: canViewCustomers(access) }),
     [access],
   );
-  const writeGate = useMemo(
-    () =>
-      customerWriteGate({
-        deliveryAccess: ALLOWED,
-        canView: canViewCustomers(access),
-        canManageCustomers: canManageCustomers(access),
-        canCreateOrders: canCreateOrders(access).allowed,
-        online,
-        saving,
-      }),
-    [access, online, saving],
-  );
+  const writeGate = useMemo(() => {
+    const gate = customerWriteGate({
+      deliveryAccess: ALLOWED,
+      canView: canViewCustomers(access),
+      canManageCustomers: canManageCustomers(access),
+      canCreateOrders: canCreateOrders(access).allowed,
+      online,
+      saving,
+    });
+    // Phase E: offline, a NEW customer can still be CAPTURED when the POS is offline-ready and the
+    // operator holds the create permission. The ONLY reason the base gate refused is connectivity
+    // (permission was already checked above), so a ready-offline session upgrades it to allowed.
+    if (!gate.allowed && !online && offlineReady && !saving && (canManageCustomers(access) || canCreateOrders(access).allowed)) {
+      return { allowed: true as const, reason: null };
+    }
+    return gate;
+  }, [access, online, offlineReady, saving]);
 
   const pick = useCallback(
     (customerId: string) => {
@@ -234,6 +243,28 @@ export function useCustomerPicker(input: {
       setSaving(true);
       setError(null);
       const payload = buildCreatePayload({ branchId, phone: decision.phone, name: decision.name, allowNameOnly: true });
+
+      // Phase E — OFFLINE: capture a durable customer_upsert instead of hitting the server. A
+      // deterministic client_op_id (branch + phone/name) makes a double-tap idempotent; the picker
+      // selects the LOCAL id, and the dependent on-account chain remaps it to canonical on sync.
+      if (!online && offlineReady) {
+        try {
+          if (!latch.current.acquire()) return;
+          const clientOpId = deterministicUuid([branchId ?? "", decision.phone ?? "", decision.name ?? "", "customer_create"]);
+          const r = await upsertCustomerOfflineAware(payload as unknown as Record<string, unknown>, clientOpId);
+          setSelected({ id: r.customer_id, name: decision.name ?? null, phone: decision.phone ?? null });
+          setResults(null);
+        } catch (e) {
+          const message = e instanceof Error ? e.message : "Could not save the customer offline.";
+          setError(message);
+          onError?.(message);
+        } finally {
+          latch.current.release();
+          setSaving(false);
+        }
+        return;
+      }
+
       try {
         const outcome = await performCustomerCreate({
           payload,
@@ -257,7 +288,7 @@ export function useCustomerPicker(input: {
         setSaving(false);
       }
     })();
-  }, [query, writeGate, branchId, onError]);
+  }, [query, writeGate, branchId, online, offlineReady, onError]);
 
   const searchProps: CustomerSearchProps = {
     query,
