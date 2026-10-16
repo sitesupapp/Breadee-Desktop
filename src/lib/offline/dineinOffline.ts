@@ -319,6 +319,88 @@ export async function setRoundPrintState(sessionId: string, roundLocalId: string
 }
 
 // ---------------------------------------------------------------------------
+// Phase D — offline SETTLE of a dine-in table (pay_table), captured against the local session.
+// The pay_table op DEPENDS on the session's open + every round op, so on reconnect it replays
+// only AFTER those orders exist on the server (else "no open order"). Deterministic op id →
+// double-tap idempotent. The draft is NOT mutated (the op is the durable record; the bill stays
+// open locally until the settle reconciles), mirroring the refund capture.
+// ---------------------------------------------------------------------------
+
+const SETTLE_OP_PREFIX = "paytable:";
+
+/** Durably capture an offline dine-in table settle. Atomic; idempotent on a deterministic id
+ *  (same session + method + currency → same op). Requires at least one sent round. */
+export async function settleTableOffline(input: {
+  sessionId: string;
+  method: string;
+  discount?: { discount_type?: string; discount_value?: number };
+}): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
+  return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
+    const d = await localdb.dineDrafts.get(input.sessionId);
+    if (!d) throw new Error("dine session not found");
+    if (d.rounds.length === 0) throw new Error("Nothing has been sent to settle on this table.");
+    const clientOpId = deterministicUuid([d.local_session_id, "pay_table", input.method, d.currency]);
+    const operationId = SETTLE_OP_PREFIX + clientOpId;
+    const existing = await localdb.operations.get(operationId);
+    if (existing) return { operationId, clientOpId, alreadyCaptured: true };
+    const scope: OperationScope = {
+      tenant_id: d.tenant_id,
+      branch_id: d.branch_id,
+      device_id: d.device_id,
+      terminal_id: d.terminal_id ?? "",
+      cashier_user_id: d.cashier_user_id,
+    };
+    const op: OfflineOperation = {
+      operation_id: operationId,
+      operation_type: "pay_table",
+      schema_version: OPERATION_SCHEMA_VERSION,
+      scope,
+      created_at: new Date().toISOString(),
+      client_op_id: clientOpId,
+      local_entity_id: null,
+      canonical_entity_id: d.table_id,
+      // Settle only AFTER the table's open + every round has synced (the orders must exist server-side).
+      dependency_ids: [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)],
+      depends_on_local_entities: [],
+      payload: {
+        table_id: d.table_id,
+        table_local: null,
+        method: input.method,
+        currency: d.currency,
+        table_name: d.table_name,
+        ...(input.discount ? { discount: input.discount } : {}),
+      },
+      status: "pending",
+      retry_count: 0,
+      last_attempt_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      result_meta: null,
+      synced_at: null,
+    };
+    await localdb.operations.add(op);
+    return { operationId, clientOpId, alreadyCaptured: false };
+  });
+}
+
+/** Any captured pay_table op for this session's table in its exact scope (for the UI to show a
+ *  table as "settling offline" and to avoid offering a second settle). */
+export async function findSettleOpForSession(sessionId: string): Promise<OfflineOperation | undefined> {
+  const d = await localdb.dineDrafts.get(sessionId);
+  if (!d) return undefined;
+  const rows = await localdb.operations.where("operation_type").equals("pay_table").toArray();
+  return rows.find(
+    (o) =>
+      (o.payload as { table_id?: string } | null)?.table_id === d.table_id &&
+      o.scope.tenant_id === d.tenant_id &&
+      (o.scope.branch_id ?? null) === (d.branch_id ?? null) &&
+      o.scope.device_id === d.device_id &&
+      o.scope.cashier_user_id === d.cashier_user_id &&
+      (d.terminal_id == null || (o.scope.terminal_id || null) === d.terminal_id),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // C13 — reconcile the local projection from synced operations (after a drain).
 // Fills canonical_order_id once round 1 syncs; NEVER deletes a draft on sync (the bill
 // stays open until closed/paid, which is a later phase). Local data is preserved on

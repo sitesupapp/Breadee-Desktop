@@ -23,6 +23,9 @@ import type { OfflineOperation } from "@/lib/offline/operationLog";
 import { resolveEntity } from "@/lib/offline/entityMap";
 import { drainOffline, __resetDrainLockForTests } from "@/lib/offline/orchestrator";
 import type { PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
+import { openTableOffline, addDraftLine, sendRoundOffline, settleTableOffline, findSettleOpForSession } from "@/lib/offline/dineinOffline";
+
+const DSCOPE = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", shiftId: "sh1" };
 
 const SCOPE = { tenant_id: "t1", branch_id: "b1", device_id: "dev1", terminal_id: "term1", cashier_user_id: "u1" };
 const CTX = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", online: true };
@@ -74,7 +77,7 @@ function op(type: "pay_table" | "pay_order", payload: Record<string, unknown>, o
 }
 
 beforeEach(async () => {
-  await Promise.all([localdb.operations.clear(), localdb.entityMap.clear(), localdb.syncHistory.clear()]);
+  await Promise.all([localdb.operations.clear(), localdb.entityMap.clear(), localdb.syncHistory.clear(), localdb.dineDrafts.clear()]);
   __resetDrainLockForTests();
 });
 
@@ -165,4 +168,58 @@ test("scope-exact: a settle op from another terminal is NOT drained here", async
   const r = await drainOffline(CTX, "test", d);
   assert.equal(called, 0);
   assert.equal((await getOperation(o.operation_id))?.status, "pending");
+});
+
+// ---------------- Dine-in CAPTURE → drain (open → round → settle dependency chain) ----------------
+
+test("settleTableOffline: captures a pay_table op that depends on the session's open + rounds", async () => {
+  const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
+  await addDraftLine(draft.local_session_id, { menu_item_id: "m1", name: "Burger", base_price: 10, quantity: 1, modifiers: [], kitchen_note: null });
+  await sendRoundOffline(draft.local_session_id);
+  const cap = await settleTableOffline({ sessionId: draft.local_session_id, method: "cash" });
+  assert.equal(cap.alreadyCaptured, false);
+  const settleOp = await getOperation(cap.operationId);
+  assert.equal(settleOp?.operation_type, "pay_table");
+  // Depends on the open op + the round op (so it replays only after they sync).
+  const fresh = await localdb.dineDrafts.get(draft.local_session_id);
+  assert.ok(settleOp?.dependency_ids.includes(fresh!.open_operation_id));
+  assert.ok(settleOp?.dependency_ids.includes(fresh!.rounds[0].operation_id));
+  assert.equal((settleOp?.payload as { table_id?: string }).table_id, "TBL-9");
+});
+
+test("settleTableOffline: double-tap collapses to ONE pay_table op", async () => {
+  const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
+  await addDraftLine(draft.local_session_id, { menu_item_id: "m1", name: "Burger", base_price: 10, quantity: 1, modifiers: [], kitchen_note: null });
+  await sendRoundOffline(draft.local_session_id);
+  const a = await settleTableOffline({ sessionId: draft.local_session_id, method: "cash" });
+  const b = await settleTableOffline({ sessionId: draft.local_session_id, method: "cash" });
+  assert.equal(a.operationId, b.operationId);
+  assert.equal(b.alreadyCaptured, true);
+  assert.equal(await localdb.operations.where("operation_type").equals("pay_table").count(), 1);
+  assert.ok(await findSettleOpForSession(draft.local_session_id));
+});
+
+test("settleTableOffline: refuses a table with nothing sent", async () => {
+  const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
+  await assert.rejects(() => settleTableOffline({ sessionId: draft.local_session_id, method: "cash" }), /nothing has been sent/i);
+});
+
+test("capture → drain: open → round → settle replay IN ORDER, exactly once", async () => {
+  const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
+  await addDraftLine(draft.local_session_id, { menu_item_id: "m1", name: "Burger", base_price: 10, quantity: 1, modifiers: [], kitchen_note: null });
+  await sendRoundOffline(draft.local_session_id);
+  const cap = await settleTableOffline({ sessionId: draft.local_session_id, method: "cash" });
+
+  const order: string[] = [];
+  const { deps: d } = deps({
+    openTable: async () => { order.push("open"); return { table_id: "TBL-9", pos_entity_version: 1 }; },
+    submitRound: async () => { order.push("round"); return { order_id: "O1", order_number: "N1", batch_no: 1, appended: true, idempotent: false }; },
+    payTable: async () => { order.push("pay"); return { ok: true, amount: 10, idempotent: false }; },
+  });
+  await drainOffline({ tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", online: true }, "reconnect", d);
+  assert.equal(order[order.length - 1], "pay"); // settle is LAST — after open + round
+  assert.ok(order.indexOf("open") < order.indexOf("pay"));
+  assert.ok(order.indexOf("round") < order.indexOf("pay"));
+  assert.equal(order.filter((x) => x === "pay").length, 1); // exactly once
+  assert.equal((await getOperation(cap.operationId))?.status, "synced");
 });

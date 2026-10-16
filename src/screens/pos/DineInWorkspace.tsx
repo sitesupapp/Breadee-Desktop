@@ -116,6 +116,7 @@ import {
   getDineDraftForTable,
   setRoundPrintState,
   billFromDraft,
+  settleTableOffline,
 } from "@/lib/offline/dineinOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -380,6 +381,18 @@ export function useDineInWorkspace(input: {
     };
   }, [pos.access, selected, hasOpenShift, input.online]);
 
+  // Phase C/D — offline capture is live when the backend is unreachable AND the device is
+  // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
+  // so both can read them; the duplicate lower-down declarations were hoisted to this point.
+  const offlineCapture = !input.online && input.offlineReady === true && input.offlineScope != null;
+  // The PROVISIONAL offline bill for the selected table (derived from its local draft's sent
+  // rounds). Populated by the effect further down; read by the payment gate so an offline table
+  // with sent rounds can be settled.
+  const [offlineBill, setOfflineBill] = useState<TableBill | null>(null);
+  /** The bill the settle path acts on: the local provisional bill when capturing offline, else
+   *  the authoritative server bill. */
+  const settleBill = offlineCapture ? offlineBill : tables.bill;
+
   /**
    * THE payment gate. Computed once, here, and handed to every surface that can
    * start a payment. Nothing downstream re-derives "can pay" from its own parts.
@@ -387,19 +400,23 @@ export function useDineInWorkspace(input: {
    * `pos.apply_discounts` is deliberately NOT part of it: a cashier without that
    * permission may still settle a bill at full price. Discount permission is
    * enforced only when a discount is actually entered.
+   *
+   * Phase D: offline, connectivity is treated as satisfied for the gate ONLY when offline
+   * capture is live AND a local provisional bill (sent rounds) exists; the settle then CAPTURES
+   * a pay_table op instead of charging the server. Online behaviour is unchanged.
    */
   const payGate: Gate = useMemo(
     () =>
       payTableGate({
         takePayments: pos.gates.takePayments,
         table: selected,
-        bill: tables.bill,
+        bill: settleBill,
         hasOpenShift,
-        online: input.online,
+        online: input.online || (offlineCapture && settleBill != null && settleBill.orders.length > 0),
         settling: paying,
         branchId: pos.branch.id,
       }),
-    [pos.gates.takePayments, pos.branch.id, selected, tables.bill, hasOpenShift, input.online, paying],
+    [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying],
   );
 
   const select = useCallback(
@@ -630,7 +647,6 @@ export function useDineInWorkspace(input: {
   // hydrated for offline Dine-In. The round GATES then treat connectivity as satisfied
   // (so add/send are allowed), while the HANDLERS below still branch on the real
   // input.online to route into the local engine rather than the server.
-  const offlineCapture = !input.online && input.offlineReady === true && input.offlineScope != null;
   const gateCtx: RoundContext = useMemo(
     () => (offlineCapture ? { ...roundCtx, online: true } : roundCtx),
     [offlineCapture, roundCtx],
@@ -666,10 +682,10 @@ export function useDineInWorkspace(input: {
     [gateCtx, roundLines, input.createOrders, input.menu],
   );
 
-  // Phase C — the PROVISIONAL offline bill for the selected table, derived from its local
-  // draft (sent rounds). Used only when offlineCapture is live; the online store's bill
+  // Phase C — populate the PROVISIONAL offline bill for the selected table, derived from its
+  // local draft (sent rounds). Used only when offlineCapture is live; the online store's bill
   // remains authoritative otherwise. Recomputed when the selection or a capture settles.
-  const [offlineBill, setOfflineBill] = useState<TableBill | null>(null);
+  // (The `offlineBill` state is declared above, beside the payment gate that reads it.)
   useEffect(() => {
     let live = true;
     if (!offlineCapture || !selected || !input.offlineScope) {
@@ -1208,8 +1224,51 @@ export function useDineInWorkspace(input: {
       tendered: number | null;
     }) => {
       const table = selected;
+      if (!table || !payGate.allowed) return;
+
+      // Phase D — OFFLINE settle: CAPTURE a pay_table op (durable, exactly-once, dependent on
+      // the session's open+rounds), never a server charge. The online path below is unchanged.
+      if (offlineCapture && input.offlineScope) {
+        const draft = await getDineDraftForTable(input.offlineScope, table.id);
+        if (!draft) {
+          setPayError("This table isn't available offline. Reconnect to settle it.");
+          return;
+        }
+        let offlineDiscount: ReturnType<typeof validateTableDiscount>;
+        try {
+          offlineDiscount = validateTableDiscount({
+            canDiscount: pos.gates.applyDiscounts,
+            subtotal: settleBill?.subtotal ?? 0,
+            type: dialog.discountType,
+            value: dialog.discountValue,
+          });
+        } catch (e) {
+          const c = classifyError(e);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+          return;
+        }
+        setPaying(true);
+        setPayError(null);
+        try {
+          await settleTableOffline({ sessionId: draft.local_session_id, method: dialog.method, discount: offlineDiscount.fields });
+          setPayOpen(false);
+          toast.push({
+            tone: "success",
+            message: `${table.name} settled offline`,
+            detail: "Recorded on this device — it will sync automatically when you reconnect.",
+          });
+          setOfflineBill(billFromDraft(draft));
+        } catch (e) {
+          const c = classifyError(e);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        } finally {
+          setPaying(false);
+        }
+        return;
+      }
+
       const shownBill = useTables.getState().bill;
-      if (!table || !shownBill || !payGate.allowed) return;
+      if (!shownBill) return;
 
       // The bill's OWN currency is what the server settles in. The dialog's
       // currency is the TENDER currency at the drawer - a different thing.
@@ -1309,7 +1368,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, payGate.allowed, pos.gates.applyDiscounts, input.currency, input.rate, ctx, readTableState, runCompletion, toast],
+    [selected, payGate.allowed, pos.gates.applyDiscounts, input.currency, input.rate, ctx, readTableState, runCompletion, toast, offlineCapture, input.offlineScope, settleBill],
   );
 
   /**

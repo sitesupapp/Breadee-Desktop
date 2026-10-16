@@ -39,11 +39,24 @@ test("offlineCapture is exactly backend-unreachable AND ready AND scope present"
   assert.match(src, /const offlineCapture = !input\.online && input\.offlineReady === true && input\.offlineScope != null;/);
 });
 
-test("payment and advanced table ops are NOT relaxed offline (financial + advanced wall)", () => {
+test("advanced table ops (move/merge/close/clear) stay WALLED offline", () => {
   const src = ts(DW);
-  // payGate / tableOpGate are computed from input.online only — no offlineReady relaxation.
-  assert.ok(!/payTableGate\(\{[\s\S]{0,200}offlineReady/.test(src), "payTableGate must not consult offlineReady");
-  assert.ok(!/tableOpGate\(\{[\s\S]{0,200}offlineReady/.test(src), "tableOpGate (move/merge/close/clear) must not consult offlineReady");
+  // The shared op context is online-only (no offline readiness/capture), and each tableOpGate
+  // call's OWN braces never consult offline.
+  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online \};/);
+  assert.ok(!/tableOpGate\(\{[^}]{0,120}offline/.test(src), "no tableOpGate call consults offline");
+});
+
+test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a server charge offline)", () => {
+  const src = ts(DW);
+  // payGate treats connectivity as satisfied ONLY when offline capture is live AND a local
+  // provisional bill with sent rounds exists — otherwise it stays blocked.
+  assert.match(src, /online: input\.online \|\| \(offlineCapture && settleBill != null && settleBill\.orders\.length > 0\)/);
+  // confirmPay branches to the local CAPTURE offline; the ONLINE charge path is preserved.
+  assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,1400}settleTableOffline\(/, "offline settle captures via settleTableOffline");
+  assert.match(src, /await performTablePayment\(/, "the ONLINE table payment path is preserved unchanged");
+  // Fail-closed: no local draft for the table → blocked with a reconnect message, no capture.
+  assert.match(src, /if \(!draft\)[\s\S]{0,160}isn't available offline/);
 });
 
 test("PosWorkspace threads readiness + a five-dimensional capture scope equal to the drain scope", () => {
