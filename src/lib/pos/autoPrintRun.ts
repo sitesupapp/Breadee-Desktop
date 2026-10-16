@@ -45,7 +45,7 @@ import {
   type KitchenTicket,
 } from "@/lib/pos/kitchenPrinter";
 import { resolvePrintRoute, type ResolvedRoute } from "@/lib/pos/printRouteResolver";
-import { cachePrintRoute, readCachedPrintRoute } from "@/lib/offline/db";
+import { cachePrintRoute, readCachedPrintRoute, cacheItemRoutes, readCachedItemRoutes, cacheServerPrinters, readCachedServerPrinters } from "@/lib/offline/db";
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { resolveRouteTarget, type PrintResolution } from "@/lib/pos/printTarget";
 import { readAutoPrintSettings, readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
@@ -187,14 +187,27 @@ export async function autoPrintKitchenTicket(input: {
   // NO RULES, which is precisely the behaviour of every release before this one.
   // A branch whose routing table is briefly unreachable prints the whole batch
   // to its usual printer rather than nothing at all.
-  const routes = await loadItemRoutes({ tenantId: input.tenantId, branchId: input.branchId }).catch(() => []);
+  // Phase F (GAP 4): write the branch's item/station routes through to the cache on a successful
+  // online load, and fall back to the cached routes offline — so an offline ticket reproduces the
+  // EXACT same station split it had online, not a silent reroute to the branch default.
+  const routes = await loadItemRoutes({ tenantId: input.tenantId, branchId: input.branchId })
+    .then((r) => {
+      void cacheItemRoutes(input.tenantId, input.branchId, r);
+      return r;
+    })
+    .catch(async () => ((await readCachedItemRoutes(input.tenantId, input.branchId).catch(() => null)) as Awaited<ReturnType<typeof loadItemRoutes>> | null) ?? []);
   const stations = splitTicketByStation({ ticket: input.ticket, routes, orderSource: input.source });
 
   // Only read when an explicit rule actually matched. A branch with no station
   // routing pays nothing for this feature - not a query, not a round trip.
   const needsPrinters = stations.some((s) => s.printerId !== null);
   const printers = needsPrinters
-    ? await loadServerPrinters({ tenantId: input.tenantId, branchId: input.branchId }).catch(() => [])
+    ? await loadServerPrinters({ tenantId: input.tenantId, branchId: input.branchId })
+        .then((p) => {
+          void cacheServerPrinters(input.tenantId, input.branchId, p);
+          return p;
+        })
+        .catch(async () => ((await readCachedServerPrinters(input.tenantId, input.branchId).catch(() => null)) as ServerPrinter[] | null) ?? [])
     : [];
 
   const render = kitchenRenderOptions(design);

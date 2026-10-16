@@ -956,6 +956,63 @@ export const mergeTablesHandler: OperationHandler = {
   },
 };
 
+/** A receivable-collection refusal that means the outstanding balance/state drifted since it was
+ *  proven locally — already settled, over the outstanding balance, or no longer an outstanding
+ *  receivable. A CONFLICT the operator resolves (needs_attention); the server re-derives the balance
+ *  under its row lock + idempotency, so a duplicate replay returns the cached result (exactly-once)
+ *  and a genuine drift never over-collects. */
+function isReceivableConflict(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("already settled") ||
+    m.includes("exceeds the outstanding") ||
+    m.includes("no outstanding receivable") ||
+    m.includes("outstanding") ||
+    m.includes("not found") ||
+    isConflictMessage(message)
+  );
+}
+
+type ReceivableCollectPayload = {
+  order_id: string | null;
+  /** Local order entity id to remap to the canonical order id (a receivable created offline). */
+  order_local: string | null;
+  amount: number;
+  method: string;
+};
+
+/** receivable_collect — book a payment against ONE on-account order offline (pos_receivable_collect),
+ *  exactly-once (server idempotency on client_op_id). An offline-created receivable is remapped
+ *  order_local → canonical first. A stale/over balance → CONFLICT → needs_attention; the local
+ *  customer-payment event is retained for reconciliation. */
+export const receivableCollectHandler: OperationHandler = {
+  type: "receivable_collect",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as ReceivableCollectPayload;
+    let orderId = p.order_id;
+    if (p.order_local) {
+      const c = await ctx.canonicalFor(p.order_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "receivable not yet synced" };
+      orderId = c;
+    }
+    if (!orderId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_order", message: "no receivable order id" };
+    if (!(p.amount > 0)) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "bad_amount", message: "no collection amount" };
+    try {
+      const r = await ctx.deps.receivableCollect({ orderId, amount: p.amount, method: p.method, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: orderId, resultMeta: { payment_id: r.payment_id, payment_status: r.payment_status, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "receivable_collect: transport", message: msg };
+      const t = terminalKind(msg);
+      if (t === "permission") return { ok: false, retryClass: "AUTHORITY_REFUSED", code: "permission", message: msg };
+      if (t === "shift_closed") return { ok: false, retryClass: "CONFLICT", code: "shift_closed", message: msg };
+      if (isReceivableConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "receivable_conflict", message: msg };
+      return { ok: false, retryClass: "VALIDATION_TERMINAL", code: t ?? "validation", message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -976,6 +1033,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${addOrderItemsHandler.type}@${addOrderItemsHandler.schemaVersion}`]: addOrderItemsHandler,
   [`${moveTableHandler.type}@${moveTableHandler.schemaVersion}`]: moveTableHandler,
   [`${mergeTablesHandler.type}@${mergeTablesHandler.schemaVersion}`]: mergeTablesHandler,
+  [`${receivableCollectHandler.type}@${receivableCollectHandler.schemaVersion}`]: receivableCollectHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

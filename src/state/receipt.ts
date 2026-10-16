@@ -25,6 +25,30 @@
 import { create } from "zustand";
 import type { ReceiptData } from "@/lib/receipt";
 
+// Phase F (GAP 1): persist every presented receipt durably so a device-created transaction can be
+// reprinted offline AND after a cold restart (Ctrl+P / reopen). Best-effort, lazy-imported so this
+// store stays import-safe in the pure-logic test runtime; a persistence failure never affects the
+// on-screen receipt.
+function persist(receipt: ReceiptData, provisional: boolean): void {
+  void (async () => {
+    try {
+      const ref = (receipt as { orderNumber?: string }).orderNumber;
+      if (!ref) return;
+      const { persistReceiptSnapshot } = await import("@/lib/offline/db");
+      let tenantId: string | null = null;
+      try {
+        const { useSession } = await import("@/state/session");
+        tenantId = useSession.getState().tenant?.id ?? null;
+      } catch {
+        /* scope is best-effort */
+      }
+      await persistReceiptSnapshot({ ref, data: receipt, tenantId, provisional });
+    } catch {
+      /* durability is best-effort; never break presenting a receipt */
+    }
+  })();
+}
+
 type ReceiptState = {
   /** The most recent completed receipt. Survives hide() and cart reset. */
   receipt: ReceiptData | null;
@@ -49,15 +73,28 @@ type ReceiptState = {
   hide: () => void;
   /** Drop everything - used on sign-out, never during a normal sale. */
   clear: () => void;
+  /**
+   * Phase F (GAP 1): after a cold restart the in-memory receipt is gone, but a durable snapshot of
+   * the last presented receipt survives in Dexie. Load it (staged, NOT shown) so Ctrl+P can reprint
+   * the last device-created transaction offline. No-op when there is already a receipt in memory or
+   * none persisted. Best-effort.
+   */
+  restoreLatest: (tenantId?: string | null) => Promise<void>;
 };
 
 export const useReceipt = create<ReceiptState>((set, get) => ({
   receipt: null,
   visible: false,
 
-  present: (receipt) => set({ receipt, visible: true }),
+  present: (receipt) => {
+    set({ receipt, visible: true });
+    persist(receipt, false);
+  },
 
-  stage: (receipt) => set({ receipt, visible: false }),
+  stage: (receipt) => {
+    set({ receipt, visible: false });
+    persist(receipt, false);
+  },
 
   reopen: () => {
     if (!get().receipt) return;
@@ -66,7 +103,28 @@ export const useReceipt = create<ReceiptState>((set, get) => ({
 
   hide: () => set({ visible: false }),
 
-  clear: () => set({ receipt: null, visible: false }),
+  clear: () => {
+    set({ receipt: null, visible: false });
+    void (async () => {
+      try {
+        const { clearReceiptSnapshots } = await import("@/lib/offline/db");
+        await clearReceiptSnapshots();
+      } catch {
+        /* sign-out cleanup is best-effort */
+      }
+    })();
+  },
+
+  restoreLatest: async (tenantId) => {
+    if (get().receipt) return; // a live receipt already present — don't overwrite it
+    try {
+      const { readLatestReceiptSnapshot } = await import("@/lib/offline/db");
+      const snap = await readLatestReceiptSnapshot(tenantId ?? null);
+      if (snap && snap.data && !get().receipt) set({ receipt: snap.data as ReceiptData, visible: false });
+    } catch {
+      /* best-effort restore */
+    }
+  },
 }));
 
 /**

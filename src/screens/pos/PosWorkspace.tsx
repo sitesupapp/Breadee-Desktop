@@ -538,6 +538,12 @@ function PosWorkspaceInner() {
   const [expected, setExpected] = useState<ShiftExpected | null>(null);
   // Receipt presentation is store-owned and atomic - see `state/receipt.ts`.
   const receiptStore = useReceipt();
+  // Phase F (GAP 1): after a cold restart the in-memory receipt is gone; restore the last durable
+  // snapshot (staged, not shown) so Ctrl+P can reprint the last device-created transaction offline.
+  useEffect(() => {
+    void useReceipt.getState().restoreLatest(tenantId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId]);
   // Same arrangement for the kitchen ticket, and for the same reason.
   const kitchenStore = useKitchenTicket();
 
@@ -639,7 +645,21 @@ function PosWorkspaceInner() {
           }),
         );
       } catch (e) {
-        toast.push({ tone: "error", message: "The order could not be read for printing.", detail: e instanceof Error ? e.message : null });
+        // Phase F (GAP 1): the server read failed (offline). Fall back to a durable local snapshot of
+        // this transaction's receipt if one was persisted (a device-created/settled order), so a
+        // locally-known receipt still reprints offline + after restart. Only a server-only historical
+        // order with no local snapshot asks for a reconnect.
+        try {
+          const { readReceiptSnapshot } = await import("@/lib/offline/db");
+          const snap = (await readReceiptSnapshot(order.order_number ?? order.id.slice(0, 8))) ?? (await readReceiptSnapshot(order.id));
+          if (snap?.data) {
+            receiptStore.present(snap.data as ReceiptData);
+            return;
+          }
+        } catch {
+          /* fall through to the friendly message */
+        }
+        toast.push({ tone: "warning", message: "This receipt isn't available offline.", detail: "Reconnect to reprint an order that wasn't created on this device." });
       }
     },
     [currency, pos.branch.name, pos.tenantName, pos.userName, receiptStore, shiftId, toast],
@@ -1537,13 +1557,44 @@ function PosWorkspaceInner() {
       } catch {
         /* offline print is non-fatal */
       }
+      // Phase F (GAP 1): present (and durably persist) a PROVISIONAL receipt for the offline sale,
+      // so the operator gets a receipt now and can reprint it offline + after a cold restart. The ref
+      // is clearly provisional (OFF-...); the server figures become authoritative on sync.
+      try {
+        const receiptLines = lines.map((l) => {
+          const mods = (l.modifiers ?? []).map((m) => ({ name: m.name, price_delta: Number(m.price_delta) || 0, quantity: Number(m.quantity) || 1 }));
+          const unit = Number(l.base_price) + mods.reduce((s, m) => s + m.price_delta * m.quantity, 0);
+          return { name: l.name, qty: l.quantity, unitPrice: unit, lineTotal: unit * l.quantity, modifiers: mods, note: l.kitchen_note ?? null };
+        });
+        receiptStore.present(
+          buildReceipt({
+            businessName: pos.tenantName,
+            branchName: pos.branch.name,
+            orderType: "Takeaway",
+            orderSource: "takeaway",
+            staffName: pos.userName,
+            orderNumber: ref,
+            at: new Date().toLocaleString(),
+            paid: true,
+            method: "cash",
+            currency: input.currency,
+            lines: receiptLines,
+            subtotal: total,
+            discount: 0,
+            total,
+            shiftRef: activeShiftId ? activeShiftId.slice(0, 8) : null,
+          }),
+        );
+      } catch {
+        /* the receipt is best-effort; the sale is already durably captured */
+      }
       void refreshOfflineQueue();
       // Durable commit is done; only now clear the cart and close the dialog.
       setPayIntent(null);
       newOrder();
       toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
     },
-    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
+    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, provisionalResult, receiptStore, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
 
   /** Resume an offline order that was sent to the kitchen but not yet paid. */

@@ -337,6 +337,42 @@ export interface CachedPrintRoute {
   cached_at: string;
 }
 
+/**
+ * Phase F (GAP 1) — a durable snapshot of a presented RECEIPT, so a transaction created or settled
+ * on THIS device can be reprinted immediately offline AND after a cold restart, before and after
+ * canonical sync, without a reconnect. Stores the exact ReceiptData the presenter built (the same
+ * layout prints it); keyed by a stable ref (order number / local ref). Device-local and cleared on
+ * sign-out. Historical server-only receipts never hydrated here stay reconnect-required.
+ */
+export interface CachedReceipt {
+  ref: string; // stable receipt ref (order number / provisional local ref) — PK
+  data: unknown; // the ReceiptData snapshot as presented
+  tenant_id: string | null;
+  branch_id: string | null;
+  provisional: boolean; // true for an offline/local settlement whose server figures aren't final yet
+  created_at: string;
+}
+
+/**
+ * Phase F (GAP 2) — the local proof of an OUTSTANDING on-account RECEIVABLE, written through while
+ * ONLINE. An offline receivable collection is permitted ONLY against a receivable proven here: the
+ * order existed as a completed on_account order with a locally-known outstanding balance, in THIS
+ * tenant+OU. The capture refuses an amount above the proven outstanding; the server
+ * (pos_receivable_collect) re-derives outstanding under a FOR UPDATE lock on replay and refuses
+ * over-collection, so a stale/over balance → CONFLICT → needs_attention, never an over-collection.
+ */
+export interface ReceivableProof {
+  order_id: string; // canonical on-account order id (PK)
+  order_number: string | null;
+  tenant_id: string;
+  branch_id: string | null; // OU
+  customer_id: string | null;
+  customer_name: string | null;
+  outstanding_amount: number; // in the order's PRIMARY currency (what the collect amount is in)
+  currency: string;
+  cached_at: string;
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
@@ -364,6 +400,12 @@ class BreadeeDB extends Dexie {
   // Phase F (schema version 9). Write-through cache of resolved print routes (per branch), so a
   // kitchen/receipt ticket can be routed offline. Keyed by `${branch}:${purpose}:${order_source}`.
   printRoutes!: Table<CachedPrintRoute, string>;
+  // Phase F (GAP 2, schema version 10). Local proof of outstanding on-account receivables, so a
+  // collection can be captured offline against a proven balance. Keyed by order_id.
+  receivableProofs!: Table<ReceivableProof, string>;
+  // Phase F (GAP 1, schema version 11). Durable presented-receipt snapshots, so a device-created
+  // transaction reprints offline + after cold restart. Keyed by ref.
+  receipts!: Table<CachedReceipt, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -428,6 +470,17 @@ class BreadeeDB extends Dexie {
     // carries forward UNTOUCHED; a v1..v8 database upgrades in place with all data preserved.
     this.version(9).stores({
       printRoutes: "key, branch_id, purpose, order_source, cached_at",
+    });
+    // Version 10 - Phase F (GAP 2), ADDITIVE. Adds ONLY the receivableProofs store (local proof of
+    // outstanding on-account receivables, written through while online). Every prior store (v1..v9)
+    // carries forward UNTOUCHED; a v1..v9 database upgrades in place with all data preserved.
+    this.version(10).stores({
+      receivableProofs: "order_id, tenant_id, branch_id, customer_id, cached_at",
+    });
+    // Version 11 - Phase F (GAP 1), ADDITIVE. Adds ONLY the receipts snapshot store (durable
+    // reprint of device-created transactions). Every prior store (v1..v10) carries forward UNTOUCHED.
+    this.version(11).stores({
+      receipts: "ref, tenant_id, branch_id, created_at",
     });
   }
 }
@@ -1038,4 +1091,135 @@ export async function readCachedPrintRoute(branchId: string | null, purpose: str
 /** Sign-out cleanup: drop the print-route cache. */
 export async function clearPrintRoutes(): Promise<void> {
   await localdb.printRoutes.clear();
+}
+
+// --- Phase F (GAP 4) — item/station routing + server-printer caches ----------
+// Reuse the generic snapshots store (tenant+branch scoped) so an offline kitchen ticket reproduces
+// the EXACT station/item routing it had online, instead of falling back to the branch default.
+// Write-through ONLY on a successful online load; read as a fallback when that load throws offline.
+
+const itemRoutesKey = (branchId: string | null) => `itemroutes:${branchId ?? "none"}`;
+const serverPrintersKey = (branchId: string | null) => `printers:${branchId ?? "none"}`;
+
+/** Cache the branch's item/category kitchen routes (call only after a successful online load). */
+export async function cacheItemRoutes(tenantId: string | null, branchId: string | null, routes: unknown[]): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({ key: itemRoutesKey(branchId), tenant_id: tenantId, branch_id: branchId, data: routes, cached_at: new Date().toISOString() });
+}
+
+/** The cached item routes for a branch, or null. Scope-checked (tenant + branch). */
+export async function readCachedItemRoutes(tenantId: string | null, branchId: string | null): Promise<unknown[] | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(itemRoutesKey(branchId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  return Array.isArray(row.data) ? (row.data as unknown[]) : null;
+}
+
+/** Cache the branch's server printer registry (call only after a successful online load). */
+export async function cacheServerPrinters(tenantId: string | null, branchId: string | null, printers: unknown[]): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({ key: serverPrintersKey(branchId), tenant_id: tenantId, branch_id: branchId, data: printers, cached_at: new Date().toISOString() });
+}
+
+/** The cached server printers for a branch, or null. Scope-checked (tenant + branch). */
+export async function readCachedServerPrinters(tenantId: string | null, branchId: string | null): Promise<unknown[] | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(serverPrintersKey(branchId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  return Array.isArray(row.data) ? (row.data as unknown[]) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Phase F (GAP 2) — outstanding-receivable proofs (receivableProofs, v10)
+// ---------------------------------------------------------------------------
+
+/** Write through the proof of an OUTSTANDING receivable while ONLINE. Idempotent per order_id; a
+ *  newer read replaces the prior proof. A receivable with no outstanding balance is EVICTED so it
+ *  can never be offline-collected against. No-op without tenant/order. */
+export async function cacheReceivableProof(proof: ReceivableProof): Promise<void> {
+  if (!proof.tenant_id || !proof.order_id) return;
+  if (!(proof.outstanding_amount > 0)) {
+    await localdb.receivableProofs.delete(proof.order_id).catch(() => undefined);
+    return;
+  }
+  await localdb.receivableProofs.put({ ...proof, cached_at: proof.cached_at || new Date().toISOString() });
+}
+
+/** The proof for a receivable order, or null. SCOPE-CHECKED (tenant + OU/branch) — a proof from a
+ *  sibling OU or another tenant is never returned (fail-closed). */
+export async function readReceivableProof(
+  orderId: string,
+  scope: { tenantId: string | null; branchId: string | null },
+): Promise<ReceivableProof | null> {
+  if (!scope.tenantId || !orderId) return null;
+  const row = await localdb.receivableProofs.get(orderId);
+  if (!row) return null;
+  if (row.tenant_id !== scope.tenantId) return null;
+  if ((row.branch_id ?? null) !== (scope.branchId ?? null)) return null;
+  return row;
+}
+
+/** Every proven outstanding receivable for a customer in a tenant+branch scope (for the offline list). */
+export async function listReceivableProofs(tenantId: string | null, branchId: string | null, customerId?: string | null): Promise<ReceivableProof[]> {
+  if (!tenantId) return [];
+  const all = await localdb.receivableProofs.where("tenant_id").equals(tenantId).toArray();
+  return all.filter((r) => (r.branch_id ?? null) === (branchId ?? null) && (customerId == null || r.customer_id === customerId));
+}
+
+/** Drop a receivable proof (e.g. once its collection reconciles). Best-effort. */
+export async function deleteReceivableProof(orderId: string): Promise<void> {
+  await localdb.receivableProofs.delete(orderId).catch(() => undefined);
+}
+
+/** Sign-out cleanup: drop the receivable-proof cache (privacy — customer balances). */
+export async function clearReceivableProofs(): Promise<void> {
+  await localdb.receivableProofs.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Phase F (GAP 1) — durable receipt snapshots (receipts, v11)
+// ---------------------------------------------------------------------------
+
+/** Persist a presented receipt so it can be reprinted offline + after restart. Idempotent per ref
+ *  (a newer present of the same ref — e.g. a provisional offline receipt later reconciled online —
+ *  replaces it). No-op without a ref. Best-effort: never throws into the caller's print path. */
+export async function persistReceiptSnapshot(input: {
+  ref: string;
+  data: unknown;
+  tenantId?: string | null;
+  branchId?: string | null;
+  provisional?: boolean;
+}): Promise<void> {
+  if (!input.ref) return;
+  try {
+    await localdb.receipts.put({
+      ref: input.ref,
+      data: input.data,
+      tenant_id: input.tenantId ?? null,
+      branch_id: input.branchId ?? null,
+      provisional: input.provisional === true,
+      created_at: new Date().toISOString(),
+    });
+  } catch {
+    /* a persistence failure must never break presenting/printing a receipt */
+  }
+}
+
+/** One persisted receipt by its ref, or null. */
+export async function readReceiptSnapshot(ref: string): Promise<CachedReceipt | null> {
+  if (!ref) return null;
+  return (await localdb.receipts.get(ref).catch(() => undefined)) ?? null;
+}
+
+/** The most recent persisted receipt (optionally scoped to tenant), for a post-restart Ctrl+P
+ *  reprint of the last transaction. */
+export async function readLatestReceiptSnapshot(tenantId?: string | null): Promise<CachedReceipt | null> {
+  const rows = await localdb.receipts.orderBy("created_at").reverse().toArray().catch(() => []);
+  const match = rows.find((r) => tenantId == null || r.tenant_id == null || r.tenant_id === tenantId);
+  return match ?? null;
+}
+
+/** Sign-out cleanup: drop the receipt-snapshot cache (privacy). */
+export async function clearReceiptSnapshots(): Promise<void> {
+  await localdb.receipts.clear();
 }

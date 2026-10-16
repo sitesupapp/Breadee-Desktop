@@ -235,6 +235,11 @@ export type PosTxnSyncDeps = {
   /** Phase-E: merge source table bills into a primary (pos_merge_tables_v3). client_op_id →
    *  exactly-once; `expected` is the per-table version-map CAS. */
   mergeTables: (args: { primaryTableId: string; sourceTableIds: string[]; expected: Record<string, number>; clientOpId: string }) => Promise<{ ok: boolean; merge_id: string; sources_merged: number; idempotent: boolean }>;
+  /** Phase-F: collect a payment against ONE on-account order (pos_receivable_collect). Exactly-once
+   *  via the server's pos_operation_idempotency on client_op_id; the server re-derives the
+   *  outstanding balance under a FOR UPDATE lock and refuses over-collection → a stale/over balance
+   *  is a structured conflict. `amount` is in the order's primary currency (the server prices USD). */
+  receivableCollect: (args: { orderId: string; amount: number; method: string; clientOpId: string }) => Promise<{ ok: boolean; payment_id: string | null; payment_status: string; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -452,6 +457,19 @@ export const defaultDeps: PosTxnSyncDeps = {
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok !== false, merge_id: String(row.merge_id ?? ""), sources_merged: row.sources_merged == null ? 0 : Number(row.sources_merged), idempotent };
+  },
+  receivableCollect: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_receivable_collect", {
+      p_payload: { order_id: args.orderId, amount: args.amount, method: args.method, client_op_id: args.clientOpId },
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return {
+      ok: row.ok !== false,
+      payment_id: row.payment_id == null ? null : String(row.payment_id),
+      payment_status: String(row.payment_status ?? ""),
+      idempotent,
+    };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

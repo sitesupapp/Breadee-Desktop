@@ -68,6 +68,12 @@ export type OperationType =
   // target order may be canonical (hydrated) or offline-created (order_local → canonical remap).
   | "edit_order_line"
   | "add_order_items"
+  // Phase F — offline RECEIVABLE collection (book a cash/tender payment against ONE on-account
+  // order) → pos_receivable_collect (exactly-once via pos_operation_idempotency on client_op_id;
+  // FOR UPDATE row lock; re-derives outstanding under the lock and refuses over-collection). Only
+  // against a receivable whose outstanding balance is locally proven; a stale/over balance →
+  // CONFLICT → needs_attention. Drawer reduced... no — a CASH collection is cash IN.
+  | "receivable_collect"
   // Phase E — offline dine-in TABLE RESTRUCTURE of CANONICAL (hydrated) tables with open bills.
   // move_table → pos_move_table (CAS expected_version); merge_tables → pos_merge_tables_v3 (CAS
   // version-map). Both replay-safe on client_op_id + atomic server-side. Any version drift (a bill

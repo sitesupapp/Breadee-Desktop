@@ -45,6 +45,10 @@ import {
   type ReceivableConfirmation,
 } from "@/lib/pos/receivableReceipt";
 import { isNativeAvailable } from "@/lib/nativePrinting";
+import { useShift, requireOpenShiftId } from "@/state/shift";
+import { getDeviceIdentity } from "@/lib/device";
+import { hydrateReceivableProofs, receivableAccountFromProofs } from "@/lib/pos/receivableProofHydration";
+import { proveReceivableOffline, captureReceivableCollectOffline, evaluateReceivableCollectOfflineReady, type ReceivableScope } from "@/lib/offline/receivableCollectOffline";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -70,6 +74,19 @@ function errorMessage(error: unknown): string {
 export function CustomerAccounts() {
   const pos = usePosContext();
   const online = useSession((s) => s.online && !s.offlineMode);
+  const shiftStore = useShift();
+
+  // Phase F (GAP 2): the immutable 5-D scope an offline collection is captured under, and whether an
+  // open shift exists (the server books the collection to the open shift on replay).
+  const offlineScope = useMemo<ReceivableScope | null>(
+    () =>
+      pos.tenantId && pos.userId
+        ? { tenantId: pos.tenantId, branchId: pos.branch.id, cashierUserId: pos.userId, deviceId: getDeviceIdentity().device_id, terminalId: getDeviceIdentity().terminal_id }
+        : null,
+    [pos.tenantId, pos.userId, pos.branch.id],
+  );
+  const proofScope = useMemo(() => ({ tenantId: pos.tenantId, branchId: pos.branch.id }), [pos.tenantId, pos.branch.id]);
+  const hasOpenShift = requireOpenShiftId(shiftStore.shift) != null;
 
   const view = pos.gates.viewReceivables;
   const collect = pos.gates.collectReceivables;
@@ -121,15 +138,28 @@ export function CustomerAccounts() {
     setLoadingAccount(true);
     setAccountError(null);
     try {
-      const acct = await getReceivablesCustomer(customerId);
-      setAccount(acct);
+      if (online) {
+        const acct = await getReceivablesCustomer(customerId);
+        setAccount(acct);
+        // Write the outstanding receivables through so they can be collected offline later.
+        void hydrateReceivableProofs(acct, proofScope).catch(() => undefined);
+      } else {
+        // OFFLINE: reconstruct a reduced account from the cached proofs (customer + outstanding
+        // orders). No payment history — that is a live-only read.
+        const acct = await receivableAccountFromProofs(customerId, proofScope);
+        if (acct) setAccount(acct);
+        else {
+          setAccount(null);
+          setAccountError("This customer's receivables aren't available offline. Reconnect to view them.");
+        }
+      }
     } catch (e) {
       setAccountError(errorMessage(e));
       setAccount(null);
     } finally {
       setLoadingAccount(false);
     }
-  }, []);
+  }, [online, proofScope]);
 
   useEffect(() => {
     if (selectedId) void loadAccount(selectedId);
@@ -182,10 +212,6 @@ export function CustomerAccounts() {
       setCollectError(collect.reason ?? "You cannot collect on customer accounts.");
       return;
     }
-    if (!online) {
-      setCollectError("Collecting a payment needs a connection. Reconnect before collecting.");
-      return;
-    }
     const amount = parseAmount(amountInput);
     try {
       assertCollectionAmount(amount);
@@ -195,6 +221,63 @@ export function CustomerAccounts() {
     }
     if (amount > order.balance + 1e-6) {
       setCollectError("That is more than the balance on this order. Collect the balance or less.");
+      return;
+    }
+
+    // Phase F (GAP 2) — OFFLINE collection: capture a durable receivable_collect op against a
+    // receivable whose outstanding balance is proven locally (never over the proven balance). The
+    // server (pos_receivable_collect) re-derives outstanding under its row lock on replay and dedups
+    // on client_op_id, so a stale/over balance → needs_attention, never an over-collection.
+    if (!online) {
+      const proof = await proveReceivableOffline(order.orderId, offlineScope ?? ({ tenantId: pos.tenantId ?? "", branchId: pos.branch.id, cashierUserId: pos.userId ?? "", deviceId: getDeviceIdentity().device_id, terminalId: getDeviceIdentity().terminal_id }));
+      const gate = evaluateReceivableCollectOfflineReady({ online: false, offlineReady: offlineScope != null, hasScope: offlineScope != null, hasOpenShift, proof, amount });
+      if (!gate.allowed || !offlineScope) {
+        setCollectError(gate.reason ?? "This receivable cannot be collected offline.");
+        return;
+      }
+      if (!clientOpId.current) clientOpId.current = newClientOpId();
+      setCollectBusy(true);
+      setCollectError(null);
+      try {
+        await captureReceivableCollectOffline({
+          scope: offlineScope,
+          orderId: order.orderId,
+          amount,
+          method,
+          currency: order.currency,
+          clientOpId: clientOpId.current,
+          cashAmountUsd: order.currency === "USD" ? amount : null,
+        });
+        clientOpId.current = null;
+        setConfirmation(
+          buildReceivableConfirmation({
+            businessName: pos.tenantName,
+            branchName: pos.branch.name,
+            cashierName: pos.userName,
+            customerName: account.customer.name,
+            customerPhone: account.customer.phone,
+            previousBalanceUsd: order.outstandingUsd,
+            paidAmount: amount,
+            paidCurrency: order.currency,
+            method,
+            at: new Date().toLocaleString(),
+            // Provisional figures: the authoritative USD + remaining come from the server on sync.
+            result: {
+              ok: true,
+              paymentId: null,
+              orderNumber: order.orderNumber ?? "",
+              paymentStatus: amount >= order.balance - 1e-6 ? "paid" : "partial",
+              collectedUsd: 0,
+              outstandingUsd: 0,
+              idempotentReplay: false,
+            },
+          }),
+        );
+      } catch (e) {
+        setCollectError(errorMessage(e));
+      } finally {
+        setCollectBusy(false);
+      }
       return;
     }
     if (!clientOpId.current) clientOpId.current = newClientOpId();

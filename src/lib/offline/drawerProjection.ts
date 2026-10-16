@@ -141,6 +141,16 @@ export function extractDrawerMovements(
       const method = typeof p.method === "string" && p.method ? p.method : "cash";
       if (usd != null && usd > 0) movements.push({ kind: "payout", method, amountUsd: usd, operationId: op.operation_id });
       else unknown++;
+    } else if (op.operation_type === "receivable_collect") {
+      // A cash receivable collection is cash INTO the drawer (sale sign). A non-cash tender goes to
+      // its own per-method total, not to cash. Only a locally-known USD amount contributes.
+      if (p.method === "cash") {
+        const usd = typeof p.cash_amount_usd === "number" ? p.cash_amount_usd : null;
+        if (usd != null && usd > 0) movements.push({ kind: "sale", method: "cash", amountUsd: usd, operationId: op.operation_id });
+        else unknown++;
+      } else if (typeof p.method === "string" && typeof p.cash_amount_usd === "number" && p.cash_amount_usd > 0) {
+        movements.push({ kind: "sale", method: p.method, amountUsd: p.cash_amount_usd, operationId: op.operation_id });
+      }
     }
   }
   return { movements, unknownAmountCount: unknown };

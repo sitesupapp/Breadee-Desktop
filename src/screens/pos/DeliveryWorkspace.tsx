@@ -165,6 +165,7 @@ import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/u
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable } from "@/lib/offline/reachability";
+import { capturePayOrderOffline, payOrderClientOpId } from "@/lib/offline/payOrderOffline";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, getPosOfflineTxn, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
 import { getDeviceIdentity } from "@/lib/device";
@@ -1375,11 +1376,14 @@ export function useDeliveryWorkspace(input: {
         takePayments: input.takePayments,
         order: payTarget.order,
         hasOpenShift: payTarget.shiftOpen,
-        online,
+        // Phase F (GAP 3): an in-house (non-provider) delivery can settle its COD cash OFFLINE by
+        // capturing a pay_order op, so connectivity is satisfied for the gate in that case. The gate
+        // still enforces access, open shift and currency. Provider-mode orders stay online.
+        online: online || (!providerModeOn && itemEditOfflineScope != null),
         currencyBlockedReason: paymentBlockedReason(input.currency, input.rate),
         paying,
       }),
-    [accessGate, input.takePayments, payTarget, online, input.currency, input.rate, paying],
+    [accessGate, input.takePayments, payTarget, online, providerModeOn, itemEditOfflineScope, input.currency, input.rate, paying],
   );
 
   /**
@@ -1439,6 +1443,39 @@ export function useDeliveryWorkspace(input: {
     }) => {
       const order = payTarget.order;
       if (!order || !payGate.allowed) return;
+
+      // Phase F (GAP 3) — OFFLINE in-house COD cash settlement. Capture a pay_order op (reuses the
+      // replay-safe pos_pay_order engine) instead of charging the server. Restricted to NON-provider
+      // delivery, where the cash is unambiguously Breadee-recorded; a provider order keeps its online
+      // settlement so a provider's external step is never faked offline. An offline-created order is
+      // remapped local→canonical on replay; a settle conflict → needs_attention, never a second charge.
+      if (!online && !providerModeOn && itemEditOfflineScope) {
+        setPaying(true);
+        setPayError(null);
+        try {
+          const localTxn = await getPosOfflineTxn(order.id).catch(() => undefined);
+          const orderLocal = localTxn ? order.id : null;
+          const clientOpId = payOrderClientOpId(itemEditOfflineScope, order.id, confirm.method, confirm.currency);
+          await capturePayOrderOffline({
+            scope: itemEditOfflineScope,
+            orderId: orderLocal ? null : order.id,
+            orderLocal,
+            method: confirm.method,
+            currency: confirm.currency,
+            clientOpId,
+            orderNumber: order.order_number ?? null,
+          });
+          setPayOpen(false);
+          toast.push({ tone: "success", message: "Delivery settled offline", detail: "Recorded on this device — it will sync when you reconnect." });
+          await input.refreshCashBox().catch(() => {});
+        } catch (e) {
+          setPayError(e instanceof Error ? e.message : "The delivery could not be settled offline.");
+        } finally {
+          setPaying(false);
+        }
+        return;
+      }
+
       const fromQueue = payTarget.fromQueue;
       const intended = {
         orderId: order.id,
@@ -1588,7 +1625,7 @@ export function useDeliveryWorkspace(input: {
         setPaying(false);
       }
     },
-    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
+    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast, online, providerModeOn, itemEditOfflineScope],
   );
 
   /**
