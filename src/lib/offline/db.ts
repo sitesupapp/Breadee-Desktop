@@ -107,6 +107,15 @@ export interface PosOfflineTxn {
    * Null/absent for sales against a real server shift (the common case).
    */
   pending_shift_local_id?: string | null;
+  /**
+   * Phase E (E3): set when this (delivery) order was placed against an OFFLINE-CREATED customer /
+   * address whose ids in `order_payload` are LOCAL (not yet synced). On reconnect the replay engine
+   * waits for the customer_upsert to resolve them, then remaps `order_payload.customer_id` /
+   * `order_payload.address_id` to the canonical ids BEFORE submitting. Null/absent for a real
+   * server customer (the common case).
+   */
+  customer_local?: string | null;
+  address_local?: string | null;
 }
 
 /** Lifecycle of an offline-opened shift that has not yet reached the server. */

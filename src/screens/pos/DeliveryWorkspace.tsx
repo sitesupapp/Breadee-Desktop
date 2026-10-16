@@ -166,7 +166,7 @@ import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
-import { addPosOfflineTxn, getPosOfflineTxnByOp, getPosOfflineTxn, updatePosOfflineTxn } from "@/lib/offline/db";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, getPosOfflineTxn, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
 import { getDeviceIdentity } from "@/lib/device";
 import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
 import { useShortcuts } from "@/lib/keyboard/provider";
@@ -878,8 +878,15 @@ export function useDeliveryWorkspace(input: {
         const total = subtotal + feeValue;
         const existing = await getPosOfflineTxnByOp(snapshot.clientOpId);
         const localId = existing?.local_txn_id ?? crypto.randomUUID();
+        // Phase E (E3): if the chosen customer was CREATED offline, its customer/address ids are
+        // LOCAL. Carry them so replay waits for the customer_upsert and remaps them to canonical
+        // before pos_submit_order (never submits a local id). A cached server customer → nulls.
+        const cachedCust = await getCachedCustomer(snapshot.customerId, pos.tenantId, snapshot.branchId).catch(() => undefined);
+        const isPendingLocal = cachedCust?.pending_local === true;
+        const customerLocal = isPendingLocal ? snapshot.customerId : null;
+        const addressLocal = isPendingLocal ? snapshot.addressId : null;
         if (existing) {
-          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued" });
+          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued", customer_local: customerLocal, address_local: addressLocal });
         } else {
           await addPosOfflineTxn({
             local_txn_id: localId,
@@ -901,6 +908,8 @@ export function useDeliveryWorkspace(input: {
             total,
             status: "queued",
             attempts: 0,
+            customer_local: customerLocal,
+            address_local: addressLocal,
           });
         }
         const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;

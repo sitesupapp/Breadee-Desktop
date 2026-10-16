@@ -119,6 +119,17 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
       continue;
     }
     const dependsShift = t.pending_shift_local_id ?? null;
+    // Phase E (E3): a delivery order against an OFFLINE-CREATED customer/address carries their LOCAL
+    // ids. They must resolve (via the customer_upsert op) before this order submits, so they join
+    // the dependency barrier and the handler remaps them into order_payload before pos_submit_order.
+    const customerLocal = t.customer_local ?? null;
+    const addressLocal = t.address_local ?? null;
+    // Gate on the shift + the CUSTOMER local (both are op local_entity_ids the orchestrator tracks).
+    // The ADDRESS local is resolved by the SAME customer_upsert (into the entity map) as a side
+    // effect, so gating on the customer guarantees the address is resolvable; the handler reads it
+    // from the map at replay. (An op's dependency gate only recognises local_entity_id resolutions,
+    // not a handler-written mapping, so the address must NOT be a gate here.)
+    const localDeps = [dependsShift, customerLocal].filter((x): x is string => x != null);
     const op: OfflineOperation = {
       operation_id: id,
       operation_type: "takeaway_sale",
@@ -135,8 +146,8 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
       local_entity_id: t.local_txn_id,
       canonical_entity_id: t.server_order_id ?? null,
       dependency_ids: dependsShift ? [shiftOpId(dependsShift)] : [],
-      depends_on_local_entities: dependsShift ? [dependsShift] : [],
-      payload: { order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true },
+      depends_on_local_entities: localDeps,
+      payload: { order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true, shift_local: dependsShift, customer_local: customerLocal, address_local: addressLocal },
       status: txnStatus(t.status),
       retry_count: t.attempts ?? 0,
       last_attempt_at: t.last_attempt_at ?? null,

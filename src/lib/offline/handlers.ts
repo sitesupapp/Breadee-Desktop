@@ -100,6 +100,11 @@ type TakeawayPayload = {
   order_payload: SubmitOrderPayload;
   payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown> } | null;
   paid?: boolean;
+  /** Phase E: explicit local-id dependencies to remap into order_payload before submit. Absent on
+   *  pre-E migrated ops (whose single shift dep lived only in depends_on_local_entities). */
+  shift_local?: string | null;
+  customer_local?: string | null;
+  address_local?: string | null;
 };
 
 /** takeaway_sale — the opaque Takeaway/Delivery-cached offline sale: submit the order
@@ -114,9 +119,11 @@ export const takeawaySaleHandler: OperationHandler = {
   async replay(op, ctx) {
     const p = (op.payload ?? {}) as TakeawayPayload;
     let payload = p.order_payload;
+    let changed = false;
 
-    // Remap a pending-shift dependency to its canonical server shift id, durably.
-    const shiftLocalId = op.depends_on_local_entities[0];
+    // Remap a pending-shift dependency to its canonical server shift id, durably. Prefer the
+    // explicit field; fall back to the single legacy dependency id (pre-E ops had only a shift dep).
+    const shiftLocalId = p.shift_local !== undefined ? p.shift_local : (op.depends_on_local_entities[0] ?? null);
     if (shiftLocalId) {
       const canonicalShift = await ctx.canonicalFor(shiftLocalId);
       if (!canonicalShift) {
@@ -124,9 +131,30 @@ export const takeawaySaleHandler: OperationHandler = {
       }
       if ((payload as { shift_id?: string }).shift_id !== canonicalShift) {
         payload = { ...payload, shift_id: canonicalShift } as SubmitOrderPayload;
-        await ctx.update({ payload: { ...p, order_payload: payload } });
+        changed = true;
       }
     }
+
+    // Phase E: remap an OFFLINE-CREATED customer / address (local ids) to their canonical server ids
+    // before submit. The customer_upsert op resolves them; until then the order stays dependency-blocked
+    // (the orchestrator gates on depends_on_local_entities), never submitting with a local id.
+    if (p.customer_local) {
+      const canonicalCustomer = await ctx.canonicalFor(p.customer_local);
+      if (!canonicalCustomer) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "customer_unresolved", message: "customer not yet synced" };
+      if ((payload as { customer_id?: string }).customer_id !== canonicalCustomer) {
+        payload = { ...payload, customer_id: canonicalCustomer } as SubmitOrderPayload;
+        changed = true;
+      }
+    }
+    if (p.address_local) {
+      const canonicalAddress = await ctx.canonicalFor(p.address_local);
+      if (!canonicalAddress) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "address_unresolved", message: "address not yet synced" };
+      if ((payload as { address_id?: string }).address_id !== canonicalAddress) {
+        payload = { ...payload, address_id: canonicalAddress } as SubmitOrderPayload;
+        changed = true;
+      }
+    }
+    if (changed) await ctx.update({ payload: { ...p, order_payload: payload } });
 
     // 1. Order (idempotent on client_op_id). canonical_entity_id holds the server order id once known.
     let orderId = op.canonical_entity_id;
