@@ -177,6 +177,41 @@ export async function unsettledOperationCount(): Promise<number> {
 }
 
 /**
+ * Phase F (Conflict Center) — put a parked operation back in the drain queue for an explicit
+ * operator retry. ONLY a `needs_attention` op is requeued (→ pending, errors cleared); a synced,
+ * syncing, pending or cancelled op is left untouched (returns false) so a retry can never disturb
+ * in-flight or terminal work or resurrect a withdrawn op. The next drain picks it up.
+ */
+export async function requeueOperation(operationId: string): Promise<boolean> {
+  const op = await localdb.operations.get(operationId);
+  if (!op || op.status !== "needs_attention") return false;
+  await localdb.operations.update(operationId, {
+    status: "pending",
+    last_error_code: null,
+    last_error_message: null,
+  });
+  return true;
+}
+
+/**
+ * Phase F — garbage-collect SYNCED operations older than `olderThanMs` (default 7 days). NEVER
+ * touches an unsettled op (pending/blocked/syncing/retryable/needs_attention) or a cancelled one
+ * that is younger than the window — durable work is never dropped. Returns the count removed. The
+ * entity map + sync history are intentionally retained (audit/remap continuity). Safe to call on
+ * mount; bounded by the synced-status index.
+ */
+export async function gcSyncedOperations(olderThanMs = 7 * 24 * 60 * 60 * 1000): Promise<number> {
+  const cutoff = Date.now() - olderThanMs;
+  const synced = await localdb.operations.where("status").equals("synced").toArray();
+  const stale = synced.filter((o) => {
+    const t = Date.parse(o.synced_at ?? o.created_at);
+    return Number.isFinite(t) && t < cutoff;
+  });
+  await Promise.all(stale.map((o) => localdb.operations.delete(o.operation_id)));
+  return stale.length;
+}
+
+/**
  * Operations ready for a drain pass, in FIFO capture order, scoped to the EXACT live
  * context. An op for another tenant/branch/cashier/device is never returned here (it is
  * not ours to replay in this session). `needs_attention`/`synced`/`cancelled` are excluded;

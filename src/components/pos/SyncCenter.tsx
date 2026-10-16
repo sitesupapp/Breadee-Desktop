@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Glyph } from "@/components/Glyph";
 import { historySummary, listHistory, type SyncHistoryEvent } from "@/lib/offline/syncHistory";
+import { requeueOperation } from "@/lib/offline/operationLog";
 
 type Summary = { pending: number; syncing: number; needsAttention: number; synced: number };
 
@@ -36,10 +37,27 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
   const [events, setEvents] = useState<SyncHistoryEvent[]>([]);
   const [expanded, setExpanded] = useState<number | null>(null);
 
+  const [requeuing, setRequeuing] = useState<string | null>(null);
+
   const refresh = useCallback(async () => {
     setSummary(await historySummary(tenantId, branchId).catch(() => ({ pending: 0, syncing: 0, needsAttention: 0, synced: 0 })));
     if (open) setEvents(await listHistory(tenantId, branchId, 100).catch(() => []));
   }, [tenantId, branchId, open]);
+
+  // Conflict Center: put a parked (needs-attention) operation back in the queue. Only a
+  // needs_attention op is affected; it syncs on the next connection. Never touches in-flight work.
+  const retry = useCallback(
+    async (operationId: string) => {
+      setRequeuing(operationId);
+      try {
+        await requeueOperation(operationId).catch(() => false);
+        await refresh();
+      } finally {
+        setRequeuing(null);
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     void refresh();
@@ -111,6 +129,16 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
                           {e.retry_count > 0 && <div>Retries: {e.retry_count}</div>}
                           {e.error_summary && <div>Note: {e.error_summary}</div>}
                           {e.synced_at && <div>Synced at: {fmtTime(e.synced_at)}</div>}
+                          {e.status === "needs_attention" && e.operation_id && (
+                            <button
+                              type="button"
+                              onClick={() => void retry(e.operation_id)}
+                              disabled={requeuing === e.operation_id}
+                              className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60"
+                            >
+                              {requeuing === e.operation_id ? "Queuing…" : "Try again on next sync"}
+                            </button>
+                          )}
                         </div>
                       )}
                     </li>

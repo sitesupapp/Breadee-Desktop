@@ -14,6 +14,7 @@ import {
   type OfflineOperation,
   type RetryClass,
   updateOperation,
+  gcSyncedOperations,
 } from "@/lib/offline/operationLog";
 import { evaluateDependencies, resolveEntity, canonicalIdForInScope } from "@/lib/offline/entityMap";
 import { handlerFor, type HandlerContext } from "@/lib/offline/handlers";
@@ -348,6 +349,12 @@ export async function drainOperations(
     }
   } finally {
     if (ownsLock) draining = false;
+  }
+
+  // Phase F — housekeeping: GC old SYNCED ops so the log does not grow unbounded. Best-effort and
+  // only on a lock-owning pass; it NEVER touches unsettled work (durable ops are never dropped).
+  if (ownsLock) {
+    try { await gcSyncedOperations(); } catch { /* housekeeping only — never fail a drain */ }
   }
 
   report.finishedAt = new Date().toISOString();
