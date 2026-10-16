@@ -191,6 +191,16 @@ export type PosTxnSyncDeps = {
     deliveryFeeCashTreatment?: string;
     clientOpId: string;
   }) => Promise<{ shift_id: string; idempotent: boolean }>;
+  /** Phase-D: settle one SPLIT leg (pos_split_settle). Item-subset allocations; the server derives
+   *  the amount. expectedVersion is optional (NULL offline). client_op_id → exactly-once per leg. */
+  splitSettle: (args: {
+    orderId: string;
+    method: string;
+    currency: string;
+    allocations: { order_item_id: string; quantity: number }[];
+    expectedVersion: number | null;
+    clientOpId: string;
+  }) => Promise<{ ok: boolean; split_no: number; parent_completed: boolean; remaining_qty: number; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -306,6 +316,27 @@ export const defaultDeps: PosTxnSyncDeps = {
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { shift_id: String(row.shift_id ?? args.shiftId), idempotent };
+  },
+  splitSettle: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_split_settle", {
+      p_payload: {
+        order_id: args.orderId,
+        method: args.method,
+        currency_code: args.currency,
+        allocations: args.allocations,
+        client_op_id: args.clientOpId,
+        ...(args.expectedVersion == null ? {} : { expected_version: args.expectedVersion }),
+      },
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return {
+      ok: row.ok === true,
+      split_no: row.split_no == null ? 0 : Number(row.split_no),
+      parent_completed: row.parent_completed === true,
+      remaining_qty: row.remaining_qty == null ? 0 : Number(row.remaining_qty),
+      idempotent,
+    };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

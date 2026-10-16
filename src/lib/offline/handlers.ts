@@ -540,6 +540,67 @@ export const endShiftHandler: OperationHandler = {
   },
 };
 
+/** A split refusal that means the bill changed underneath the captured leg — already allocated
+ *  remotely, no longer splittable, a changed/paid order, or a stale version. The operator resolves
+ *  it (needs_attention); the server never over-allocates or double-charges (remaining-qty check +
+ *  client_op_id dedup under the row lock). */
+function isSplitConflict(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("not_splittable") ||
+    m.includes("version_conflict") ||
+    m.includes("only ") && m.includes("remaining") ||
+    m.includes("not part of this bill") ||
+    m.includes("no longer active") ||
+    m.includes("changed since it was loaded") ||
+    m.includes("already")
+  );
+}
+
+type SplitSettlePayload = {
+  order_id: string | null;
+  /** Local order entity id to remap to the canonical order id (offline-created session). */
+  order_local: string | null;
+  method: string;
+  currency: string;
+  allocations: { order_item_id: string; quantity: number }[];
+  expected_version: number | null;
+  split_seq?: number;
+  order_number?: string | null;
+};
+
+/** split_settle — settle ONE split leg offline (pos_split_settle), exactly-once on client_op_id.
+ *  Item-subset allocations; the server derives the amount + validates remaining qty under its row
+ *  lock (so an over-allocation or a changed/paid bill → CONFLICT → needs_attention, never an
+ *  overpayment or double settle). Legs replay strictly in order via the capture's dependency chain. */
+export const splitSettleHandler: OperationHandler = {
+  type: "split_settle",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as SplitSettlePayload;
+    let orderId = p.order_id;
+    if (p.order_local) {
+      const c = await ctx.canonicalFor(p.order_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+      orderId = c;
+    }
+    if (!orderId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_order", message: "no order id" };
+    if (!Array.isArray(p.allocations) || p.allocations.length === 0) {
+      return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_allocations", message: "no split allocations" };
+    }
+    try {
+      const r = await ctx.deps.splitSettle({ orderId, method: p.method, currency: p.currency, allocations: p.allocations, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: orderId, resultMeta: { split_no: r.split_no, parent_completed: r.parent_completed, remaining_qty: r.remaining_qty, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "split_settle: transport", message: msg };
+      if (isSplitConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "split_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -553,6 +614,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${onAccountTableHandler.type}@${onAccountTableHandler.schemaVersion}`]: onAccountTableHandler,
   [`${onAccountOrderHandler.type}@${onAccountOrderHandler.schemaVersion}`]: onAccountOrderHandler,
   [`${endShiftHandler.type}@${endShiftHandler.schemaVersion}`]: endShiftHandler,
+  [`${splitSettleHandler.type}@${splitSettleHandler.schemaVersion}`]: splitSettleHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

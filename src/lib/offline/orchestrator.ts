@@ -102,6 +102,11 @@ function labelFor(op: OfflineOperation): string {
   }
   if (op.operation_type === "payout") return "Cash payout";
   if (op.operation_type === "end_shift") return "End shift";
+  if (op.operation_type === "split_settle") {
+    const p = (op.payload as { order_number?: string; split_seq?: number } | null) ?? {};
+    const num = p.order_number ? ` #${p.order_number}` : "";
+    return p.split_seq ? `Split ${p.split_seq} — order${num}` : `Split payment${num}`;
+  }
   return String(op.operation_type);
 }
 
