@@ -1247,10 +1247,22 @@ export function useDineInWorkspace(input: {
           setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
           return;
         }
+        // Best-effort LOCAL USD amount for the drawer projection only (server derives the real
+        // charge). The provisional bill total is in the order's OWN currency.
+        const billCcy: CurrencyCode = settleBill?.currency ?? input.currency;
+        const billTotal = settleBill?.total ?? 0;
+        const cashAmountUsd =
+          dialog.method === "cash"
+            ? billCcy === "USD"
+              ? billTotal
+              : billCcy === "LBP" && input.rate && input.rate > 0
+                ? billTotal / input.rate
+                : null
+            : null;
         setPaying(true);
         setPayError(null);
         try {
-          await settleTableOffline({ sessionId: draft.local_session_id, method: dialog.method, discount: offlineDiscount.fields });
+          await settleTableOffline({ sessionId: draft.local_session_id, method: dialog.method, discount: offlineDiscount.fields, cashAmountUsd });
           setPayOpen(false);
           toast.push({
             tone: "success",

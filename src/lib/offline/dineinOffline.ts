@@ -334,6 +334,9 @@ export async function settleTableOffline(input: {
   sessionId: string;
   method: string;
   discount?: { discount_type?: string; discount_value?: number };
+  /** Best-effort LOCAL USD amount of the bill, for the drawer projection only (NOT authoritative;
+   *  the server derives the real charge). Omitted when the local USD amount is unknowable. */
+  cashAmountUsd?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const d = await localdb.dineDrafts.get(input.sessionId);
@@ -369,6 +372,7 @@ export async function settleTableOffline(input: {
         currency: d.currency,
         table_name: d.table_name,
         ...(input.discount ? { discount: input.discount } : {}),
+        ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
       },
       status: "pending",
       retry_count: 0,

@@ -42,7 +42,10 @@ export type OperationType =
   // on_account_table → pos_complete_table_on_account; on_account_order → pos_complete_on_account.
   // Exactly-once via client_op_id. An offline-created customer dependency arrives with Phase E.
   | "on_account_table"
-  | "on_account_order";
+  | "on_account_order"
+  // Phase D — offline PAYOUT (petty-cash out of the drawer) → pos_payout_create (replay-safe,
+  // records payout_id). Reduces the local drawer projection immediately; exactly-once on reconnect.
+  | "payout";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =
