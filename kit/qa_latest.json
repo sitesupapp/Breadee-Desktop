@@ -1,0 +1,11 @@
+{
+  "version": "1.0.36",
+  "notes": "QA updater test - Breadee Desktop 1.0.36 (isolated; not the fleet)",
+  "pub_date": "2026-10-16T08:37:45Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dHdMakNMOTF5NXU1V05JMG9PREcvU29CenNRN2IxZHV3WC84R3JFUlhWYWx5NnI5RStOSDVPd090YVBzMEVuTTlLS0tJcEpuRG9BYnhweWJCZm8yK1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTM5ODY1CWZpbGU6QnJlYWRlZV8xLjAuMzZfeDY0LXNldHVwLmV4ZQp4OGpHZFlmclNacGwwM1FCQ1J3bVo5MEVCNlBBb0hOZFU3ejFnRy93TnpqM3VTTXhoOGJhOU5rN2xOU1ZCTkhySGlnenlNMnBGdEVPTVgrMEZmNzhCQT09Cg==",
+      "url": "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/Breadee_1.0.36_x64-setup.exe"
+    }
+  }
+}
