@@ -387,6 +387,66 @@ export async function settleTableOffline(input: {
   });
 }
 
+const ONACCOUNT_OP_PREFIX = "onaccounttable:";
+
+/** Durably capture an offline dine-in table ON-ACCOUNT (receivable) against a LOCALLY-KNOWN
+ *  (cached/canonical) customer. Mirrors settleTableOffline: depends on the session's open + rounds
+ *  (so the orders exist server-side first), deterministic id (session + customer + method) →
+ *  idempotent, draft unchanged. The customer is canonical today; a future offline-created customer
+ *  is carried as customer_local so Phase E can remap it. Requires at least one sent round. */
+export async function tableOnAccountOffline(input: {
+  sessionId: string;
+  customerId: string | null;
+  customerLocal?: string | null;
+  amount: number;
+  method: string;
+  discount?: { discount_type?: string; discount_value?: number };
+}): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
+  return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
+    const d = await localdb.dineDrafts.get(input.sessionId);
+    if (!d) throw new Error("dine session not found");
+    if (d.rounds.length === 0) throw new Error("Nothing has been sent to put on account for this table.");
+    if (!input.customerId && !input.customerLocal) throw new Error("A customer is required to put this table on account.");
+    const clientOpId = deterministicUuid([d.local_session_id, "on_account_table", input.customerId ?? input.customerLocal ?? "", input.method, String(input.amount)]);
+    const operationId = ONACCOUNT_OP_PREFIX + clientOpId;
+    const existing = await localdb.operations.get(operationId);
+    if (existing) return { operationId, clientOpId, alreadyCaptured: true };
+    const scope: OperationScope = { tenant_id: d.tenant_id, branch_id: d.branch_id, device_id: d.device_id, terminal_id: d.terminal_id ?? "", cashier_user_id: d.cashier_user_id };
+    const dependsLocal: string[] = input.customerLocal ? [input.customerLocal] : [];
+    const op: OfflineOperation = {
+      operation_id: operationId,
+      operation_type: "on_account_table",
+      schema_version: OPERATION_SCHEMA_VERSION,
+      scope,
+      created_at: new Date().toISOString(),
+      client_op_id: clientOpId,
+      local_entity_id: null,
+      canonical_entity_id: d.table_id,
+      dependency_ids: [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)],
+      depends_on_local_entities: dependsLocal,
+      payload: {
+        table_id: d.table_id,
+        table_local: null,
+        customer_id: input.customerId,
+        customer_local: input.customerLocal ?? null,
+        amount: input.amount,
+        method: input.method,
+        table_name: d.table_name,
+        ...(input.discount ? { discount: input.discount } : {}),
+      },
+      status: "pending",
+      retry_count: 0,
+      last_attempt_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      result_meta: null,
+      synced_at: null,
+    };
+    await localdb.operations.add(op);
+    return { operationId, clientOpId, alreadyCaptured: false };
+  });
+}
+
 /** Any captured pay_table op for this session's table in its exact scope (for the UI to show a
  *  table as "settling offline" and to avoid offering a second settle). */
 export async function findSettleOpForSession(sessionId: string): Promise<OfflineOperation | undefined> {

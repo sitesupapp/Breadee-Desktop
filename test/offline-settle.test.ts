@@ -23,7 +23,7 @@ import type { OfflineOperation } from "@/lib/offline/operationLog";
 import { resolveEntity } from "@/lib/offline/entityMap";
 import { drainOffline, __resetDrainLockForTests } from "@/lib/offline/orchestrator";
 import type { PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
-import { openTableOffline, addDraftLine, sendRoundOffline, settleTableOffline, findSettleOpForSession } from "@/lib/offline/dineinOffline";
+import { openTableOffline, addDraftLine, sendRoundOffline, settleTableOffline, findSettleOpForSession, tableOnAccountOffline } from "@/lib/offline/dineinOffline";
 
 const DSCOPE = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", shiftId: "sh1" };
 
@@ -249,6 +249,34 @@ test("settleTableOffline: double-tap collapses to ONE pay_table op", async () =>
 test("settleTableOffline: refuses a table with nothing sent", async () => {
   const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
   await assert.rejects(() => settleTableOffline({ sessionId: draft.local_session_id, method: "cash" }), /nothing has been sent/i);
+});
+
+test("tableOnAccountOffline: captures an on_account_table op depending on the session + a customer", async () => {
+  const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
+  await addDraftLine(draft.local_session_id, { menu_item_id: "m1", name: "Burger", base_price: 10, quantity: 1, modifiers: [], kitchen_note: null });
+  await sendRoundOffline(draft.local_session_id);
+  const cap = await tableOnAccountOffline({ sessionId: draft.local_session_id, customerId: "CUST-1", amount: 10, method: "cash" });
+  assert.equal(cap.alreadyCaptured, false);
+  const o = await getOperation(cap.operationId);
+  assert.equal(o?.operation_type, "on_account_table");
+  const fresh = await localdb.dineDrafts.get(draft.local_session_id);
+  assert.ok(o?.dependency_ids.includes(fresh!.open_operation_id));
+  assert.ok(o?.dependency_ids.includes(fresh!.rounds[0].operation_id));
+  const p = o?.payload as Record<string, unknown>;
+  assert.equal(p.customer_id, "CUST-1");
+  assert.equal(p.amount, 10);
+  // double-tap idempotent
+  const cap2 = await tableOnAccountOffline({ sessionId: draft.local_session_id, customerId: "CUST-1", amount: 10, method: "cash" });
+  assert.equal(cap2.alreadyCaptured, true);
+  assert.equal(await localdb.operations.where("operation_type").equals("on_account_table").count(), 1);
+});
+
+test("tableOnAccountOffline: refuses without a customer or with nothing sent", async () => {
+  const draft = await openTableOffline({ scope: DSCOPE, tableId: "TBL-9", tableName: "9", currency: "USD" });
+  await assert.rejects(() => tableOnAccountOffline({ sessionId: draft.local_session_id, customerId: "CUST-1", amount: 10, method: "cash" }), /nothing has been sent/i);
+  await addDraftLine(draft.local_session_id, { menu_item_id: "m1", name: "Burger", base_price: 10, quantity: 1, modifiers: [], kitchen_note: null });
+  await sendRoundOffline(draft.local_session_id);
+  await assert.rejects(() => tableOnAccountOffline({ sessionId: draft.local_session_id, customerId: null, amount: 10, method: "cash" }), /customer is required/i);
 });
 
 test("capture → drain: open → round → settle replay IN ORDER, exactly once", async () => {
