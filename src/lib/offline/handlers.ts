@@ -822,6 +822,73 @@ export const customerUpsertHandler: OperationHandler = {
   },
 };
 
+type ItemEditPayload = {
+  /** The exact pre-built p_payload for the RPC (carries expected_version + client_op_id + reason). */
+  payload: Record<string, unknown>;
+  /** Local order entity id to remap to the canonical order id (an offline-created order); null when
+   *  payload.order_id is already canonical (a hydrated order). */
+  order_local: string | null;
+};
+
+/** Resolve the target order id for an item-edit op: remap order_local → canonical when the order was
+ *  created offline, else use the payload's canonical order_id. Returns null when still unresolved. */
+async function resolveEditOrder(p: ItemEditPayload, ctx: HandlerContext): Promise<{ payload: Record<string, unknown> } | { blocked: true }> {
+  if (p.order_local) {
+    const canonical = await ctx.canonicalFor(p.order_local);
+    if (!canonical) return { blocked: true };
+    return { payload: { ...p.payload, order_id: canonical } };
+  }
+  return { payload: p.payload };
+}
+
+/** edit_order_line — edit one line of an open order offline (pos_edit_order_line), exactly-once on
+ *  client_op_id. CAS (expected_version) + reason are baked into the captured payload; a bill that
+ *  changed since it was loaded → CONFLICT → needs_attention, never a blind re-apply. */
+export const editOrderLineHandler: OperationHandler = {
+  type: "edit_order_line",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as ItemEditPayload;
+    if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no edit payload" };
+    const resolved = await resolveEditOrder(p, ctx);
+    if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    try {
+      const r = await ctx.deps.editOrderLine({ payload: resolved.payload });
+      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "edit_order_line: transport", message: msg };
+      if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "edit_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
+/** add_order_items — add new lines to an open delivery order offline (pos_add_order_items),
+ *  exactly-once on client_op_id. CAS (expected_version) in the captured payload; a version drift →
+ *  CONFLICT → needs_attention. The server resolves every price (the payload carries none). */
+export const addOrderItemsHandler: OperationHandler = {
+  type: "add_order_items",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as ItemEditPayload;
+    if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no add payload" };
+    const resolved = await resolveEditOrder(p, ctx);
+    if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    try {
+      const r = await ctx.deps.addOrderItems({ payload: resolved.payload });
+      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "add_order_items: transport", message: msg };
+      if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "add_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -838,6 +905,8 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${splitSettleHandler.type}@${splitSettleHandler.schemaVersion}`]: splitSettleHandler,
   [`${payoutHandler.type}@${payoutHandler.schemaVersion}`]: payoutHandler,
   [`${customerUpsertHandler.type}@${customerUpsertHandler.schemaVersion}`]: customerUpsertHandler,
+  [`${editOrderLineHandler.type}@${editOrderLineHandler.schemaVersion}`]: editOrderLineHandler,
+  [`${addOrderItemsHandler.type}@${addOrderItemsHandler.schemaVersion}`]: addOrderItemsHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

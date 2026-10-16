@@ -60,7 +60,14 @@ export type OperationType =
   // the canonical id on reconnect so a later offline delivery/on-account can chain to it; an EDIT
   // carries the canonical id and creates no local entity. A same-OU identity conflict replays as a
   // CONFLICT → needs_attention (never a silent duplicate / silent re-link).
-  | "customer_upsert";
+  | "customer_upsert"
+  // Phase E — offline ORDER ITEM EDIT of an open, unpaid order. edit_order_line → pos_edit_order_line
+  // (set_quantity / change_modifiers; CAS expected_version + reason); add_order_items →
+  // pos_add_order_items (CAS expected_version). Both replay-safe on client_op_id. A version drift
+  // (the bill changed since it was loaded) → CONFLICT → needs_attention, never a blind re-apply. The
+  // target order may be canonical (hydrated) or offline-created (order_local → canonical remap).
+  | "edit_order_line"
+  | "add_order_items";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

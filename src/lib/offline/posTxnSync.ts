@@ -223,6 +223,12 @@ export type PosTxnSyncDeps = {
     payload: Record<string, unknown>;
     clientOpId: string;
   }) => Promise<{ customer_id: string; address_id: string | null; is_new: boolean }>;
+  /** Phase-E: edit one line of an open order (pos_edit_order_line). The payload is the exact
+   *  pre-built p_payload (op/line/quantity/modifiers + expected_version + reason + client_op_id);
+   *  the dep only re-points order_id to the canonical id when the order was created offline. */
+  editOrderLine: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  /** Phase-E: add new lines to an open delivery order (pos_add_order_items). Same payload contract. */
+  addOrderItems: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -404,6 +410,18 @@ export const defaultDeps: PosTxnSyncDeps = {
       address_id: row.address_id == null ? null : String(row.address_id),
       is_new: row.is_new === true,
     };
+  },
+  editOrderLine: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_edit_order_line", { p_payload: args.payload })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: row.ok !== false, idempotent };
+  },
+  addOrderItems: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_add_order_items", { p_payload: args.payload })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: row.ok !== false, idempotent };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {
