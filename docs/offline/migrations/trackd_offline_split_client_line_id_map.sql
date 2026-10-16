@@ -1,0 +1,49 @@
+-- ============================================================================
+-- Track D (D3.3) — LOCAL dine-in line -> CANONICAL pos_order_item.id correlation, so a
+-- fully-offline-created Dine-In session can be SPLIT offline (pos_split_settle needs canonical
+-- order_item_ids, which a fully-offline round does not have until it syncs).
+--
+-- Environment : STAGING ONLY (azjxprewycygsocusxjn). NOT applied to production.
+-- Applied     : 2026-10-16 via Supabase MCP apply_migration
+--               trackd_offline_split_client_line_id_map  +  trackd_offline_split_item_map_acl
+-- Discipline   : ADDITIVE + OPTIONAL. Online callers omit client_line_id and are byte-identical.
+--               No signature change on _pos_insert_order_items (CREATE OR REPLACE → grants /
+--               SECURITY DEFINER / search_path preserved). No pricing/business-rule change.
+--               No authorization widening. No destructive change. NO production migration.
+--
+-- WHAT:
+--   1) pos_order_items.client_line_id uuid  (nullable, no default, no constraint, no backfill)
+--   2) _pos_insert_order_items — persists nullif(it->>'client_line_id','')::uuid on each line
+--      (the ONLY change; verbatim otherwise). Online items without the field store NULL.
+--   3) NEW pos_order_item_map(p_order uuid, p_batch int default null) RETURNS jsonb — operator-
+--      scoped (pos_assert_operator + assert_branch_access), SECURITY DEFINER, search_path=public,
+--      STABLE. Returns [{client_line_id, order_item_id}] for that order (optionally one batch),
+--      client_line_id not null. EXECUTE granted to authenticated + service_role (anon revoked).
+--
+-- WHY A SEPARATE READ FN (not a pos_save_order return change): avoids recreating the ~90-line
+-- core SECURITY DEFINER order RPC (transcription risk on a live-critical path). The round-replay
+-- handler calls pos_order_item_map AFTER the round syncs and records each
+-- client_line_id (local line id) -> order_item_id into the generic entityMap (entity_type
+-- 'order_item'); the split_settle handler then resolves each allocation's local line id to the
+-- canonical order_item_id before calling pos_split_settle. Duplicate identical menu lines map
+-- independently because client_line_id is the stable per-line local id (not name+qty+price).
+--
+-- VERIFICATION (2026-10-16, rolled back): inserted a pos_order_items row with
+-- client_line_id=1111...1111 on a #2101 order, impersonated the branch operator, called
+-- pos_order_item_map(order,99) → [{order_item_id: 39d47040-…, client_line_id: 1111…1111}];
+-- forced rollback (no residue). Column present; both functions secdef + search_path=public;
+-- pos_order_item_map ACL = {postgres, authenticated, service_role} (no anon).
+--
+-- The authoritative forward DDL is the two applied migrations above.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- ROLLBACK (staging) — only if the offline-split item-mapping path is abandoned.
+-- The column is harmless to leave (nullable, additive); drop only if truly reverting.
+-- ---------------------------------------------------------------------------
+-- drop function if exists public.pos_order_item_map(uuid, integer);
+-- -- Recreate the PRE-D3.3 _pos_insert_order_items (without the client_line_id insert column) from
+-- -- git history / the live definition captured in the D3 discovery notes:
+-- --   (CREATE OR REPLACE public._pos_insert_order_items(...) — remove client_line_id from the
+-- --    INSERT column list + values; everything else identical.)
+-- alter table public.pos_order_items drop column if exists client_line_id;
