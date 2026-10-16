@@ -24,6 +24,7 @@ import { resolveEntity } from "@/lib/offline/entityMap";
 import { drainOffline, __resetDrainLockForTests } from "@/lib/offline/orchestrator";
 import type { PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
 import { openTableOffline, addDraftLine, sendRoundOffline, settleTableOffline, findSettleOpForSession, tableOnAccountOffline } from "@/lib/offline/dineinOffline";
+import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
 
 const DSCOPE = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", shiftId: "sh1" };
 
@@ -215,6 +216,50 @@ test("on_account_order: an offline-created customer (customer_local) blocks unti
   r = await drainOffline(CTX, "t", d2);
   assert.deepEqual(r.drained, [o.operation_id]);
   assert.equal(captured, "CUST-9");
+});
+
+// ---------------- Order (Takeaway/Delivery) on-account capture + chain ----------------
+
+const ORDSCOPE = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1" };
+
+test("orderOnAccountOffline: requires an order and a customer", async () => {
+  await assert.rejects(() => orderOnAccountOffline({ scope: ORDSCOPE, orderId: null, orderLocal: null, migOpId: null, customerId: "C1", amount: 5, method: "cash" }), /order is required/i);
+  await assert.rejects(() => orderOnAccountOffline({ scope: ORDSCOPE, orderId: "ORD-1", orderLocal: null, migOpId: null, customerId: null, amount: 5, method: "cash" }), /customer is required/i);
+});
+
+test("orderOnAccountOffline: canonical order + cached customer settles once; double-tap idempotent", async () => {
+  const cap = await orderOnAccountOffline({ scope: ORDSCOPE, orderId: "ORD-1", orderLocal: null, migOpId: null, customerId: "C1", amount: 5, method: "cash" });
+  assert.equal(cap.alreadyCaptured, false);
+  let calls: { orderId: string; customerId: string }[] = [];
+  const { deps: d } = deps({ onAccountOrder: async (a) => { calls.push({ orderId: a.orderId, customerId: a.customerId }); return { ok: true, idempotent: false }; } });
+  const r = await drainOffline(CTX, "t", d);
+  assert.deepEqual(r.drained, [cap.operationId]);
+  assert.deepEqual(calls[0], { orderId: "ORD-1", customerId: "C1" });
+  const again = await orderOnAccountOffline({ scope: ORDSCOPE, orderId: "ORD-1", orderLocal: null, migOpId: null, customerId: "C1", amount: 5, method: "cash" });
+  assert.equal(again.alreadyCaptured, true);
+});
+
+test("takeaway chain: an offline order's receivable settles only AFTER the order syncs", async () => {
+  // A takeaway_sale op (as migration.ts would create it): id mig:txn:tx1, local_entity_id tx1.
+  const saleId = takeawaySaleOpId("tx1");
+  await addOperation({
+    operation_id: saleId, operation_type: "takeaway_sale", schema_version: OPERATION_SCHEMA_VERSION, scope: SCOPE,
+    created_at: new Date(Date.now() - 1000).toISOString(), client_op_id: "cop-tx1", local_entity_id: "tx1", canonical_entity_id: null,
+    dependency_ids: [], depends_on_local_entities: [], payload: { order_payload: { items: [] }, payment_intent: null, paid: true },
+    status: "pending", retry_count: 0, last_attempt_at: null, last_error_code: null, last_error_message: null, result_meta: null, synced_at: null,
+  });
+  const cap = await orderOnAccountOffline({ scope: ORDSCOPE, orderId: null, orderLocal: "tx1", migOpId: saleId, customerId: "C1", amount: 7, method: "cash" });
+
+  const order: string[] = [];
+  let settledOrderId = "";
+  const { deps: d } = deps({
+    submit: async () => { order.push("sale"); return { order_id: "SRV-ORD", order_number: "N1" }; },
+    onAccountOrder: async (a) => { order.push("oa"); settledOrderId = a.orderId; return { ok: true, idempotent: false }; },
+  });
+  const r = await drainOffline({ tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", online: true }, "reconnect", d);
+  assert.ok(order.indexOf("sale") < order.indexOf("oa"), "receivable settles after the order syncs");
+  assert.equal(settledOrderId, "SRV-ORD"); // order_local tx1 remapped to the canonical order
+  assert.ok(r.drained.includes(cap.operationId));
 });
 
 // ---------------- Dine-in CAPTURE → drain (open → round → settle dependency chain) ----------------
