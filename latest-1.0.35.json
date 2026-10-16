@@ -1,0 +1,11 @@
+{
+    "version":  "1.0.35",
+    "notes":  "Breadee Desktop 1.0.35 - Transfer Center and Delivery Order Editing.",
+    "pub_date":  "2026-10-13T22:06:49Z",
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dDJBTTZ0RnFNNjFrZ2txQSthQTgvT044UTdsbnFwUTZjWktQSmExNnMxellZclczZWZ6b0hlMXN0ZHZnN0JTOHFwVzFLZ3VTQjhLa0ZPbFpUU3VCU1FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTU4NjQyCWZpbGU6QnJlYWRlZV8xLjAuMzVfeDY0LXNldHVwLmV4ZQpQK3YwcGdwRThNUGhtMThxRXJXMXlpWFdtM09xL1BnNzVDeG9ldmpjYlY1V3lQNGpYRmw0UkNJTThwYUVIRTFBc1A3cVpzNThCYldvaGZWaGlNaElEZz09Cg==",
+                                             "url":  "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.35/Breadee_1.0.35_x64-setup.exe"
+                                         }
+                  }
+}
