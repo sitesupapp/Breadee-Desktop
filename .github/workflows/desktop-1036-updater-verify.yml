@@ -1,0 +1,142 @@
+name: desktop-1036-updater-verify
+
+# READ-ONLY updater verification on a clean runner (bypasses the local shell storm).
+# Reads prod+staging updater config/pubkey/endpoints, the updater implementation,
+# the live channel manifests, downloads the EXACT signed 1.0.36 artifact from run
+# 38817031890, and CRYPTOGRAPHICALLY verifies the .sig against the embedded pubkey
+# with minisign. Publishes nothing; advances no channel.
+on:
+  push:
+    branches: [ "ci/desktop-1036-updater-verify" ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: "38817031890"
+      EXPECT_SHA256: "56c7b8187fa818132a0cd5b19538359271016686aaf63d65106d74df247160ab"
+    steps:
+      - name: Checkout (all refs)
+        uses: actions/checkout@v4
+        with:
+          ref: feat/desktop-1.0.36-ui
+          fetch-depth: 0
+
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: 1) PROD updater config (endpoints + pubkey)
+        run: |
+          set -e
+          echo "## PROD updater config (feat/desktop-1.0.36-ui = c655651)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          node -e "const c=require('./src-tauri/tauri.conf.json'); console.log(JSON.stringify((c.plugins&&c.plugins.updater)||c.updater||{}, null, 2))" | tee prod_updater.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "release.conf override:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat src-tauri/tauri.release.conf.json >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          node -e "const c=require('./src-tauri/tauri.conf.json'); const u=(c.plugins&&c.plugins.updater)||c.updater||{}; process.stdout.write(u.pubkey||'')" > prod_pubkey.b64
+          echo "prod pubkey length: $(wc -c < prod_pubkey.b64)"
+
+      - name: 2) Updater implementation + runtime override scan
+        run: |
+          echo "## Updater implementation / override scan" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la src/lib/ | grep -i updat || true
+          echo "--- files referencing updater/endpoint/setCustom ---" >> "$GITHUB_STEP_SUMMARY"
+          grep -rniE "endpoint|checkUpdate|check_update|Updater|setEndpoint|UPDATER_ENDPOINT|override" src app 2>/dev/null | grep -iE "updat|endpoint" | head -60 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "### src/lib/updater.ts (if present)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```ts' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '1,200p' src/lib/updater.ts 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "(no src/lib/updater.ts)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 3) STAGING 1.0.35 updater config + pubkey + enabled?
+        run: |
+          echo "## STAGING 1.0.35 (tag desktop-staging-v1.0.35) updater config" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          git show "refs/tags/desktop-staging-v1.0.35:src-tauri/tauri.conf.json" 2>/dev/null \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const c=JSON.parse(s);console.log(JSON.stringify((c.plugins&&c.plugins.updater)||c.updater||{created:'tag read failed'},null,2))})" \
+            | tee staging_updater.json >> "$GITHUB_STEP_SUMMARY" || echo "(staging tag config read failed)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # also check if a staging conf variant exists on the 1.0.36 branch
+          echo "staging conf variants present:" >> "$GITHUB_STEP_SUMMARY"
+          ls src-tauri/*.conf.json >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          git show "refs/tags/desktop-staging-v1.0.35:src-tauri/tauri.conf.json" 2>/dev/null \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const c=JSON.parse(s);const u=(c.plugins&&c.plugins.updater)||c.updater||{};process.stdout.write(u.pubkey||'')})" > staging_pubkey.b64 || true
+          echo "staging pubkey length: $(wc -c < staging_pubkey.b64 2>/dev/null || echo 0)"
+
+      - name: 4) Live channel manifests (prod + staging)
+        run: |
+          echo "## Live channel manifests" >> "$GITHUB_STEP_SUMMARY"
+          for br in desktop-production-channel desktop-staging-channel; do
+            echo "### $br : latest.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            (git show "origin/$br:latest.json" 2>/dev/null || echo "(no latest.json on $br)") >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: 5) Download EXACT 1.0.36 artifact + integrity
+        run: |
+          set -e
+          gh run download "$RUN_ID" -R sitesupapp/Breadee-Desktop -n breadee-desktop-1.0.36-signed-unpublished -D art
+          echo "## Artifact integrity" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la art >> "$GITHUB_STEP_SUMMARY"
+          GOT=$(sha256sum "art/Breadee_1.0.36_x64-setup.exe" | awk '{print $1}')
+          echo "sha256(exe)=$GOT" >> "$GITHUB_STEP_SUMMARY"
+          echo "expected   =$EXPECT_SHA256" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GOT" = "$EXPECT_SHA256" ]; then echo "SHA256: MATCH" >> "$GITHUB_STEP_SUMMARY"; else echo "::error::SHA256 MISMATCH"; echo "SHA256: MISMATCH" >> "$GITHUB_STEP_SUMMARY"; exit 1; fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 6) CRYPTOGRAPHIC signature verification (minisign)
+        run: |
+          set -e
+          echo "## Cryptographic signature verification" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # tauri pubkey in config is base64 of a minisign public-key FILE ("untrusted comment..\nRW..")
+          base64 -d prod_pubkey.b64 > prod_pub.key 2>/dev/null || cp prod_pubkey.b64 prod_pub.key
+          echo "decoded prod pubkey file:" >> "$GITHUB_STEP_SUMMARY"
+          cat prod_pub.key >> "$GITHUB_STEP_SUMMARY"
+          PK=$(grep -vE '^untrusted comment' prod_pub.key | head -1)
+          echo "prod pubkey line: $PK" >> "$GITHUB_STEP_SUMMARY"
+          echo "--- minisign -V against PROD pubkey ---" >> "$GITHUB_STEP_SUMMARY"
+          if minisign -V -P "$PK" -m "art/Breadee_1.0.36_x64-setup.exe" -x "art/Breadee_1.0.36_x64-setup.exe.sig" >> "$GITHUB_STEP_SUMMARY" 2>&1; then
+            echo "PROD SIGNATURE: VERIFIED" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "PROD SIGNATURE: FAILED" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # staging pubkey parity + verify (if staging pubkey captured)
+          if [ -s staging_pubkey.b64 ]; then
+            base64 -d staging_pubkey.b64 > staging_pub.key 2>/dev/null || cp staging_pubkey.b64 staging_pub.key
+            SPK=$(grep -vE '^untrusted comment' staging_pub.key | head -1)
+            echo "staging pubkey line: $SPK" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$PK" = "$SPK" ]; then echo "PUBKEY PARITY (prod==staging): YES" >> "$GITHUB_STEP_SUMMARY"; else echo "PUBKEY PARITY (prod==staging): NO" >> "$GITHUB_STEP_SUMMARY"; fi
+            if minisign -V -P "$SPK" -m "art/Breadee_1.0.36_x64-setup.exe" -x "art/Breadee_1.0.36_x64-setup.exe.sig" >/dev/null 2>&1; then
+              echo "STAGING-PUBKEY VERIFY of prod-signed 1.0.36: VERIFIED (staging-channel test would be signature-valid)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "STAGING-PUBKEY VERIFY of prod-signed 1.0.36: FAILED (staging uses a different key; staging-channel test NOT signature-representative)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "staging pubkey: NOT CAPTURED" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-verify-evidence
+          path: |
+            prod_updater.json
+            staging_updater.json
+            prod_pub.key
+            staging_pub.key
+          if-no-files-found: ignore
