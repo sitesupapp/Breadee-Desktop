@@ -165,6 +165,24 @@ export type PosTxnSyncDeps = {
     clientOpId: string;
     expectedVersion: number | null;
   }) => Promise<{ order_id: string; paid: boolean; amount: number; idempotent: boolean }>;
+  /** Phase-D: put a dine-in TABLE bill on a customer's account (pos_complete_table_on_account). */
+  onAccountTable: (args: {
+    tableId: string;
+    customerId: string;
+    amount: number;
+    method: string;
+    discount?: { discount_type?: string; discount_value?: number };
+    clientOpId: string;
+  }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  /** Phase-D: put a single ORDER on a customer's account (pos_complete_on_account). */
+  onAccountOrder: (args: {
+    orderId: string;
+    customerId: string;
+    amount: number;
+    method: string;
+    discount?: { discount_type?: string; discount_value?: number };
+    clientOpId: string;
+  }) => Promise<{ ok: boolean; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -248,6 +266,24 @@ export const defaultDeps: PosTxnSyncDeps = {
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { order_id: String(row.order_id ?? args.orderId), paid: row.paid === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent };
+  },
+  onAccountTable: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const payload: Record<string, unknown> = { table_id: args.tableId, customer_id: args.customerId, amount: args.amount, method: args.method, client_op_id: args.clientOpId };
+    if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
+    if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
+    const row = (await callPosRpc("pos_complete_table_on_account", { p_payload: payload })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: true, idempotent };
+  },
+  onAccountOrder: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const payload: Record<string, unknown> = { order_id: args.orderId, customer_id: args.customerId, amount: args.amount, method: args.method, client_op_id: args.clientOpId };
+    if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
+    if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
+    const row = (await callPosRpc("pos_complete_on_account", { p_payload: payload })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: true, idempotent };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

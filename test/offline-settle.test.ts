@@ -45,6 +45,8 @@ function deps(over: Partial<PosTxnSyncDeps> = {}): { deps: PosTxnSyncDeps; table
     voidRefund: async () => ({ order_id: "O", status: "refunded", refunded: true, refund_usd: 0, refund_id: null, idempotent: false }),
     payTable: async (a) => { tableCalls.push({ tableId: a.tableId, method: a.method, clientOpId: a.clientOpId }); return { ok: true, amount: 5, idempotent: false }; },
     payOrderOp: async (a) => { orderCalls.push({ orderId: a.orderId, method: a.method, clientOpId: a.clientOpId, expectedVersion: a.expectedVersion }); return { order_id: a.orderId, paid: true, amount: 5, idempotent: false }; },
+    onAccountTable: async () => ({ ok: true, idempotent: false }),
+    onAccountOrder: async () => ({ ok: true, idempotent: false }),
     isTransport: (e) => e instanceof TypeError,
     hasSession: async () => true,
     ...over,
@@ -52,7 +54,7 @@ function deps(over: Partial<PosTxnSyncDeps> = {}): { deps: PosTxnSyncDeps; table
   return { deps: d, tableCalls, orderCalls };
 }
 
-function op(type: "pay_table" | "pay_order", payload: Record<string, unknown>, over: Partial<OfflineOperation> = {}): OfflineOperation {
+function op(type: "pay_table" | "pay_order" | "on_account_table" | "on_account_order", payload: Record<string, unknown>, over: Partial<OfflineOperation> = {}): OfflineOperation {
   return {
     operation_id: over.operation_id ?? ("op-" + Math.random().toString(36).slice(2)),
     operation_type: type,
@@ -168,6 +170,51 @@ test("scope-exact: a settle op from another terminal is NOT drained here", async
   const r = await drainOffline(CTX, "test", d);
   assert.equal(called, 0);
   assert.equal((await getOperation(o.operation_id))?.status, "pending");
+});
+
+// ---------------- On-account (receivable) engine ----------------
+
+test("on_account_table: puts a table on a cached customer's account once; conflict → needs_attention", async () => {
+  const good = op("on_account_table", { table_id: "TBL-1", table_local: null, customer_id: "CUST-1", customer_local: null, amount: 12, method: "cash" }, { client_op_id: "cop-at" });
+  await addOperation(good);
+  let calls: { tableId: string; customerId: string; clientOpId: string }[] = [];
+  const { deps: d } = deps({ onAccountTable: async (a) => { calls.push({ tableId: a.tableId, customerId: a.customerId, clientOpId: a.clientOpId }); return { ok: true, idempotent: false }; } });
+  const r1 = await drainOffline(CTX, "t", d);
+  assert.deepEqual(r1.drained, [good.operation_id]);
+  assert.deepEqual(calls[0], { tableId: "TBL-1", customerId: "CUST-1", clientOpId: "cop-at" });
+
+  __resetDrainLockForTests();
+  await localdb.operations.clear();
+  const conflicted = op("on_account_table", { table_id: "TBL-1", table_local: null, customer_id: "CUST-1", customer_local: null, amount: 12, method: "cash" });
+  await addOperation(conflicted);
+  const { deps: d2 } = deps({ onAccountTable: async () => { throw new Error("This order is already paid."); } });
+  const r2 = await drainOffline(CTX, "t", d2);
+  assert.equal(r2.needsAttention.length, 1);
+  assert.equal((await getOperation(conflicted.operation_id))?.last_error_code, "settle_conflict");
+});
+
+test("on_account_order: a missing customer is a terminal validation refusal (never a blind receivable)", async () => {
+  const o = op("on_account_order", { order_id: "ORD-1", order_local: null, customer_id: null, customer_local: null, amount: 5, method: "cash" });
+  await addOperation(o);
+  let called = 0;
+  const { deps: d } = deps({ onAccountOrder: async () => { called++; return { ok: true, idempotent: false }; } });
+  const r = await drainOffline(CTX, "t", d);
+  assert.equal(called, 0);
+  assert.equal((await getOperation(o.operation_id))?.status, "needs_attention");
+});
+
+test("on_account_order: an offline-created customer (customer_local) blocks until it resolves", async () => {
+  const o = op("on_account_order", { order_id: "ORD-1", order_local: null, customer_id: null, customer_local: "cust-local", amount: 5, method: "cash" }, { depends_on_local_entities: ["cust-local"] });
+  await addOperation(o);
+  const { deps: d } = deps();
+  let r = await drainOffline(CTX, "t", d);
+  assert.equal((await getOperation(o.operation_id))?.status, "blocked_dependency");
+  await resolveEntity({ local_entity_id: "cust-local", entity_type: "customer", canonical_id: "CUST-9", resolved_at: new Date().toISOString(), tenant_id: "t1", branch_id: "b1", device_id: "dev1", cashier_user_id: "u1", terminal_id: "term1" });
+  let captured = "";
+  const { deps: d2 } = deps({ onAccountOrder: async (a) => { captured = a.customerId; return { ok: true, idempotent: false }; } });
+  r = await drainOffline(CTX, "t", d2);
+  assert.deepEqual(r.drained, [o.operation_id]);
+  assert.equal(captured, "CUST-9");
 });
 
 // ---------------- Dine-in CAPTURE → drain (open → round → settle dependency chain) ----------------

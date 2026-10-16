@@ -406,6 +406,96 @@ export const payOrderHandler: OperationHandler = {
   },
 };
 
+type OnAccountTablePayload = {
+  table_id: string | null;
+  table_local: string | null;
+  customer_id: string | null;
+  /** Local customer id to remap once an offline-created customer syncs (Phase E); null = cached. */
+  customer_local: string | null;
+  amount: number;
+  method: string;
+  discount?: { discount_type?: string; discount_value?: number };
+  table_name?: string | null;
+};
+
+/** on_account_table — put a dine-in TABLE bill on a customer's account offline
+ *  (pos_complete_table_on_account), exactly-once on client_op_id. Depends on the table's open +
+ *  rounds (so the orders exist server-side) and on a LOCALLY-KNOWN customer. */
+export const onAccountTableHandler: OperationHandler = {
+  type: "on_account_table",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as OnAccountTablePayload;
+    let tableId = p.table_id;
+    if (p.table_local) {
+      const c = await ctx.canonicalFor(p.table_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "table_unresolved", message: "table not yet synced" };
+      tableId = c;
+    }
+    let customerId = p.customer_id;
+    if (p.customer_local) {
+      const c = await ctx.canonicalFor(p.customer_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "customer_unresolved", message: "customer not yet synced" };
+      customerId = c;
+    }
+    if (!tableId || !customerId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "missing_ref", message: "no table or customer id" };
+    try {
+      const r = await ctx.deps.onAccountTable({ tableId, customerId, amount: p.amount, method: p.method, discount: p.discount, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: tableId, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "on_account_table: transport", message: msg };
+      if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
+type OnAccountOrderPayload = {
+  order_id: string | null;
+  order_local: string | null;
+  customer_id: string | null;
+  customer_local: string | null;
+  amount: number;
+  method: string;
+  discount?: { discount_type?: string; discount_value?: number };
+  order_number?: string | null;
+};
+
+/** on_account_order — put a single ORDER on a customer's account offline
+ *  (pos_complete_on_account), exactly-once on client_op_id. */
+export const onAccountOrderHandler: OperationHandler = {
+  type: "on_account_order",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as OnAccountOrderPayload;
+    let orderId = p.order_id;
+    if (p.order_local) {
+      const c = await ctx.canonicalFor(p.order_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+      orderId = c;
+    }
+    let customerId = p.customer_id;
+    if (p.customer_local) {
+      const c = await ctx.canonicalFor(p.customer_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "customer_unresolved", message: "customer not yet synced" };
+      customerId = c;
+    }
+    if (!orderId || !customerId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "missing_ref", message: "no order or customer id" };
+    try {
+      const r = await ctx.deps.onAccountOrder({ orderId, customerId, amount: p.amount, method: p.method, discount: p.discount, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: orderId, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "on_account_order: transport", message: msg };
+      if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -416,6 +506,8 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${voidRefundHandler.type}@${voidRefundHandler.schemaVersion}`]: voidRefundHandler,
   [`${payTableHandler.type}@${payTableHandler.schemaVersion}`]: payTableHandler,
   [`${payOrderHandler.type}@${payOrderHandler.schemaVersion}`]: payOrderHandler,
+  [`${onAccountTableHandler.type}@${onAccountTableHandler.schemaVersion}`]: onAccountTableHandler,
+  [`${onAccountOrderHandler.type}@${onAccountOrderHandler.schemaVersion}`]: onAccountOrderHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

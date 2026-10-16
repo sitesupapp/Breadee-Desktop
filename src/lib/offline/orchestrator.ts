@@ -92,6 +92,14 @@ function labelFor(op: OfflineOperation): string {
     const p = (op.payload as { order_number?: string } | null) ?? {};
     return p.order_number ? `Pay order #${p.order_number}` : "Pay order";
   }
+  if (op.operation_type === "on_account_table") {
+    const p = (op.payload as { table_name?: string } | null) ?? {};
+    return p.table_name ? `On account — table ${p.table_name}` : "On account — table";
+  }
+  if (op.operation_type === "on_account_order") {
+    const p = (op.payload as { order_number?: string } | null) ?? {};
+    return p.order_number ? `On account — order #${p.order_number}` : "On account — order";
+  }
   return String(op.operation_type);
 }
 

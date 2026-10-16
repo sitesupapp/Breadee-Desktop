@@ -37,7 +37,12 @@ export type OperationType =
   // (→ pos_pay_table); pay_order settles a single order (→ pos_pay_order). Both may depend on the
   // session's open/round ops when the order/table was created offline.
   | "pay_table"
-  | "pay_order";
+  | "pay_order"
+  // Phase D — offline ON-ACCOUNT (receivable) against a LOCALLY-KNOWN (cached/canonical) customer.
+  // on_account_table → pos_complete_table_on_account; on_account_order → pos_complete_on_account.
+  // Exactly-once via client_op_id. An offline-created customer dependency arrives with Phase E.
+  | "on_account_table"
+  | "on_account_order";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =
