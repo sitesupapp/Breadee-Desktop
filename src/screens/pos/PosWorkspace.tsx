@@ -49,6 +49,7 @@ import { loadFloorLayout, tableSectionMap } from "@/lib/pos/floor";
 import { DeliveryModal } from "@/components/pos/DeliveryModal";
 import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { hydrateRefundProofs } from "@/lib/pos/refundProofHydration";
+import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
@@ -514,7 +515,9 @@ function PosWorkspaceInner() {
   // Customer Receivables / On Account. The latch stops a double-tap becoming a
   // second receivable; the picker chooses the customer while the dialog is open.
   const onAccountLatch = useRef(createOnAccountLatch());
-  const onAccountReachable = payIntent !== null && pos.gates.takeOnAccount.allowed && online;
+  // Reachable online, OR offline when a shift is open (the picker then uses the offline-aware
+  // cached-customer adapter; confirmOnAccount captures the receivable locally).
+  const onAccountReachable = payIntent !== null && pos.gates.takeOnAccount.allowed && (online || Boolean(shiftId));
   const customerPicker = useCustomerPicker({
     access: pos.access,
     branchId: pos.branch.id,
@@ -1901,10 +1904,91 @@ function PosWorkspaceInner() {
     }) => {
       const intent = payIntent;
       if (!intent) return;
+
+      // Phase D — OFFLINE Takeaway/order on-account CAPTURE: capture the order (saveOfflineSend)
+      // then chain an on_account_order receivable that settles after the order syncs. No server
+      // RPC offline. The ONLINE path below is unchanged.
       if (!online) {
-        setPayError("On-account sales need a connection. Reconnect before putting a sale on account.");
+        if (!input.customerId) {
+          setPayError("Choose a customer before putting a sale on account.");
+          return;
+        }
+        if (!offlineScope || !shiftId) {
+          setPayError("On-account sales need a connection. Reconnect before putting a sale on account.");
+          return;
+        }
+        if (inFlight.current) return;
+        inFlight.current = true;
+        setBusy(true);
+        setPayError(null);
+        try {
+          const ordScope = {
+            tenantId: offlineScope.tenantId,
+            branchId: offlineScope.branchId,
+            cashierUserId: offlineScope.cashierUserId,
+            deviceId: offlineScope.deviceId,
+            terminalId: offlineScope.terminalId,
+          };
+          const offDiscount =
+            input.discountType !== "none" && input.discountValue.trim() !== ""
+              ? { discount_type: input.discountType, discount_value: Number(input.discountValue) }
+              : undefined;
+          if (intent.kind === "draft") {
+            const lines = useCart.getState().lines;
+            if (lines.length === 0) {
+              setPayError("Add items before putting a sale on account.");
+              return;
+            }
+            await saveOfflineSend(lines); // durable order capture (posOfflineTxns → takeaway_sale)
+            const opId = useCart.getState().ensureOpId();
+            const txn = await getPosOfflineTxnByOp(opId);
+            if (!txn) {
+              setPayError("Could not capture the order offline. Reconnect and retry.");
+              return;
+            }
+            await orderOnAccountOffline({
+              scope: ordScope,
+              orderId: null,
+              orderLocal: txn.local_txn_id,
+              migOpId: takeawaySaleOpId(txn.local_txn_id),
+              customerId: input.customerId,
+              amount: input.amountNow,
+              method: input.method,
+              discount: offDiscount,
+            });
+            useCart.getState().reset();
+          } else {
+            // An existing shown order: only a hydrated canonical order id can be put on account
+            // offline; a stale/offline order replays to a server conflict → needs_attention.
+            const ord = intent.order;
+            await orderOnAccountOffline({
+              scope: ordScope,
+              orderId: ord.id,
+              orderLocal: null,
+              migOpId: null,
+              customerId: input.customerId,
+              amount: input.amountNow,
+              method: input.method,
+              orderNumber: ord.order_number ?? null,
+              discount: offDiscount,
+            });
+          }
+          setPayIntent(null);
+          toast.push({
+            tone: "success",
+            message: "Put on account offline",
+            detail: "Recorded on this device — it will sync automatically when you reconnect.",
+          });
+        } catch (e) {
+          const c = classifyError(e);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        } finally {
+          inFlight.current = false;
+          setBusy(false);
+        }
         return;
       }
+
       if (!input.customerId) {
         setPayError("Choose a customer before putting a sale on account.");
         return;
@@ -2030,6 +2114,8 @@ function PosWorkspaceInner() {
       shiftStore,
       ticketForOrder,
       toast,
+      offlineScope,
+      saveOfflineSend,
     ],
   );
 

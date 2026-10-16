@@ -78,6 +78,17 @@ test("Phase D: dine-in ON-ACCOUNT is offline-capable via CAPTURE only, cached-cu
   assert.match(src, /if \(!draft\)[\s\S]{0,160}Reconnect to put it on account/);
 });
 
+test("Phase D: Takeaway On-Account is offline-capable via CAPTURE (order → chained receivable)", () => {
+  const src = ts(PW);
+  // Reachable offline when a shift is open.
+  assert.match(src, /onAccountReachable = payIntent !== null && pos\.gates\.takeOnAccount\.allowed && \(online \|\| Boolean\(shiftId\)\)/);
+  // confirmOnAccount offline branch: capture the order (saveOfflineSend) then chain the receivable.
+  assert.match(src, /await saveOfflineSend\(lines\);[\s\S]{0,500}orderOnAccountOffline\(/);
+  assert.match(src, /migOpId: takeawaySaleOpId\(txn\.local_txn_id\)/);
+  // The ONLINE performOnAccount path is preserved.
+  assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
+});
+
 test("the customer picker is offline-aware (cached customers), not a second cache", () => {
   const cp = ts("src/state/customerPicker.ts");
   assert.match(cp, /searchCustomersOfflineAware\(/);
