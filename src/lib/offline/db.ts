@@ -675,6 +675,28 @@ export async function readCachedPaymentMethods(tenantId: string | null): Promise
   return { methods: Array.isArray(row.data) ? (row.data as unknown[]) : [], cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
 }
 
+// --- Phase D (D3) — split-state cache (per canonical order, for offline split of a hydrated bill) -
+
+const splitStateKey = (orderId: string) => `split:${orderId}`;
+
+/** Mirror a bill's authoritative split state (order + its canonical order_item rows + already-
+ *  allocated quantities) while online, so a HYDRATED bill can still be split offline against the
+ *  real server item ids. Scope-checked by tenant+branch; survives restart. The payload is the
+ *  split state as-is (lines carry order_item_id / original + allocated qty / unit price). */
+export async function cacheSplitState(orderId: string, state: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
+  if (!tenantId || !orderId) return;
+  await localdb.snapshots.put({ key: splitStateKey(orderId), tenant_id: tenantId, branch_id: branchId, data: state, cached_at: new Date().toISOString() });
+}
+
+/** The cached split state for a canonical order, or null. Scope-checked (tenant + branch/OU). */
+export async function readSplitState(orderId: string, tenantId: string | null, branchId: string | null): Promise<{ state: unknown; cachedAt: number } | null> {
+  if (!tenantId || !orderId) return null;
+  const row = await localdb.snapshots.get(splitStateKey(orderId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { state: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
 // ---------------------------------------------------------------------------
 // Phase C — Dine-In local projection (dineDrafts, v6)
 // ---------------------------------------------------------------------------
