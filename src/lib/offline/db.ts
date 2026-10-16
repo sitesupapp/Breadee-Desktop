@@ -654,6 +654,27 @@ export async function readCachedBill(tableId: string, tenantId: string | null, b
   return { bill: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
 }
 
+// --- Phase D — payment-method catalog cache (tenant-scoped) ------------------
+
+const payMethodsKey = (tenantId: string) => `paymethods:${tenantId}`;
+
+/** Mirror the tenant's ACTIVE payment-method catalog while online, so the checkout dialog can
+ *  still offer the real tenant tenders offline instead of falling back to Cash-only. Tenant-scoped
+ *  (methods are a tenant catalog, not branch-specific). The payload is the method list as-is. */
+export async function cachePaymentMethods(tenantId: string | null, methods: unknown[]): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({ key: payMethodsKey(tenantId), tenant_id: tenantId, branch_id: null, data: methods, cached_at: new Date().toISOString() });
+}
+
+/** The cached payment-method catalog for a tenant, or null. Scope-checked by tenant. */
+export async function readCachedPaymentMethods(tenantId: string | null): Promise<{ methods: unknown[]; cachedAt: number } | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(payMethodsKey(tenantId));
+  if (!row || row.tenant_id !== tenantId) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { methods: Array.isArray(row.data) ? (row.data as unknown[]) : [], cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
 // ---------------------------------------------------------------------------
 // Phase C — Dine-In local projection (dineDrafts, v6)
 // ---------------------------------------------------------------------------

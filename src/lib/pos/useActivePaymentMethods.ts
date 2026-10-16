@@ -6,12 +6,16 @@
 // this catalog; this hook closes that gap for Takeaway / Dine-In full-bill /
 // Delivery without touching Split.
 //
-// OFFLINE CONTRACT (preserved): when the backend is not reachable we return
-// Cash-only and never call the catalog read, so an offline till can never be
-// offered a stale custom method. The dynamic catalog appears only when online.
+// OFFLINE CONTRACT (Phase D): online we load the catalog AND mirror it to the local cache; offline
+// we read that cache and offer the local-recording (Breadee-records-the-tender) subset — so a till
+// can still take the tenant's real tenders offline instead of Cash-only, without ever being offered
+// an external-authorization method (network-required) or silently substituting Cash. Falls back to
+// Cash-only when there is no cache.
 
 import { useEffect, useState } from "react";
 import { loadSplitPaymentMethods, type SplitPaymentMethod } from "@/lib/pos/split";
+import { cachePaymentMethods, readCachedPaymentMethods } from "@/lib/offline/db";
+import { offlineCapableMethods } from "@/lib/offline/paymentMethodClass";
 
 const CASH_ONLY: SplitPaymentMethod[] = [{ key: "cash", label: "Cash", is_cash: true }];
 
@@ -28,13 +32,31 @@ export function useActivePaymentMethods(
 
   useEffect(() => {
     let cancelled = false;
-    if (!online || !tenantId) {
+    if (!tenantId) {
       setMethods(CASH_ONLY);
       return;
+    }
+    if (!online) {
+      // Offline: offer the cached catalog's offline-capable (local-recording) subset.
+      readCachedPaymentMethods(tenantId)
+        .then((c) => {
+          if (cancelled) return;
+          const cached = (c?.methods ?? []) as SplitPaymentMethod[];
+          const usable = offlineCapableMethods(cached);
+          setMethods(usable.length ? usable : CASH_ONLY);
+        })
+        .catch(() => {
+          if (!cancelled) setMethods(CASH_ONLY);
+        });
+      return () => {
+        cancelled = true;
+      };
     }
     loadSplitPaymentMethods(tenantId)
       .then((m) => {
         if (!cancelled) setMethods(m.length ? m : CASH_ONLY);
+        // Mirror the live catalog so the next offline till has the real tenders.
+        void cachePaymentMethods(tenantId, m).catch(() => {});
       })
       .catch(() => {
         if (!cancelled) setMethods(CASH_ONLY);
