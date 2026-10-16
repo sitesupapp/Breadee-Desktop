@@ -28,7 +28,10 @@ export type OperationType =
   | "takeaway_sale" // offline Takeaway/Delivery-cached sale: submit (+ optional cash pay) (was posOfflineTxns)
   // Phase C — offline Dine-In service continuity (certified Track-A contracts only):
   | "dinein_open_table" // occupy a table / establish the local session (→ pos_open_table)
-  | "dinein_send_round"; // send a round to the table's open order (→ pos_submit_order, expected_order_id-bound)
+  | "dinein_send_round" // send a round to the table's open order (→ pos_submit_order, expected_order_id-bound)
+  // Phase D — bounded offline refund/void of a LOCALLY-HYDRATED canonical order (→ pos_void_order,
+  // expected_version CAS + expected_refund_usd guard). Never against an ad-hoc/local-only order.
+  | "void_refund";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

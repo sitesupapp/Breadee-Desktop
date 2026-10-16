@@ -1,0 +1,76 @@
+-- ============================================================================
+-- Track D (offline refund) — expected-refundable-amount guard on the ORDER-LINKED
+-- refund path: public.pos_void_order / public.pos_void_order_core
+--
+-- Environment : STAGING ONLY (azjxprewycygsocusxjn). NOT applied to production.
+-- Applied     : 2026-10-16 via Supabase MCP apply_migration
+--               name = trackd_offline_refund_expected_amount_guard
+--               name = trackd_offline_refund_guard_acl_restore (ACL parity fix)
+-- Discipline   : wrap-don't-rewrite / smallest correct change / additive.
+--
+-- WHY THIS, NOT pos_record_standalone_refund:
+--   pos_record_standalone_refund is a FREE-FORM historical refund with NO original-order
+--   linkage (order_id NULL, items manually entered). The offline-refund policy (rule 9)
+--   FORBIDS offline refunds against arbitrary non-hydrated orders, so that RPC stays
+--   ONLINE-ONLY. The policy's bounded offline refund — "prove the original sale/payment and
+--   refundable balance locally" — maps to the order-linked void-with-refund path
+--   (pos_void_order with p_refund = true), which the Desktop already uses for "Refund order".
+--
+-- WHAT WAS ALREADY ENFORCED (no change needed):
+--   * FOR UPDATE row lock on the order                                        (rule 4 lock)
+--   * operator + branch(OU) authorization + pos.cancel_orders permission      (rules 1, 10)
+--   * per-order idempotency; duplicate replay returns the original result      (rules 3, 4)
+--   * server-AUTHORITATIVE refund amount = sum(pos_payments.amount_usd); the
+--     client can never inflate it                                             (rule 2)
+--   * already voided/cancelled/refunded -> ALREADY_SETTLED structured conflict (rule 4)
+--   * pos_entity_version CAS -> VERSION_CONFLICT structured conflict           (rule 4)
+--
+-- THE ONE ADDITION (this migration):
+--   A new OPTIONAL trailing parameter p_expected_refund_usd (DEFAULT NULL) on BOTH the
+--   wrapper and the core. When supplied (offline-captured refunds set it to the locally
+--   proven refundable USD balance), the core re-verifies that balance UNDER THE ROW LOCK,
+--   BEFORE any write:
+--     * order no longer paid              -> pos_op_error('REFUND_BALANCE_CHANGED')
+--     * |server_net_usd - expected| >=0.005 -> pos_op_error('REFUND_AMOUNT_MISMATCH')
+--   Both are STRUCTURED conflicts (errcode P0001 + DETAIL {"pos_error_code": ...}) that the
+--   offline client maps to needs_attention, preserving the local cash-out record for
+--   reconciliation/audit (rule 7). Every existing (online) caller passes NULL by omission
+--   and is byte-identical in behavior.
+--
+-- A new parameter changes the signature, so CREATE OR REPLACE cannot be used (it would leave
+-- an ambiguous second overload). Both functions are therefore dropped and recreated, with
+-- owner postgres, SECURITY DEFINER, search_path=public, and the EXACT original EXECUTE grants
+-- restored (Supabase default privileges auto-grant anon/authenticated on new functions, which
+-- the ACL-restore step reverts):
+--     pos_void_order      -> postgres, authenticated, service_role
+--     pos_void_order_core -> postgres, service_role
+--
+-- VERIFICATION (2026-10-16, all non-persisting):
+--   * signatures / owner / secdef / search_path confirmed; exactly one overload each
+--   * ACL restored to captured originals (no anon; core not authenticated)
+--   * Probe A (expected 999.99 vs actual 0.50) -> REFUND_AMOUNT_MISMATCH before any write
+--   * Probe B (expected 0.50, matched) -> refund executed normally, force-rolled-back
+--   * post-rollback: order completed/paid, version 0, 0 refund rows / 0 neg payments / 0 idem
+--   * security advisors: no new findings (the authenticated-SECURITY-DEFINER note is
+--     pre-existing and intentional; core unflagged)
+--
+-- The authoritative forward DDL is in the two apply_migration calls above; the body is the
+-- original pos_void_order_core verbatim plus the guard block, and the original wrapper plus
+-- the threaded parameter. See the applied migrations for the full text.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- ROLLBACK (staging) — restore the original 5-arg / 4-arg signatures.
+-- Drops the 6-arg / 5-arg variants and recreates the pre-Track-D definitions.
+-- Use ONLY if Track-D offline refund is abandoned; harmless to leave in place
+-- otherwise (online callers already ignore the optional parameter).
+-- ---------------------------------------------------------------------------
+-- drop function if exists public.pos_void_order(uuid, text, boolean, uuid, integer, numeric);
+-- drop function if exists public.pos_void_order_core(uuid, text, boolean, integer, numeric);
+-- -- then re-run the PRE-Track-D definitions of pos_void_order_core(uuid,text,boolean,integer)
+-- -- and pos_void_order(uuid,text,boolean,uuid,integer) captured in
+-- -- docs/offline/TRACK_A_SERVER_REPLAY_AUDIT.md / git history, and:
+-- --   alter function ... owner to postgres;
+-- --   revoke all on function ... from public;
+-- --   grant execute on function public.pos_void_order_core(uuid,text,boolean,integer) to service_role;
+-- --   grant execute on function public.pos_void_order(uuid,text,boolean,uuid,integer) to authenticated, service_role;

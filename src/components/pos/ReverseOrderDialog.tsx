@@ -22,6 +22,7 @@ import { classifyError } from "@/lib/pos/errors";
 import { validateVoidReason, voidDeliveryOrder, type VoidAction } from "@/lib/pos/deliveryOrderManagement";
 import { reversalTitle, reversalWarning } from "@/lib/pos/orderActions";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import { proveOfflineReversible, captureOfflineRefund, type RefundScope } from "@/lib/offline/refundOffline";
 
 export function ReverseOrderDialog(props: {
   order: ShiftOpenOrder | null;
@@ -29,6 +30,14 @@ export function ReverseOrderDialog(props: {
   onClose: () => void;
   /** Called once the server has confirmed, so callers can re-read. */
   onDone: () => void;
+  /**
+   * Phase-D offline reversal context. ABSENT on callers that have no offline story → the dialog
+   * behaves exactly as before (online-only). When present AND the backend is unreachable, the
+   * reversal is CAPTURED locally (durably, exactly-once) instead of sent — but ONLY for an order
+   * whose refund-proof is locally hydrated (policy rules 1/8/9); otherwise the operator is told to
+   * reconnect. Online, this context is ignored and the live path is byte-identical.
+   */
+  offline?: { online: boolean; offlineReady: boolean; scope: RefundScope | null };
 }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,6 +49,9 @@ export function ReverseOrderDialog(props: {
 
   const orderNumber = order.order_number ?? order.id.slice(0, 8);
   const reasonGiven = reason.trim() !== "";
+  // Capture offline ONLY when a context is supplied and the backend is unreachable; everything
+  // else (no context, or online) takes the unchanged live path.
+  const captureOffline = props.offline != null && props.offline.online === false;
 
   const confirm = async () => {
     // A synchronous guard, not React state: two clicks in the same tick would
@@ -51,7 +63,28 @@ export function ReverseOrderDialog(props: {
     setError(null);
     try {
       const clean = validateVoidReason(reason);
-      await voidDeliveryOrder({ orderId: order.id, reason: clean, action });
+      if (captureOffline) {
+        const off = props.offline!;
+        if (!off.offlineReady || !off.scope) {
+          setError("This action needs a connection.");
+          return;
+        }
+        // Fail-closed: only a locally-proven original/balance may be reversed offline.
+        const proof = await proveOfflineReversible(order.id, off.scope);
+        if (!proof.ok) {
+          setError(proof.reason);
+          return;
+        }
+        await captureOfflineRefund({
+          scope: off.scope,
+          proof: proof.proof,
+          action: proof.action,
+          reason: clean,
+          tender: order.payment_method === "cash" ? "cash" : "other",
+        });
+      } else {
+        await voidDeliveryOrder({ orderId: order.id, reason: clean, action });
+      }
       props.onDone();
       props.onClose();
       setReason("");
@@ -85,7 +118,7 @@ export function ReverseOrderDialog(props: {
             title={reasonGiven ? undefined : "A reason is required."}
             onClick={() => void confirm()}
           >
-            {busy ? "Sending..." : action === "refund" ? "Refund order" : "Cancel order"}
+            {busy ? (captureOffline ? "Saving..." : "Sending...") : action === "refund" ? "Refund order" : "Cancel order"}
           </Button>
         </div>
       }
@@ -95,6 +128,11 @@ export function ReverseOrderDialog(props: {
           This affects order <strong>#{orderNumber}</strong> only.
         </p>
         <p className="text-[12px] text-sub">{reversalWarning(action)}</p>
+        {captureOffline && (
+          <p className="rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-700">
+            Offline — this will be recorded on this device and sync automatically when you reconnect.
+          </p>
+        )}
         <div>
           <label className="text-[11px] font-bold uppercase tracking-wide text-sub" htmlFor="reverse-reason">
             Reason

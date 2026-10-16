@@ -29,7 +29,17 @@ function isConflictMessage(message: string): boolean {
     m.includes("bill changed") ||
     m.includes("version_conflict") ||
     m.includes("changed since it was loaded") ||
-    m.includes("changed since it was opened")
+    m.includes("changed since it was opened") ||
+    // Phase D — the offline-refund guard + the void state machine. A changed refundable
+    // balance, a no-longer-paid order, an order someone else already settled, or a stale
+    // version are all CONFLICTS the operator resolves — never a silent second refund.
+    m.includes("refund_amount_mismatch") ||
+    m.includes("refund_balance_changed") ||
+    m.includes("already_settled") ||
+    m.includes("already voided") ||
+    m.includes("already refunded") ||
+    m.includes("refundable amount changed") ||
+    m.includes("no longer in a refundable")
   );
 }
 
@@ -254,6 +264,58 @@ export const dineinSendRoundHandler: OperationHandler = {
   },
 };
 
+type VoidRefundPayload = {
+  /** The CANONICAL server order id. An offline refund is only ever captured against a
+   *  locally-hydrated canonical order (policy rule 9), so there is no local-id remap. */
+  order_id: string;
+  reason: string;
+  /** true = refund a paid order (writes the negative payment + refund record); false = cancel. */
+  refund: boolean;
+  /** The pos_entity_version the order held locally at capture (CAS). */
+  expected_version: number | null;
+  /** Refund only: the refundable USD balance proven from LOCAL payment data at capture.
+   *  The server re-verifies it under the row lock; a drift raises REFUND_AMOUNT_MISMATCH. */
+  expected_refund_usd: number | null;
+  /** Whether this was a cash refund (the local drawer projection was already reduced at
+   *  capture). Audit/reconciliation metadata only — the server amount is authoritative. */
+  tender: "cash" | "other";
+};
+
+/** void_refund — reverse a PAID (refund) or cancel an UNPAID order via pos_void_order,
+ *  exactly-once on client_op_id. The order id is canonical (offline refunds are only allowed
+ *  against locally-hydrated orders), so no dependency remap. A duplicate replay of OUR op
+ *  returns the original result (idempotent SUCCESS); a balance/version/already-settled drift
+ *  is a CONFLICT → needs_attention, never a silent second refund (the local cash-out record
+ *  is preserved for reconciliation/audit). */
+export const voidRefundHandler: OperationHandler = {
+  type: "void_refund",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as VoidRefundPayload;
+    try {
+      const r = await ctx.deps.voidRefund({
+        orderId: p.order_id,
+        reason: p.reason,
+        refund: p.refund,
+        clientOpId: op.client_op_id,
+        expectedVersion: p.expected_version ?? null,
+        expectedRefundUsd: p.expected_refund_usd ?? null,
+      });
+      return {
+        ok: true,
+        canonicalId: r.order_id,
+        resultMeta: { status: r.status, refunded: r.refunded, refund_usd: r.refund_usd, refund_id: r.refund_id, idempotent: r.idempotent },
+      };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "void_refund: transport", message: msg };
+      if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "refund_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -261,6 +323,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${takeawaySaleHandler.type}@${takeawaySaleHandler.schemaVersion}`]: takeawaySaleHandler,
   [`${dineinOpenTableHandler.type}@${dineinOpenTableHandler.schemaVersion}`]: dineinOpenTableHandler,
   [`${dineinSendRoundHandler.type}@${dineinSendRoundHandler.schemaVersion}`]: dineinSendRoundHandler,
+  [`${voidRefundHandler.type}@${voidRefundHandler.schemaVersion}`]: voidRefundHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

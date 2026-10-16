@@ -134,6 +134,18 @@ export type PosTxnSyncDeps = {
   openTable: (payload: OpenTablePayload) => Promise<{ table_id: string; pos_entity_version: number | null }>;
   /** Phase-C: send a dine-in round (pos_submit_order; expected_order_id binds rounds >=2). */
   submitRound: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string; batch_no: number; appended: boolean; idempotent: boolean }>;
+  /** Phase-D: void/refund a LOCALLY-HYDRATED canonical order (pos_void_order). client_op_id gives
+   *  exactly-once; expectedVersion is the entity-version CAS; expectedRefundUsd (refund only) is the
+   *  locally-proven refundable USD balance the server re-verifies under the row lock. A changed
+   *  balance/version/state surfaces a structured conflict the handler maps to needs_attention. */
+  voidRefund: (args: {
+    orderId: string;
+    reason: string;
+    refund: boolean;
+    clientOpId: string;
+    expectedVersion: number | null;
+    expectedRefundUsd: number | null;
+  }) => Promise<{ order_id: string; status: string; refunded: boolean; refund_usd: number; refund_id: string | null; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -164,6 +176,30 @@ export const defaultDeps: PosTxnSyncDeps = {
     const { submitOrder } = await import("@/lib/pos/orders");
     const r = await submitOrder(payload);
     return { order_id: r.order_id, order_number: r.order_number, batch_no: r.batch_no ?? 1, appended: r.appended ?? true, idempotent: r.idempotent ?? false };
+  },
+  voidRefund: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_void_order", {
+      p_order: args.orderId,
+      p_reason: args.reason,
+      p_refund: args.refund,
+      p_client_op_id: args.clientOpId,
+      p_expected_version: args.expectedVersion,
+      // Refund-only guard; null for a cancel (unpaid) so the server's guard stays inert.
+      p_expected_refund_usd: args.refund ? args.expectedRefundUsd : null,
+    })) as Record<string, unknown>;
+    const idempotent =
+      row.idempotent === true ||
+      row.idempotent_replay === true ||
+      row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return {
+      order_id: String(row.order_id ?? args.orderId),
+      status: String(row.status ?? ""),
+      refunded: row.refunded === true,
+      refund_usd: row.refund_usd == null ? 0 : Number(row.refund_usd),
+      refund_id: row.refund_id == null ? null : String(row.refund_id),
+      idempotent,
+    };
   },
   isTransport: isTransportFailure,
   hasSession: async () => {

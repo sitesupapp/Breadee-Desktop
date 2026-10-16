@@ -79,6 +79,11 @@ function labelFor(op: OfflineOperation): string {
     const where = p.table_name ? ` — Table ${p.table_name}` : "";
     return `Kitchen round${where}`;
   }
+  if (op.operation_type === "void_refund") {
+    const p = (op.payload as { refund?: boolean; order_number?: string } | null) ?? {};
+    const num = p.order_number ? ` #${p.order_number}` : "";
+    return p.refund ? `Refund order${num}` : `Cancel order${num}`;
+  }
   return String(op.operation_type);
 }
 

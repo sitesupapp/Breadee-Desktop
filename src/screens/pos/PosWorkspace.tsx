@@ -48,6 +48,7 @@ import { selectOpenTables } from "@/lib/pos/openTables";
 import { loadFloorLayout, tableSectionMap } from "@/lib/pos/floor";
 import { DeliveryModal } from "@/components/pos/DeliveryModal";
 import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
+import { hydrateRefundProofs } from "@/lib/pos/refundProofHydration";
 import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
@@ -1047,6 +1048,23 @@ function PosWorkspaceInner() {
         : undefined,
     [tenantId, pos.branch.id, userId, shiftId],
   );
+
+  // Phase D — while ONLINE, write through refund-proofs for this shift's paid orders so a later
+  // offline refund can prove the original order + refundable balance (fail-closed otherwise).
+  // Best-effort and side-effect-free for the UI: a failure just leaves those orders online-only.
+  useEffect(() => {
+    if (!online || !shiftId || !offlineScope) return;
+    void hydrateRefundProofs(
+      {
+        tenantId: offlineScope.tenantId,
+        branchId: offlineScope.branchId,
+        cashierUserId: offlineScope.cashierUserId,
+        deviceId: offlineScope.deviceId,
+        terminalId: offlineScope.terminalId,
+      },
+      shiftId,
+    ).catch(() => undefined);
+  }, [online, shiftId, offlineScope, shiftOrders.orders.length]);
 
   const dineIn = useDineInWorkspace({
     pos,
@@ -2693,6 +2711,22 @@ function PosWorkspaceInner() {
         onDone={() => {
           refreshShiftOrders();
           void shiftStore.refreshCashBox();
+        }}
+        /* Phase-D offline reversal: online this is ignored (byte-identical live path); when the
+           backend is unreachable it CAPTURES the reversal locally, but only for an order whose
+           refund-proof was hydrated while online (fail-closed → otherwise "reconnect required"). */
+        offline={{
+          online,
+          offlineReady: offlineReadiness.ready,
+          scope: offlineScope
+            ? {
+                tenantId: offlineScope.tenantId,
+                branchId: offlineScope.branchId,
+                cashierUserId: offlineScope.cashierUserId,
+                deviceId: offlineScope.deviceId,
+                terminalId: offlineScope.terminalId,
+              }
+            : null,
         }}
       />
 

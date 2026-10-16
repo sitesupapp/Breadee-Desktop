@@ -247,6 +247,34 @@ export interface DineDraft {
   updated_at: string;
 }
 
+/**
+ * Phase D — the local REFUND-PROOF of a PAID canonical order, written through while ONLINE.
+ *
+ * An offline refund is allowed ONLY against an order whose proof is cached here (policy
+ * rules 1/8/9): the order must have existed, been paid, and belonged to THIS tenant+OU — all
+ * established from authoritative server data captured while connected. `refundable_usd` is the
+ * client's best local knowledge of the refundable balance; the server re-verifies it under the
+ * row lock (the `p_expected_refund_usd` guard), so a drift is caught as a conflict, never a
+ * wrong-amount refund. This store is NEVER an independent financial authority — it only gates
+ * capture; the canonical server transaction remains the source of truth after sync.
+ */
+export interface PaidOrderProof {
+  order_id: string; // canonical server order id (PK)
+  order_number: string | null;
+  tenant_id: string;
+  branch_id: string | null; // OU
+  shift_id: string | null; // the shift that took the payment (refund must post to it)
+  pos_entity_version: number | null; // CAS value known locally at cache time
+  payment_status: string; // 'paid' required for a refund
+  status: string; // order status at cache time (must not be terminal)
+  refundable_usd: number; // best local knowledge of sum(pos_payments.amount_usd)
+  currency: string; // order primary currency snapshot
+  cashier_user_id: string | null;
+  device_id: string | null;
+  terminal_id: string | null;
+  cached_at: string; // ISO; freshness for the operator
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
@@ -266,6 +294,8 @@ class BreadeeDB extends Dexie {
   syncHistory!: Table<SyncHistoryEvent, number>;
   // Phase C (schema version 6). Durable local Dine-In projection. Keyed by local_session_id.
   dineDrafts!: Table<DineDraft, string>;
+  // Phase D (schema version 7). Local refund-proof of PAID canonical orders. Keyed by order_id.
+  paidOrderProofs!: Table<PaidOrderProof, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -310,6 +340,13 @@ class BreadeeDB extends Dexie {
     // upgrades in place with all data preserved. No destructive change, no data migration.
     this.version(6).stores({
       dineDrafts: "local_session_id, tenant_id, branch_id, table_id, status, cashier_user_id, device_id, updated_at",
+    });
+    // Version 7 - Phase D, ADDITIVE. Adds ONLY the paidOrderProofs store (the local refund-proof
+    // of paid canonical orders, written through while online). Every prior store (v1..v6) carries
+    // forward UNTOUCHED; a v1..v6 database upgrades in place with all data preserved. No
+    // destructive change, no data migration.
+    this.version(7).stores({
+      paidOrderProofs: "order_id, tenant_id, branch_id, shift_id, payment_status, cashier_user_id, device_id, cached_at",
     });
   }
 }
@@ -662,4 +699,43 @@ export async function listDineDrafts(scope: {
         d.status === "open",
     )
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+// ---------------------------------------------------------------------------
+// Phase D — refund-proof of paid canonical orders (paidOrderProofs, v7)
+// ---------------------------------------------------------------------------
+
+/** Write through the refund-proof of a PAID canonical order while ONLINE. Idempotent per
+ *  order_id (a newer read replaces the prior proof). No-op without a tenant/order id. */
+export async function cachePaidOrderProof(proof: PaidOrderProof): Promise<void> {
+  if (!proof.tenant_id || !proof.order_id) return;
+  await localdb.paidOrderProofs.put({ ...proof, cached_at: proof.cached_at || new Date().toISOString() });
+}
+
+/** The refund-proof for a canonical order, or null. SCOPE-CHECKED: a proof from a sibling OU,
+ *  another tenant, cashier, device or terminal is never returned (fail-closed, mirrors the
+ *  operation scope rule; terminal enforced only when a live terminal is supplied). */
+export async function readPaidOrderProof(
+  orderId: string,
+  scope: { tenantId: string | null; branchId: string | null; cashierUserId?: string | null; deviceId?: string | null; terminalId?: string | null },
+): Promise<PaidOrderProof | null> {
+  if (!scope.tenantId || !orderId) return null;
+  const row = await localdb.paidOrderProofs.get(orderId);
+  if (!row) return null;
+  // FAIL-CLOSED five-dimensional isolation: every dimension must match EXACTLY, null-safe, in
+  // BOTH directions. A null stored value is NOT a wildcard — a proof captured without a terminal
+  // (null) never satisfies a scoped terminal, and vice versa. Anything short of exact equality on
+  // tenant, OU/branch, cashier, device and terminal returns null (not ours to reverse).
+  if (row.tenant_id !== scope.tenantId) return null;
+  if ((row.branch_id ?? null) !== (scope.branchId ?? null)) return null;
+  if ((row.cashier_user_id ?? null) !== (scope.cashierUserId ?? null)) return null;
+  if ((row.device_id ?? null) !== (scope.deviceId ?? null)) return null;
+  if ((row.terminal_id ?? null) !== (scope.terminalId ?? null)) return null;
+  return row;
+}
+
+/** Drop a proof once its order has reached a terminal state locally (e.g. after a refund op
+ *  reconciles). Best-effort; never throws on a missing row. */
+export async function deletePaidOrderProof(orderId: string): Promise<void> {
+  await localdb.paidOrderProofs.delete(orderId).catch(() => undefined);
 }
