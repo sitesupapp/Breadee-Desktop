@@ -129,12 +129,17 @@ jobs:
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Capture full summary to report.md
+        if: always()
+        run: cp "$GITHUB_STEP_SUMMARY" report.md || true
+
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: updater-verify-evidence
           path: |
+            report.md
             prod_updater.json
             staging_updater.json
             prod_pub.key
