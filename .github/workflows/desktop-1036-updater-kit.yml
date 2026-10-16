@@ -19,15 +19,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: ci/desktop-1036-updater-kit }
-      - name: Assemble kit
+      - name: Assemble kit (self-contained: 1.0.35 + signed 1.0.36 + scripts)
         run: |
           set -e
           mkdir -p out
           cp kit/qa_oneclick_test.ps1 kit/qa_latest.json kit/QA_UPDATER_TEST.md out/
+          # exact signed 1.0.36 candidate (+ .sig) from the approved build
           gh run download "$RUN_ID" -R sitesupapp/Breadee-Desktop -n breadee-desktop-1.0.36-signed-unpublished -D dl
           cp "dl/Breadee_1.0.36_x64-setup.exe" out/
           cp "dl/Breadee_1.0.36_x64-setup.exe.sig" out/
-          ( cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt )
+          # unmodified production 1.0.35 installer from its published release
+          gh release download desktop-prod-v1.0.35 -R sitesupapp/Breadee-Desktop -p 'Breadee_1.0.35_x64-setup.exe' -D out
+          # deterministic checksums over the shipped set (exclude SHA256SUMS.txt itself)
+          ( cd out && sha256sum \
+              Breadee_1.0.35_x64-setup.exe \
+              Breadee_1.0.36_x64-setup.exe \
+              Breadee_1.0.36_x64-setup.exe.sig \
+              qa_latest.json qa_oneclick_test.ps1 QA_UPDATER_TEST.md > SHA256SUMS.txt && cat SHA256SUMS.txt )
       - name: Secret scan (fail if any production secret present)
         run: |
           set -e
