@@ -16,6 +16,7 @@ const ts = (rel: string) => stripComments(readFileSync(join(root, rel), "utf8"))
 
 const DW = "src/screens/pos/DineInWorkspace.tsx";
 const PW = "src/screens/pos/PosWorkspace.tsx";
+const DELW = "src/screens/pos/DeliveryWorkspace.tsx";
 const ENGINE = "src/lib/offline/dineinOffline.ts";
 
 test("open: offline branch routes to the local engine, gated on unreachable + ready + scope", () => {
@@ -86,6 +87,16 @@ test("Phase D: Takeaway On-Account is offline-capable via CAPTURE (order → cha
   assert.match(src, /await saveOfflineSend\(lines\);[\s\S]{0,500}orderOnAccountOffline\(/);
   assert.match(src, /migOpId: takeawaySaleOpId\(txn\.local_txn_id\)/);
   // The ONLINE performOnAccount path is preserved.
+  assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
+});
+
+test("Phase D: Delivery On-Account is offline-capable via CAPTURE (local-vs-canonical chain)", () => {
+  const src = ts(DELW);
+  // settleOnAccount offline branch captures the receivable; offline-captured order (its id is the
+  // local_txn_id) chains via order_local + mig op, hydrated uses canonical id; online unchanged.
+  assert.match(src, /if \(!online\)[\s\S]{0,1400}orderOnAccountOffline\(/);
+  assert.match(src, /const localTxn = await getPosOfflineTxn\(order\.id\)/);
+  assert.match(src, /migOpId: localTxn \? takeawaySaleOpId\(order\.id\) : null/);
   assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
 });
 

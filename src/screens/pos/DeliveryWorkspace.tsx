@@ -166,8 +166,9 @@ import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
-import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn } from "@/lib/offline/db";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, getPosOfflineTxn, updatePosOfflineTxn } from "@/lib/offline/db";
 import { getDeviceIdentity } from "@/lib/device";
+import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -1584,10 +1585,56 @@ export function useDeliveryWorkspace(input: {
     }) => {
       const order = payTarget.order;
       if (!order || !payGate.allowed) return;
+
+      // Phase D — OFFLINE delivery on-account CAPTURE. The order's own customer is authority. An
+      // offline-captured delivery order (its id IS the local_txn_id → mig:txn:<id>) is chained via
+      // order_local so the receivable settles after the order syncs; a hydrated order uses its
+      // canonical id. No server RPC offline; the ONLINE path below is unchanged.
       if (!online) {
-        setPayError("On-account sales need a connection. Reconnect before putting an order on account.");
+        const offCustomerId = order.customer_id;
+        if (!offCustomerId) {
+          setPayError("This delivery order has no customer, so it cannot be put on account.");
+          return;
+        }
+        if (!pos.tenantId || !pos.userId) {
+          setPayError("On-account sales need a connection. Reconnect before putting an order on account.");
+          return;
+        }
+        setPayError(null);
+        setPaying(true);
+        settleDone.current = false;
+        try {
+          const dev = getDeviceIdentity();
+          const scope = { tenantId: pos.tenantId, branchId: pos.branch.id, cashierUserId: pos.userId, deviceId: dev.device_id, terminalId: dev.terminal_id };
+          const offDiscount =
+            confirm.discountType !== "none" && confirm.discountValue.trim() !== ""
+              ? { discount_type: confirm.discountType, discount_value: Number(confirm.discountValue) }
+              : undefined;
+          const localTxn = await getPosOfflineTxn(order.id);
+          await orderOnAccountOffline({
+            scope,
+            orderId: localTxn ? null : order.id,
+            orderLocal: localTxn ? order.id : null,
+            migOpId: localTxn ? takeawaySaleOpId(order.id) : null,
+            customerId: offCustomerId,
+            amount: confirm.amountNow,
+            method: confirm.method,
+            orderNumber: order.order_number ?? null,
+            discount: offDiscount,
+          });
+          settleDone.current = true;
+          setPayOpen(false);
+          void refreshQueue();
+          toast.push({ tone: "success", message: "Put on account offline", detail: "Recorded on this device — it will sync automatically when you reconnect." });
+        } catch (e) {
+          const c = classifyError(e);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        } finally {
+          setPaying(false);
+        }
         return;
       }
+
       // The order's own customer is authority - not the dialog, not the selection.
       const customerId = order.customer_id;
       if (!customerId) {
@@ -1712,7 +1759,7 @@ export function useDeliveryWorkspace(input: {
         setPaying(false);
       }
     },
-    [payTarget, payGate.allowed, online, input, pos.branch.name, pos.tenantName, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
+    [payTarget, payGate.allowed, online, input, pos.branch.name, pos.branch.id, pos.tenantId, pos.tenantName, pos.userId, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
   );
 
   // --- Level 3D: edit ---------------------------------------------------------
@@ -2443,15 +2490,17 @@ export function useDeliveryWorkspace(input: {
           address: payTarget.order ? receiptIdentity(payTarget.order).addressText : null,
         }}
         onAccountDisabledReason={
-          pos.gates.takeOnAccount.allowed && online
-            ? null
-            : !pos.gates.takeOnAccount.allowed
-              ? pos.gates.takeOnAccount.reason
-              : "On-account sales need an internet connection."
+          !pos.gates.takeOnAccount.allowed
+            ? pos.gates.takeOnAccount.reason
+            : !payTarget.order?.customer_id
+              ? "This delivery order has no customer, so it cannot be put on account."
+              : null
         }
         onAccount={(() => {
           const o = payTarget.order;
-          if (!pos.gates.takeOnAccount.allowed || !online || !o || !o.customer_id) return undefined;
+          // Online OR offline (offline captures a receivable against the order's own cached
+          // customer; settleOnAccount branches internally). A customer on the order is required.
+          if (!pos.gates.takeOnAccount.allowed || !o || !o.customer_id) return undefined;
           // The customer is the ORDER's own, read-only - no picker on delivery.
           const who = receiptIdentity(o);
           return {

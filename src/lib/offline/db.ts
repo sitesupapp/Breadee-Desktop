@@ -507,6 +507,12 @@ export async function getPosOfflineTxnByOp(clientOpId: string): Promise<PosOffli
   return localdb.posOfflineTxns.where("client_op_id").equals(clientOpId).first();
 }
 
+/** One offline txn by its LOCAL id (PK). Used to tell an offline-captured order (whose id IS the
+ *  local_txn_id) from a hydrated canonical order when chaining a receivable offline. */
+export async function getPosOfflineTxn(localTxnId: string): Promise<PosOfflineTxn | undefined> {
+  return localdb.posOfflineTxns.get(localTxnId);
+}
+
 /**
  * Offline orders that were SENT to the kitchen but not yet paid, for the given
  * live session (tenant + branch + cashier). These are the orders a cashier can
