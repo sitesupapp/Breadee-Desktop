@@ -552,24 +552,39 @@ test("a dine-in ticket is built from the SUBMITTED round, not from the bill", ()
   // Bounded by CODE, not by a comment: the comments have been stripped, so a
   // comment anchor would return -1 and silently widen the slice to the rest of
   // the file - which is how an assertion ends up reading somebody else's code.
+  // sendRound now has TWO branches (Phase C offline capture + online submit); BOTH build the
+  // ticket from the submitted round's cart snapshot, never from the bill. Assert each branch.
   const send = dineIn.slice(dineIn.indexOf("const sendRound"), dineIn.indexOf("const readTableState"));
-  assert.match(send, /const submitted = useCart\.getState\(\)\.lines/);
-  const call = send.slice(send.indexOf("onKitchenBatch"));
-  assert.match(call, /lines: submitted\.map/);
-  assert.equal(call.includes("getState().bill"), false, "the ticket must not be built from the bill");
-  // The server's own batch number, never a locally computed one.
-  assert.match(call, /batchNo: outcome\.result\.batch_no/);
+  const boundary = send.indexOf("const before: TableBill");
+  const offline = send.slice(0, boundary); // the offline-capture branch
+  const online = send.slice(boundary); // the online submit branch
+  for (const [label, part] of [["offline", offline], ["online", online]] as const) {
+    assert.match(part, /const submitted = useCart\.getState\(\)\.lines/, `${label}: round snapshotted from the cart`);
+    const call = part.slice(part.indexOf("onKitchenBatch"));
+    assert.match(call, /lines: submitted\.map/, `${label}: ticket lines from the submitted round`);
+    assert.equal(call.includes("getState().bill"), false, `${label}: the ticket must not be built from the bill`);
+  }
+  // The online ticket carries the server's own batch number, never a locally computed one.
+  assert.match(online, /batchNo: outcome\.result\.batch_no/);
 });
 
 test("the ticket is only requested after the server has accepted", () => {
-  // Bounded by CODE, not by a comment: the comments have been stripped, so a
-  // comment anchor would return -1 and silently widen the slice to the rest of
-  // the file - which is how an assertion ends up reading somebody else's code.
+  // Bounded by CODE, not by a comment (comments are stripped). The ONLINE branch must not print
+  // before the submission succeeds; the OFFLINE branch prints a local ticket only after the durable
+  // round capture, and a local-print failure never reverses the round.
   const send = dineIn.slice(dineIn.indexOf("const sendRound"), dineIn.indexOf("const readTableState"));
+  const boundary = send.indexOf("const before: TableBill");
+  const online = send.slice(boundary);
   assert.ok(
-    send.indexOf("if (!outcome.ok) throw outcome.error") < send.indexOf("onKitchenBatch"),
-    "nothing prints before the submission has succeeded",
+    online.indexOf("if (!outcome.ok) throw outcome.error") < online.indexOf("onKitchenBatch"),
+    "online: nothing prints before the submission has succeeded",
   );
+  const offline = send.slice(0, boundary);
+  assert.ok(
+    offline.indexOf("sendRoundOffline(") < offline.indexOf("onKitchenBatch"),
+    "offline: the durable round capture precedes the local print",
+  );
+  assert.match(offline, /catch \{[\s\S]{0,160}print_failed/, "offline: a local-print failure never reverses the captured round");
 });
 
 test("delivery snapshots its lines before the first await, as the payload does", () => {

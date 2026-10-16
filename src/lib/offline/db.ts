@@ -320,6 +320,23 @@ export interface PayoutSourceProof {
   cached_at: string; // ISO; freshness for the operator
 }
 
+/**
+ * Phase F — a write-through cache of a RESOLVED print route (kitchen/receipt destination), so a
+ * ticket can be ROUTED offline exactly as it was resolved while online. The server stays the
+ * authoritative resolver (`resolve_print_route`); this is ONLY a fallback read when that RPC is
+ * unreachable, populated on every SUCCESSFUL online resolve. A route is a per-BRANCH config, so the
+ * cache is keyed + scoped by branch (routes never cross branches). Printing from the cache creates
+ * NO business mutation — it only picks a destination; the sale/round already committed independently.
+ */
+export interface CachedPrintRoute {
+  key: string; // `${branch_id}:${purpose}:${order_source}`
+  branch_id: string;
+  purpose: string; // 'kitchen_ticket' | 'receipt'
+  order_source: string;
+  route: unknown; // the ResolvedRoute JSON as the server resolved it
+  cached_at: string;
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
@@ -344,6 +361,9 @@ class BreadeeDB extends Dexie {
   // Phase D (D4, schema version 8). Local payout-source proof (valid economic records hydrated
   // while online), so a cash payout can be captured offline against a proven source. Keyed by proof_key.
   payoutSourceProofs!: Table<PayoutSourceProof, string>;
+  // Phase F (schema version 9). Write-through cache of resolved print routes (per branch), so a
+  // kitchen/receipt ticket can be routed offline. Keyed by `${branch}:${purpose}:${order_source}`.
+  printRoutes!: Table<CachedPrintRoute, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -402,6 +422,12 @@ class BreadeeDB extends Dexie {
     // change, no data migration. `scope_type` is a compound index for scope-exact write-through replace.
     this.version(8).stores({
       payoutSourceProofs: "proof_key, source_type, source_id, tenant_id, branch_id, cashier_user_id, device_id, cached_at",
+    });
+    // Version 9 - Phase F, ADDITIVE. Adds ONLY the printRoutes write-through cache (resolved
+    // kitchen/receipt destinations per branch) so tickets route offline. Every prior store (v1..v8)
+    // carries forward UNTOUCHED; a v1..v8 database upgrades in place with all data preserved.
+    this.version(9).stores({
+      printRoutes: "key, branch_id, purpose, order_source, cached_at",
     });
   }
 }
@@ -977,4 +1003,39 @@ export async function purgeForeignPayoutSourceProofs(tenantId: string | null, br
 /** Sign-out cleanup: drop the whole payout-source proof cache. */
 export async function clearPayoutSourceProofs(): Promise<void> {
   await localdb.payoutSourceProofs.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Phase F — resolved print-route cache (printRoutes, v9)
+// ---------------------------------------------------------------------------
+
+const printRouteKey = (branchId: string, purpose: string, orderSource: string) => `${branchId}:${purpose}:${orderSource}`;
+
+/** Write through a RESOLVED print route for a branch (call only after a SUCCESSFUL online resolve).
+ *  No-op without a branch. The route JSON is stored as-is so the offline fallback returns exactly
+ *  what the server resolved. */
+export async function cachePrintRoute(branchId: string | null, purpose: string, orderSource: string, route: unknown): Promise<void> {
+  if (!branchId) return;
+  await localdb.printRoutes.put({
+    key: printRouteKey(branchId, purpose, orderSource),
+    branch_id: branchId,
+    purpose,
+    order_source: orderSource,
+    route,
+    cached_at: new Date().toISOString(),
+  });
+}
+
+/** The cached resolved route for a branch+purpose+source, or null. Scope-checked by branch (a route
+ *  never crosses branches), so one branch's cached destination can never serve another. */
+export async function readCachedPrintRoute(branchId: string | null, purpose: string, orderSource: string): Promise<unknown | null> {
+  if (!branchId) return null;
+  const row = await localdb.printRoutes.get(printRouteKey(branchId, purpose, orderSource));
+  if (!row || row.branch_id !== branchId) return null;
+  return row.route;
+}
+
+/** Sign-out cleanup: drop the print-route cache. */
+export async function clearPrintRoutes(): Promise<void> {
+  await localdb.printRoutes.clear();
 }

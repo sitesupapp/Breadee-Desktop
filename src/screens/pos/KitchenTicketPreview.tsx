@@ -33,7 +33,8 @@ import {
   type NativePrintError,
   type PrintOutcome,
 } from "@/lib/nativePrinting";
-import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolvePrintRoute, type ResolvedRoute } from "@/lib/pos/printRouteResolver";
+import { cachePrintRoute, readCachedPrintRoute } from "@/lib/offline/db";
 import {
   kitchenBlockMessage,
   kitchenPrintGate,
@@ -198,7 +199,14 @@ export function KitchenTicketModal({
     void (async () => {
       const [installed, route] = await Promise.all([
         listPrinters(),
-        resolvePrintRoute({ branchId, purpose: "kitchen_ticket", orderSource: source }).catch(() => null),
+        // Online resolve writes through to the per-branch cache; offline falls back to it, so a
+        // manual reprint still routes to where the ticket was resolved while online.
+        resolvePrintRoute({ branchId, purpose: "kitchen_ticket", orderSource: source })
+          .then((r) => {
+            if (r.resolved) void cachePrintRoute(branchId, "kitchen_ticket", source, r);
+            return r;
+          })
+          .catch(async () => ((await readCachedPrintRoute(branchId, "kitchen_ticket", source).catch(() => null)) as ResolvedRoute | null) ?? null),
       ]);
       if (cancelled) return;
       if (!route) {

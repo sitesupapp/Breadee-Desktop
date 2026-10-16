@@ -44,7 +44,8 @@ import {
   ORDER_SUCCEEDED_TICKET_DID_NOT,
   type KitchenTicket,
 } from "@/lib/pos/kitchenPrinter";
-import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolvePrintRoute, type ResolvedRoute } from "@/lib/pos/printRouteResolver";
+import { cachePrintRoute, readCachedPrintRoute } from "@/lib/offline/db";
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { resolveRouteTarget, type PrintResolution } from "@/lib/pos/printTarget";
 import { readAutoPrintSettings, readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
@@ -78,11 +79,24 @@ async function resolveFor(input: {
   installed: Awaited<ReturnType<typeof listPrinters>>;
 }): Promise<PrintResolution> {
   if (!input.branchId) return { kind: "blocked", block: { reason: "no_route" } };
+  const branchId = input.branchId;
+  // Server is the authoritative resolver. On a SUCCESSFUL online resolve, write the result through
+  // to the local cache so the SAME destination can be routed offline; when the resolve throws
+  // (backend unreachable), fall back to the cached route — a ticket still prints to where it was
+  // resolved while online. Routing resolution creates no business mutation either way.
   const route = await resolvePrintRoute({
-    branchId: input.branchId,
+    branchId,
     purpose: input.purpose,
     orderSource: input.orderSource,
-  }).catch(() => null);
+  })
+    .then((r) => {
+      if (r.resolved) void cachePrintRoute(branchId, input.purpose, input.orderSource, r);
+      return r;
+    })
+    .catch(async () => {
+      const cached = await readCachedPrintRoute(branchId, input.purpose, input.orderSource).catch(() => null);
+      return (cached as ResolvedRoute | null) ?? null;
+    });
   if (!route) return { kind: "blocked", block: { reason: "no_route" } };
   const resolution = resolveRouteTarget({ route, installed: input.installed.ok ? input.installed.value : [] });
   return resolution.kind === "single"
