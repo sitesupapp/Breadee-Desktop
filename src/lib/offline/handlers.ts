@@ -316,6 +316,96 @@ export const voidRefundHandler: OperationHandler = {
   },
 };
 
+/** A settle refusal that means the bill was ALREADY settled by a DIFFERENT action (not our own
+ *  replay — our own replay returns idempotent SUCCESS via the server's client_op_id cache). We
+ *  collected tender offline against a bill that is now closed another way, so this is a CONFLICT
+ *  the operator resolves (needs_attention), never a silent second charge. */
+function isSettleConflict(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("already paid") ||
+    m.includes("no open order") ||
+    m.includes("already settled") ||
+    isConflictMessage(message)
+  );
+}
+
+type PayTablePayload = {
+  /** Canonical table id when known (a configured table). */
+  table_id: string | null;
+  /** Local open-table entity id to remap to the canonical table id (ad-hoc offline tables). */
+  table_local: string | null;
+  method: string;
+  currency: string;
+  discount?: { discount_type?: string; discount_value?: number };
+  table_name?: string | null;
+};
+
+/** pay_table — settle a dine-in TABLE bill offline (pos_pay_table), exactly-once on client_op_id.
+ *  An ad-hoc table created offline is remapped from its open-table op; a configured table uses its
+ *  canonical id directly. A bill settled another way meanwhile → CONFLICT (needs_attention). */
+export const payTableHandler: OperationHandler = {
+  type: "pay_table",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as PayTablePayload;
+    let tableId = p.table_id;
+    if (p.table_local) {
+      const canonical = await ctx.canonicalFor(p.table_local);
+      if (!canonical) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "table_unresolved", message: "table not yet synced" };
+      tableId = canonical;
+    }
+    if (!tableId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_table", message: "no table id" };
+    try {
+      const r = await ctx.deps.payTable({ tableId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id });
+      return { ok: true, canonicalId: tableId, resultMeta: { amount: r.amount, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "pay_table: transport", message: msg };
+      if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
+type PayOrderPayload = {
+  order_id: string | null;
+  /** Local order entity id to remap to the canonical order id (offline-created order). */
+  order_local: string | null;
+  method: string;
+  currency: string;
+  discount?: Record<string, unknown>;
+  expected_version?: number | null;
+  order_number?: string | null;
+};
+
+/** pay_order — settle a single ORDER offline (pos_pay_order), exactly-once on client_op_id. */
+export const payOrderHandler: OperationHandler = {
+  type: "pay_order",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as PayOrderPayload;
+    let orderId = p.order_id;
+    if (p.order_local) {
+      const canonical = await ctx.canonicalFor(p.order_local);
+      if (!canonical) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+      orderId = canonical;
+    }
+    if (!orderId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_order", message: "no order id" };
+    try {
+      const r = await ctx.deps.payOrderOp({ orderId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id, expectedVersion: p.expected_version ?? null });
+      return { ok: true, canonicalId: r.order_id, resultMeta: { amount: r.amount, paid: r.paid, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "pay_order: transport", message: msg };
+      if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -324,6 +414,8 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${dineinOpenTableHandler.type}@${dineinOpenTableHandler.schemaVersion}`]: dineinOpenTableHandler,
   [`${dineinSendRoundHandler.type}@${dineinSendRoundHandler.schemaVersion}`]: dineinSendRoundHandler,
   [`${voidRefundHandler.type}@${voidRefundHandler.schemaVersion}`]: voidRefundHandler,
+  [`${payTableHandler.type}@${payTableHandler.schemaVersion}`]: payTableHandler,
+  [`${payOrderHandler.type}@${payOrderHandler.schemaVersion}`]: payOrderHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

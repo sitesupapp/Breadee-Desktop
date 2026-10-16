@@ -31,7 +31,13 @@ export type OperationType =
   | "dinein_send_round" // send a round to the table's open order (→ pos_submit_order, expected_order_id-bound)
   // Phase D — bounded offline refund/void of a LOCALLY-HYDRATED canonical order (→ pos_void_order,
   // expected_version CAS + expected_refund_usd guard). Never against an ad-hoc/local-only order.
-  | "void_refund";
+  | "void_refund"
+  // Phase D — offline SETTLE (cash / dynamic tender). Exactly-once via client_op_id (the settle
+  // RPCs already carry the server replay wrapper). pay_table settles a dine-in table bill
+  // (→ pos_pay_table); pay_order settles a single order (→ pos_pay_order). Both may depend on the
+  // session's open/round ops when the order/table was created offline.
+  | "pay_table"
+  | "pay_order";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

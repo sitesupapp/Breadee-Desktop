@@ -84,6 +84,14 @@ function labelFor(op: OfflineOperation): string {
     const num = p.order_number ? ` #${p.order_number}` : "";
     return p.refund ? `Refund order${num}` : `Cancel order${num}`;
   }
+  if (op.operation_type === "pay_table") {
+    const p = (op.payload as { table_name?: string } | null) ?? {};
+    return p.table_name ? `Pay table ${p.table_name}` : "Pay table";
+  }
+  if (op.operation_type === "pay_order") {
+    const p = (op.payload as { order_number?: string } | null) ?? {};
+    return p.order_number ? `Pay order #${p.order_number}` : "Pay order";
+  }
   return String(op.operation_type);
 }
 
