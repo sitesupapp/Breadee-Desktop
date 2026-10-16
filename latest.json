@@ -1,11 +1,11 @@
 {
-    "version":  "1.0.35",
-    "notes":  "Breadee Desktop 1.0.35 - Transfer Center and Delivery Order Editing.",
-    "pub_date":  "2026-10-13T22:06:49Z",
+    "version":  "1.0.36",
+    "notes":  "Breadee Desktop 1.0.36 - Smarter table merging with partial payments, improved shift management, per-branch end-of-shift approval, direct POS access for owners, better customer accounts, and Force Transfer controls.",
+    "pub_date":  "2026-10-16T15:45:00Z",
     "platforms":  {
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dDJBTTZ0RnFNNjFrZ2txQSthQTgvT044UTdsbnFwUTZjWktQSmExNnMxellZclczZWZ6b0hlMXN0ZHZnN0JTOHFwVzFLZ3VTQjhLa0ZPbFpUU3VCU1FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNTU4NjQyCWZpbGU6QnJlYWRlZV8xLjAuMzVfeDY0LXNldHVwLmV4ZQpQK3YwcGdwRThNUGhtMThxRXJXMXlpWFdtM09xL1BnNzVDeG9ldmpjYlY1V3lQNGpYRmw0UkNJTThwYUVIRTFBc1A3cVpzNThCYldvaGZWaGlNaElEZz09Cg==",
-                                             "url":  "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.35/Breadee_1.0.35_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dHdMakNMOTF5NXU1V05JMG9PREcvU29CenNRN2IxZHV3WC84R3JFUlhWYWx5NnI5RStOSDVPd090YVBzMEVuTTlLS0tJcEpuRG9BYnhweWJCZm8yK1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTM5ODY1CWZpbGU6QnJlYWRlZV8xLjAuMzZfeDY0LXNldHVwLmV4ZQp4OGpHZFlmclNacGwwM1FCQ1J3bVo5MEVCNlBBb0hOZFU3ejFnRy93TnpqM3VTTXhoOGJhOU5rN2xOU1ZCTkhySGlnenlNMnBGdEVPTVgrMEZmNzhCQT09Cg==",
+                                             "url":  "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.36/Breadee_1.0.36_x64-setup.exe"
                                          }
                   }
 }
