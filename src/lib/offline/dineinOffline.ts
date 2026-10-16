@@ -451,6 +451,113 @@ export async function tableOnAccountOffline(input: {
   });
 }
 
+const SPLIT_OP_PREFIX = "dineinsplit:";
+
+/** Split legs captured for a session's order, in capture order (for chaining + projection). */
+async function sessionSplitLegs(d: DineDraft): Promise<OfflineOperation[]> {
+  const rows = await localdb.operations.where("operation_type").equals("split_settle").toArray();
+  return rows
+    .filter((o) => o.status !== "cancelled" && (o.payload as { order_local?: string } | null)?.order_local === d.local_session_id)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+export type DineSplitRemainingLine = { line_id: string; name: string; sent_qty: number; allocated: number; remaining: number; final_unit_price: number };
+
+/** Restart-safe local split projection for a fully-offline dine-in session: for each SENT line,
+ *  remaining = sent qty − already-allocated across captured split legs. Only sent lines are
+ *  splittable (an unsent line is not yet on any order). */
+export async function splitDineDraftRemaining(sessionId: string): Promise<DineSplitRemainingLine[] | null> {
+  const d = await localdb.dineDrafts.get(sessionId);
+  if (!d) return null;
+  const legs = await sessionSplitLegs(d);
+  const allocByLine = new Map<string, number>();
+  for (const leg of legs) {
+    const allocs = ((leg.payload as { allocations?: { line_local?: string; quantity: number }[] } | null)?.allocations) ?? [];
+    for (const a of allocs) if (a.line_local) allocByLine.set(a.line_local, (allocByLine.get(a.line_local) ?? 0) + Number(a.quantity));
+  }
+  // Collapse sent lines by line_id (each DineDraftLine is one line with a quantity).
+  return d.lines
+    .filter((l) => l.sent_round !== null)
+    .map((l) => {
+      const allocated = allocByLine.get(l.line_id) ?? 0;
+      return { line_id: l.line_id, name: l.name, sent_qty: l.quantity, allocated, remaining: Math.max(0, l.quantity - allocated), final_unit_price: l.base_price };
+    });
+}
+
+export type DineSplitCaptureResult =
+  | { ok: true; operationId: string; clientOpId: string; alreadyCaptured: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * Capture ONE offline split leg for a fully-offline Dine-In session. Allocations reference LOCAL
+ * line ids (line_local); at replay the split handler resolves them to canonical order_item_ids via
+ * pos_order_item_map + entityMap. The op depends on the session's open + every round op (so the
+ * order + items exist and are mapped) and on the previous split leg (strict order). Validates
+ * against the local remaining projection (never locally over-allocates). Deterministic/idempotent.
+ */
+export async function splitDineDraftOffline(input: {
+  sessionId: string;
+  allocations: { line_id: string; quantity: number }[];
+  method: string;
+}): Promise<DineSplitCaptureResult> {
+  const allocs = input.allocations.filter((a) => Number(a.quantity) > 0);
+  if (allocs.length === 0) return { ok: false, reason: "Select at least one item to split." };
+  return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
+    const d = await localdb.dineDrafts.get(input.sessionId);
+    if (!d) return { ok: false, reason: "This table isn't available offline. Reconnect to split it." };
+    if (d.rounds.length === 0) return { ok: false, reason: "Nothing has been sent to split on this table." };
+    const remaining = await splitDineDraftRemaining(input.sessionId);
+    const remByLine = new Map((remaining ?? []).map((r) => [r.line_id, r]));
+    for (const a of allocs) {
+      const line = remByLine.get(a.line_id);
+      if (!line) return { ok: false, reason: "A selected line is not a sent part of this bill." };
+      if (Number(a.quantity) > line.remaining) return { ok: false, reason: `Only ${line.remaining} of "${line.name}" remain to split.` };
+    }
+    const sorted = [...allocs].sort((x, y) => x.line_id.localeCompare(y.line_id));
+    const allocKey = sorted.map((a) => `${a.line_id}:${a.quantity}`).join(",");
+    const clientOpId = deterministicUuid([d.tenant_id, d.branch_id ?? "", d.cashier_user_id, d.device_id, d.terminal_id ?? "", "split_settle", d.local_session_id, input.method, allocKey]);
+    const operationId = SPLIT_OP_PREFIX + clientOpId;
+    const existing = await getOperation(operationId);
+    if (existing) return { ok: true, operationId, clientOpId, alreadyCaptured: true };
+    const legs = await sessionSplitLegs(d);
+    const prevLeg = legs.length > 0 ? legs[legs.length - 1].operation_id : null;
+    const scope: OperationScope = { tenant_id: d.tenant_id, branch_id: d.branch_id, device_id: d.device_id, terminal_id: d.terminal_id ?? "", cashier_user_id: d.cashier_user_id };
+    const op: OfflineOperation = {
+      operation_id: operationId,
+      operation_type: "split_settle",
+      schema_version: OPERATION_SCHEMA_VERSION,
+      scope,
+      created_at: new Date().toISOString(),
+      client_op_id: clientOpId,
+      local_entity_id: null,
+      canonical_entity_id: null,
+      // Needs the order + its items on the server first (open + every round), plus strict leg order.
+      dependency_ids: [d.open_operation_id, ...d.rounds.map((r) => r.operation_id), ...(prevLeg ? [prevLeg] : [])],
+      depends_on_local_entities: [d.local_session_id],
+      payload: {
+        order_id: null,
+        order_local: d.local_session_id,
+        method: input.method,
+        currency: d.currency,
+        allocations: sorted.map((a) => ({ line_local: a.line_id, quantity: a.quantity })),
+        expected_version: null,
+        batch_no: null,
+        split_seq: legs.length + 1,
+        table_name: d.table_name,
+      },
+      status: "pending",
+      retry_count: 0,
+      last_attempt_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      result_meta: null,
+      synced_at: null,
+    };
+    await localdb.operations.add(op);
+    return { ok: true, operationId, clientOpId, alreadyCaptured: false };
+  });
+}
+
 /** Any captured pay_table op for this session's table in its exact scope (for the UI to show a
  *  table as "settling offline" and to avoid offering a second settle). */
 export async function findSettleOpForSession(sessionId: string): Promise<OfflineOperation | undefined> {

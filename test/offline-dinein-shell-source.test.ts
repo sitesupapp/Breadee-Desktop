@@ -100,6 +100,16 @@ test("Phase D: Delivery On-Account is offline-capable via CAPTURE (local-vs-cano
   assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
 });
 
+test("Phase D: Dine-In SPLIT is offline-capable via CAPTURE (fully-offline bill, local line ids)", () => {
+  const src = ts(DW);
+  // openSplit offline builds the panel from the local draft projection; online loadSplitState kept.
+  assert.match(src, /if \(offlineCapture && input\.offlineScope && selected\)[\s\S]{0,400}splitDineDraftRemaining\(/);
+  assert.match(src, /loadSplitState\(order\.id\)/, "online split-state load preserved");
+  // paySplit offline captures a leg via splitDineDraftOffline; online settleSplit preserved.
+  assert.match(src, /if \(offlineCapture\)[\s\S]{0,400}splitDineDraftOffline\(/);
+  assert.match(src, /await settleSplit\(/, "online settleSplit path preserved");
+});
+
 test("the customer picker is offline-aware (cached customers), not a second cache", () => {
   const cp = ts("src/state/customerPicker.ts");
   assert.match(cp, /searchCustomersOfflineAware\(/);

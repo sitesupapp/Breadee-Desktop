@@ -118,6 +118,9 @@ import {
   billFromDraft,
   settleTableOffline,
   tableOnAccountOffline,
+  splitDineDraftOffline,
+  splitDineDraftRemaining,
+  type DineSplitRemainingLine,
 } from "@/lib/offline/dineinOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -919,16 +922,53 @@ export function useDineInWorkspace(input: {
   const [splitError, setSplitError] = useState<string | null>(null);
   const [splitLastPaid, setSplitLastPaid] = useState<{ display_no: string; amount: number; method: string } | null>(null);
 
+  /** Build a SplitState the existing panel can render from the local dine-in draft projection.
+   *  The LOCAL line id stands in for order_item_id offline; paySplit maps it back on capture. */
+  const offlineSplitState = useCallback((sessionId: string, orderNumber: string, currency: CurrencyCode, remaining: DineSplitRemainingLine[]): SplitState => ({
+    order_id: sessionId,
+    order_number: orderNumber,
+    status: "sent_to_kitchen",
+    payment_status: "unpaid",
+    pos_entity_version: 0,
+    total_amount: remaining.reduce((s, r) => s + r.final_unit_price * r.sent_qty, 0),
+    paid_amount_usd: 0,
+    currency,
+    lines: remaining.map((r) => ({
+      order_item_id: r.line_id,
+      name: r.name,
+      quantity: r.sent_qty,
+      final_unit_price: r.final_unit_price,
+      line_total: r.final_unit_price * r.sent_qty,
+      kitchen_note: null,
+      allocated_qty: r.allocated,
+      available_qty: r.remaining,
+    })),
+    settlements: [],
+  }), []);
+
   const openSplit = useCallback(async () => {
     if (!splitGate.allowed) return;
-    const bill = useTables.getState().bill;
-    const order = bill?.orders.find((o) => o.payment_status !== "paid") ?? bill?.orders[0];
-    if (!order) return;
     setSplitError(null);
     setSplitLastPaid(null);
     setSplitLoading(true);
     setSplitOpen(true);
     try {
+      // OFFLINE: split the local dine-in session (fully-offline bill) from its projection; no server
+      // call. The existing panel renders it; selection yields local line ids that paySplit maps.
+      if (offlineCapture && input.offlineScope && selected) {
+        const draft = await getDineDraftForTable(input.offlineScope, selected.id);
+        if (!draft) {
+          setSplitError("This table isn't available offline. Reconnect to split it.");
+          return;
+        }
+        const remaining = (await splitDineDraftRemaining(draft.local_session_id)) ?? [];
+        setSplitState(offlineSplitState(draft.local_session_id, draft.table_name, input.currency, remaining));
+        setSplitMethods(activePaymentMethods);
+        return;
+      }
+      const bill = useTables.getState().bill;
+      const order = bill?.orders.find((o) => o.payment_status !== "paid") ?? bill?.orders[0];
+      if (!order) return;
       const [state, methods] = await Promise.all([loadSplitState(order.id), loadSplitPaymentMethods(pos.tenantId)]);
       setSplitState(state);
       setSplitMethods(methods);
@@ -937,7 +977,8 @@ export function useDineInWorkspace(input: {
     } finally {
       setSplitLoading(false);
     }
-  }, [splitGate.allowed, pos.tenantId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitGate.allowed, pos.tenantId, offlineCapture, input.offlineScope, input.currency, selected, activePaymentMethods, offlineSplitState]);
 
   const paySplit = useCallback(
     async (allocations: SplitAllocationInput[], method: string) => {
@@ -945,6 +986,33 @@ export function useDineInWorkspace(input: {
       if (!st) return;
       setSplitBusy(true);
       setSplitError(null);
+
+      // OFFLINE: CAPTURE a split leg against the local session (no server call). The panel's
+      // order_item_id selections ARE local line ids offline; map them to the capture shape.
+      if (offlineCapture) {
+        try {
+          const cap = await splitDineDraftOffline({
+            sessionId: st.order_id,
+            allocations: allocations.map((a) => ({ line_id: a.order_item_id, quantity: a.quantity })),
+            method,
+          });
+          if (!cap.ok) {
+            setSplitError(cap.reason);
+            return;
+          }
+          // Re-derive the local projection so the panel shows the reduced remaining; the leg is
+          // settlement-pending-sync (never falsely canonical-paid).
+          const remaining = (await splitDineDraftRemaining(st.order_id)) ?? [];
+          setSplitState(offlineSplitState(st.order_id, st.order_number, input.currency, remaining));
+          setSplitLastPaid({ display_no: `${st.order_number}-offline`, amount: 0, method });
+        } catch (e) {
+          setSplitError(classifyError(e).message);
+        } finally {
+          setSplitBusy(false);
+        }
+        return;
+      }
+
       try {
         const result = await settleSplit(
           buildSplitSettlePayload({
@@ -971,7 +1039,8 @@ export function useDineInWorkspace(input: {
         setSplitBusy(false);
       }
     },
-    [splitState, tables, ctx],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [splitState, tables, ctx, offlineCapture, input.currency, offlineSplitState],
   );
 
   // Phase 2: a persisted REMOVAL or REDUCTION needs an audited reason; a plain
