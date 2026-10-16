@@ -316,3 +316,46 @@ export async function loadPayoutSources(
     return [];
   }
 }
+
+/** The 5-D scope an offline-aware source read is hydrated/served under (mirrors the capture scope). */
+export type PayoutSourceScope = {
+  tenantId: string | null;
+  branchId: string | null;
+  cashierUserId: string | null;
+  deviceId: string | null;
+  terminalId: string | null;
+};
+
+/**
+ * Offline-aware payout sources for ONE type. ONLINE: read the authoritative records and WRITE
+ * THROUGH to the local proof cache (replace-set) so the SAME list can gate an offline payout
+ * later — exactly like useActivePaymentMethods mirrors the tender catalog. OFFLINE: serve the
+ * cached, scope-exact proofs (fail-closed — an unhydrated type simply has no candidates). The
+ * server always re-validates the chosen source on create/replay, so the cache only ever GATES.
+ */
+export async function loadPayoutSourcesOfflineAware(
+  scope: PayoutSourceScope,
+  type: PayoutSourceType,
+  online: boolean,
+  opts: { limit?: number } = {},
+): Promise<PayoutSource[]> {
+  const { cachePayoutSourceProofs, listPayoutSourceProofs } = await import("@/lib/offline/db");
+  const proofScope = {
+    tenantId: scope.tenantId,
+    branchId: scope.branchId,
+    cashierUserId: scope.cashierUserId,
+    deviceId: scope.deviceId,
+    terminalId: scope.terminalId,
+  };
+  if (online) {
+    const sources = await loadPayoutSources(scope.tenantId, scope.branchId, type, opts);
+    try {
+      await cachePayoutSourceProofs(proofScope, type, sources);
+    } catch {
+      // Write-through is best-effort; a failure just leaves this type online-only.
+    }
+    return sources;
+  }
+  const proofs = await listPayoutSourceProofs(proofScope, type);
+  return proofs.map((p) => ({ id: p.source_id, label: p.label, sublabel: p.sublabel }));
+}

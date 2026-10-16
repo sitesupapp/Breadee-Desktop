@@ -18,13 +18,19 @@ import {
   createPayout,
   buildPayoutCreatePayload,
   loadPayoutList,
-  loadPayoutSources,
+  loadPayoutSourcesOfflineAware,
   reversePayout,
   type Payout,
   type PayoutListState,
   type PayoutSource,
   type PayoutSourceType,
 } from "@/lib/pos/payouts";
+import {
+  provePayoutSourceOffline,
+  capturePayoutOffline,
+  payoutAmountUsd,
+  type PayoutScope,
+} from "@/lib/offline/payoutOffline";
 
 type Step = "amount" | "kind" | "source" | "review";
 
@@ -39,6 +45,10 @@ export function PayoutsModal({
   canCreate,
   canReverse,
   onChanged,
+  offlineReady = false,
+  offlineScope = null,
+  shiftLocalId = null,
+  usdRate = null,
 }: {
   open: boolean;
   onClose: () => void;
@@ -51,6 +61,15 @@ export function PayoutsModal({
   canReverse: Gate;
   /** A payout changed the drawer — let the workspace re-read the cash box / expected. */
   onChanged?: () => void;
+  /** Phase D (D4): POS is offline-ready (shift/scope hydrated) so a cash payout can be CAPTURED
+   *  offline against a proven source. */
+  offlineReady?: boolean;
+  /** The immutable 5-D scope for offline capture + proof lookup (null disables offline payout). */
+  offlineScope?: PayoutScope | null;
+  /** Local open-shift id when the shift was opened offline (remapped to canonical on replay). */
+  shiftLocalId?: string | null;
+  /** usd_to_lbp rate, so an LBP cash-out reduces the USD drawer projection immediately. */
+  usdRate?: number | null;
 }) {
   const [list, setList] = useState<PayoutListState | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -96,6 +115,7 @@ export function PayoutsModal({
           online={online}
           canCreate={canCreate}
           canReverse={canReverse}
+          offlineNewAllowed={offlineReady && offlineScope != null}
           onNew={() => setMode("new")}
           afterReverse={async () => {
             await refresh();
@@ -110,6 +130,10 @@ export function PayoutsModal({
           currency={currencyCode}
           online={online}
           canCreate={canCreate}
+          offlineReady={offlineReady}
+          offlineScope={offlineScope}
+          shiftLocalId={shiftLocalId}
+          usdRate={usdRate}
           onCancel={() => setMode("list")}
           onDone={async () => {
             await refresh();
@@ -139,6 +163,7 @@ function PayoutList({
   online,
   canCreate,
   canReverse,
+  offlineNewAllowed,
   onNew,
   afterReverse,
 }: {
@@ -149,13 +174,16 @@ function PayoutList({
   online: boolean;
   canCreate: Gate;
   canReverse: Gate;
+  offlineNewAllowed: boolean;
   onNew: () => void;
   afterReverse: () => Promise<void>;
 }) {
-  const newReason = !online
+  // Offline, a payout can still be CAPTURED against a source proven while online (fail-closed
+  // otherwise). The permission snapshot (canCreate) still applies; only the connectivity gate relaxes.
+  const newReason = !online && !offlineNewAllowed
     ? "Cash payouts need a connection so the linked record can be verified."
     : canCreate.reason;
-  const newAllowed = online && canCreate.allowed;
+  const newAllowed = (online || offlineNewAllowed) && canCreate.allowed;
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-3 gap-2">
@@ -166,7 +194,11 @@ function PayoutList({
 
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-sub">
-          {online ? "Every payout links to an existing expense, invoice, supplier payment or maintenance job." : "Offline — recording a payout is paused until the connection returns."}
+          {online
+            ? "Every payout links to an existing expense, invoice, supplier payment or maintenance job."
+            : offlineNewAllowed
+              ? "Offline — you can pay out against a record that was loaded while online; it syncs on reconnect."
+              : "Offline — recording a payout is paused until the connection returns."}
         </p>
         <Button size="lg" onClick={onNew} disabled={!newAllowed} title={newReason ?? undefined}>
           + New payout
@@ -295,6 +327,10 @@ function NewPayout({
   currency,
   online,
   canCreate,
+  offlineReady,
+  offlineScope,
+  shiftLocalId,
+  usdRate,
   onCancel,
   onDone,
 }: {
@@ -304,6 +340,10 @@ function NewPayout({
   currency: CurrencyCode;
   online: boolean;
   canCreate: Gate;
+  offlineReady: boolean;
+  offlineScope: PayoutScope | null;
+  shiftLocalId: string | null;
+  usdRate: number | null;
   onCancel: () => void;
   onDone: () => Promise<void>;
 }) {
@@ -319,6 +359,19 @@ function NewPayout({
   const opId = useRef<string | null>(null);
 
   const amountNum = parseAmount(amount);
+  // Offline capture is possible only when the POS is offline-ready AND the full 5-D scope is present.
+  const offlineCapable = !online && offlineReady && offlineScope != null;
+  // The scope used for the (offline-aware) source read + write-through. Offline capture additionally
+  // requires the full 5-D offlineScope; online uses tenant+branch (the loader caches under this).
+  const sourceScope = offlineScope
+    ? {
+        tenantId: offlineScope.tenantId,
+        branchId: offlineScope.branchId,
+        cashierUserId: offlineScope.cashierUserId,
+        deviceId: offlineScope.deviceId,
+        terminalId: offlineScope.terminalId,
+      }
+    : { tenantId, branchId, cashierUserId: null, deviceId: null, terminalId: null };
 
   const chooseKind = useCallback(
     async (k: PayoutSourceType) => {
@@ -326,9 +379,10 @@ function NewPayout({
       setSource(null);
       setSources(null);
       setStep("source");
-      setSources(await loadPayoutSources(tenantId, branchId, k));
+      setSources(await loadPayoutSourcesOfflineAware(sourceScope, k, online));
     },
-    [branchId, tenantId],
+    // sourceScope is derived from stable props; listing its parts keeps the dep array honest.
+    [online, offlineScope, tenantId, branchId],
   );
 
   const submit = useCallback(async () => {
@@ -337,24 +391,43 @@ function NewPayout({
     setError(null);
     if (!opId.current) opId.current = crypto.randomUUID();
     try {
-      await createPayout({
-        payload: buildPayoutCreatePayload({
+      if (online) {
+        await createPayout({
+          payload: buildPayoutCreatePayload({
+            shiftId,
+            amount: amountNum,
+            sourceType: kind,
+            sourceId: source.id,
+            note: note.trim() || null,
+            clientOpId: opId.current,
+          }),
+          online,
+        });
+      } else {
+        // OFFLINE: capture durably against a source PROVEN while online (fail-closed otherwise).
+        // The server re-validates the source + prices the cash-out on replay (exactly-once).
+        if (!offlineScope) throw new PayoutOfflineError();
+        const proof = await provePayoutSourceOffline(kind, source.id, offlineScope);
+        if (!proof.ok) throw new Error(proof.reason);
+        await capturePayoutOffline({
+          scope: offlineScope,
           shiftId,
+          shiftLocalId,
+          proof: proof.proof,
           amount: amountNum,
-          sourceType: kind,
-          sourceId: source.id,
+          currency,
           note: note.trim() || null,
+          amountUsd: payoutAmountUsd(amountNum, currency, usdRate),
           clientOpId: opId.current,
-        }),
-        online,
-      });
+        });
+      }
       await onDone();
     } catch (e) {
       setError(e instanceof PayoutOfflineError ? e.message : e instanceof Error ? e.message : "The payout could not be recorded.");
     } finally {
       setBusy(false);
     }
-  }, [amountNum, kind, note, onDone, online, shiftId, source]);
+  }, [amountNum, currency, kind, note, offlineScope, onDone, online, shiftId, shiftLocalId, source, usdRate]);
 
   return (
     <div className="space-y-4">
@@ -475,6 +548,7 @@ function NewPayout({
           <p className="text-[12px] text-sub">
             This records the cash leaving the till. It does NOT create a new expense or payable — the linked record above
             is the only business entry.
+            {!online && " Offline, it's recorded locally against the drawer and syncs on reconnect."}
           </p>
           {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{error}</p>}
           <div className="flex justify-between gap-2">
@@ -484,8 +558,8 @@ function NewPayout({
             <Button
               size="lg"
               onClick={() => void submit()}
-              disabled={busy || !online || !canCreate.allowed || amountNum <= 0}
-              title={(!online ? "Cash payouts need a connection." : canCreate.reason) ?? undefined}
+              disabled={busy || !(online || offlineCapable) || !canCreate.allowed || amountNum <= 0}
+              title={(!online && !offlineCapable ? "Cash payouts need a connection." : canCreate.reason) ?? undefined}
             >
               {busy ? "Paying out…" : `Pay out cash · ${formatMoney(amountNum, currency)}`}
             </Button>

@@ -204,6 +204,17 @@ export type PosTxnSyncDeps = {
     expectedVersion: number | null;
     clientOpId: string;
   }) => Promise<{ ok: boolean; split_no: number; parent_completed: boolean; remaining_qty: number; idempotent: boolean }>;
+  /** Phase-D: record a cash PAYOUT (pos_payout_create). client_op_id → exactly-once (the RPC
+   *  carries the server replay wrapper). The server validates the linked source under its row lock
+   *  and prices the cash-out; no currency/USD is sent (the drawer currency is the server's). */
+  payout: (args: {
+    shiftId: string;
+    amount: number;
+    sourceType: string;
+    sourceId: string;
+    note: string | null;
+    clientOpId: string;
+  }) => Promise<{ payout_id: string; amount: number; amount_usd: number; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
 };
@@ -346,6 +357,27 @@ export const defaultDeps: PosTxnSyncDeps = {
       split_no: row.split_no == null ? 0 : Number(row.split_no),
       parent_completed: row.parent_completed === true,
       remaining_qty: row.remaining_qty == null ? 0 : Number(row.remaining_qty),
+      idempotent,
+    };
+  },
+  payout: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const { buildPayoutCreatePayload } = await import("@/lib/pos/payouts");
+    const row = (await callPosRpc("pos_payout_create", {
+      p_payload: buildPayoutCreatePayload({
+        shiftId: args.shiftId,
+        amount: args.amount,
+        sourceType: args.sourceType as import("@/lib/pos/payouts").PayoutSourceType,
+        sourceId: args.sourceId,
+        note: args.note,
+        clientOpId: args.clientOpId,
+      }),
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return {
+      payout_id: String(row.payout_id ?? ""),
+      amount: row.amount == null ? 0 : Number(row.amount),
+      amount_usd: row.amount_usd == null ? 0 : Number(row.amount_usd),
       idempotent,
     };
   },

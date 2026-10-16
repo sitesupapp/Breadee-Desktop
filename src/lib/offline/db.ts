@@ -275,6 +275,35 @@ export interface PaidOrderProof {
   cached_at: string; // ISO; freshness for the operator
 }
 
+/**
+ * Phase D (D4) — the local PAYOUT-SOURCE proof, written through while ONLINE.
+ *
+ * A cash payout records PHYSICAL cash leaving the till to fund an EXISTING economic source
+ * (an expense / purchase invoice / supplier payment / maintenance job). The server validates
+ * that source against the live DB. OFFLINE, a payout is permitted ONLY against a source whose
+ * proof is cached here — i.e. the source provably EXISTED and was VALID at hydration, and
+ * belonged to THIS tenant+OU on THIS device/terminal/cashier (fail-closed 5-D isolation). The
+ * server re-validates on replay under its row lock, so a source deleted/voided/changed since
+ * hydration surfaces as a CONFLICT → needs_attention, never a blind cash-out against a bad
+ * record. This store NEVER creates a second economic event and holds NO financial authority —
+ * it only GATES offline capture; the canonical `pos_payout_create` remains the source of truth.
+ */
+export interface PayoutSourceProof {
+  /** Deterministic PK: the full 5-D scope + source type + id, so one scope's proof can never
+   *  be read under another's (two scopes may legitimately cache the same source id). */
+  proof_key: string;
+  source_type: string; // 'expense' | 'purchase_invoice' | 'supplier_payment' | 'maintenance_job'
+  source_id: string; // the economic record id (server-validated on replay)
+  label: string; // preview label (the server re-snapshots the authoritative one)
+  sublabel: string | null;
+  tenant_id: string;
+  branch_id: string | null; // OU
+  cashier_user_id: string | null;
+  device_id: string | null;
+  terminal_id: string | null;
+  cached_at: string; // ISO; freshness for the operator
+}
+
 class BreadeeDB extends Dexie {
   outbox!: Table<OutboxItem, number>;
   snapshots!: Table<Snapshot, string>;
@@ -296,6 +325,9 @@ class BreadeeDB extends Dexie {
   dineDrafts!: Table<DineDraft, string>;
   // Phase D (schema version 7). Local refund-proof of PAID canonical orders. Keyed by order_id.
   paidOrderProofs!: Table<PaidOrderProof, string>;
+  // Phase D (D4, schema version 8). Local payout-source proof (valid economic records hydrated
+  // while online), so a cash payout can be captured offline against a proven source. Keyed by proof_key.
+  payoutSourceProofs!: Table<PayoutSourceProof, string>;
 
   constructor() {
     super("breadee-desktop");
@@ -347,6 +379,13 @@ class BreadeeDB extends Dexie {
     // destructive change, no data migration.
     this.version(7).stores({
       paidOrderProofs: "order_id, tenant_id, branch_id, shift_id, payment_status, cashier_user_id, device_id, cached_at",
+    });
+    // Version 8 - Phase D (D4), ADDITIVE. Adds ONLY the payoutSourceProofs store (the local proof
+    // of valid payout sources, written through while online). Every prior store (v1..v7) carries
+    // forward UNTOUCHED; a v1..v7 database upgrades in place with all data preserved. No destructive
+    // change, no data migration. `scope_type` is a compound index for scope-exact write-through replace.
+    this.version(8).stores({
+      payoutSourceProofs: "proof_key, source_type, source_id, tenant_id, branch_id, cashier_user_id, device_id, cached_at",
     });
   }
 }
@@ -787,4 +826,116 @@ export async function readPaidOrderProof(
  *  reconciles). Best-effort; never throws on a missing row. */
 export async function deletePaidOrderProof(orderId: string): Promise<void> {
   await localdb.paidOrderProofs.delete(orderId).catch(() => undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Phase D (D4) — payout-source proofs (payoutSourceProofs, v8)
+// ---------------------------------------------------------------------------
+
+/** The immutable 5-D scope a payout source is proven and captured under. */
+export type PayoutProofScope = {
+  tenantId: string | null;
+  branchId: string | null; // OU
+  cashierUserId: string | null;
+  deviceId: string | null;
+  terminalId: string | null;
+};
+
+/** Deterministic scope-exact key for a payout-source proof. A null dimension is encoded
+ *  distinctly (not a wildcard), so a proof captured without a terminal never satisfies a
+ *  scoped terminal and vice-versa — the same fail-closed rule the read enforces. */
+function payoutProofKey(scope: PayoutProofScope, sourceType: string, sourceId: string): string {
+  return [
+    scope.tenantId ?? "∅",
+    scope.branchId ?? "∅",
+    scope.cashierUserId ?? "∅",
+    scope.deviceId ?? "∅",
+    scope.terminalId ?? "∅",
+    sourceType,
+    sourceId,
+  ].join("\u0001");
+}
+
+function inPayoutScope(row: PayoutSourceProof, scope: PayoutProofScope): boolean {
+  // FAIL-CLOSED 5-D isolation: every dimension must match EXACTLY, null-safe, in both directions.
+  return (
+    row.tenant_id === scope.tenantId &&
+    (row.branch_id ?? null) === (scope.branchId ?? null) &&
+    (row.cashier_user_id ?? null) === (scope.cashierUserId ?? null) &&
+    (row.device_id ?? null) === (scope.deviceId ?? null) &&
+    (row.terminal_id ?? null) === (scope.terminalId ?? null)
+  );
+}
+
+/**
+ * Write through the valid payout sources of ONE source type for a scope while ONLINE, as a
+ * REPLACE-SET: every prior proof for THIS exact (scope, source_type) is dropped and replaced by
+ * the current list. A source no longer returned by the authoritative online read is therefore
+ * EVICTED (it has gone / become invalid) and can never be offline-paid-out against — exactly the
+ * eviction-on-absence the refund proof uses. No-op without a tenant.
+ */
+export async function cachePayoutSourceProofs(
+  scope: PayoutProofScope,
+  sourceType: string,
+  sources: { id: string; label: string; sublabel: string | null }[],
+): Promise<void> {
+  if (!scope.tenantId) return;
+  const now = new Date().toISOString();
+  await localdb.transaction("rw", localdb.payoutSourceProofs, async () => {
+    const existing = await localdb.payoutSourceProofs.where("source_type").equals(sourceType).toArray();
+    const stale = existing.filter((r) => inPayoutScope(r, scope));
+    await Promise.all(stale.map((r) => localdb.payoutSourceProofs.delete(r.proof_key)));
+    const rows: PayoutSourceProof[] = sources
+      .filter((s) => s.id)
+      .map((s) => ({
+        proof_key: payoutProofKey(scope, sourceType, s.id),
+        source_type: sourceType,
+        source_id: s.id,
+        label: s.label,
+        sublabel: s.sublabel,
+        tenant_id: scope.tenantId as string,
+        branch_id: scope.branchId ?? null,
+        cashier_user_id: scope.cashierUserId ?? null,
+        device_id: scope.deviceId ?? null,
+        terminal_id: scope.terminalId ?? null,
+        cached_at: now,
+      }));
+    if (rows.length > 0) await localdb.payoutSourceProofs.bulkPut(rows);
+  });
+}
+
+/** Every cached payout-source proof of one type for the EXACT scope (for the offline picker). */
+export async function listPayoutSourceProofs(scope: PayoutProofScope, sourceType: string): Promise<PayoutSourceProof[]> {
+  if (!scope.tenantId) return [];
+  const all = await localdb.payoutSourceProofs.where("source_type").equals(sourceType).toArray();
+  return all.filter((r) => inPayoutScope(r, scope)).sort((a, b) => b.cached_at.localeCompare(a.cached_at));
+}
+
+/** One payout-source proof, SCOPE-CHECKED (fail-closed 5-D). Returns null when the source was
+ *  never hydrated for this exact scope — the caller must then refuse the offline payout. */
+export async function readPayoutSourceProof(
+  sourceType: string,
+  sourceId: string,
+  scope: PayoutProofScope,
+): Promise<PayoutSourceProof | null> {
+  if (!scope.tenantId || !sourceId) return null;
+  const row = await localdb.payoutSourceProofs.get(payoutProofKey(scope, sourceType, sourceId));
+  if (!row) return null;
+  // Defence in depth: the key already encodes the scope, but re-check every dimension.
+  if (!inPayoutScope(row, scope)) return null;
+  return row;
+}
+
+/** Scope hygiene: drop payout-source proofs that do NOT belong to the current tenant/branch, so a
+ *  previous session's sources can never surface for a different tenant/branch. */
+export async function purgeForeignPayoutSourceProofs(tenantId: string | null, branchId: string | null): Promise<number> {
+  const all = await localdb.payoutSourceProofs.toArray();
+  const foreign = all.filter((r) => r.tenant_id !== tenantId || (branchId != null && (r.branch_id ?? null) !== branchId));
+  await Promise.all(foreign.map((r) => localdb.payoutSourceProofs.delete(r.proof_key)));
+  return foreign.length;
+}
+
+/** Sign-out cleanup: drop the whole payout-source proof cache. */
+export async function clearPayoutSourceProofs(): Promise<void> {
+  await localdb.payoutSourceProofs.clear();
 }

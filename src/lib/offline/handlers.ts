@@ -665,6 +665,75 @@ export const splitSettleHandler: OperationHandler = {
   },
 };
 
+/** A payout refusal that means the linked economic SOURCE drifted since it was hydrated — gone,
+ *  voided, deleted, or otherwise no longer valid against the live DB. The source was provable
+ *  offline but is not now, so this is a CONFLICT the operator resolves (needs_attention), never a
+ *  hot retry and never a blind cash-out. The server re-validates under its row lock; a duplicate of
+ *  OUR own op returns the original result (idempotent SUCCESS via the client_op_id replay cache). */
+function isPayoutDrift(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("source") ||
+    m.includes("not found") ||
+    m.includes("does not exist") ||
+    m.includes("no longer") ||
+    m.includes("voided") ||
+    m.includes("deleted") ||
+    m.includes("already")
+  );
+}
+
+type PayoutPayload = {
+  shift_id: string | null;
+  /** Local open-shift entity id to remap to the canonical shift (offline-opened shift). */
+  shift_local: string | null;
+  amount: number;
+  source_type: string;
+  source_id: string;
+  note: string | null;
+};
+
+/** payout — record a cash PAYOUT offline (pos_payout_create), exactly-once on client_op_id. The
+ *  server validates + snapshots the linked source and prices the cash-out (no second economic
+ *  event). An offline-opened shift is remapped from its open op before the call; a source that
+ *  drifted since hydration → CONFLICT → needs_attention; the local drawer was already reduced at
+ *  capture and is preserved for reconciliation regardless. */
+export const payoutHandler: OperationHandler = {
+  type: "payout",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as PayoutPayload;
+    let shiftId = p.shift_id;
+    if (p.shift_local) {
+      const c = await ctx.canonicalFor(p.shift_local);
+      if (!c) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "shift_unresolved", message: "shift not yet synced" };
+      shiftId = c;
+    }
+    if (!shiftId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_shift", message: "no shift id" };
+    if (!p.source_id || !p.source_type) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_source", message: "no payout source" };
+    try {
+      const r = await ctx.deps.payout({
+        shiftId,
+        amount: p.amount,
+        sourceType: p.source_type,
+        sourceId: p.source_id,
+        note: p.note,
+        clientOpId: op.client_op_id,
+      });
+      return { ok: true, canonicalId: r.payout_id || null, resultMeta: { payout_id: r.payout_id, amount: r.amount, amount_usd: r.amount_usd, idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "payout: transport", message: msg };
+      // Shift/permission refusals are classified first (a closed shift is a CONFLICT, not source drift).
+      const t = terminalKind(msg);
+      if (t === "shift_closed") return { ok: false, retryClass: "CONFLICT", code: "shift_closed", message: msg };
+      if (t === "permission") return { ok: false, retryClass: "AUTHORITY_REFUSED", code: "permission", message: msg };
+      if (isPayoutDrift(msg)) return { ok: false, retryClass: "CONFLICT", code: "payout_source_drift", message: msg };
+      return { ok: false, retryClass: "VALIDATION_TERMINAL", code: t ?? "validation", message: msg };
+    }
+  },
+};
+
 /** The registry keyed by `${type}@${schemaVersion}`. An operation whose key is absent is
  *  QUARANTINED by the orchestrator (needs_attention / unknown_handler) and never executed. */
 export const HANDLERS: Record<string, OperationHandler> = {
@@ -679,6 +748,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${onAccountOrderHandler.type}@${onAccountOrderHandler.schemaVersion}`]: onAccountOrderHandler,
   [`${endShiftHandler.type}@${endShiftHandler.schemaVersion}`]: endShiftHandler,
   [`${splitSettleHandler.type}@${splitSettleHandler.schemaVersion}`]: splitSettleHandler,
+  [`${payoutHandler.type}@${payoutHandler.schemaVersion}`]: payoutHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {
