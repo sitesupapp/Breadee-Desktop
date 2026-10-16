@@ -36,6 +36,7 @@ import {
   type ModifierTuple,
 } from "@/lib/pos/deliveryItemEdit";
 import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
+import { captureEditOrderLineOffline, captureAddOrderItemsOffline, type ItemEditScope } from "@/lib/offline/itemEditOffline";
 
 type Toast = { push: (t: { tone: "info" | "success" | "warning" | "error"; message: string; detail?: string }) => unknown };
 
@@ -76,8 +77,15 @@ export function useDeliveryItemEditing(input: {
   access: PosAccessContext;
   reload: () => Promise<void>;
   toast: Toast;
+  /** Phase E: connectivity + the immutable 5-D scope, so an edit can be CAPTURED offline. */
+  online?: boolean;
+  offlineReady?: boolean;
+  offlineScope?: ItemEditScope | null;
 }): UseDeliveryItemEditing {
   const { order, access, reload, toast } = input;
+  const online = input.online ?? true;
+  const offlineCapable = !online && input.offlineReady === true && input.offlineScope != null;
+  const offlineScope = input.offlineScope ?? null;
   const [state, dispatch] = useReducer(deliveryEditReducer, initialDeliveryEditState);
   const [reasonPrompt, setReasonPrompt] = useState<DeliveryReasonPrompt | null>(null);
   const [modifierLine, setModifierLine] = useState<DeliveryOrderLine | null>(null);
@@ -103,6 +111,13 @@ export function useDeliveryItemEditing(input: {
       dispatch({ t: "submit_start", key, snapshot: { opId, expectedVersion } });
       try {
         await do_(opId, expectedVersion);
+        // OFFLINE: the edit is durably CAPTURED (not applied on a server), so there is nothing to
+        // re-read — the authoritative totals reconcile on sync. Online: re-read the authoritative order.
+        if (offlineCapable) {
+          dispatch({ t: "submit_ok", key });
+          toast.push({ tone: "info", message: "Change saved offline — it will apply when the connection returns." });
+          return;
+        }
         await reload();
         dispatch({ t: "submit_ok", key });
       } catch (e) {
@@ -125,11 +140,11 @@ export function useDeliveryItemEditing(input: {
     (line: DeliveryOrderLine, newQuantity: number, reason: string | null) => {
       if (!order) return;
       const key = editKey(newQuantity === 0 ? "remove" : "qty", line.id);
-      void run(key, async (opId, expectedVersion) =>
-        void (await editOrderLine(
-          buildSetQuantityPayload({ orderId: order.id, lineId: line.id, newQuantity, expectedVersion, clientOpId: opId, reason }),
-        )),
-      );
+      void run(key, async (opId, expectedVersion) => {
+        const payload = buildSetQuantityPayload({ orderId: order.id, lineId: line.id, newQuantity, expectedVersion, clientOpId: opId, reason });
+        if (offlineCapable && offlineScope) await captureEditOrderLineOffline({ scope: offlineScope, orderId: order.id, payload: payload as unknown as Record<string, unknown>, clientOpId: opId });
+        else await editOrderLine(payload);
+      });
     },
     [order, run],
   );
@@ -168,19 +183,19 @@ export function useDeliveryItemEditing(input: {
     (line: DeliveryOrderLine, result: ItemOptionsResult, reason: string | null) => {
       if (!order) return;
       const key = editKey("modifier", line.id);
-      void run(key, async (opId, expectedVersion) =>
-        void (await editOrderLine(
-          buildChangeModifiersPayload({
-            orderId: order.id,
-            lineId: line.id,
-            quantity: result.quantity,
-            modifiers: result.modifiers,
-            expectedVersion,
-            clientOpId: opId,
-            reason,
-          }),
-        )),
-      );
+      void run(key, async (opId, expectedVersion) => {
+        const payload = buildChangeModifiersPayload({
+          orderId: order.id,
+          lineId: line.id,
+          quantity: result.quantity,
+          modifiers: result.modifiers,
+          expectedVersion,
+          clientOpId: opId,
+          reason,
+        });
+        if (offlineCapable && offlineScope) await captureEditOrderLineOffline({ scope: offlineScope, orderId: order.id, payload: payload as unknown as Record<string, unknown>, clientOpId: opId });
+        else await editOrderLine(payload);
+      });
     },
     [order, run],
   );
@@ -210,9 +225,11 @@ export function useDeliveryItemEditing(input: {
       if (!order || !gate.allowed || state.busy || items.length === 0) return;
       // A fresh add is its own logical intent, keyed by a nonce so its op id is reused only on ITS retry.
       const key = editKey("add", newClientOpId());
-      await run(key, async (opId, expectedVersion) =>
-        void (await addOrderItems(buildAddItemsPayload({ orderId: order.id, items, expectedVersion, clientOpId: opId }))),
-      );
+      await run(key, async (opId, expectedVersion) => {
+        const payload = buildAddItemsPayload({ orderId: order.id, items, expectedVersion, clientOpId: opId });
+        if (offlineCapable && offlineScope) await captureAddOrderItemsOffline({ scope: offlineScope, orderId: order.id, payload: payload as unknown as Record<string, unknown>, clientOpId: opId });
+        else await addOrderItems(payload);
+      });
     },
     [order, gate.allowed, state.busy, run],
   );

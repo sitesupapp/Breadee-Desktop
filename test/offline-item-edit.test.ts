@@ -20,6 +20,13 @@ import { OPERATION_SCHEMA_VERSION, getOperation, type OfflineOperation } from "@
 import { drainOffline, __resetDrainLockForTests } from "@/lib/offline/orchestrator";
 import type { PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
 import { captureEditOrderLineOffline, captureAddOrderItemsOffline, type ItemEditScope } from "@/lib/offline/itemEditOffline";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { stripComments } from "./source-helpers.ts";
+
+const _here = dirname(fileURLToPath(import.meta.url));
+const srcOf = (rel: string) => stripComments(readFileSync(join(_here, "..", rel), "utf8"));
 
 const SCOPE: ItemEditScope = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1" };
 const OPSCOPE = { tenant_id: "t1", branch_id: "b1", device_id: "dev1", terminal_id: "term1", cashier_user_id: "u1" };
@@ -79,6 +86,18 @@ test("capture + E2E add_order_items: drain → pos_add_order_items once", async 
   assert.equal(adds.length, 1);
   assert.equal(adds[0].expected_version, 3);
   assert.equal(r.needsAttention.length, 0);
+});
+
+test("UI source: the hook branches to offline capture and skips reload offline; online path preserved", () => {
+  const h = srcOf("src/screens/pos/useDeliveryItemEditing.ts");
+  assert.match(h, /const offlineCapable = !online && input\.offlineReady === true && input\.offlineScope != null;/);
+  assert.match(h, /if \(offlineCapable\)[\s\S]{0,260}dispatch\(\{ t: "submit_ok", key \}\);[\s\S]{0,160}return;/, "offline: submit_ok + no reload");
+  assert.match(h, /if \(offlineCapable && offlineScope\) await captureEditOrderLineOffline\(/, "line edit captures offline");
+  assert.match(h, /if \(offlineCapable && offlineScope\) await captureAddOrderItemsOffline\(/, "add items captures offline");
+  assert.match(h, /else await editOrderLine\(payload\);/, "online editOrderLine preserved");
+  assert.match(h, /else await addOrderItems\(payload\);/, "online addOrderItems preserved");
+  const dw = srcOf("src/screens/pos/DeliveryWorkspace.tsx");
+  assert.match(dw, /offlineReady: itemEditOfflineScope != null && detail != null,/, "workspace threads readiness (order loaded + scope)");
 });
 
 test("order_local: editing an OFFLINE-CREATED order waits for it to sync, then edits the canonical id", async () => {

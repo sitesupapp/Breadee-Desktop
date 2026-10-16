@@ -1210,7 +1210,24 @@ export function useDeliveryWorkspace(input: {
     () => (detail ? refreshDetail(detail.id) : Promise.resolve()),
     [detail, refreshDetail],
   );
-  const itemEditing = useDeliveryItemEditing({ order: detail, access: pos.access, reload: reloadDetail, toast });
+  const itemEditOfflineScope = useMemo(
+    () =>
+      pos.tenantId && pos.userId
+        ? { tenantId: pos.tenantId, branchId: pos.branch.id, cashierUserId: pos.userId, deviceId: getDeviceIdentity().device_id, terminalId: getDeviceIdentity().terminal_id }
+        : null,
+    [pos.tenantId, pos.userId, pos.branch.id],
+  );
+  const itemEditing = useDeliveryItemEditing({
+    order: detail,
+    access: pos.access,
+    reload: reloadDetail,
+    toast,
+    online: input.online,
+    // An edit needs the order loaded (its version is known) + the 5-D scope; the detail is already
+    // in memory when the connection drops, so a captured edit replays exactly-once on reconnect.
+    offlineReady: itemEditOfflineScope != null && detail != null,
+    offlineScope: itemEditOfflineScope,
+  });
   const [addPickerOpen, setAddPickerOpen] = useState(false);
   const canEditLineModifiers = useCallback(
     (line: DeliveryOrderLine) =>
