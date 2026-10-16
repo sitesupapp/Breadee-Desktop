@@ -40,6 +40,7 @@ import {
 } from "@/lib/pos/access";
 import type { CustomerSearchProps } from "@/components/pos/CustomerSearch";
 import { SEARCH_DEBOUNCE_MS } from "@/state/customers";
+import { searchCustomersOfflineAware } from "@/lib/offline/customerCache";
 
 /** The minimal customer identity the payment dialog and the receipt need. */
 export type PickedCustomer = { id: string; name: string | null; phone: string | null };
@@ -133,7 +134,9 @@ export function useCustomerPicker(input: {
     const id = window.setTimeout(() => {
       void (async () => {
         try {
-          const r = await searchCustomers(term);
+          // Offline-aware: online searches the server + mirrors to the cache (byte-identical
+          // result); offline reads the cached customers so the picker still works.
+          const r = await searchCustomersOfflineAware(term);
           // The query may have moved on while this read was in flight.
           if (latestTerm.current !== term) return;
           setResults(r);
@@ -181,7 +184,7 @@ export function useCustomerPicker(input: {
       if (term === "") return;
       let candidates: CustomerMatch[];
       try {
-        candidates = await searchCustomers(term);
+        candidates = await searchCustomersOfflineAware(term);
         setResults(candidates);
       } catch (e) {
         const message = e instanceof Error ? e.message : "Could not search customers.";

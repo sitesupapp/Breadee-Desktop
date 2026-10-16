@@ -117,6 +117,7 @@ import {
   setRoundPrintState,
   billFromDraft,
   settleTableOffline,
+  tableOnAccountOffline,
 } from "@/lib/offline/dineinOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -316,7 +317,11 @@ export function useDineInWorkspace(input: {
   // Cash-only when offline. Fed to PaymentDialog so Pay Full Bill shows the
   // tenant's active methods instead of Cash-only.
   const activePaymentMethods = useActivePaymentMethods(pos.tenantId, input.online);
-  const onAccountReachable = payOpen && pos.gates.takeOnAccount.allowed && input.online;
+  // On-account is reachable online, OR offline when the device is hydrated for Dine-In (the
+  // customer picker then uses the offline-aware cached-customer adapters). (offlineCapture is
+  // declared below beside the payment gate; its predicate is inlined here as it is input-only.)
+  const onAccountReachable =
+    payOpen && pos.gates.takeOnAccount.allowed && (input.online || (input.offlineReady === true && input.offlineScope != null));
   const customerPicker = useCustomerPicker({
     access: pos.access,
     branchId: pos.branch.id,
@@ -1401,8 +1406,46 @@ export function useDineInWorkspace(input: {
       discountValue: string;
     }) => {
       const table = selected;
+      if (!table || !payGate.allowed) return;
+
+      // Phase D — OFFLINE on-account CAPTURE (receivable) against a cached/proven customer. Depends
+      // on the session open+rounds; durable before success; no server RPC. Online path unchanged.
+      if (offlineCapture && input.offlineScope) {
+        if (!dialog.customerId) {
+          setPayError("Choose a customer before putting a bill on account.");
+          return;
+        }
+        const draft = await getDineDraftForTable(input.offlineScope, table.id);
+        if (!draft) {
+          setPayError("This table isn't available offline. Reconnect to put it on account.");
+          return;
+        }
+        const offDiscount =
+          dialog.discountType !== "none" && dialog.discountValue.trim() !== ""
+            ? { discount_type: dialog.discountType, discount_value: Number(dialog.discountValue) }
+            : undefined;
+        setPaying(true);
+        setPayError(null);
+        try {
+          await tableOnAccountOffline({ sessionId: draft.local_session_id, customerId: dialog.customerId, amount: dialog.amountNow, method: dialog.method, discount: offDiscount });
+          setPayOpen(false);
+          toast.push({
+            tone: "success",
+            message: `${table.name} put on account offline`,
+            detail: "Recorded on this device — it will sync automatically when you reconnect.",
+          });
+          setOfflineBill(billFromDraft(draft));
+        } catch (e) {
+          const c = classifyError(e);
+          setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
+        } finally {
+          setPaying(false);
+        }
+        return;
+      }
+
       const shownBill = useTables.getState().bill;
-      if (!table || !shownBill || !payGate.allowed) return;
+      if (!shownBill || !payGate.allowed) return;
       if (!input.online) {
         setPayError("On-account sales need a connection. Reconnect before putting a bill on account.");
         return;
@@ -1513,7 +1556,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, payGate.allowed, input.online, input.currency, input.shiftId, ctx, readTableState, toast],
+    [selected, payGate.allowed, input.online, input.currency, input.shiftId, ctx, readTableState, toast, offlineCapture, input.offlineScope],
   );
 
   // A payment dialog left open over a table that is no longer selected would

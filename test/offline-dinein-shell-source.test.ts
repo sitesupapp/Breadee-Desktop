@@ -67,6 +67,22 @@ test("PosWorkspace threads readiness + a five-dimensional capture scope equal to
   assert.match(src, /tenantId,[\s\S]{0,200}branchId: pos\.branch\.id,[\s\S]{0,120}cashierUserId: userId,[\s\S]{0,200}deviceId: getDeviceIdentity\(\)\.device_id,[\s\S]{0,120}terminalId: getDeviceIdentity\(\)\.terminal_id/);
 });
 
+test("Phase D: dine-in ON-ACCOUNT is offline-capable via CAPTURE only, cached-customer gated", () => {
+  const src = ts(DW);
+  // Reachable offline when hydrated (online OR ready+scope) — the picker then uses cached customers.
+  assert.match(src, /onAccountReachable\s*=[\s\S]{0,160}input\.online \|\| \(input\.offlineReady === true && input\.offlineScope != null\)/);
+  // confirmTableOnAccount captures offline via tableOnAccountOffline; a customer is still required;
+  // the ONLINE performOnAccount path is preserved.
+  assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,700}tableOnAccountOffline\(/);
+  assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
+  assert.match(src, /if \(!draft\)[\s\S]{0,160}Reconnect to put it on account/);
+});
+
+test("the customer picker is offline-aware (cached customers), not a second cache", () => {
+  const cp = ts("src/state/customerPicker.ts");
+  assert.match(cp, /searchCustomersOfflineAware\(/);
+});
+
 test("no Reporting-Engine surface is introduced by the offline engine", () => {
   const src = ts(ENGINE);
   for (const forbidden of ["report", "semantic", "analytics", "aggregation", "accounting"]) {
