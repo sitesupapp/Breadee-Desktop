@@ -88,6 +88,26 @@ test("extract: on_account is a RECEIVABLE, never a drawer movement", () => {
   assert.equal(movements.length, 0);
 });
 
+test("D5: a captured cash PAYOUT reduces the drawer; split_settle + takeaway are server-derived (excluded)", () => {
+  // The final Phase-D op set: a cash payout IS a physical cash-out; a split leg's amount is
+  // server-derived (no local USD) and a takeaway sale's cash is nested — both are intentionally
+  // NOT projected locally (they reconcile on sync), exactly like a non-cash tender stays off cash.
+  const ops = [
+    op("pay_table", { table_id: "T1", method: "cash", currency: "USD", cash_amount_usd: 40 }),
+    op("payout", { shift_id: "S1", source_type: "expense", source_id: "E1", amount: 9, currency: "USD", method: "cash", amount_usd: 9 }),
+    op("split_settle", { order_id: "O1", method: "cash", currency: "USD", allocations: [{ order_item_id: "I1", quantity: 1 }] }),
+    op("takeaway_sale", { order_payload: { order_type: "takeaway" }, payment_intent: { method: "cash", currency: "USD" } }),
+  ];
+  const { movements, unknownAmountCount } = extractDrawerMovements(ops, SCOPE);
+  // Only the settle (in) and the payout (out) are locally-known cash movements.
+  assert.equal(movements.length, 2);
+  assert.equal(unknownAmountCount, 0); // server-derived ops are EXCLUDED, not counted as unknown
+  const d = computeDrawerProjection(100, movements);
+  assert.equal(d.cashInUsd, 40);
+  assert.equal(d.cashOutUsd, 9);
+  assert.equal(d.expectedCashUsd, 131); // 100 + 40 − 9
+});
+
 test("extract: an op with NO locally-known USD amount is counted as unknown, never guessed", () => {
   const ops = [op("pay_table", { table_id: "T1", method: "cash", currency: "LBP" })]; // no cash_amount_usd
   const { movements, unknownAmountCount } = extractDrawerMovements(ops, SCOPE);
