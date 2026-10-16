@@ -68,15 +68,29 @@ jobs:
           echo "sha256=$GOT expected=$EXPECT_SHA256" >> "$R"
           [ "$GOT" = "$EXPECT_SHA256" ] && echo "SHA256: MATCH" >> "$R" || { echo "SHA256: MISMATCH" >> "$R"; cp "$R" report_final.md; exit 1; }
 
-          echo -e "\n## 6) CRYPTOGRAPHIC signature verification (minisign, GATING)" >> "$R"
+          echo -e "\n## 6) CRYPTOGRAPHIC signature verification (minisign-verify crate = EXACT tauri updater verifier, GATING)" >> "$R"
           base64 -d prod_pubkey.b64 > prod_pub.key
           cat prod_pub.key >> "$R"
           PK=$(grep -vE '^untrusted comment' prod_pub.key | head -1)
           echo "prod pubkey line: $PK" >> "$R"
-          if minisign -V -P "$PK" -m "art/Breadee_1.0.36_x64-setup.exe" -x "art/Breadee_1.0.36_x64-setup.exe.sig" >> "$R" 2>&1; then
-            echo "PROD-PUBKEY SIGNATURE: VERIFIED" >> "$R"; PROD_OK=1
+          mkdir -p verifier/src
+          printf '%s\n' '[package]' 'name = "v"' 'version = "0.0.0"' 'edition = "2021"' '[dependencies]' 'minisign-verify = "0.2"' > verifier/Cargo.toml
+          printf '%s\n' \
+            'use minisign_verify::{PublicKey, Signature};' \
+            'use std::fs;' \
+            'fn main() {' \
+            '    let a: Vec<String> = std::env::args().collect();' \
+            '    let pk = PublicKey::from_base64(fs::read_to_string(&a[1]).unwrap().trim()).expect("pk");' \
+            '    let sig = Signature::decode(&fs::read_to_string(&a[2]).unwrap()).expect("sig");' \
+            '    let data = fs::read(&a[3]).unwrap();' \
+            '    pk.verify(&data, &sig, false).expect("VERIFY FAILED");' \
+            '    println!("VERIFIED");' \
+            '}' > verifier/src/main.rs
+          printf '%s' "$PK" > pk_line.txt
+          if (cd verifier && cargo run --quiet --release -- ../pk_line.txt ../art/Breadee_1.0.36_x64-setup.exe.sig ../art/Breadee_1.0.36_x64-setup.exe) >> "$R" 2>&1; then
+            echo "PROD-PUBKEY SIGNATURE: VERIFIED (minisign-verify crate)" >> "$R"; PROD_OK=1
           else
-            echo "PROD-PUBKEY SIGNATURE: FAILED" >> "$R"; PROD_OK=0
+            echo "PROD-PUBKEY SIGNATURE: FAILED (minisign-verify crate)" >> "$R"; PROD_OK=0
           fi
           if [ -s staging_pubkey.b64 ]; then
             base64 -d staging_pubkey.b64 > staging_pub.key
