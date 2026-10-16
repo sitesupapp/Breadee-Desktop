@@ -18,6 +18,7 @@ import {
   errMsg,
   isAlreadyPaid,
 } from "@/lib/offline/posTxnSync";
+import { resolveEntity } from "@/lib/offline/entityMap";
 
 /** A server message that means a concurrency/state CONFLICT the operator must resolve
  *  (never a hot retry, never a silent new bill): the Track-A expected-order guard, or the
@@ -557,22 +558,35 @@ function isSplitConflict(message: string): boolean {
   );
 }
 
+type SplitAlloc = {
+  /** Canonical order_item id (hydrated bill). */
+  order_item_id?: string | null;
+  /** Local line id (fully-offline session) to resolve to a canonical order_item id via entityMap. */
+  line_local?: string | null;
+  quantity: number;
+};
+
 type SplitSettlePayload = {
   order_id: string | null;
   /** Local order entity id to remap to the canonical order id (offline-created session). */
   order_local: string | null;
   method: string;
   currency: string;
-  allocations: { order_item_id: string; quantity: number }[];
+  allocations: SplitAlloc[];
   expected_version: number | null;
   split_seq?: number;
   order_number?: string | null;
+  /** The batch to resolve item mappings for (optional; null → whole order). */
+  batch_no?: number | null;
 };
 
 /** split_settle — settle ONE split leg offline (pos_split_settle), exactly-once on client_op_id.
  *  Item-subset allocations; the server derives the amount + validates remaining qty under its row
  *  lock (so an over-allocation or a changed/paid bill → CONFLICT → needs_attention, never an
- *  overpayment or double settle). Legs replay strictly in order via the capture's dependency chain. */
+ *  overpayment or double settle). Legs replay strictly in order via the capture's dependency chain.
+ *  Fully-offline legs carry LOCAL line ids: each is resolved to its canonical order_item_id via the
+ *  generic entityMap (populated from pos_order_item_map once the round synced). A leg with any
+ *  unresolved mapping stays WAITING_FOR_DEPENDENCY — it NEVER sends a partial allocation. */
 export const splitSettleHandler: OperationHandler = {
   type: "split_settle",
   schemaVersion: 1,
@@ -588,8 +602,58 @@ export const splitSettleHandler: OperationHandler = {
     if (!Array.isArray(p.allocations) || p.allocations.length === 0) {
       return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_allocations", message: "no split allocations" };
     }
+
+    // Resolve every allocation to a CANONICAL order_item_id. Hydrated legs already carry it; a
+    // fully-offline leg carries a local line id resolved via entityMap. If a local mapping is not
+    // yet present, populate entityMap from the server's correlation (pos_order_item_map) for this
+    // order, then retry; still-missing → WAITING_FOR_DEPENDENCY (no partial allocation ever sent).
+    const needLocal = p.allocations.some((a) => !a.order_item_id && a.line_local);
+    if (needLocal) {
+      const stillUnresolved = async () => {
+        for (const a of p.allocations) {
+          if (a.order_item_id) continue;
+          if (!a.line_local) return true;
+          if (!(await ctx.canonicalFor(a.line_local))) return true;
+        }
+        return false;
+      };
+      if (await stillUnresolved()) {
+        // Pull the server's client_line_id -> order_item_id correlation and record it scope-exact.
+        try {
+          const map = await ctx.deps.orderItemMap({ orderId, batchNo: p.batch_no ?? null });
+          for (const m of map) {
+            await resolveEntity({
+              local_entity_id: m.client_line_id,
+              entity_type: "order_item",
+              canonical_id: m.order_item_id,
+              resolved_at: new Date().toISOString(),
+              tenant_id: op.scope.tenant_id,
+              branch_id: op.scope.branch_id,
+              device_id: op.scope.device_id,
+              cashier_user_id: op.scope.cashier_user_id,
+              terminal_id: op.scope.terminal_id,
+            });
+          }
+        } catch (e) {
+          if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "item_map: transport", message: errMsg(e) };
+          // A non-transport failure reading the map is a genuine block (e.g. not yet synced).
+          return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_map_unresolved", message: errMsg(e) };
+        }
+        if (await stillUnresolved()) {
+          return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "order items not yet mapped" };
+        }
+      }
+    }
+
+    const resolved: { order_item_id: string; quantity: number }[] = [];
+    for (const a of p.allocations) {
+      const id = a.order_item_id ?? (a.line_local ? await ctx.canonicalFor(a.line_local) : null);
+      if (!id) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "allocation item not mapped" };
+      resolved.push({ order_item_id: id, quantity: a.quantity });
+    }
+
     try {
-      const r = await ctx.deps.splitSettle({ orderId, method: p.method, currency: p.currency, allocations: p.allocations, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id });
+      const r = await ctx.deps.splitSettle({ orderId, method: p.method, currency: p.currency, allocations: resolved, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id });
       return { ok: true, canonicalId: orderId, resultMeta: { split_no: r.split_no, parent_completed: r.parent_completed, remaining_qty: r.remaining_qty, idempotent: r.idempotent } };
     } catch (e) {
       const msg = errMsg(e);

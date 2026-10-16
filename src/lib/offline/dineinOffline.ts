@@ -72,6 +72,10 @@ function lineToItem(l: DineDraftLine): SubmitOrderItem {
     base_price: l.base_price,
     quantity: l.quantity,
     kitchen_note: l.kitchen_note,
+    // Phase D — the stable local line id travels as client_line_id so the server can correlate the
+    // inserted canonical order_item back to this local line (pos_order_item_map), enabling offline
+    // split of a fully-offline session. Online/other callers omit it (server stores NULL).
+    client_line_id: l.line_id,
     ...(l.customization_json ? { customization_json: l.customization_json as SubmitOrderItem["customization_json"] } : {}),
     modifiers: l.modifiers.map((m) => ({ ...m })),
   } as SubmitOrderItem;

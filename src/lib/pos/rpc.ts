@@ -91,6 +91,9 @@ export type PosRpcName =
   // fail-closed to (dine_in, sent_to_kitchen, unpaid) + pos.edit_orders, idempotent on
   // client_op_id, optimistic-concurrency via expected_version. See lib/pos/orders.ts.
   | "pos_edit_order_line"
+  // Phase D (offline split) — read-only {client_line_id, order_item_id} correlation for a synced
+  // round, so offline-captured dine-in lines map to canonical order_item rows (STAGING additive).
+  | "pos_order_item_map"
   // R2 (1.0.35) — add NEW menu-item lines to an open, unpaid DELIVERY order. Server-authoritative
   // pricing (client sends item identities + quantities only, NO price), fail-closed to
   // (delivery, sent_to_kitchen, unpaid) + pos.edit_orders, idempotent on client_op_id with a

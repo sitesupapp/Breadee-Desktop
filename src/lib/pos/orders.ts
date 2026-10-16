@@ -40,6 +40,13 @@ export type SubmitOrderItem = {
    * Cost Control's `removed_ingredients`. See `lib/pos/itemOptions.ts`.
    */
   customization_json?: LineCustomization;
+  /**
+   * Phase D (offline split) — an OPTIONAL stable per-line client id. Online callers omit it (the
+   * server stores NULL and behaves byte-identically). Offline Dine-In rounds send the local line
+   * id so the server can correlate the inserted canonical pos_order_item back to this local line
+   * (read via pos_order_item_map), enabling offline split of a fully-offline session.
+   */
+  client_line_id?: string;
   modifiers: {
     group_id: string | null;
     option_id: string | null;

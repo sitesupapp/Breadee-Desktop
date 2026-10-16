@@ -37,6 +37,7 @@ function deps(order: string[], over: Partial<PosTxnSyncDeps> = {}): { deps: PosT
     openShift: async () => ({ shiftId: "s", reused: false }),
     openTable: async () => ({ table_id: "T", pos_entity_version: 1 }),
     submitRound: async () => ({ order_id: "O", order_number: "N", batch_no: 1, appended: true, idempotent: false }),
+    orderItemMap: async () => [],
     voidRefund: async () => ({ order_id: "O", status: "refunded", refunded: true, refund_usd: 0, refund_id: null, idempotent: false }),
     payTable: async () => ({ ok: true, amount: 5, idempotent: false }),
     payOrderOp: async (a) => ({ order_id: a.orderId, paid: true, amount: 5, idempotent: false }),
@@ -149,6 +150,32 @@ test("order_local remap: an offline session's split leg resolves to the canonica
   r = await drainOffline(CTX, "t", d);
   assert.deepEqual(r.drained, [o.operation_id]);
   assert.equal(calls[0].orderId, "SRV-ORD");
+});
+
+// ---------------- Fully-offline line mapping (local line id → canonical order_item_id) ----------------
+
+test("fully-offline leg: resolves local line ids via pos_order_item_map, then settles with canonical ids", async () => {
+  const o = splitOp({ order_id: "ORD-1", order_local: null, method: "cash", currency: "USD", allocations: [{ line_local: "L1", quantity: 1 }, { line_local: "L2", quantity: 1 }], expected_version: null, batch_no: 1 });
+  await addOperation(o);
+  const log: string[] = [];
+  const { deps: d, calls } = deps(log, {
+    orderItemMap: async () => [{ client_line_id: "L1", order_item_id: "IT-1" }, { client_line_id: "L2", order_item_id: "IT-2" }],
+  });
+  const r = await drainOffline(CTX, "t", d);
+  assert.deepEqual(r.drained, [o.operation_id]);
+  // The server got CANONICAL order_item_ids, resolved from the local line ids.
+  assert.deepEqual(calls[0].allocations, [{ order_item_id: "IT-1", quantity: 1 }, { order_item_id: "IT-2", quantity: 1 }]);
+});
+
+test("fully-offline leg: WAITING_FOR_DEPENDENCY (never partial) while any line mapping is missing", async () => {
+  const o = splitOp({ order_id: "ORD-1", order_local: null, method: "cash", currency: "USD", allocations: [{ line_local: "L1", quantity: 1 }, { line_local: "L2", quantity: 1 }], expected_version: null, batch_no: 1 });
+  await addOperation(o);
+  const log: string[] = [];
+  // The map only knows L1 → the leg must NOT settle a partial allocation; it blocks.
+  const { deps: d, calls } = deps(log, { orderItemMap: async () => [{ client_line_id: "L1", order_item_id: "IT-1" }] });
+  await drainOffline(CTX, "t", d);
+  assert.equal(calls.length, 0, "no split call while a mapping is missing (no partial allocation)");
+  assert.equal((await getOperation(o.operation_id))?.status, "blocked_dependency");
 });
 
 test("scope-exact: a split op from another terminal is NOT drained here", async () => {

@@ -134,6 +134,9 @@ export type PosTxnSyncDeps = {
   openTable: (payload: OpenTablePayload) => Promise<{ table_id: string; pos_entity_version: number | null }>;
   /** Phase-C: send a dine-in round (pos_submit_order; expected_order_id binds rounds >=2). */
   submitRound: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string; batch_no: number; appended: boolean; idempotent: boolean }>;
+  /** Phase-D (offline split): read the server's {client_line_id, order_item_id} correlation for a
+   *  synced round (pos_order_item_map), so local dine-in lines map to canonical order_item rows. */
+  orderItemMap: (args: { orderId: string; batchNo: number | null }) => Promise<{ client_line_id: string; order_item_id: string }[]>;
   /** Phase-D: void/refund a LOCALLY-HYDRATED canonical order (pos_void_order). client_op_id gives
    *  exactly-once; expectedVersion is the entity-version CAS; expectedRefundUsd (refund only) is the
    *  locally-proven refundable USD balance the server re-verifies under the row lock. A changed
@@ -231,6 +234,14 @@ export const defaultDeps: PosTxnSyncDeps = {
     const { submitOrder } = await import("@/lib/pos/orders");
     const r = await submitOrder(payload);
     return { order_id: r.order_id, order_number: r.order_number, batch_no: r.batch_no ?? 1, appended: r.appended ?? true, idempotent: r.idempotent ?? false };
+  },
+  orderItemMap: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const rows = (await callPosRpc("pos_order_item_map", { p_order: args.orderId, p_batch: args.batchNo })) as unknown;
+    if (!Array.isArray(rows)) return [];
+    return (rows as Record<string, unknown>[])
+      .filter((r) => r.client_line_id != null && r.order_item_id != null)
+      .map((r) => ({ client_line_id: String(r.client_line_id), order_item_id: String(r.order_item_id) }));
   },
   voidRefund: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");
