@@ -98,11 +98,26 @@ export const useSession = create<SessionState>((set, get) => ({
       }
     }
     // No live session (or context load failed) — try the offline cache.
+    //
+    // NATIVE OFFLINE FIX (1.0.37): this restore must NOT require `data.session` to be truthy.
+    // Offline, supabase.auth.getSession() reads persisted localStorage, but once the access token
+    // has expired it attempts a refresh that cannot reach the auth server and returns null — even
+    // though the device is simply offline and the durable context cache is still valid. Requiring
+    // `data.session` here dropped the WHOLE authenticated context on an offline relaunch, which
+    // emptied `pos.access` and collapsed every permission/feature-gated POS section (Dine-In,
+    // Delivery, Transfer, Force-End) to inaccessible while unconditional Takeaway survived.
+    //
+    // The cache is the authority offline: it is written ONLY after a successful online auth
+    // (loadContextOnline), is TTL-bounded (OFFLINE_TTL_MS = 7 days), and is cleared on sign-out — so
+    // a genuinely signed-out user has NO cache to restore. Reconnect still revalidates authority
+    // through the canonical path (loadContextOnline / refreshPermissions), and server RLS remains the
+    // mutation boundary. Restoring a valid, non-expired cache is exactly the offline-continuity intent.
     const cache = readCache();
-    if (cache && Date.now() - cache.cachedAt < OFFLINE_TTL_MS && data.session) {
+    if (cache && Date.now() - cache.cachedAt < OFFLINE_TTL_MS) {
       set({
         loading: false,
         offlineMode: true,
+        online: false,
         userId: cache.userId,
         email: cache.email,
         isPlatformUser: cache.isPlatformUser,
