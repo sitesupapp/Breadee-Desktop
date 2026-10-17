@@ -160,27 +160,49 @@ export function isFloorStale(lastLoadedAt: number | null, now: number): boolean 
 }
 
 /**
+ * The outcome of a floor pre-warm, as a PRECISE per-checkpoint code so a diagnostic can pinpoint
+ * exactly where offline-readiness fell down (instead of a bare success/fail):
+ *   NO_SCOPE     — no tenant/branch yet (caller should wait for resolution; never reached while gated)
+ *   LOAD_FAILED  — the published-floor read (floor_service_layout) threw: backend unreachable / RPC error
+ *   WRITE_FAILED — the layout loaded but the durable cache write did not commit / could not be read back
+ *   EMPTY        — the branch has NO published floor (cached as such → offline shows "no floor published",
+ *                  which is correct continuity, not an error); the cache IS present
+ *   READY        — a published floor was loaded AND durably cached AND confirmed by read-back
+ * READY and EMPTY both mean "the cache is present" (floorCache diagnostic → present).
+ */
+export type FloorPrewarmResult = "NO_SCOPE" | "LOAD_FAILED" | "WRITE_FAILED" | "EMPTY" | "READY";
+
+/**
  * Pre-warm the durable floor cache for a branch WITHOUT mounting the Map, so the visual Floor Map
  * renders offline the FIRST time Dine-In is opened — the operator never has to visit it online first.
  *
  * Unlike the store's `load` (which write-throughs fire-and-forget), this AWAITS the cache write AND
  * confirms it by reading it back, so a caller can report floorCache=READY only once the durable write
- * has actually committed — the exact gap behind "the floor isn't saved for offline use yet" in the
- * native RC (the operator disconnected before the async write landed, with no READY signal to wait on).
- *
- * The loader is injectable for tests; it NEVER throws (an unreachable backend simply yields false).
+ * has actually committed. Returns a precise checkpoint code; NEVER throws. The loader is injectable
+ * for tests.
  */
 export async function prewarmFloorCache(
   ctx: Context,
   load: (branchId: string | null) => Promise<FloorLayout> = loadFloorLayout,
-): Promise<boolean> {
-  if (!ctx.tenantId || !ctx.branchId) return false;
+): Promise<FloorPrewarmResult> {
+  if (!ctx.tenantId || !ctx.branchId) return "NO_SCOPE";
+  let layout: FloorLayout;
   try {
-    const layout = await load(ctx.branchId);
+    layout = await load(ctx.branchId);
+  } catch {
+    return "LOAD_FAILED";
+  }
+  try {
     await cacheFloor(layout, ctx.tenantId, ctx.branchId);
     const confirmed = await readCachedFloor(ctx.tenantId, ctx.branchId);
-    return confirmed != null;
+    if (confirmed == null) return "WRITE_FAILED";
   } catch {
-    return false;
+    return "WRITE_FAILED";
   }
+  return layout.hasPublished ? "READY" : "EMPTY";
+}
+
+/** True when the pre-warm result means the durable cache is present (offline-ready). */
+export function floorPrewarmCached(r: FloorPrewarmResult): boolean {
+  return r === "READY" || r === "EMPTY";
 }

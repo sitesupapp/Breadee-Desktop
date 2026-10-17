@@ -142,7 +142,7 @@ test("evaluateCustomerWriteOfflineReady: offline-ready + permission allows; not-
 
 test("Dine-In Floor Map: pre-hydrated on POS entry, and no raw fetch error offline", () => {
   const pw = srcOf("src/screens/pos/PosWorkspace.tsx");
-  assert.match(pw, /const ok = await prewarmFloorCache\(ctx\)/, "floor pre-hydrated (awaited + confirmed) during online POS use");
+  assert.match(pw, /const r = await prewarmFloorCache\(ctx\)/, "floor pre-hydrated (awaited + confirmed) during online POS use");
   assert.match(pw, /canViewTables\(pos\.access\)\.allowed\) void useTables\.getState\(\)\.refresh\(ctx\)/, "table map pre-hydrated too");
   const floor = srcOf("src/state/floor.ts");
   assert.match(floor, /isBackendReachable/, "the no-cache branch classifies offline vs a real fault");
@@ -170,36 +170,58 @@ test("Transfer Center + Force End: modal opens offline with a controlled message
   assert.match(feb, /Force-End needs a connection\./);
 });
 
-// --- A: Dine-In Floor pre-hydration (TEST 1 + TEST 2) ------------------------
+// --- A: Dine-In Floor pre-hydration (CASE A/B/C/D) ---------------------------
 
 const FLOOR_CTX = { tenantId: "t1", branchId: "b1" };
 const SAMPLE_LAYOUT = { hasPublished: true, sections: [{ id: "sec1", name: "Main" }], elements: [] } as never;
 
-test("TEST1 — floor prewarm writes the durable cache WITHOUT visiting Dine-In; the production read path finds it", async () => {
-  // Normal POS hydration path (no Map mount): prewarm with a stubbed online layout load.
-  const ok = await prewarmFloorCache(FLOOR_CTX, async () => SAMPLE_LAYOUT);
-  assert.equal(ok, true, "prewarm confirms the durable write committed (floorCache=READY is truthful)");
+test("CASE A — MANAGER operational access: prewarm caches the published floor WITHOUT visiting Dine-In; read-key matches", async () => {
+  // The prewarm's only gate is the published-floor READ entitlement (canViewFloor = pos.tables.view +
+  // the pos.floor_map sub-feature) — NEVER the designer/manage authority. A stubbed online load stands
+  // in for floor_service_layout (staging-proven to succeed for a manager on pos.tables.view).
+  const r = await prewarmFloorCache(FLOOR_CTX, async () => SAMPLE_LAYOUT);
+  assert.equal(r, "READY", "prewarm confirms the durable write committed (floorCache=READY is truthful)");
   // The EXACT production read path used by the floor store offline:
   const read = await readCachedFloor("t1", "b1");
   assert.ok(read, "readCachedFloor finds the prewarmed floor");
   assert.deepEqual(read?.layout, SAMPLE_LAYOUT, "write key == read key (same tenant+branch)");
+  // The POS pre-hydration gate is the READ entitlement, not the designer authority.
+  const pw = srcOf("src/screens/pos/PosWorkspace.tsx");
+  assert.match(pw, /canViewFloor\(pos\.access\)\.allowed/, "gated on the floor READ entitlement");
+  assert.doesNotMatch(pw, /canManageFloor/, "never gated on designer/manage authority");
 });
 
-test("TEST2 — floor cold restart: the cache survives store recreation and reads back on the same key", async () => {
+test("CASE B — delayed branch resolution: NO_SCOPE until the branch resolves, then READY", async () => {
+  assert.equal(await prewarmFloorCache({ tenantId: "t1", branchId: null }, async () => SAMPLE_LAYOUT), "NO_SCOPE");
+  assert.equal(await readCachedFloor("t1", "b1"), null, "nothing cached under a null branch");
+  // Branch resolves → prewarm runs and caches. The effect re-runs because pos.branch.id is a dependency.
+  assert.equal(await prewarmFloorCache(FLOOR_CTX, async () => SAMPLE_LAYOUT), "READY");
+  const pw = srcOf("src/screens/pos/PosWorkspace.tsx");
+  assert.match(pw, /\[pos\.allowed, tenantId, pos\.branch\.id, online\]/, "effect re-runs when branch/online resolve");
+});
+
+test("CASE C — cold restart: the cache survives store recreation and reads back on the same key", async () => {
   await prewarmFloorCache(FLOOR_CTX, async () => SAMPLE_LAYOUT);
-  // Simulate a cold restart: the zustand store is gone, only durable Dexie survives.
   const { useFloor } = await import("@/state/floor");
   useFloor.getState().reset();
   const read = await readCachedFloor("t1", "b1");
   assert.deepEqual(read?.layout, SAMPLE_LAYOUT, "same floor/layout restores offline after restart");
 });
 
-test("floor prewarm fails closed (no throw) when the layout load is unreachable; cache stays absent", async () => {
-  const ok = await prewarmFloorCache(FLOOR_CTX, async () => {
-    throw new TypeError("Failed to fetch");
-  });
-  assert.equal(ok, false);
-  assert.equal(await readCachedFloor("t1", "b1"), null);
+test("CASE D — OU isolation: a floor cached for branch A is never served for branch B", async () => {
+  await prewarmFloorCache({ tenantId: "t1", branchId: "A" }, async () => SAMPLE_LAYOUT);
+  assert.ok(await readCachedFloor("t1", "A"), "branch A is cached");
+  assert.equal(await readCachedFloor("t1", "B"), null, "branch B never serves branch A's floor");
+  assert.equal(await readCachedFloor("t2", "A"), null, "a different tenant never serves it either");
+});
+
+test("floor prewarm returns a PRECISE checkpoint code (LOAD_FAILED / WRITE_FAILED / EMPTY), never throws", async () => {
+  assert.equal(await prewarmFloorCache(FLOOR_CTX, async () => { throw new TypeError("Failed to fetch"); }), "LOAD_FAILED");
+  assert.equal(await readCachedFloor("t1", "b1"), null, "a failed load leaves the cache absent");
+  // A branch with NO published floor caches an empty layout (offline shows 'no floor published', not an error).
+  const empty = await prewarmFloorCache(FLOOR_CTX, async () => ({ hasPublished: false, sections: [], elements: [] } as never));
+  assert.equal(empty, "EMPTY");
+  assert.ok(await readCachedFloor("t1", "b1"), "EMPTY still writes a (present) cache");
 });
 
 // --- B: Delivery Orders offline continuity (TEST 3 / 4 / 5 / 6) --------------
@@ -285,6 +307,8 @@ test("Delivery Orders loader is offline-aware in the UI, with a controlled offli
 test("PosWorkspace pre-hydrates the floor + delivery queue during online POS use and surfaces floorCache diagnostics", () => {
   const pw = srcOf("src/screens/pos/PosWorkspace.tsx");
   assert.match(pw, /prewarmFloorCache\(ctx\)/, "floor prewarm wired");
-  assert.match(pw, /rcSetFloorHydrate\(ok \? "SUCCESS" : "FAILED"\)/, "floorHydrate diagnostic set");
+  assert.match(pw, /rcSetFloorHydrate\(r\)/, "floorHydrate diagnostic set to the precise checkpoint code");
+  assert.match(pw, /floorPrewarmCached\(r\)/, "retries until the cache is present (READY/EMPTY)");
+  assert.match(pw, /rcSetFloorHydrate\("SKIP_ACCESS"\)/, "records when the floor READ entitlement is missing");
   assert.match(pw, /prewarmDeliveryQueue\(\{ tenantId, branchId: pos\.branch\.id, shiftId, now: new Date\(\) \}\)/, "delivery queue prewarm wired with the shift-matching key");
 });

@@ -102,7 +102,15 @@ export type RcAccessSnapshot = {
 // Floor pre-hydration outcome, surfaced so a native tester can confirm the floor became
 // offline-ready BEFORE disconnecting — without ever opening Dine-In. Set by the PosWorkspace
 // pre-hydration effect. "NOT_RUN" until the effect fires.
-export type RcFloorHydrate = "NOT_RUN" | "SUCCESS" | "FAILED";
+export type RcFloorHydrate =
+  | "NOT_RUN" // the pre-hydration effect's gate is not yet satisfied (no branch / not POS-allowed)
+  | "SKIP_ACCESS" // online but the operator lacks the published-floor READ entitlement (canViewFloor)
+  | "LOADING" // prewarm in flight
+  | "NO_SCOPE"
+  | "LOAD_FAILED"
+  | "WRITE_FAILED"
+  | "EMPTY"
+  | "READY";
 let floorHydrate: RcFloorHydrate = "NOT_RUN";
 export function rcSetFloorHydrate(s: RcFloorHydrate): void {
   floorHydrate = s;

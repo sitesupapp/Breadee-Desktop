@@ -95,7 +95,7 @@ import { dineInBottomBar } from "@/lib/pos/dineInActions";
 import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewOrders, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
-import { prewarmFloorCache } from "@/state/floor";
+import { prewarmFloorCache, floorPrewarmCached } from "@/state/floor";
 import { prewarmDeliveryQueue } from "@/lib/offline/deliveryQueueOffline";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
@@ -241,12 +241,27 @@ function PosWorkspaceInner() {
       .catch(() => {});
     if (online) {
       if (canViewTables(pos.access).allowed) void useTables.getState().refresh(ctx);
-      if (canViewFloor(pos.access).allowed) {
+      if (!canViewFloor(pos.access).allowed) {
+        // The floor READ entitlement (pos.tables.view + the pos.floor_map sub-feature) — NOT the
+        // designer/manage authority. If this is false the Map toggle is also absent, so there is
+        // nothing to pre-hydrate; the diagnostic records WHY rather than silently doing nothing.
+        rcSetFloorHydrate("SKIP_ACCESS");
+      } else {
+        rcSetFloorHydrate("LOADING");
         void (async () => {
-          const ok = await prewarmFloorCache(ctx);
-          if (!active) return;
-          rcSetFloorHydrate(ok ? "SUCCESS" : "FAILED");
-          if (ok) setFloorCacheReady(true);
+          // Retry a TRANSIENT failure (a slow cross-region floor RPC, or one dropped mid-flight as the
+          // link degrades) so a single online session reliably reaches a present cache — the operator's
+          // "wait for floorCache=READY" is then dependable. Bounded; stops as soon as the cache is present.
+          for (let attempt = 0; attempt < 5 && active; attempt++) {
+            const r = await prewarmFloorCache(ctx);
+            if (!active) return;
+            rcSetFloorHydrate(r);
+            if (floorPrewarmCached(r)) {
+              setFloorCacheReady(true);
+              return;
+            }
+            await new Promise((res) => setTimeout(res, 1500));
+          }
         })();
       }
     }
