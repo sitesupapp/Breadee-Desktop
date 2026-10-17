@@ -13,6 +13,7 @@
 
 import {
   cachePendingLocalCustomer,
+  getCachedCustomer,
   type CachedCustomer,
 } from "@/lib/offline/db";
 import {
@@ -78,9 +79,14 @@ export async function captureCustomerUpsertOffline(input: {
   const operationId = CUSTOMER_OP_PREFIX + clientOpId;
 
   const isEdit = typeof upsert.id === "string" && upsert.id.length > 0;
-  const hasAddress = upsert.address != null && typeof upsert.address === "object";
+  const addressRec =
+    upsert.address != null && typeof upsert.address === "object" ? (upsert.address as Record<string, unknown>) : null;
+  // A NEW address (no server id) captured offline needs a LOCAL address id so a dependent delivery
+  // order can chain to address_local and the handler can remap it on replay (it resolves
+  // p.local_address_id for BOTH a create and an edit). An EXISTING address being edited keeps its id.
+  const isNewAddress = addressRec != null && !(typeof addressRec.id === "string" && (addressRec.id as string).length > 0);
   const localCustomerId = isEdit ? null : localCustomerIdFor(clientOpId);
-  const localAddressId = !isEdit && hasAddress ? localAddressIdFor(clientOpId) : null;
+  const localAddressId = isNewAddress ? localAddressIdFor(clientOpId) : null;
 
   const existing = await getOperation(operationId);
   if (existing) {
@@ -118,7 +124,7 @@ export async function captureCustomerUpsertOffline(input: {
 
   // CREATE: cache a pending-local customer so the picker can select it offline immediately.
   if (localCustomerId) {
-    const addresses = hasAddress ? [{ ...(upsert.address as Record<string, unknown>), id: localAddressId }] : null;
+    const addresses = addressRec ? [{ ...addressRec, id: localAddressId }] : null;
     const cached: CachedCustomer = {
       id: localCustomerId,
       tenant_id: scope.tenantId,
@@ -134,6 +140,22 @@ export async function captureCustomerUpsertOffline(input: {
       local_address_id: localAddressId,
     };
     await cachePendingLocalCustomer(cached).catch(() => undefined);
+  } else if (isEdit && localAddressId) {
+    // Adding a NEW address OFFLINE to a locally-created (pending-local) customer: append the local
+    // address to its cached profile so the picker can select it and a dependent order can chain to
+    // address_local. ONLY for a pending-local customer — a canonical customer must never be re-marked
+    // pending-local (cachePendingLocalCustomer forces that flag); its address replays with the op and
+    // appears after sync. Nothing else about the customer changes.
+    const existing = await getCachedCustomer(upsert.id as string, scope.tenantId, scope.branchId).catch(() => undefined);
+    if (existing?.pending_local && addressRec) {
+      const prior = Array.isArray(existing.addresses) ? (existing.addresses as unknown[]) : [];
+      await cachePendingLocalCustomer({
+        ...existing,
+        addresses: [...prior, { ...addressRec, id: localAddressId }],
+        has_profile: true,
+        cached_at: new Date().toISOString(),
+      }).catch(() => undefined);
+    }
   }
 
   return { operationId, clientOpId, localCustomerId, localAddressId, alreadyCaptured: false };

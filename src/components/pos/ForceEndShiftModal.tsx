@@ -61,6 +61,7 @@ function statusLabel(s: ForceEndRequestRow["status"]): string {
 
 export function ForceEndShiftModal({
   open,
+  online,
   shiftId,
   branchId,
   userId,
@@ -73,6 +74,9 @@ export function ForceEndShiftModal({
   onChanged,
 }: {
   open: boolean;
+  /** Backend reachability. Force-End needs the server to verify cashier authority + the live shift
+   *  snapshot, so offline the modal OPENS but shows a controlled reconnect message and runs no fetch. */
+  online: boolean;
   /** The OPEN source shift to force-end (the operator's own, or another cashier's). Null = none. */
   shiftId: string | null;
   branchId: string | null;
@@ -109,7 +113,18 @@ export function ForceEndShiftModal({
       size="lg"
       onClose={onClose}
     >
-      {tabs.length === 0 ? (
+      {!online ? (
+        // Server-authoritative: Force-End verifies cashier authority and re-scans the live shift
+        // snapshot server-side, so offline the modal OPENS but runs NO loader — a controlled message,
+        // never a raw "Failed to fetch". Normal End Shift stays separately offline-capable.
+        <div className="rounded-lg bg-amber-50 px-3 py-3 text-sm text-amber-800">
+          <p className="font-semibold">Force End Shift needs a connection.</p>
+          <p className="mt-1">
+            Force-ending a shift requires a connection to verify cashier authority and the current shift
+            state. Reconnect to hand over and finalize. A normal end-of-shift is still available offline.
+          </p>
+        </div>
+      ) : tabs.length === 0 ? (
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
           {requestGate.reason ?? finalizeGate.reason ?? "You do not have permission to force-end a shift."}
         </p>

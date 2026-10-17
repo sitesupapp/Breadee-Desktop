@@ -77,6 +77,7 @@ function statusLabel(s: TransferStatus): string {
 
 export function TransferCenterModal({
   open,
+  online,
   shiftId,
   branchId,
   userId,
@@ -85,6 +86,9 @@ export function TransferCenterModal({
   onChanged,
 }: {
   open: boolean;
+  /** Backend reachability. Transfer is COORDINATION-LIMITED: offline the modal still OPENS but shows a
+   *  controlled reconnect message instead of fetching (which would raise a raw "Failed to fetch"). */
+  online: boolean;
   /** The operator's own OPEN shift (source for Send, target for Incoming approve). Null = no open shift. */
   shiftId: string | null;
   branchId: string | null;
@@ -132,7 +136,18 @@ export function TransferCenterModal({
       size="lg"
       onClose={guardedClose}
     >
-      {tabs.length === 0 ? (
+      {!online ? (
+        // COORDINATION-LIMITED offline: the modal OPENS (so the control is never a dead end), but every
+        // tab needs the server to verify the receiving cashier + active shift, so we render a controlled
+        // message and run NO loader — never a raw "Failed to fetch".
+        <div className="rounded-lg bg-amber-50 px-3 py-3 text-sm text-amber-800">
+          <p className="font-semibold">Transfer Center needs a connection.</p>
+          <p className="mt-1">
+            Completing or approving a transfer requires a connection to verify the receiving cashier and their
+            active shift. Reconnect to send, accept or manage transfers.
+          </p>
+        </div>
+      ) : tabs.length === 0 ? (
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
           You do not have permission to use transfers in this branch.
         </p>

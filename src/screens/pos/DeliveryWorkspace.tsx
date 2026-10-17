@@ -74,6 +74,8 @@ import {
   type CustomerUpsertPayload,
 } from "@/lib/pos/customers";
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
+import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
+import { deterministicUuid } from "@/lib/offline/dineinOffline";
 import { customerCreateLatch, SEARCH_DEBOUNCE_MS, selectedAddress, useCustomers } from "@/state/customers";
 import {
   buildDeliveryPayload,
@@ -450,22 +452,38 @@ export function useDeliveryWorkspace(input: {
   // --- gates -----------------------------------------------------------------
 
   const accessGate = useMemo(() => canViewDelivery(pos.access), [pos.access]);
+  // Offline-ready for a customer WRITE: the device has a resolved 5-D scope (tenant + cashier), so a
+  // new/edited customer or address can be CAPTURED to the durable op log and replayed on reconnect —
+  // the SAME Phase-E path the offline delivery SEND already consumes (customer_local / address_local).
+  const customerOfflineReady = Boolean(pos.tenantId && pos.userId);
   const lookupGate = useMemo(
     () => customerLookupGate({ deliveryAccess: accessGate, canView: canViewCustomers(pos.access) }),
     [accessGate, pos.access],
   );
-  const writeGate = useMemo(
-    () =>
-      customerWriteGate({
-        deliveryAccess: accessGate,
-        canView: canViewCustomers(pos.access),
-        canManageCustomers: canManageCustomers(pos.access),
-        canCreateOrders: pos.gates.createOrders.allowed,
-        online,
-        saving,
-      }),
-    [accessGate, pos.access, pos.gates.createOrders.allowed, online, saving],
-  );
+  const writeGate = useMemo(() => {
+    const gate = customerWriteGate({
+      deliveryAccess: accessGate,
+      canView: canViewCustomers(pos.access),
+      canManageCustomers: canManageCustomers(pos.access),
+      canCreateOrders: pos.gates.createOrders.allowed,
+      online,
+      saving,
+    });
+    // Phase E: OFFLINE a customer can still be CAPTURED when the device is offline-ready and the
+    // operator holds the create/manage permission. The base gate refused ONLY on connectivity
+    // (permission was already checked), so a ready-offline session upgrades it to allowed — the
+    // capture is durable and syncs exactly-once. Permission and access are never widened.
+    if (
+      !gate.allowed &&
+      !online &&
+      customerOfflineReady &&
+      !saving &&
+      (canManageCustomers(pos.access) || pos.gates.createOrders.allowed)
+    ) {
+      return { allowed: true as const, reason: null };
+    }
+    return gate;
+  }, [accessGate, pos.access, pos.gates.createOrders.allowed, online, saving, customerOfflineReady]);
 
   // Level 3D. Three separate keys because the server checks three separate
   // things: reading the queue, editing an order, and cancelling or refunding it.
@@ -612,7 +630,10 @@ export function useDeliveryWorkspace(input: {
 
     let candidates: CustomerMatch[];
     try {
-      candidates = await searchCustomers(term);
+      // Offline-aware: online searches the server + mirrors to the cache; offline reads the cached
+      // customers so a lookup never raises a raw "Failed to fetch". An uncached number offline
+      // yields no candidates → the create path (below) captures a new customer locally.
+      candidates = await searchCustomersOfflineAware(term);
     } catch (e) {
       toast.push({ tone: "error", message: "Could not search customers", detail: classifyError(e).message });
       return;
@@ -677,6 +698,23 @@ export function useDeliveryWorkspace(input: {
           name: values.name,
           notes: values.notes,
         });
+        // Phase E — OFFLINE: capture a durable customer_upsert and select the LOCAL customer so the
+        // delivery flow continues; the op syncs exactly-once on reconnect (a same-OU clash surfaces as
+        // needs_attention). A deterministic client_op_id makes a double-tap idempotent.
+        if (!online && customerOfflineReady) {
+          try {
+            const clientOpId = deterministicUuid([branchId ?? "", values.phone ?? "", values.name ?? "", "delivery_customer_create"]);
+            const r = await upsertCustomerOfflineAware(payload as unknown as Record<string, unknown>, clientOpId);
+            await useCustomers.getState().select(r.customer_id);
+            setDialog({ kind: "none" });
+            toast.push({ tone: "success", message: "Customer saved offline", detail: "It will sync when you reconnect." });
+          } catch (e) {
+            setDialogError(classifyError(e).message);
+          } finally {
+            setSaving(false);
+          }
+          return;
+        }
         const outcome = await performCustomerCreate({
           payload,
           submit: upsertCustomer,
@@ -719,7 +757,7 @@ export function useDeliveryWorkspace(input: {
         setSaving(false);
       }
     },
-    [branchId, toast, writeGate.allowed],
+    [branchId, toast, writeGate.allowed, online, customerOfflineReady],
   );
 
   // R6 (1.0.36): resolve the conflict by LINKING to the matched customer — re-send the original
@@ -757,17 +795,26 @@ export function useDeliveryWorkspace(input: {
       setDialogError(null);
       setSaving(true);
       try {
-        await upsertCustomer(
-          buildEditPayload({
-            branchId,
-            customerId: selected.id,
-            name: values.name,
-            notes: values.notes,
-            // Only sent when it actually changed - re-sending the same number is
-            // harmless but pointless, and the field is the risky one.
-            phone: values.phone.trim() === (selected.phone ?? "").trim() ? null : values.phone,
-          }),
-        );
+        const editPayload = buildEditPayload({
+          branchId,
+          customerId: selected.id,
+          name: values.name,
+          notes: values.notes,
+          // Only sent when it actually changed - re-sending the same number is
+          // harmless but pointless, and the field is the risky one.
+          phone: values.phone.trim() === (selected.phone ?? "").trim() ? null : values.phone,
+        });
+        // Phase E — OFFLINE: capture the edit as a durable customer_upsert (it replays exactly-once;
+        // a same-OU clash surfaces as needs_attention). The card keeps its locally-known details.
+        if (!online && customerOfflineReady) {
+          const clientOpId = deterministicUuid([selected.id, values.name ?? "", values.phone ?? "", values.notes ?? "", "delivery_customer_edit"]);
+          await upsertCustomerOfflineAware(editPayload as unknown as Record<string, unknown>, clientOpId);
+          await useCustomers.getState().refresh();
+          setDialog({ kind: "none" });
+          toast.push({ tone: "success", message: "Customer update saved offline", detail: "It will sync when you reconnect." });
+          return;
+        }
+        await upsertCustomer(editPayload);
         // Authoritative re-read. What the server stored is what the card shows.
         await useCustomers.getState().refresh();
         setDialog({ kind: "none" });
@@ -779,7 +826,7 @@ export function useDeliveryWorkspace(input: {
         setSaving(false);
       }
     },
-    [branchId, toast, writeGate.allowed],
+    [branchId, toast, writeGate.allowed, online, customerOfflineReady],
   );
 
   // --- addresses -------------------------------------------------------------
@@ -792,13 +839,25 @@ export function useDeliveryWorkspace(input: {
       setDialogError(null);
       setSaving(true);
       try {
-        const result = await upsertCustomer(
-          buildAddressPayload({
-            branchId,
-            customerId: selected.id,
-            address: { ...values, id: dialog.addressId },
-          }),
-        );
+        const addressPayload = buildAddressPayload({
+          branchId,
+          customerId: selected.id,
+          address: { ...values, id: dialog.addressId },
+        });
+        // Phase E — OFFLINE: capture the address as a durable customer_upsert. For a locally-created
+        // (pending-local) customer a LOCAL address id is minted and appended to the cached profile so
+        // it is immediately selectable and a dependent offline order chains to address_local; the
+        // handler remaps it on replay. A deterministic client_op_id makes a double-tap idempotent.
+        if (!online && customerOfflineReady) {
+          const clientOpId = deterministicUuid([selected.id, values.street ?? "", dialog.addressId ?? "", "delivery_address"]);
+          const r = await upsertCustomerOfflineAware(addressPayload as unknown as Record<string, unknown>, clientOpId);
+          await useCustomers.getState().refresh();
+          if (r.address_id) useCustomers.getState().selectAddress(r.address_id);
+          setDialog({ kind: "none" });
+          toast.push({ tone: "success", message: "Address saved offline", detail: "It will sync when you reconnect." });
+          return;
+        }
+        const result = await upsertCustomer(addressPayload);
         await useCustomers.getState().refresh();
         // A newly added address becomes the chosen one - the operator asked for
         // it while looking at this customer, so it is the obvious intent.
@@ -812,7 +871,7 @@ export function useDeliveryWorkspace(input: {
         setSaving(false);
       }
     },
-    [branchId, dialog, toast, writeGate.allowed],
+    [branchId, dialog, toast, writeGate.allowed, online, customerOfflineReady],
   );
 
   // --- Level 3B: sending ------------------------------------------------------

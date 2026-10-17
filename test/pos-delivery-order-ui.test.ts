@@ -721,7 +721,10 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // 54 -> 55 for Desktop 1.0.36 (R4) the Force-End recipient reader pos_force_end_eligible_recipients,
   //   also called from the force-end layer, not these delivery screens.
   // 55 -> 56 for Desktop 1.0.36 (R4) pos_shifts_list (supervisor Force-End browser read; not these screens).
-  assert.equal(names.length, 56);
+  // 56 -> 57 for Desktop 1.0.37 Full-Offline GAP-2 pos_receivable_collect (offline receivables collection;
+  //   called from the receivable-collect capture/replay layer, NOT these delivery screens — the
+  //   no-direct-callPosRpc check below still holds).
+  assert.equal(names.length, 57);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));

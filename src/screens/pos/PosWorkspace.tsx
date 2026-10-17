@@ -95,6 +95,7 @@ import { dineInBottomBar } from "@/lib/pos/dineInActions";
 import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
+import { useFloor } from "@/state/floor";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount } from "@/lib/offline/db";
@@ -222,6 +223,19 @@ function PosWorkspaceInner() {
       window.removeEventListener(MENU_CHANGED_EVENT, refresh);
     };
   }, [pos.allowed, tenantId, fetchMenu]);
+
+  // Pre-hydrate Dine-In operational data (table map + published FLOOR layout)
+  // during NORMAL online POS use, so the table List AND the visual Floor Map are
+  // offline-ready WITHOUT the operator having to open the Map online first. Each
+  // store caches on success; both are a no-op / clean-empty offline. Gated on the
+  // relevant access and a live connection, and scoped to this tenant+OU.
+  useEffect(() => {
+    if (!pos.allowed || !tenantId || !pos.branch.id || !online) return;
+    const ctx = { tenantId, branchId: pos.branch.id };
+    if (canViewTables(pos.access).allowed) void useTables.getState().refresh(ctx);
+    if (canViewFloor(pos.access).allowed) void useFloor.getState().load(ctx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pos.allowed, tenantId, pos.branch.id, online]);
 
   // --- shift -----------------------------------------------------------------
   const userId = pos.userId;
@@ -3131,6 +3145,7 @@ function PosWorkspaceInner() {
       {/* Desktop 1.0.35 (B2) — Transfer Center: Send (Standard/Force) · Incoming · Manage. */}
       <TransferCenterModal
         open={transferCenterOpen}
+        online={online}
         shiftId={shiftId}
         branchId={pos.branch.id}
         userId={pos.userId}
@@ -3147,6 +3162,7 @@ function PosWorkspaceInner() {
           to close it. Opened from the blocked End-Shift dialog; self-shift only on the desktop. */}
       <ForceEndShiftModal
         open={forceEndOpen}
+        online={online}
         shiftId={shiftId}
         branchId={pos.branch.id}
         userId={pos.userId}
@@ -3177,6 +3193,7 @@ function PosWorkspaceInner() {
           ANOTHER cashier's stuck shift (isOwnShift = false inside). Gated on pos.close_other_shifts. */}
       <ForceEndShiftBrowser
         open={forceEndBrowserOpen}
+        online={online}
         branchId={pos.branch.id}
         userId={pos.userId}
         currency={currency}

@@ -27,6 +27,7 @@ type Row = OpenBranchShift & { cashierName: string; blockingCount: number | null
 
 export function ForceEndShiftBrowser({
   open,
+  online,
   branchId,
   userId,
   currency,
@@ -35,6 +36,9 @@ export function ForceEndShiftBrowser({
   onChanged,
 }: {
   open: boolean;
+  /** Backend reachability. Listing/force-ending shifts is server-authoritative, so offline the
+   *  browser OPENS but shows a controlled reconnect message and runs no fetch. */
+  online: boolean;
   branchId: string | null;
   /** The signed-in supervisor = the requester. Their own open shift is excluded from the list. */
   userId: string | null;
@@ -100,13 +104,15 @@ export function ForceEndShiftBrowser({
     setRows([]);
     setTarget(null);
     setLoadError(null);
-    if (!open) {
+    if (!open || !online) {
+      // Offline: do NOT fetch (it would raise a raw "Failed to fetch"); the render shows a controlled
+      // reconnect message instead.
       setLoading(false);
       return;
     }
     setLoading(true);
     void load();
-  }, [open, load]);
+  }, [open, online, load]);
 
   // A slow tick so the "open for" badges age while the browser is watched. Runs only while open.
   useEffect(() => {
@@ -127,6 +133,14 @@ export function ForceEndShiftBrowser({
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
           {requestGate.reason ?? "You do not have permission to force-end another cashier's shift."}
         </p>
+      ) : !online ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-3 text-sm text-amber-800">
+          <p className="font-semibold">Force-End needs a connection.</p>
+          <p className="mt-1">
+            Listing open shifts and force-ending a cashier requires a connection to verify authority and
+            the live shift state. Reconnect to continue. A normal end-of-shift is still available offline.
+          </p>
+        </div>
       ) : loading ? (
         <div className="space-y-2">
           <Skeleton className="h-16 w-full" />
@@ -169,6 +183,7 @@ export function ForceEndShiftBrowser({
       {/* The generalized hand-over modal, targeting the chosen cashier's shift (isOwnShift = false). */}
       <ForceEndShiftModal
         open={target !== null}
+        online={online}
         shiftId={target?.shiftId ?? null}
         branchId={branchId}
         userId={userId}

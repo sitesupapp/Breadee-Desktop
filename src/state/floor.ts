@@ -16,6 +16,7 @@ import { EMPTY_FLOOR_LAYOUT, loadFloorLayout, type FloorLayout } from "@/lib/pos
 import { resolveActiveSection } from "@/lib/pos/floorSections";
 import type { Transform } from "@/lib/pos/floorGeometry";
 import { cacheFloor, readCachedFloor } from "@/lib/offline/db";
+import { isBackendReachable } from "@/lib/offline/reachability";
 
 /** How long a loaded floor is considered fresh before a sensible re-fetch. */
 export const FLOOR_STALE_AFTER_MS = 60_000;
@@ -110,10 +111,20 @@ export const useFloor = create<FloorState>((set, get) => ({
         });
         return;
       }
+      // No cache to fall back on. An UNREACHABLE backend is an expected offline
+      // state, not a fault to shove a raw "Failed to fetch" at the cashier: show a
+      // controlled readiness reason instead. A reachable-but-failed load (RLS, slow
+      // replica) keeps its real message so a genuine fault is still diagnosable.
+      const reachable = await isBackendReachable().catch(() => false);
       set({
         loading: false,
         refreshing: false,
-        error: e instanceof Error ? e.message : "Couldn't load the floor map.",
+        offline: !reachable,
+        error: reachable
+          ? e instanceof Error
+            ? e.message
+            : "Couldn't load the floor map."
+          : "The floor map isn't saved for offline use yet. Reconnect once while online to make it available offline — the table List is available now.",
       });
     }
   },

@@ -105,7 +105,7 @@ test("PosWorkspace mounts the readout and traces the four nav clicks; main logs 
 
 test("the RC is a DISTINCT, identifiable build (version bumped; SHA/run/flag injected by CI)", () => {
   const conf = JSON.parse(rawOf("src-tauri/tauri.conf.json")) as { version: string; identifier: string };
-  assert.equal(conf.version, "1.0.37-rc.3", "version bumped so Windows cannot reuse the prior package");
+  assert.equal(conf.version, "1.0.37-rc.4", "version bumped so Windows cannot reuse the prior package");
   assert.equal(conf.identifier, "app.breadee.desktop.offlinerc", "isolated bundle identity preserved");
   const wf = rawOf(".github/workflows/desktop-windows-installer.yml");
   assert.match(wf, /VITE_BUILD_SHA: \$\{\{ github\.sha \}\}/);
