@@ -29,6 +29,8 @@ class MemStorage {
 
 import { localdb, getCachedCustomer, readCachedFloor, addPosOfflineTxn, cacheDeliveryQueue, cacheDeliveryReport, readCachedDeliveryReport, type PosOfflineTxn } from "@/lib/offline/db";
 import { loadDeliveryReportOfflineAware } from "@/lib/offline/deliveryReportOffline";
+import { captureDeliveryOpsOffline, captureEditOrderNoteOffline } from "@/lib/offline/deliveryActionOffline";
+import { HANDLERS } from "@/lib/offline/handlers";
 import { getOperation } from "@/lib/offline/operationLog";
 import {
   captureCustomerUpsertOffline,
@@ -334,9 +336,8 @@ test("DELIVERY void/cancel is wired to the certified fail-closed refund engine, 
   assert.match(dw, /proveOfflineReversible\(target\.id, itemEditOfflineScope\)/, "offline void proves reversibility fail-closed");
   assert.match(dw, /captureOfflineRefund\(\{/, "offline void captures via the certified engine");
   assert.match(dw, /online: online \|\| voidOfflineReady/, "void gate lifts the blanket offline refusal when ready");
-  // Print / ops / provider offline → controlled message, never a raw doomed fetch.
-  assert.match(dw, /Reconnect to open this order's receipt/, "print offline is controlled");
-  assert.match(dw, /Editing delivery details needs a connection/, "ops save offline is controlled");
+  // Print offline → controlled message (snapshot reprint handled in the rc.8 test below).
+  assert.match(dw, /Reconnect to open this order's receipt/, "print offline falls back to a controlled message when no snapshot");
 });
 
 test("R1/R2/R3 — Delivery report: online write-through; offline serves the cached snapshot; offline-uncached is controlled (no recompute)", async () => {
@@ -376,4 +377,81 @@ test("Delivery report component shows a controlled offline state and a last-sync
   assert.match(dr, /showing last synced report data/, "last-synced badge for a cached offline report");
   const cacheReport = cacheDeliveryReport; // referenced so the import is exercised
   assert.equal(typeof cacheReport, "function");
+});
+
+// --- rc.8: Delivery local Print + contract-proven offline delivery_ops / note captures ------
+
+const DA_SCOPE = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1" };
+
+test("delivery_ops + edit_order handlers are REGISTERED so the drain can replay them", () => {
+  assert.ok(HANDLERS["delivery_ops@1"], "delivery_ops handler registered");
+  assert.ok(HANDLERS["edit_order@1"], "edit_order handler registered");
+});
+
+test("P5 — captureDeliveryOpsOffline: durable op, order_local dependency, exactly-once on client_op_id", async () => {
+  // A delivery-ops edit on an OFFLINE-created order → depends on the local order id (remap on sync).
+  const r1 = await captureDeliveryOpsOffline({
+    scope: DA_SCOPE,
+    orderId: null,
+    orderLocal: "LOCAL-ORD",
+    payload: { order_id: "LOCAL-ORD", handler_type: "driver", delivered_by_user_id: null, person_ref: "Sam", cost: 3, client_op_id: "op-ops-1" },
+    clientOpId: "op-ops-1",
+  });
+  assert.equal(r1.alreadyCaptured, false);
+  const op = await getOperation("delivops:op-ops-1");
+  assert.equal(op?.operation_type, "delivery_ops");
+  assert.deepEqual(op?.depends_on_local_entities, ["LOCAL-ORD"], "gates on the offline order until it syncs");
+  assert.equal((op?.payload as { payload: { person_ref: string } }).payload.person_ref, "Sam");
+  // Double-tap of the SAME edit is idempotent (same op id).
+  const r2 = await captureDeliveryOpsOffline({
+    scope: DA_SCOPE, orderId: null, orderLocal: "LOCAL-ORD",
+    payload: { order_id: "LOCAL-ORD", handler_type: "driver", delivered_by_user_id: null, person_ref: "Sam", cost: 3, client_op_id: "op-ops-1" },
+    clientOpId: "op-ops-1",
+  });
+  assert.equal(r2.alreadyCaptured, true, "same client_op_id → one op, exactly-once");
+});
+
+test("captureEditOrderNoteOffline: a canonical order's NOTE edit captures edit_order (no local dependency)", async () => {
+  const r = await captureEditOrderNoteOffline({
+    scope: DA_SCOPE,
+    orderId: "SRV-ORD",
+    orderLocal: null,
+    payload: { order_id: "SRV-ORD", note: "ring the bell", client_op_id: "op-note-1" },
+    clientOpId: "op-note-1",
+  });
+  assert.equal(r.alreadyCaptured, false);
+  const op = await getOperation("editorder:op-note-1");
+  assert.equal(op?.operation_type, "edit_order");
+  assert.equal(op?.canonical_entity_id, "SRV-ORD");
+  assert.deepEqual(op?.depends_on_local_entities, [], "a hydrated order has no local dependency");
+  assert.equal((op?.payload as { payload: { note: string } }).payload.note, "ring the bell");
+});
+
+test("delivery_ops handler replays via the setDeliveryOps dep, and BLOCKS until an offline order is remapped", async () => {
+  const h = HANDLERS["delivery_ops@1"];
+  let called: Record<string, unknown> | null = null;
+  const baseCtx = {
+    deps: {
+      setDeliveryOps: async (a: { payload: Record<string, unknown> }) => { called = a.payload; return { ok: true, idempotent: false }; },
+      isTransport: () => false,
+    },
+  } as never;
+  // order_local not yet resolved → DEPENDENCY_BLOCKED, dep not called.
+  const blockedOp = { payload: { payload: { order_id: "LOCAL-ORD" }, order_local: "LOCAL-ORD" } } as never;
+  const blocked = await h.replay(blockedOp, { ...baseCtx, canonicalFor: async () => null });
+  assert.equal(blocked.ok, false);
+  assert.equal(called, null, "dep never called while the order is unresolved");
+  // Once the local order maps to canonical, the dep is called with the remapped order_id.
+  const ok = await h.replay(blockedOp, { ...baseCtx, canonicalFor: async () => "SRV-ORD" });
+  assert.equal(ok.ok, true);
+  assert.equal((called as unknown as { order_id: string }).order_id, "SRV-ORD", "order_local remapped to canonical before replay");
+});
+
+test("DELIVERY offline actions wired: Print reprints the keyed snapshot; ops + note capture; discount offline refused", () => {
+  const dw = srcOf("src/screens/pos/DeliveryWorkspace.tsx");
+  assert.match(dw, /readReceiptSnapshot\(order\.order_number\)/, "print reprints the order's keyed receipt snapshot offline");
+  assert.match(dw, /captureDeliveryOpsOffline\(\{/, "delivery-ops captured offline");
+  assert.match(dw, /captureEditOrderNoteOffline\(\{/, "order note captured offline");
+  assert.match(dw, /Changing the discount needs a connection/, "discount change is refused offline (documented)");
+  assert.match(dw, /Setting the delivery provider or cost needs a connection/, "provider stays external (controlled)");
 });

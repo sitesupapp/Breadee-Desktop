@@ -77,6 +77,7 @@ import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog"
 import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
 import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
 import { proveOfflineReversible, captureOfflineRefund } from "@/lib/offline/refundOffline";
+import { captureDeliveryOpsOffline, captureEditOrderNoteOffline } from "@/lib/offline/deliveryActionOffline";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
 import { customerCreateLatch, SEARCH_DEBOUNCE_MS, selectedAddress, useCustomers } from "@/state/customers";
 import {
@@ -505,10 +506,13 @@ export function useDeliveryWorkspace(input: {
         deliveryAccess: accessGate,
         canEditOrders: editOrdersPermission,
         order: detail,
-        online,
+        // OFFLINE: a NOTE edit is captured durably (pos_edit_order replay-safe); lift the blanket
+        // refusal when offline-ready. A DISCOUNT change offline is refused at confirm (it needs a
+        // server-authoritative pricing recompute the local projection can't reflect).
+        online: online || voidOfflineReady,
         busy: editBusy,
       }),
-    [accessGate, editOrdersPermission, detail, online, editBusy],
+    [accessGate, editOrdersPermission, detail, online, voidOfflineReady, editBusy],
   );
 
   /**
@@ -1347,10 +1351,46 @@ export function useDeliveryWorkspace(input: {
         setOpsError(input.manageDelivery.reason ?? "You do not have permission to manage delivery details.");
         return;
       }
-      // Server-authoritative ops write (pos_set_delivery_ops) with no offline capture: show a
-      // controlled reason rather than firing a doomed live RPC that surfaces a raw network error.
+      // OFFLINE: delivered-by / handler / cost are internal, deterministic Breadee state and
+      // pos_set_delivery_ops is replay-safe on client_op_id — so CAPTURE a durable delivery_ops op
+      // (exactly-once, order_local → canonical remap, conflict → needs_attention) instead of a doomed
+      // live RPC. The provider/cost-settlement path (external coordination) stays online (saveProvider).
       if (!online) {
-        setOpsError("Editing delivery details needs a connection. Reconnect to update delivered-by, handler or cost.");
+        if (!itemEditOfflineScope) {
+          setOpsError("Editing delivery details needs the POS to be ready offline.");
+          return;
+        }
+        if (!opsLatch.current.acquire()) return;
+        setOpsBusy(true);
+        setOpsError(null);
+        try {
+          const txn = await getPosOfflineTxn(target.id).catch(() => undefined);
+          const pending = txn ? txn.status !== "synced" : false;
+          const clientOpId = deterministicUuid([
+            target.id, "delivery_ops", values.handlerType ?? "", target.delivered_by_user_id ?? "", values.personRef ?? "", String(values.cost ?? ""),
+          ]);
+          await captureDeliveryOpsOffline({
+            scope: itemEditOfflineScope,
+            orderId: pending ? null : target.id,
+            orderLocal: pending ? target.id : null,
+            payload: {
+              order_id: target.id,
+              handler_type: values.handlerType,
+              delivered_by_user_id: target.delivered_by_user_id ?? null,
+              person_ref: values.personRef,
+              cost: values.cost,
+              client_op_id: clientOpId,
+            },
+            clientOpId,
+          });
+          setOpsEditing(false);
+          toast.push({ tone: "success", message: "Delivery details saved offline", detail: "They will sync when you reconnect." });
+        } catch (e) {
+          setOpsError(classifyError(e).message);
+        } finally {
+          setOpsBusy(false);
+          opsLatch.current.release();
+        }
         return;
       }
       if (!opsLatch.current.acquire()) return;
@@ -1375,7 +1415,7 @@ export function useDeliveryWorkspace(input: {
         opsLatch.current.release();
       }
     },
-    [detail, input.manageDelivery, online, refreshDetail, refreshQueue, toast],
+    [detail, input.manageDelivery, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast],
   );
 
   // Save the order's advanced settlement PROVIDER + delivery cost through the ONE
@@ -1928,6 +1968,35 @@ export function useDeliveryWorkspace(input: {
       setEditBusy(true);
       setEditError(null);
       try {
+        // OFFLINE: capture a NOTE-only edit durably (pos_edit_order replay-safe on client_op_id; note is
+        // a SET so replay converges). A DISCOUNT change is refused offline — it needs a
+        // server-authoritative pricing recompute the local delivery projection cannot show. Never a
+        // doomed live RPC.
+        if (!online) {
+          if (intent.discount !== null) {
+            setEditError("Changing the discount needs a connection. You can edit the order note offline.");
+            return;
+          }
+          if (!itemEditOfflineScope) {
+            setEditError("Editing the order needs the POS to be ready offline.");
+            return;
+          }
+          const noteText = (intent.note ?? "").trim();
+          const txn = await getPosOfflineTxn(target.id).catch(() => undefined);
+          const pending = txn ? txn.status !== "synced" : false;
+          const clientOpId = deterministicUuid([target.id, "edit_order_note", noteText]);
+          await captureEditOrderNoteOffline({
+            scope: itemEditOfflineScope,
+            orderId: pending ? null : target.id,
+            orderLocal: pending ? target.id : null,
+            payload: { order_id: target.id, note: noteText, client_op_id: clientOpId },
+            clientOpId,
+          });
+          setEditOpen(false);
+          toast.push({ tone: "success", message: "Order note saved offline", detail: "It will sync when you reconnect." });
+          return;
+        }
+
         const fresh = await readDeliveryOrder(target.id);
         checkOrderContext(fresh, { orderId: target.id, branchOrderIds: new Set(queue.map((o) => o.id)) });
         const order = fresh as DeliveryQueueOrder;
@@ -1993,7 +2062,7 @@ export function useDeliveryWorkspace(input: {
         setEditBusy(false);
       }
     },
-    [detail, editGate.allowed, queue, input.applyDiscounts, refreshDetail, refreshQueue, toast],
+    [detail, editGate.allowed, queue, input.applyDiscounts, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast],
   );
 
   // --- Level 3D: cancel / refund ----------------------------------------------
@@ -2131,14 +2200,24 @@ export function useDeliveryWorkspace(input: {
   const openHistoricalReceipt = useCallback(
     async (order: DeliveryQueueOrder) => {
       // OFFLINE: the full delivery receipt is assembled from authoritative server reads
-      // (readHistoricalReceipt). Rather than fire a doomed fetch and surface a raw "Failed to fetch",
-      // show a controlled message — the order itself stays available offline. (A per-order durable
-      // receipt snapshot is not keyed by order id, so presenting the latest could show the wrong one.)
+      // (readHistoricalReceipt), which would raise a raw "Failed to fetch". Instead REPRINT the durable
+      // local receipt snapshot for THIS order — keyed by its own order number / id (the same keyed
+      // lookup the shift-order reprint uses), so a locally-known order that has a stored receipt prints
+      // offline with no backend call. If none is stored yet (e.g. an unpaid order never presented), show
+      // a controlled message — the order itself stays available offline.
       if (!online) {
+        const { readReceiptSnapshot } = await import("@/lib/offline/db");
+        const snap =
+          (order.order_number ? await readReceiptSnapshot(order.order_number).catch(() => null) : null) ??
+          (await readReceiptSnapshot(order.id).catch(() => null));
+        if (snap) {
+          input.onPresentReceipt(snap.data as ReceiptData);
+          return;
+        }
         toast.push({
           tone: "info",
           message: "Reconnect to open this order's receipt",
-          detail: "The full delivery receipt is assembled online; the order stays available offline.",
+          detail: "No receipt is saved on this device for this order yet; the order stays available offline.",
         });
         return;
       }

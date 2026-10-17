@@ -81,7 +81,17 @@ export type OperationType =
   // destructive move/merge. (Order TRANSFER stays online — its cross-cashier approval needs the
   // server to mediate.)
   | "move_table"
-  | "merge_tables";
+  | "merge_tables"
+  // Phase F (rc.8) — offline DELIVERY-OPS edit (internal delivered-by / handler / cost) →
+  // pos_set_delivery_ops (replay-safe on client_op_id; pos_op_replay + pos_op_record). Deterministic
+  // internal Breadee state, no money movement, no external coordination. Target order may be canonical
+  // (hydrated) or offline-created (order_local → canonical remap).
+  | "delivery_ops"
+  // Phase F (rc.8) — offline ORDER NOTE edit of an open order → pos_edit_order (replay-safe on
+  // client_op_id; every field is a SET so replay converges). NOTE ONLY: an offline discount change is
+  // NOT captured here (server-authoritative pricing recompute + the local projection cannot show an
+  // accurate payable offline). Target order may be canonical or offline-created (order_local remap).
+  | "edit_order";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

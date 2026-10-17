@@ -229,6 +229,12 @@ export type PosTxnSyncDeps = {
   editOrderLine: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-E: add new lines to an open delivery order (pos_add_order_items). Same payload contract. */
   addOrderItems: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  /** Phase-F (rc.8): set an order's internal delivery ops (pos_set_delivery_ops). Payload carries
+   *  order_id + handler_type/delivered_by_user_id/person_ref/cost + client_op_id. Replay-safe. */
+  setDeliveryOps: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  /** Phase-F (rc.8): edit an order's NOTE (pos_edit_order). Payload is the exact p_payload
+   *  (order_id + note + client_op_id). Replay-safe; every field is a SET so replay converges. */
+  editOrder: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-E: move a table's open bill to another table (pos_move_table). client_op_id → exactly-once;
    *  expectedVersion is the CAS on the from-table. */
   moveTable: (args: { fromTableId: string; toTableId: string; expectedVersion: number | null; clientOpId: string }) => Promise<{ ok: boolean; orders_moved: number; idempotent: boolean }>;
@@ -432,6 +438,26 @@ export const defaultDeps: PosTxnSyncDeps = {
     const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_add_order_items", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: row.ok !== false, idempotent };
+  },
+  setDeliveryOps: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const p = args.payload;
+    const row = (await callPosRpc("pos_set_delivery_ops", {
+      p_order_id: p.order_id,
+      p_delivery_handler_type: p.handler_type ?? null,
+      p_delivered_by_user_id: p.delivered_by_user_id ?? null,
+      p_delivery_person_ref: p.person_ref ?? null,
+      p_delivery_cost: p.cost ?? null,
+      p_client_op_id: p.client_op_id,
+    })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
+    return { ok: row.ok !== false, idempotent };
+  },
+  editOrder: async (args) => {
+    const { callPosRpc } = await import("@/lib/pos/rpc");
+    const row = (await callPosRpc("pos_edit_order", { p_payload: args.payload })) as Record<string, unknown>;
+    const idempotent = row.idempotent === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok !== false, idempotent };
   },
   moveTable: async (args) => {

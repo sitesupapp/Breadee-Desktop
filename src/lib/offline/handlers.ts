@@ -889,6 +889,54 @@ export const addOrderItemsHandler: OperationHandler = {
   },
 };
 
+/** delivery_ops — edit an open order's internal delivered-by / handler / cost offline
+ *  (pos_set_delivery_ops), exactly-once on client_op_id. No money, no external coordination; the
+ *  server resolves fee/margin. order_local → canonical remap when the order was created offline. */
+export const deliveryOpsHandler: OperationHandler = {
+  type: "delivery_ops",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as ItemEditPayload;
+    if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no delivery-ops payload" };
+    const resolved = await resolveEditOrder(p, ctx);
+    if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    try {
+      const r = await ctx.deps.setDeliveryOps({ payload: resolved.payload });
+      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "delivery_ops: transport", message: msg };
+      if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "delivery_ops_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
+/** edit_order — edit an open order's NOTE offline (pos_edit_order), exactly-once on client_op_id.
+ *  NOTE ONLY (a discount change is never captured offline). Every field is a SET so replay converges.
+ *  order_local → canonical remap when the order was created offline. */
+export const editOrderHandler: OperationHandler = {
+  type: "edit_order",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as ItemEditPayload;
+    if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no edit payload" };
+    const resolved = await resolveEditOrder(p, ctx);
+    if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    try {
+      const r = await ctx.deps.editOrder({ payload: resolved.payload });
+      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "edit_order: transport", message: msg };
+      if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "edit_order_conflict", message: msg };
+      const t = terminalClass(msg);
+      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
 /** A table-restructure refusal that means the floor changed since it was loaded — a stale version,
  *  a source no longer occupied / already settled / split / on-account, or a bill that moved. All are
  *  CONFLICTS the operator resolves (reload the floor + redo), never a hot retry and never a silent
@@ -1034,6 +1082,8 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${moveTableHandler.type}@${moveTableHandler.schemaVersion}`]: moveTableHandler,
   [`${mergeTablesHandler.type}@${mergeTablesHandler.schemaVersion}`]: mergeTablesHandler,
   [`${receivableCollectHandler.type}@${receivableCollectHandler.schemaVersion}`]: receivableCollectHandler,
+  [`${deliveryOpsHandler.type}@${deliveryOpsHandler.schemaVersion}`]: deliveryOpsHandler,
+  [`${editOrderHandler.type}@${editOrderHandler.schemaVersion}`]: editOrderHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

@@ -740,6 +740,9 @@ export async function setDeliveryOps(input: {
   deliveredByUserId: string | null;
   personRef: string | null;
   cost: number | null;
+  /** Exactly-once key for offline replay (pos_set_delivery_ops wraps pos_op_replay/record). Omitted
+   *  online → null → the plain core path, behaviour unchanged. */
+  clientOpId?: string | null;
 }): Promise<SetDeliveryOpsResult> {
   const row = asRecord(
     await callPosRpc("pos_set_delivery_ops", {
@@ -748,6 +751,7 @@ export async function setDeliveryOps(input: {
       p_delivered_by_user_id: input.deliveredByUserId,
       p_delivery_person_ref: input.personRef,
       p_delivery_cost: input.cost,
+      p_client_op_id: input.clientOpId ?? null,
     }),
   );
   const handler = strOrNull(row.delivery_handler_type);
