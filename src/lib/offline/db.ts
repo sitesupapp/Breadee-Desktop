@@ -818,6 +818,27 @@ export async function readCachedDeliveryQueue(tenantId: string | null, branchId:
   return { rows: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
 }
 
+// Phase F (rc.7) — Delivery REPORT read-only snapshot, reusing `snapshots`. The desktop NEVER
+// recomputes report metrics: this caches the exact server response for a (branch, from, to) range so
+// an offline reopen can show the LAST SYNCED report read-only instead of an indefinite skeleton. Not a
+// Reporting-Engine artefact and never presented as live/canonical — the UI labels it "last synced".
+const deliveryReportKey = (branchId: string | null, from: string, to: string) =>
+  `delivery_report:${branchId ?? "none"}:${from}:${to}`;
+
+/** Cache the exact delivery-report response for a range (call only after a successful online load). */
+export async function cacheDeliveryReport(report: unknown, tenantId: string | null, branchId: string | null, from: string, to: string): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({ key: deliveryReportKey(branchId, from, to), tenant_id: tenantId, branch_id: branchId, data: report, cached_at: new Date().toISOString() });
+}
+
+/** The cached delivery-report response for a (branch, range), or null. Scope-checked. */
+export async function readCachedDeliveryReport(tenantId: string | null, branchId: string | null, from: string, to: string): Promise<{ report: unknown; cachedAt: string } | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(deliveryReportKey(branchId, from, to));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  return { report: row.data, cachedAt: row.cached_at };
+}
+
 /** Cache an authoritative open bill for a table (call only after a successful online load). */
 export async function cacheBill(tableId: string, bill: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
   if (!tenantId || !tableId) return;

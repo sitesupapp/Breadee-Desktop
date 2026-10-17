@@ -1924,10 +1924,13 @@ export function useDineInWorkspace(input: {
       selected ? (
         <DineInRoundPanel
           table={selected}
-          bill={tables.bill}
-          billLoading={tables.billLoading}
-          billError={tables.billError}
-          refreshing={tables.refreshing || tables.billLoading}
+          /* OFFLINE: Add Items must read the SAME operational bill the table panel + payment use
+             (the local dineDraft projection), not the server-only tables.bill — otherwise a locally
+             known bill shows "could not be loaded" here while the sidebar shows it. Mirror the panel. */
+          bill={offlineCapture ? (offlineBill ?? tables.bill) : tables.bill}
+          billLoading={offlineCapture ? false : tables.billLoading}
+          billError={offlineCapture ? null : tables.billError}
+          refreshing={offlineCapture ? false : tables.refreshing || tables.billLoading}
           billChange={billChange}
           lines={roundLines}
           selectedKey={input.cartSelectedKey}
@@ -1952,7 +1955,7 @@ export function useDineInWorkspace(input: {
       ) : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
-      selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, billChange,
+      selected, tables.bill, tables.billLoading, tables.billError, tables.refreshing, offlineCapture, offlineBill, billChange,
       roundLines, input.cartSelectedKey, roundSubtotal, input.currency, roundBusy, submitGate,
       sendRound, discardRound, requestLeaveAddItems,
       editSentGate.allowed, editingLineId, onEditSentQty, onRemoveSentLine, onEditSentModifiers, itemHasModifiers,
@@ -2004,27 +2007,30 @@ export function useDineInWorkspace(input: {
       <PaymentDialog
         open={payOpen}
         busy={paying}
-        subtotal={tables.bill?.subtotal ?? 0}
-        primaryCurrency={tables.bill?.currency ?? input.currency}
+        /* OFFLINE: the payable total MUST come from the same operational bill the table panel shows
+           (settleBill = offline dineDraft projection when offline, else server bill) — NOT the
+           server-only tables.bill, which is null offline and rendered the total as 0. */
+        subtotal={settleBill?.subtotal ?? 0}
+        primaryCurrency={settleBill?.currency ?? input.currency}
         rate={input.rate}
         discountGate={pos.gates.applyDiscounts}
         payGate={payGate}
         paymentMethods={activePaymentMethods}
-        orderNumber={tables.bill?.orders.map((o) => o.order_number).filter(Boolean).join(", ") || null}
+        orderNumber={settleBill?.orders.map((o) => o.order_number).filter(Boolean).join(", ") || null}
         dineIn={
           selected
-            ? { tableName: selected.name, seats: selected.seats, orderCount: tables.bill?.orders.length ?? 0 }
+            ? { tableName: selected.name, seats: selected.seats, orderCount: settleBill?.orders.length ?? 0 }
             : null
         }
         onAccountDisabledReason={
-          pos.gates.takeOnAccount.allowed && input.online
-            ? null
-            : !pos.gates.takeOnAccount.allowed
-              ? pos.gates.takeOnAccount.reason
-              : "On-account sales need an internet connection."
+          !pos.gates.takeOnAccount.allowed
+            ? pos.gates.takeOnAccount.reason
+            : input.online || offlineCapture
+              ? null
+              : "On-account sales need the POS to be ready offline."
         }
         onAccount={
-          pos.gates.takeOnAccount.allowed && input.online
+          pos.gates.takeOnAccount.allowed && (input.online || offlineCapture)
             ? {
                 enabled: true,
                 customer: customerPicker.selected,

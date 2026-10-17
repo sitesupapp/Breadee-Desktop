@@ -76,6 +76,7 @@ import {
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
 import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
+import { proveOfflineReversible, captureOfflineRefund } from "@/lib/offline/refundOffline";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
 import { customerCreateLatch, SEARCH_DEBOUNCE_MS, selectedAddress, useCustomers } from "@/state/customers";
 import {
@@ -458,6 +459,11 @@ export function useDeliveryWorkspace(input: {
   // new/edited customer or address can be CAPTURED to the durable op log and replayed on reconnect —
   // the SAME Phase-E path the offline delivery SEND already consumes (customer_local / address_local).
   const customerOfflineReady = Boolean(pos.tenantId && pos.userId);
+  // Offline-ready for a void/cancel: the device has a 5-D scope so the CERTIFIED refund engine
+  // (refundOffline: proof-gated void_refund op) can capture a cancel/refund for replay. The actual
+  // reversibility is fail-closed at confirm time (proveOfflineReversible), so enabling the gate here
+  // only removes the blanket "needs a connection"; a non-reversible order still shows a clear reason.
+  const voidOfflineReady = Boolean(pos.tenantId && pos.userId);
   const lookupGate = useMemo(
     () => customerLookupGate({ deliveryAccess: accessGate, canView: canViewCustomers(pos.access) }),
     [accessGate, pos.access],
@@ -519,10 +525,13 @@ export function useDeliveryWorkspace(input: {
         canCancelOrders: cancelOrdersPermission,
         order: detail,
         orderShiftOpen: orderShiftOpen(detail, shiftOpenMap),
-        online,
+        // OFFLINE: lift the blanket connection refusal when the device is offline-ready — the handler
+        // reverses through the certified fail-closed refund engine. A paid refund still needs the
+        // order's shift open (voidOrderGate enforces it), so only a safe cancel/proven refund proceeds.
+        online: online || voidOfflineReady,
         busy: voidBusy,
       }),
-    [accessGate, cancelOrdersPermission, detail, shiftOpenMap, online, voidBusy],
+    [accessGate, cancelOrdersPermission, detail, shiftOpenMap, online, voidOfflineReady, voidBusy],
   );
 
   // --- Level 3B: the order under construction --------------------------------
@@ -1338,6 +1347,12 @@ export function useDeliveryWorkspace(input: {
         setOpsError(input.manageDelivery.reason ?? "You do not have permission to manage delivery details.");
         return;
       }
+      // Server-authoritative ops write (pos_set_delivery_ops) with no offline capture: show a
+      // controlled reason rather than firing a doomed live RPC that surfaces a raw network error.
+      if (!online) {
+        setOpsError("Editing delivery details needs a connection. Reconnect to update delivered-by, handler or cost.");
+        return;
+      }
       if (!opsLatch.current.acquire()) return;
       setOpsBusy(true);
       setOpsError(null);
@@ -1360,7 +1375,7 @@ export function useDeliveryWorkspace(input: {
         opsLatch.current.release();
       }
     },
-    [detail, input.manageDelivery, refreshDetail, refreshQueue, toast],
+    [detail, input.manageDelivery, online, refreshDetail, refreshQueue, toast],
   );
 
   // Save the order's advanced settlement PROVIDER + delivery cost through the ONE
@@ -1374,6 +1389,11 @@ export function useDeliveryWorkspace(input: {
       if (!target) return;
       if (!costCaptureGate.allowed) {
         setProvError(costCaptureGate.reason ?? "You do not have permission to set the delivery provider or cost.");
+        return;
+      }
+      // External provider settlement is server/provider-authoritative; no offline capture → controlled reason.
+      if (!online) {
+        setProvError("Setting the delivery provider or cost needs a connection.");
         return;
       }
       if (!provLatch.current.acquire()) return;
@@ -1392,7 +1412,7 @@ export function useDeliveryWorkspace(input: {
         provLatch.current.release();
       }
     },
-    [detail, costCaptureGate, refreshDetail, refreshQueue, toast],
+    [detail, costCaptureGate, online, refreshDetail, refreshQueue, toast],
   );
 
   // Load the queue when Orders is opened, and whenever the shift changes under
@@ -1999,6 +2019,35 @@ export function useDeliveryWorkspace(input: {
       try {
         const reason = validateVoidReason(rawReason);
 
+        // OFFLINE: reverse through the CERTIFIED refund engine (the same proveOfflineReversible +
+        // captureOfflineRefund path ReverseOrderDialog uses for Takeaway/Dine-in). FAIL-CLOSED: only a
+        // locally-proven original/balance may be reversed; an order with no local proof (e.g. a
+        // server-only order never hydrated here) gets a clear reason, never a raw fetch. Durable,
+        // deterministic op id, exactly-once on replay, conflict → needs_attention.
+        if (!online && itemEditOfflineScope) {
+          const proof = await proveOfflineReversible(target.id, itemEditOfflineScope);
+          if (!proof.ok) {
+            setVoidError(proof.reason);
+            return;
+          }
+          await captureOfflineRefund({
+            scope: itemEditOfflineScope,
+            proof: proof.proof,
+            action: proof.action,
+            reason,
+            tender: target.payment_method === "cash" ? "cash" : "other",
+          });
+          setVoidOpen(false);
+          await refreshDetail(target.id);
+          void refreshQueue();
+          toast.push({
+            tone: "success",
+            message: proof.action === "refund" ? "Refund saved offline" : "Order cancelled offline",
+            detail: "It will sync when you reconnect.",
+          });
+          return;
+        }
+
         const fresh = await readDeliveryOrder(target.id);
         checkOrderContext(fresh, { orderId: target.id, branchOrderIds: new Set(queue.map((o) => o.id)) });
         const order = fresh as DeliveryQueueOrder;
@@ -2066,7 +2115,7 @@ export function useDeliveryWorkspace(input: {
         setVoidBusy(false);
       }
     },
-    [detail, queue, accessGate, cancelOrdersPermission, online, refreshDetail, refreshQueue, toast],
+    [detail, queue, accessGate, cancelOrdersPermission, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast],
   );
 
   // --- Level 3D: the receipt for a past order ---------------------------------
@@ -2081,6 +2130,18 @@ export function useDeliveryWorkspace(input: {
    */
   const openHistoricalReceipt = useCallback(
     async (order: DeliveryQueueOrder) => {
+      // OFFLINE: the full delivery receipt is assembled from authoritative server reads
+      // (readHistoricalReceipt). Rather than fire a doomed fetch and surface a raw "Failed to fetch",
+      // show a controlled message — the order itself stays available offline. (A per-order durable
+      // receipt snapshot is not keyed by order id, so presenting the latest could show the wrong one.)
+      if (!online) {
+        toast.push({
+          tone: "info",
+          message: "Reconnect to open this order's receipt",
+          detail: "The full delivery receipt is assembled online; the order stays available offline.",
+        });
+        return;
+      }
       setReceiptBusy(true);
       try {
         const receipt = await readHistoricalReceipt({
@@ -2101,7 +2162,7 @@ export function useDeliveryWorkspace(input: {
         setReceiptBusy(false);
       }
     },
-    [receiptIdentity, pos.tenantName, pos.branch.name, pos.userName, input, toast],
+    [online, receiptIdentity, pos.tenantName, pos.branch.name, pos.userName, input, toast],
   );
 
   /**

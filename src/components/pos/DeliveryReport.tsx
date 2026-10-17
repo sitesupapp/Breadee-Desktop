@@ -15,13 +15,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, GatedButton, Input, Skeleton, type Gate } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import {
-  loadDeliveryReport,
   canResolveDeliveryRow,
   parseResolveDeliveryCost,
   resolveDeliveryCost,
   type DeliveryReport as Report,
   type DeliveryReportRow,
 } from "@/lib/pos/deliveryOrderManagement";
+import { loadDeliveryReportOfflineAware } from "@/lib/offline/deliveryReportOffline";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const fmtDay = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -56,6 +56,9 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Offline provenance: when offline, the report is the last-synced snapshot (or absent). */
+  const [offlineAt, setOfflineAt] = useState<string | null>(null);
+  const [offlineNoData, setOfflineNoData] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
   // Post-close cost resolution modal state.
   const [resolveRow, setResolveRow] = useState<DeliveryReportRow | null>(null);
@@ -71,9 +74,20 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
     }
     setLoading(true);
     setError(null);
+    setOfflineAt(null);
+    setOfflineNoData(false);
     try {
-      const r = await loadDeliveryReport({ from: applied.from, to: applied.to, branch: props.branchId });
-      setReport(r);
+      // Offline-aware: ONLINE loads the server report (authoritative) + write-throughs a read-only
+      // snapshot; OFFLINE serves the last-synced snapshot for this range, or a controlled
+      // connection-required state. No recomputation, no indefinite skeleton, no raw fetch error.
+      const r = await loadDeliveryReportOfflineAware({ from: applied.from, to: applied.to, branch: props.branchId });
+      if (r.offline && !r.report) {
+        setReport(null);
+        setOfflineNoData(true);
+      } else {
+        setReport(r.report);
+        setOfflineAt(r.offline ? r.cachedAt : null);
+      }
     } catch (e) {
       setReport(null);
       setError(e instanceof Error ? e.message : "Could not load the delivery report.");
@@ -168,12 +182,25 @@ export function DeliveryReport(props: { gate: Gate; currency: CurrencyCode; bran
           <Skeleton className="h-16" />
           <Skeleton className="h-16" />
         </div>
+      ) : offlineNoData ? (
+        // OFFLINE with no cached snapshot for this range: a FINISHED controlled state — never an
+        // indefinite skeleton, a raw fetch error, or fabricated zero totals.
+        <div className="rounded-2xl border border-line bg-white p-6 text-center text-sm font-semibold text-sub">
+          <p className="text-ink">Delivery Report requires a connection.</p>
+          <p className="mt-1 font-medium">Operational Delivery orders remain available offline.</p>
+        </div>
       ) : error ? (
         <div className="rounded-2xl border border-line bg-white p-6 text-center text-sm font-semibold text-red-700">
           {error}
         </div>
       ) : report && s ? (
         <>
+          {offlineAt && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-800">
+              Offline — showing last synced report data. Last updated: {new Date(offlineAt).toLocaleString()}. Orders
+              taken offline after this may not be included.
+            </div>
+          )}
           {/* Summary. Recorded figures cover ONLY orders that have a Delivery Cost. */}
           <div className="grid grid-cols-2 gap-2">
             <Stat label="Total Deliveries" value={String(s.total_delivery_orders)} />

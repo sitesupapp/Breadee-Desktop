@@ -27,7 +27,8 @@ class MemStorage {
 }
 (globalThis as unknown as { localStorage: MemStorage }).localStorage = new MemStorage();
 
-import { localdb, getCachedCustomer, readCachedFloor, addPosOfflineTxn, cacheDeliveryQueue, type PosOfflineTxn } from "@/lib/offline/db";
+import { localdb, getCachedCustomer, readCachedFloor, addPosOfflineTxn, cacheDeliveryQueue, cacheDeliveryReport, readCachedDeliveryReport, type PosOfflineTxn } from "@/lib/offline/db";
+import { loadDeliveryReportOfflineAware } from "@/lib/offline/deliveryReportOffline";
 import { getOperation } from "@/lib/offline/operationLog";
 import {
   captureCustomerUpsertOffline,
@@ -311,4 +312,68 @@ test("PosWorkspace pre-hydrates the floor + delivery queue during online POS use
   assert.match(pw, /floorPrewarmCached\(r\)/, "retries until the cache is present (READY/EMPTY)");
   assert.match(pw, /rcSetFloorHydrate\("SKIP_ACCESS"\)/, "records when the floor READ entitlement is missing");
   assert.match(pw, /prewarmDeliveryQueue\(\{ tenantId, branchId: pos\.branch\.id, shiftId, now: new Date\(\) \}\)/, "delivery queue prewarm wired with the shift-matching key");
+});
+
+// --- rc.7: Dine-In local bill projection + Delivery actions + Delivery report ----------------
+
+test("DINE-IN: Add-Items round panel and the payment modal read the OFFLINE operational bill, not the server-only one", () => {
+  const dw = srcOf("src/screens/pos/DineInWorkspace.tsx");
+  // Blocker 1 — Add Items (DineInRoundPanel) now mirrors the table panel's offline-aware source.
+  assert.match(dw, /bill=\{offlineCapture \? \(offlineBill \?\? tables\.bill\) : tables\.bill\}/, "round panel reads offline bill");
+  assert.match(dw, /billError=\{offlineCapture \? null : tables\.billError\}/, "round panel suppresses the server bill error offline");
+  // Blocker 2 — the payment modal totals come from settleBill (offline projection), not tables.bill.
+  assert.match(dw, /subtotal=\{settleBill\?\.subtotal \?\? 0\}/, "payment total from settleBill");
+  assert.match(dw, /orderNumber=\{settleBill\?\.orders/, "payment order number from settleBill");
+  // On-account is capability-gated (online OR offline-ready), not blanket online.
+  assert.match(dw, /pos\.gates\.takeOnAccount\.allowed && \(input\.online \|\| offlineCapture\)/, "on-account enabled offline when ready");
+  assert.doesNotMatch(dw, /On-account sales need an internet connection\./, "the blanket on-account internet gate is gone");
+});
+
+test("DELIVERY void/cancel is wired to the certified fail-closed refund engine, gated per-capability (not blanket online)", () => {
+  const dw = srcOf("src/screens/pos/DeliveryWorkspace.tsx");
+  assert.match(dw, /proveOfflineReversible\(target\.id, itemEditOfflineScope\)/, "offline void proves reversibility fail-closed");
+  assert.match(dw, /captureOfflineRefund\(\{/, "offline void captures via the certified engine");
+  assert.match(dw, /online: online \|\| voidOfflineReady/, "void gate lifts the blanket offline refusal when ready");
+  // Print / ops / provider offline → controlled message, never a raw doomed fetch.
+  assert.match(dw, /Reconnect to open this order's receipt/, "print offline is controlled");
+  assert.match(dw, /Editing delivery details needs a connection/, "ops save offline is controlled");
+});
+
+test("R1/R2/R3 — Delivery report: online write-through; offline serves the cached snapshot; offline-uncached is controlled (no recompute)", async () => {
+  const REPORT = { summary: { total_delivery_orders: 2 }, rows: [] } as never;
+  // R1 — ONLINE loads + write-throughs the EXACT response for this (branch, range).
+  const online = await loadDeliveryReportOfflineAware(
+    { from: "2026-10-17", to: "2026-10-17", branch: "b1" },
+    { reachable: async () => true, load: async () => REPORT, tenantId: async () => "t1" },
+  );
+  assert.equal(online.offline, false);
+  assert.deepEqual(online.report, REPORT);
+  const cached = await readCachedDeliveryReport("t1", "b1", "2026-10-17", "2026-10-17");
+  assert.deepEqual(cached?.report, REPORT, "the exact server response is cached read-only");
+  // R2 — OFFLINE serves the cached snapshot (labelled last-synced by the component); loader not called.
+  let loaderCalled = false;
+  const off = await loadDeliveryReportOfflineAware(
+    { from: "2026-10-17", to: "2026-10-17", branch: "b1" },
+    { reachable: async () => false, load: async () => { loaderCalled = true; throw new Error("no"); }, tenantId: async () => "t1" },
+  );
+  assert.equal(off.offline, true);
+  assert.deepEqual(off.report, REPORT);
+  assert.ok(off.cachedAt, "carries the last-synced timestamp");
+  assert.equal(loaderCalled, false, "never calls the server loader offline");
+  // R3 — OFFLINE uncached range → controlled (null report, offline), no fabricated zeros.
+  const none = await loadDeliveryReportOfflineAware(
+    { from: "2026-01-01", to: "2026-01-01", branch: "b1" },
+    { reachable: async () => false, load: async () => { throw new Error("no"); }, tenantId: async () => "t1" },
+  );
+  assert.equal(none.offline, true);
+  assert.equal(none.report, null);
+});
+
+test("Delivery report component shows a controlled offline state and a last-synced badge, not an indefinite skeleton", () => {
+  const dr = srcOf("src/components/pos/DeliveryReport.tsx");
+  assert.match(dr, /loadDeliveryReportOfflineAware/, "uses the offline-aware loader (probe-gated, no hang)");
+  assert.match(dr, /Delivery Report requires a connection\./, "controlled offline-no-data state");
+  assert.match(dr, /showing last synced report data/, "last-synced badge for a cached offline report");
+  const cacheReport = cacheDeliveryReport; // referenced so the import is exercised
+  assert.equal(typeof cacheReport, "function");
 });
