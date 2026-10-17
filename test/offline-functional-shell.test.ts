@@ -27,21 +27,57 @@ class MemStorage {
 }
 (globalThis as unknown as { localStorage: MemStorage }).localStorage = new MemStorage();
 
-import { localdb, getCachedCustomer } from "@/lib/offline/db";
+import { localdb, getCachedCustomer, readCachedFloor, addPosOfflineTxn, cacheDeliveryQueue, type PosOfflineTxn } from "@/lib/offline/db";
 import { getOperation } from "@/lib/offline/operationLog";
 import {
   captureCustomerUpsertOffline,
   evaluateCustomerWriteOfflineReady,
   type CustomerOpScope,
 } from "@/lib/offline/customerOffline";
+import { prewarmFloorCache } from "@/state/floor";
+import {
+  loadDeliveryQueueOfflineAware,
+  projectLocalDeliveryOrders,
+  mergeDeliveryQueue,
+} from "@/lib/offline/deliveryQueueOffline";
+import type { DeliveryQueueOrder } from "@/lib/pos/deliveryOrderManagement";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const srcOf = (rel: string) => stripComments(readFileSync(join(here, "..", rel), "utf8"));
 
 const SCOPE: CustomerOpScope = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1" };
 
+function deliveryTxn(over: Partial<PosOfflineTxn> = {}): PosOfflineTxn {
+  return {
+    local_txn_id: "LOCAL-1",
+    client_op_id: "op-1",
+    tenant_id: "t1",
+    branch_id: "b1",
+    device_id: "dev1",
+    terminal_id: "term1",
+    cashier_user_id: "u1",
+    cashier_user_name: "Cashier",
+    shift_id: "s1",
+    created_at: "2026-10-17T10:00:00.000Z",
+    order_payload: { order_type: "delivery", customer_id: "c1", address_id: "a1", delivery_fee: 2, items: [] },
+    payment_intent: null,
+    sent_to_kitchen: true,
+    currency: "USD",
+    total: 12,
+    status: "queued",
+    attempts: 0,
+    ...over,
+  };
+}
+
 beforeEach(async () => {
-  await Promise.all([localdb.operations.clear(), localdb.entityMap.clear(), localdb.posCustomers.clear()]);
+  await Promise.all([
+    localdb.operations.clear(),
+    localdb.entityMap.clear(),
+    localdb.posCustomers.clear(),
+    localdb.snapshots.clear(),
+    localdb.posOfflineTxns.clear(),
+  ]);
 });
 
 // --- Delivery offline customer (Phase-E capture) ----------------------------
@@ -106,7 +142,7 @@ test("evaluateCustomerWriteOfflineReady: offline-ready + permission allows; not-
 
 test("Dine-In Floor Map: pre-hydrated on POS entry, and no raw fetch error offline", () => {
   const pw = srcOf("src/screens/pos/PosWorkspace.tsx");
-  assert.match(pw, /canViewFloor\(pos\.access\)\.allowed\) void useFloor\.getState\(\)\.load\(ctx\)/, "floor pre-hydrated during online POS use");
+  assert.match(pw, /const ok = await prewarmFloorCache\(ctx\)/, "floor pre-hydrated (awaited + confirmed) during online POS use");
   assert.match(pw, /canViewTables\(pos\.access\)\.allowed\) void useTables\.getState\(\)\.refresh\(ctx\)/, "table map pre-hydrated too");
   const floor = srcOf("src/state/floor.ts");
   assert.match(floor, /isBackendReachable/, "the no-cache branch classifies offline vs a real fault");
@@ -132,4 +168,123 @@ test("Transfer Center + Force End: modal opens offline with a controlled message
   const feb = srcOf("src/components/pos/ForceEndShiftBrowser.tsx");
   assert.match(feb, /if \(!open \|\| !online\)/, "the browser does not fetch offline");
   assert.match(feb, /Force-End needs a connection\./);
+});
+
+// --- A: Dine-In Floor pre-hydration (TEST 1 + TEST 2) ------------------------
+
+const FLOOR_CTX = { tenantId: "t1", branchId: "b1" };
+const SAMPLE_LAYOUT = { hasPublished: true, sections: [{ id: "sec1", name: "Main" }], elements: [] } as never;
+
+test("TEST1 — floor prewarm writes the durable cache WITHOUT visiting Dine-In; the production read path finds it", async () => {
+  // Normal POS hydration path (no Map mount): prewarm with a stubbed online layout load.
+  const ok = await prewarmFloorCache(FLOOR_CTX, async () => SAMPLE_LAYOUT);
+  assert.equal(ok, true, "prewarm confirms the durable write committed (floorCache=READY is truthful)");
+  // The EXACT production read path used by the floor store offline:
+  const read = await readCachedFloor("t1", "b1");
+  assert.ok(read, "readCachedFloor finds the prewarmed floor");
+  assert.deepEqual(read?.layout, SAMPLE_LAYOUT, "write key == read key (same tenant+branch)");
+});
+
+test("TEST2 — floor cold restart: the cache survives store recreation and reads back on the same key", async () => {
+  await prewarmFloorCache(FLOOR_CTX, async () => SAMPLE_LAYOUT);
+  // Simulate a cold restart: the zustand store is gone, only durable Dexie survives.
+  const { useFloor } = await import("@/state/floor");
+  useFloor.getState().reset();
+  const read = await readCachedFloor("t1", "b1");
+  assert.deepEqual(read?.layout, SAMPLE_LAYOUT, "same floor/layout restores offline after restart");
+});
+
+test("floor prewarm fails closed (no throw) when the layout load is unreachable; cache stays absent", async () => {
+  const ok = await prewarmFloorCache(FLOOR_CTX, async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  assert.equal(ok, false);
+  assert.equal(await readCachedFloor("t1", "b1"), null);
+});
+
+// --- B: Delivery Orders offline continuity (TEST 3 / 4 / 5 / 6) --------------
+
+const CANON_ORDER: DeliveryQueueOrder = {
+  id: "SRV-1", order_number: "D-100", status: "sent_to_kitchen", payment_status: "unpaid", payment_method: null,
+  subtotal: 10, discount_amount: null, total_amount: 10, currency: "USD", customer_id: "c0", address_id: "a0",
+  notes: null, shift_id: "s1", created_at: "2026-10-17T09:00:00.000Z",
+};
+
+test("TEST3 — online load writes the snapshot; offline load serves it with NO network call", async () => {
+  // ONLINE (stubbed reachable + loader): write-through the snapshot.
+  const online = await loadDeliveryQueueOfflineAware(
+    { tenantId: "t1", branchId: "b1", shiftId: "s1", now: new Date() },
+    { reachable: async () => true, load: async () => [CANON_ORDER] },
+  );
+  assert.equal(online.offline, false);
+  assert.deepEqual(online.orders, [CANON_ORDER]);
+  // OFFLINE: a loader that WOULD throw must never be called — the snapshot is served instead.
+  const offline = await loadDeliveryQueueOfflineAware(
+    { tenantId: "t1", branchId: "b1", shiftId: "s1", now: new Date() },
+    { reachable: async () => false, load: async () => { throw new TypeError("Failed to fetch"); } },
+  );
+  assert.equal(offline.offline, true);
+  assert.equal(offline.orders.length, 1);
+  assert.equal(offline.orders[0].id, "SRV-1");
+});
+
+test("TEST4 — a local offline-created delivery order appears in the offline Orders list", async () => {
+  await addPosOfflineTxn(deliveryTxn({ local_txn_id: "LOCAL-9", client_op_id: "op-9" }));
+  const locals = await projectLocalDeliveryOrders("t1", "b1", "s1");
+  assert.equal(locals.length, 1);
+  assert.equal(locals[0].id, "LOCAL-9");
+  assert.equal(locals[0].order_number, "OFF-LOCAL-");
+  assert.equal(locals[0].payment_status, "unpaid");
+  // And it is merged into the offline list alongside the canonical snapshot.
+  await cacheDeliveryQueue([CANON_ORDER], "t1", "b1", "s1");
+  const { orders } = await loadDeliveryQueueOfflineAware(
+    { tenantId: "t1", branchId: "b1", shiftId: "s1", now: new Date() },
+    { reachable: async () => false, load: async () => { throw new Error("no"); } },
+  );
+  assert.deepEqual(orders.map((o) => o.id).sort(), ["LOCAL-9", "SRV-1"]);
+});
+
+test("TEST5 — a local order that has fully synced does NOT double with its canonical row", async () => {
+  // A synced local txn carrying its canonical server id; the snapshot already holds that canonical order.
+  await addPosOfflineTxn(deliveryTxn({ local_txn_id: "LOCAL-5", client_op_id: "op-5", status: "synced", server_order_id: "SRV-1" }));
+  await cacheDeliveryQueue([CANON_ORDER], "t1", "b1", "s1");
+  const { orders } = await loadDeliveryQueueOfflineAware(
+    { tenantId: "t1", branchId: "b1", shiftId: "s1", now: new Date() },
+    { reachable: async () => false, load: async () => { throw new Error("no"); } },
+  );
+  assert.equal(orders.length, 1, "exactly one order — not local + canonical");
+  assert.equal(orders[0].id, "SRV-1");
+});
+
+test("TEST6 — offline refresh serves local data and never calls the server loader (no raw fetch)", async () => {
+  let loaderCalled = false;
+  const { offline } = await loadDeliveryQueueOfflineAware(
+    { tenantId: "t1", branchId: "b1", shiftId: "s1", now: new Date() },
+    { reachable: async () => false, load: async () => { loaderCalled = true; return []; } },
+  );
+  assert.equal(offline, true);
+  assert.equal(loaderCalled, false, "the server loader is never invoked offline");
+});
+
+test("mergeDeliveryQueue de-dupes by id and sorts newest-first", () => {
+  const a: DeliveryQueueOrder = { ...CANON_ORDER, id: "A", created_at: "2026-10-17T08:00:00.000Z" };
+  const b: DeliveryQueueOrder = { ...CANON_ORDER, id: "B", created_at: "2026-10-17T10:00:00.000Z" };
+  const dupA: DeliveryQueueOrder = { ...CANON_ORDER, id: "A", created_at: "2026-10-17T08:00:00.000Z" };
+  const merged = mergeDeliveryQueue([a], [b, dupA]);
+  assert.deepEqual(merged.map((o) => o.id), ["B", "A"]);
+});
+
+test("Delivery Orders loader is offline-aware in the UI, with a controlled offline empty state", () => {
+  const dw = srcOf("src/screens/pos/DeliveryWorkspace.tsx");
+  assert.match(dw, /loadDeliveryQueueOfflineAware/, "refreshQueue uses the offline-aware loader");
+  assert.match(dw, /setQueueOffline/, "tracks offline provenance for the empty state");
+  const q = srcOf("src/components/pos/DeliveryOrderQueue.tsx");
+  assert.match(q, /No delivery orders saved on this device yet/, "controlled offline empty message");
+});
+
+test("PosWorkspace pre-hydrates the floor + delivery queue during online POS use and surfaces floorCache diagnostics", () => {
+  const pw = srcOf("src/screens/pos/PosWorkspace.tsx");
+  assert.match(pw, /prewarmFloorCache\(ctx\)/, "floor prewarm wired");
+  assert.match(pw, /rcSetFloorHydrate\(ok \? "SUCCESS" : "FAILED"\)/, "floorHydrate diagnostic set");
+  assert.match(pw, /prewarmDeliveryQueue\(\{ tenantId, branchId: pos\.branch\.id, shiftId, now: new Date\(\) \}\)/, "delivery queue prewarm wired with the shift-matching key");
 });

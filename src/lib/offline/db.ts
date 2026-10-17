@@ -796,6 +796,28 @@ export async function readCachedFloor(tenantId: string | null, branchId: string 
   return { layout: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
 }
 
+// Phase F (rc.5) — Delivery ORDERS queue read-snapshot, reusing `snapshots`. A READ/CONTINUITY
+// projection only (never a mutation authority — pending writes stay in the operation log / posOfflineTxns).
+// Written write-through on a successful online queue load (and a hydration prewarm), read offline so the
+// Delivery → Orders tab never raises a raw "Failed to fetch". Scope: tenant + branch + shift.
+const deliveryQueueKey = (branchId: string | null, shiftId: string | null) =>
+  `delivery_queue:${branchId ?? "none"}:${shiftId ?? "today"}`;
+
+/** Cache the operator's delivery-order queue for offline continuity (call only after a successful load). */
+export async function cacheDeliveryQueue(rows: unknown, tenantId: string | null, branchId: string | null, shiftId: string | null): Promise<void> {
+  if (!tenantId) return;
+  await localdb.snapshots.put({ key: deliveryQueueKey(branchId, shiftId), tenant_id: tenantId, branch_id: branchId, data: rows, cached_at: new Date().toISOString() });
+}
+
+/** The cached delivery-order queue for a branch+shift, or null. Scope-checked. */
+export async function readCachedDeliveryQueue(tenantId: string | null, branchId: string | null, shiftId: string | null): Promise<{ rows: unknown; cachedAt: number } | null> {
+  if (!tenantId) return null;
+  const row = await localdb.snapshots.get(deliveryQueueKey(branchId, shiftId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { rows: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
 /** Cache an authoritative open bill for a table (call only after a successful online load). */
 export async function cacheBill(tableId: string, bill: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
   if (!tenantId || !tableId) return;

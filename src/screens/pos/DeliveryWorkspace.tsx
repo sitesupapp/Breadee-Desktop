@@ -75,6 +75,7 @@ import {
 } from "@/lib/pos/customers";
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
+import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
 import { customerCreateLatch, SEARCH_DEBOUNCE_MS, selectedAddress, useCustomers } from "@/state/customers";
 import {
@@ -114,7 +115,6 @@ import {
   editDeliveryOrder,
   editOrderGate,
   loadDeliveryOrderLines,
-  loadDeliveryQueue,
   performEdit,
   performVoid,
   queueCounts,
@@ -350,6 +350,8 @@ export function useDeliveryWorkspace(input: {
   const [queue, setQueue] = useState<DeliveryQueueOrder[]>([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
+  /** True when the queue was served from the offline snapshot/local projection (controls the empty-state wording). */
+  const [queueOffline, setQueueOffline] = useState(false);
   const [parties, setParties] = useState<Map<string, OrderParty>>(new Map());
   /** Which of the queue's shifts are still open. Refunds depend on it. */
   const [shiftOpenMap, setShiftOpenMap] = useState<Map<string, boolean>>(new Map());
@@ -1207,13 +1209,18 @@ export function useDeliveryWorkspace(input: {
     setQueueLoading(true);
     setQueueError(null);
     try {
-      const rows = await loadDeliveryQueue({
+      // Offline-aware: ONLINE loads the server queue + write-throughs the durable snapshot; OFFLINE
+      // reads that snapshot merged with locally-known offline delivery orders — never a raw
+      // "Failed to fetch". `loadOrderParties` / `loadShiftOpenMap` already fail soft to empty maps
+      // offline, so no raw network error reaches the UI from them either.
+      const { orders: rows, offline } = await loadDeliveryQueueOfflineAware({
         tenantId: pos.tenantId,
         branchId,
         shiftId: input.shiftId,
         now: new Date(),
       });
       setQueue(rows);
+      setQueueOffline(offline);
       const [who, shifts] = await Promise.all([
         loadOrderParties(rows).catch(() => new Map<string, OrderParty>()),
         loadShiftOpenMap(rows.map((o) => o.shift_id)).catch(() => new Map<string, boolean>()),
@@ -2351,6 +2358,7 @@ export function useDeliveryWorkspace(input: {
             currency={input.currency}
             loading={queueLoading}
             error={queueError}
+            offline={queueOffline}
             selectedId={detail?.id ?? null}
             onSelect={openDetail}
             onRefresh={() => void refreshQueue()}

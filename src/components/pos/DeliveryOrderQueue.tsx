@@ -35,6 +35,9 @@ export type DeliveryOrderQueueProps = {
   currency: CurrencyCode;
   loading: boolean;
   error: string | null;
+  /** True when the list was served from the offline snapshot/local projection — tunes the empty-state
+   *  wording so "nothing saved on this device" is distinguished from "no orders exist". */
+  offline?: boolean;
   selectedId: string | null;
   onSelect: (order: DeliveryQueueOrder) => void;
   onRefresh: () => void;
@@ -74,11 +77,13 @@ export function DeliveryOrderQueue(props: DeliveryOrderQueueProps) {
         ) : props.orders.length === 0 ? (
           <EmptyState
             icon="-"
-            title="No delivery orders yet"
+            title={props.offline ? "No delivery orders saved on this device yet" : "No delivery orders yet"}
             hint={
-              props.shiftScoped
-                ? "Orders taken during this shift will appear here."
-                : "Delivery orders taken today at this branch will appear here."
+              props.offline
+                ? "Orders hydrated while online, or taken offline, appear here. Reconnect to load the rest."
+                : props.shiftScoped
+                  ? "Orders taken during this shift will appear here."
+                  : "Delivery orders taken today at this branch will appear here."
             }
           />
         ) : (

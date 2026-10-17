@@ -35,6 +35,10 @@ export function RcDiagnosticStrip({ snapshot }: { snapshot: RcAccessSnapshot }) 
         gates DI={yn(g.dineIn)} DE={yn(g.delivery)} TR={yn(g.transfer)} FE={yn(g.forceEnd)} · mode={snapshot.mode}
       </div>
       <div>
+        floorCache={snapshot.floorCache === null ? "?" : snapshot.floorCache ? "READY" : "MISSING"} floorHydrate=
+        {snapshot.floorHydrate}
+      </div>
+      <div>
         in POS={yn(snapshot.inputs.featPos)} DIf={yn(snapshot.inputs.featDineIn)} DEf={yn(snapshot.inputs.featDelivery)}{" "}
         acc={yn(snapshot.inputs.permAccess)} tbl={yn(snapshot.inputs.permTablesView)} tV={yn(snapshot.inputs.permTransfersView)}{" "}
         cO={yn(snapshot.inputs.permCloseOther)} sR={yn(snapshot.inputs.permSelectRecipient)}

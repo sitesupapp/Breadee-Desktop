@@ -92,13 +92,14 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewTables, canViewTransfers } from "@/lib/pos/access";
+import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewOrders, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
-import { useFloor } from "@/state/floor";
+import { prewarmFloorCache } from "@/state/floor";
+import { prewarmDeliveryQueue } from "@/lib/offline/deliveryQueueOffline";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
-import { pendingCount } from "@/lib/offline/db";
+import { pendingCount, readCachedFloor } from "@/lib/offline/db";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
@@ -109,7 +110,7 @@ import { evaluateDineinOfflineReady, type DineinScope } from "@/lib/offline/dine
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
 import { RcDiagnosticStrip } from "@/components/pos/RcDiagnosticStrip";
-import { rcDiagnosticsOn, rcLogSnapshot, rcLogNav, rcContextCachePresent, rcAccessInputs, type RcAccessSnapshot } from "@/lib/rcDiagnostics";
+import { rcDiagnosticsOn, rcLogSnapshot, rcLogNav, rcContextCachePresent, rcAccessInputs, rcSetFloorHydrate, rcFloorHydrate, type RcAccessSnapshot } from "@/lib/rcDiagnostics";
 import type { CartLine, DeliveryFeeCashTreatment, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
@@ -224,16 +225,34 @@ function PosWorkspaceInner() {
     };
   }, [pos.allowed, tenantId, fetchMenu]);
 
-  // Pre-hydrate Dine-In operational data (table map + published FLOOR layout)
-  // during NORMAL online POS use, so the table List AND the visual Floor Map are
-  // offline-ready WITHOUT the operator having to open the Map online first. Each
-  // store caches on success; both are a no-op / clean-empty offline. Gated on the
-  // relevant access and a live connection, and scoped to this tenant+OU.
+  // Pre-hydrate Dine-In operational data (table map + published FLOOR layout) during NORMAL online POS
+  // use, so the table List AND the visual Floor Map are offline-ready WITHOUT the operator opening the
+  // Map online first. `prewarmFloorCache` AWAITS + confirms the durable write (unlike the store's
+  // fire-and-forget), so floorCache=READY is truthful — the rc.4 gap was the operator disconnecting
+  // before the async write landed, with no READY signal to wait on. No-op / clean offline.
+  const [floorCacheReady, setFloorCacheReady] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!pos.allowed || !tenantId || !pos.branch.id || !online) return;
+    if (!pos.allowed || !tenantId || !pos.branch.id) return;
     const ctx = { tenantId, branchId: pos.branch.id };
-    if (canViewTables(pos.access).allowed) void useTables.getState().refresh(ctx);
-    if (canViewFloor(pos.access).allowed) void useFloor.getState().load(ctx);
+    let active = true;
+    // Reflect the CURRENT durable floor-cache presence (online OR offline / cold restart) for the diagnostic.
+    void readCachedFloor(tenantId, pos.branch.id)
+      .then((c) => { if (active) setFloorCacheReady(c != null); })
+      .catch(() => {});
+    if (online) {
+      if (canViewTables(pos.access).allowed) void useTables.getState().refresh(ctx);
+      if (canViewFloor(pos.access).allowed) {
+        void (async () => {
+          const ok = await prewarmFloorCache(ctx);
+          if (!active) return;
+          rcSetFloorHydrate(ok ? "SUCCESS" : "FAILED");
+          if (ok) setFloorCacheReady(true);
+        })();
+      }
+    }
+    return () => {
+      active = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pos.allowed, tenantId, pos.branch.id, online]);
 
@@ -248,6 +267,17 @@ function PosWorkspaceInner() {
   }, [pos.allowed, tenantId, userId, pos.branch.id]);
 
   const shiftId = requireOpenShiftId(shiftStore.shift);
+
+  // Pre-hydrate the Delivery ORDERS queue during normal online POS use, so Delivery → Orders is
+  // offline-ready WITHOUT the operator opening it online first. MUST use the SAME shiftId the Orders
+  // tab reads with, so the snapshot key matches (shift-scoped when a shift is open, else today).
+  // Online-only, write-through to the durable snapshot; a no-op offline.
+  useEffect(() => {
+    if (!pos.allowed || !tenantId || !pos.branch.id || !online) return;
+    if (!canViewOrders(pos.access).allowed) return;
+    void prewarmDeliveryQueue({ tenantId, branchId: pos.branch.id, shiftId, now: new Date() });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pos.allowed, tenantId, pos.branch.id, shiftId, online]);
 
   // --- offline: backend reachability probe (qualifies the Online badge) -------
   // A short, non-mutating probe is the deciding authority for connectivity, never
@@ -1026,9 +1056,11 @@ function PosWorkspaceInner() {
         forceEnd: forceEndBrowserAllowed,
       },
       inputs: rcAccessInputs(pos.access),
+      floorCache: floorCacheReady,
+      floorHydrate: rcFloorHydrate(),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [online, session.offlineMode, backendReachable, pos.access, pos.ready, mode, tablesGate.allowed, deliveryGate.allowed, transferRailAllowed, forceEndBrowserAllowed],
+    [online, session.offlineMode, backendReachable, pos.access, pos.ready, mode, tablesGate.allowed, deliveryGate.allowed, transferRailAllowed, forceEndBrowserAllowed, floorCacheReady],
   );
   const rcPrevPostureRef = useRef<boolean | null>(null);
   useEffect(() => {

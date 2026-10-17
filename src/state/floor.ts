@@ -158,3 +158,29 @@ export function isFloorStale(lastLoadedAt: number | null, now: number): boolean 
   if (lastLoadedAt === null) return false;
   return now - lastLoadedAt > FLOOR_STALE_AFTER_MS;
 }
+
+/**
+ * Pre-warm the durable floor cache for a branch WITHOUT mounting the Map, so the visual Floor Map
+ * renders offline the FIRST time Dine-In is opened — the operator never has to visit it online first.
+ *
+ * Unlike the store's `load` (which write-throughs fire-and-forget), this AWAITS the cache write AND
+ * confirms it by reading it back, so a caller can report floorCache=READY only once the durable write
+ * has actually committed — the exact gap behind "the floor isn't saved for offline use yet" in the
+ * native RC (the operator disconnected before the async write landed, with no READY signal to wait on).
+ *
+ * The loader is injectable for tests; it NEVER throws (an unreachable backend simply yields false).
+ */
+export async function prewarmFloorCache(
+  ctx: Context,
+  load: (branchId: string | null) => Promise<FloorLayout> = loadFloorLayout,
+): Promise<boolean> {
+  if (!ctx.tenantId || !ctx.branchId) return false;
+  try {
+    const layout = await load(ctx.branchId);
+    await cacheFloor(layout, ctx.tenantId, ctx.branchId);
+    const confirmed = await readCachedFloor(ctx.tenantId, ctx.branchId);
+    return confirmed != null;
+  } catch {
+    return false;
+  }
+}

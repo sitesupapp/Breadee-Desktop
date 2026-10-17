@@ -93,7 +93,23 @@ export type RcAccessSnapshot = {
   mode: string;
   gates: { dineIn: boolean; delivery: boolean; transfer: boolean; forceEnd: boolean };
   inputs: RcAccessInputs;
+  /** Floor offline-readiness: true = durable floor cache present for this scope, false = missing,
+   *  null = not yet checked. Plus the pre-hydration outcome. */
+  floorCache: boolean | null;
+  floorHydrate: RcFloorHydrate;
 };
+
+// Floor pre-hydration outcome, surfaced so a native tester can confirm the floor became
+// offline-ready BEFORE disconnecting — without ever opening Dine-In. Set by the PosWorkspace
+// pre-hydration effect. "NOT_RUN" until the effect fires.
+export type RcFloorHydrate = "NOT_RUN" | "SUCCESS" | "FAILED";
+let floorHydrate: RcFloorHydrate = "NOT_RUN";
+export function rcSetFloorHydrate(s: RcFloorHydrate): void {
+  floorHydrate = s;
+}
+export function rcFloorHydrate(): RcFloorHydrate {
+  return floorHydrate;
+}
 
 /** The last few nav attempts, kept in memory for the on-screen readout. */
 export type RcNavEvent = { at: string; section: string; gateAllowed: boolean; outcome: string };
@@ -141,7 +157,8 @@ export function rcLogSnapshot(snap: RcAccessSnapshot): void {
       `gates{DI=${snap.gates.dineIn} DE=${snap.gates.delivery} TR=${snap.gates.transfer} FE=${snap.gates.forceEnd}} ` +
       `inputs{POS=${snap.inputs.featPos} DIfeat=${snap.inputs.featDineIn} DEfeat=${snap.inputs.featDelivery} ` +
       `access=${snap.inputs.permAccess} tables=${snap.inputs.permTablesView} tView=${snap.inputs.permTransfersView} ` +
-      `closeOther=${snap.inputs.permCloseOther} selRecip=${snap.inputs.permSelectRecipient}}`,
+      `closeOther=${snap.inputs.permCloseOther} selRecip=${snap.inputs.permSelectRecipient}} ` +
+      `floorCache=${snap.floorCache === null ? "?" : snap.floorCache ? "READY" : "MISSING"} floorHydrate=${snap.floorHydrate}`,
   );
 }
 

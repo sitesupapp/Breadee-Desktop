@@ -87,7 +87,10 @@ test("Delivery gained an Orders view rather than a second POS workspace", () => 
 });
 
 test("the queue is read through the audited reader, with the shift as its scope", () => {
-  assert.match(workspace, /loadDeliveryQueue\(\{[\s\S]*?tenantId: pos\.tenantId,[\s\S]*?branchId,[\s\S]*?shiftId: input\.shiftId/);
+  // rc.5: the queue is read through the OFFLINE-AWARE wrapper (online → the same audited
+  // loadDeliveryQueue + write-through snapshot; offline → the snapshot + local projection), with the
+  // same tenant/branch/shift scope.
+  assert.match(workspace, /loadDeliveryQueueOfflineAware\(\{[\s\S]*?tenantId: pos\.tenantId,[\s\S]*?branchId,[\s\S]*?shiftId: input\.shiftId/);
   // The scope sentence on screen is derived from the same condition the reader
   // branches on, so the list cannot describe itself wrongly.
   assert.match(workspace, /shiftScoped=\{Boolean\(input\.shiftId\)\}/);
