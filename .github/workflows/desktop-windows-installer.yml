@@ -90,6 +90,12 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: staging
+          # Temporary offline-access RC diagnostics (1.0.37). The build fingerprint lets
+          # the native tester confirm EXACTLY which build is installed, and the readout
+          # surfaces the offline access decision on-screen. OFF in every other build.
+          VITE_BUILD_SHA: ${{ github.sha }}
+          VITE_BUILD_RUN: ${{ github.run_id }}
+          VITE_RC_DIAGNOSTICS: "1"
 
       # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
@@ -113,6 +119,12 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: staging
+          # tauri:build re-runs the frontend build (beforeBuildCommand), so the same
+          # RC-diagnostic fingerprint must be present here too, or the packaged app
+          # would ship without it.
+          VITE_BUILD_SHA: ${{ github.sha }}
+          VITE_BUILD_RUN: ${{ github.run_id }}
+          VITE_RC_DIAGNOSTICS: "1"
 
       # 9. Upload the generated Windows installer as a build artifact.
       #    Tauri v2 (targets: ["nsis"]) emits the setup .exe here:

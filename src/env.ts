@@ -13,6 +13,16 @@ const raw = {
   // app from starting, and 0.0.0 is older than any real release, so the updater
   // treats it as "everything is newer" instead of "nothing is".
   APP_VERSION: ((import.meta.env.VITE_APP_VERSION as string | undefined) ?? "0.0.0").trim(),
+  // RC build fingerprint. Injected by the Windows-installer workflow from the
+  // GitHub context (github.sha / github.run_id). ABSENT in a normal/local build,
+  // which is exactly how the RC-only diagnostics stay off everywhere else.
+  BUILD_SHA: ((import.meta.env.VITE_BUILD_SHA as string | undefined) ?? "").trim(),
+  BUILD_RUN: ((import.meta.env.VITE_BUILD_RUN as string | undefined) ?? "").trim(),
+  // Turns on the temporary, read-only offline-access diagnostics (a visible build
+  // tag + a live access/gate readout + console traces). Set ONLY by the isolated
+  // RC build; never "1" in a normal build, so there is zero behavioural or visual
+  // change anywhere but the RC installer.
+  RC_DIAGNOSTICS: ((import.meta.env.VITE_RC_DIAGNOSTICS as string | undefined) ?? "").trim() === "1",
 };
 
 if (!raw.SUPABASE_URL || !raw.SUPABASE_ANON_KEY) {
@@ -102,5 +112,8 @@ export const env = {
   APP_PLATFORM: raw.APP_PLATFORM,
   APP_NAME: raw.APP_NAME,
   APP_VERSION: raw.APP_VERSION,
+  BUILD_SHA: raw.BUILD_SHA,
+  BUILD_RUN: raw.BUILD_RUN,
+  RC_DIAGNOSTICS: raw.RC_DIAGNOSTICS,
   IS_PRODUCTION: APP_ENV === "production",
 };

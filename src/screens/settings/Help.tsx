@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
 import { Card } from "@/components/ui";
+import { rcDiagnosticsOn, rcBuildFingerprint } from "@/lib/rcDiagnostics";
+import { resolveRuntimeVersion } from "@/lib/updater";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -9,9 +12,40 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+// TEMPORARY RC-only build identity. Renders nothing in a normal build. Lets the
+// native tester confirm EXACTLY which build is installed, so a "no change" result
+// can never be a stale-binary artefact. Non-sensitive: SHA / run / version only.
+function OfflineRcBuild() {
+  const [binaryVersion, setBinaryVersion] = useState<string>("…");
+  useEffect(() => {
+    let active = true;
+    resolveRuntimeVersion()
+      .then((v) => active && setBinaryVersion(v))
+      .catch(() => active && setBinaryVersion("unknown"));
+    return () => {
+      active = false;
+    };
+  }, []);
+  if (!rcDiagnosticsOn) return null;
+  const f = rcBuildFingerprint();
+  return (
+    <Card className="border-amber-300 bg-amber-50 p-5">
+      <h3 className="font-bold text-amber-900">OFFLINE RC BUILD</h3>
+      <div className="mt-2 space-y-1 font-mono text-sm text-amber-900">
+        <p>SHA: {f.shortSha}</p>
+        <p>BUILD: {f.run}</p>
+        <p>VERSION: {binaryVersion}</p>
+        <p>ENV: {f.env}</p>
+      </div>
+      <p className="mt-2 text-xs text-amber-800">Temporary diagnostic build. Not for production.</p>
+    </Card>
+  );
+}
+
 export function Help() {
   return (
     <div className="space-y-4">
+      <OfflineRcBuild />
       <p className="text-sm text-sub">How Breadee Desktop behaves online and offline, and how staff should use it safely.</p>
 
       <Section title="Requires internet">

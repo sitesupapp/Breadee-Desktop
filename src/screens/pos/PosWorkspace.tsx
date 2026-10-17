@@ -107,6 +107,8 @@ import { getDeviceIdentity } from "@/lib/device";
 import { evaluateDineinOfflineReady, type DineinScope } from "@/lib/offline/dineinOffline";
 import { getFullscreen, restoreWindowState, toggleFullscreen, trackWindowState } from "@/lib/window/state";
 import { roleLabel } from "@/lib/permissions";
+import { RcDiagnosticStrip } from "@/components/pos/RcDiagnosticStrip";
+import { rcDiagnosticsOn, rcLogSnapshot, rcLogNav, rcContextCachePresent, rcAccessInputs, type RcAccessSnapshot } from "@/lib/rcDiagnostics";
 import type { CartLine, DeliveryFeeCashTreatment, MenuData, ModifierGroup, ModifierOption, SelectedModifier, ShiftExpected, ShiftReport, SubmitOrderResult } from "@/types/pos";
 
 const EMPTY_MENU: MenuData = { categories: [], items: [], groups: [], options: [], groupsByItem: {} };
@@ -982,6 +984,48 @@ function PosWorkspaceInner() {
   // The supervisor Force-End browser (another cashier's stuck shift) is gated on the OTHER variant
   // (close_other_shifts + select_recipient). Fail-closed: without it the rail entry is not shown.
   const forceEndBrowserAllowed = canRequestForceEndShift(pos.access, false).allowed;
+
+  // --- TEMPORARY offline-access RC diagnostics (1.0.37) -----------------------
+  // A non-sensitive snapshot (counts + the four section gate results) surfaced
+  // on-screen (RcDiagnosticStrip) and traced to the console, so ONE native
+  // reproduction reveals the first divergence: which build is running, whether
+  // pos.access is populated offline, and which gate (if any) refuses. No-op in
+  // every non-RC build (gated on env.RC_DIAGNOSTICS).
+  const rcSnapshot: RcAccessSnapshot = useMemo(
+    () => ({
+      at: new Date().toISOString(),
+      reason: "render",
+      online,
+      offlineMode: session.offlineMode,
+      backendReachable,
+      navigatorOnline: typeof navigator !== "undefined" ? navigator.onLine : true,
+      contextCached: rcContextCachePresent(),
+      permissionsCount: Object.keys(pos.access.permissions ?? {}).length,
+      featuresCount: Object.keys(pos.access.features ?? {}).length,
+      membership: !!pos.access.membership,
+      contextLoaded: pos.ready,
+      mode,
+      gates: {
+        dineIn: tablesGate.allowed,
+        delivery: deliveryGate.allowed,
+        transfer: transferRailAllowed,
+        forceEnd: forceEndBrowserAllowed,
+      },
+      inputs: rcAccessInputs(pos.access),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [online, session.offlineMode, backendReachable, pos.access, pos.ready, mode, tablesGate.allowed, deliveryGate.allowed, transferRailAllowed, forceEndBrowserAllowed],
+  );
+  const rcPrevPostureRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!rcDiagnosticsOn) return;
+    // Trace on mount and on every online<->offline flip — the precise transition
+    // the native test exercises (mid-session disconnect AND cold offline start).
+    if (rcPrevPostureRef.current === online) return;
+    rcPrevPostureRef.current = online;
+    rcLogSnapshot({ ...rcSnapshot, reason: online ? "online" : "offline-transition" });
+  }, [online, rcSnapshot]);
+
   const tableStore = useTables();
   // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
   // The rail count is derived from state already in memory - no fetch of its own.
@@ -2351,7 +2395,10 @@ function PosWorkspaceInner() {
       enabled: tablesGate.allowed,
       reason: tablesGate.reason,
       active: mode === "dine_in" && !ordersOpen && !openTablesOpen,
-      onSelect: () => setMode("dine_in"),
+      onSelect: () => {
+        rcLogNav("dine_in", tablesGate.allowed, "setMode(dine_in)");
+        setMode("dine_in");
+      },
     },
     {
       key: "delivery",
@@ -2361,7 +2408,10 @@ function PosWorkspaceInner() {
       enabled: deliveryGate.allowed,
       reason: deliveryGate.reason,
       active: mode === "delivery" && !ordersOpen && !openTablesOpen,
-      onSelect: () => setMode("delivery"),
+      onSelect: () => {
+        rcLogNav("delivery", deliveryGate.allowed, "setMode(delivery)");
+        setMode("delivery");
+      },
     },
     {
       // Open Tables: a read-only lens over the dine-in table map showing every
@@ -2389,7 +2439,10 @@ function PosWorkspaceInner() {
       enabled: transferRailAllowed,
       reason: transferRailAllowed ? undefined : "You do not have permission to use transfers.",
       active: transferCenterOpen,
-      onSelect: () => setTransferCenterOpen(true),
+      onSelect: () => {
+        rcLogNav("transfer", transferRailAllowed, "openTransferCenter");
+        setTransferCenterOpen(true);
+      },
     },
     ...(forceEndBrowserAllowed
       ? [
@@ -2403,7 +2456,10 @@ function PosWorkspaceInner() {
             to: "/pos",
             enabled: true,
             active: forceEndBrowserOpen,
-            onSelect: () => setForceEndBrowserOpen(true),
+            onSelect: () => {
+              rcLogNav("force_end", forceEndBrowserAllowed, "openForceEndBrowser");
+              setForceEndBrowserOpen(true);
+            },
           },
         ]
       : []),
@@ -2424,6 +2480,8 @@ function PosWorkspaceInner() {
 
   return (
     <>
+      {/* TEMPORARY RC-only offline-access readout. Renders nothing in a normal build. */}
+      <RcDiagnosticStrip snapshot={rcSnapshot} />
       <PosShell
         routes={routes}
         /* CLOSE returns to the Desktop main page. It is a route change and

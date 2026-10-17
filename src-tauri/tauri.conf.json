@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Breadee Offline RC",
-  "version": "1.0.37",
+  "version": "1.0.37-rc.3",
   "identifier": "app.breadee.desktop.offlinerc",
   "build": {
     "frontendDist": "../dist",
