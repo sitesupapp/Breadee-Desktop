@@ -46,6 +46,9 @@ export async function capturePayOrderOffline(input: {
   expectedVersion?: number | null;
   cashAmountUsd?: number | null;
   orderNumber?: string | null;
+  /** rc.9 — every still-unsynced mutation of this order (item edits / provider / ops) from the
+   *  operational projection: the settle replays only AFTER them, never against a pre-edit total. */
+  dependencyIds?: string[];
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   const clientOpId = input.clientOpId;
   const operationId = PAY_ORDER_OP_PREFIX + clientOpId;
@@ -61,7 +64,7 @@ export async function capturePayOrderOffline(input: {
     client_op_id: clientOpId,
     local_entity_id: null, // settles an existing order; creates no new local entity
     canonical_entity_id: input.orderLocal ? null : input.orderId,
-    dependency_ids: [],
+    dependency_ids: Array.from(new Set(input.dependencyIds ?? [])),
     depends_on_local_entities: input.orderLocal ? [input.orderLocal] : [],
     payload: {
       order_id: input.orderLocal ? null : input.orderId,

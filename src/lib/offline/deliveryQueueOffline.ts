@@ -14,6 +14,7 @@
 
 import { isBackendReachable } from "@/lib/offline/reachability";
 import {
+  cacheDeliveryLines,
   cacheDeliveryQueue,
   readCachedDeliveryQueue,
   listPosOfflineTxns,
@@ -118,8 +119,46 @@ export async function prewarmDeliveryQueue(input: DeliveryQueueInput): Promise<b
     if (!(await isBackendReachable())) return false;
     const rows = await loadDeliveryQueue(input);
     await cacheDeliveryQueue(rows, input.tenantId, input.branchId, input.shiftId);
+    // rc.9 — also pre-hydrate the LINES of the open, unpaid orders (bounded) so the offline operational
+    // projection can show + edit them without the operator having opened each one online first.
+    void prewarmOpenDeliveryLines(input.tenantId, input.branchId, rows);
     return true;
   } catch {
     return false;
   }
+}
+
+/** rc.9 — per-session signature of the last line snapshot pre-warmed per order (version + total). */
+const linesSig = new Map<string, string>();
+
+/** Bounded (≤ 40 orders, 3 at a time) write-through of open unpaid delivery orders' lines. Read-only;
+ *  never throws. The loader is injectable for tests. */
+export async function prewarmOpenDeliveryLines(
+  tenantId: string | null,
+  branchId: string | null,
+  rows: DeliveryQueueOrder[],
+  load?: (orderId: string) => Promise<unknown>,
+): Promise<number> {
+  if (!tenantId) return 0;
+  const reader = load ?? (async (id: string) => (await import("@/lib/pos/deliveryOrderManagement")).loadDeliveryOrderLines(id));
+  const todo = rows
+    .filter((r) => r.status === "sent_to_kitchen" && r.payment_status === "unpaid")
+    .filter((r) => linesSig.get(r.id) !== `${r.pos_entity_version ?? ""}|${r.total_amount ?? ""}`)
+    .slice(0, 40);
+  let done = 0;
+  const worker = async () => {
+    for (let r = todo.shift(); r; r = todo.shift()) {
+      const fetchedAt = Date.now();
+      try {
+        const lines = await reader(r.id);
+        await cacheDeliveryLines(r.id, lines, tenantId, branchId, fetchedAt);
+        linesSig.set(r.id, `${r.pos_entity_version ?? ""}|${r.total_amount ?? ""}`);
+        done += 1;
+      } catch {
+        /* best-effort */
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  return done;
 }

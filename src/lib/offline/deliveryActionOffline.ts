@@ -33,8 +33,8 @@ export type CaptureDeliveryActionResult = { operationId: string; clientOpId: str
 
 async function capture(
   prefix: string,
-  opType: "delivery_ops" | "edit_order",
-  input: { scope: DeliveryActionScope; orderId: string | null; orderLocal: string | null; payload: Record<string, unknown>; clientOpId: string },
+  opType: "delivery_ops" | "edit_order" | "delivery_set_provider",
+  input: { scope: DeliveryActionScope; orderId: string | null; orderLocal: string | null; payload: Record<string, unknown>; clientOpId: string; dependencyIds?: string[] },
 ): Promise<CaptureDeliveryActionResult> {
   const clientOpId = input.clientOpId;
   const operationId = prefix + clientOpId;
@@ -50,7 +50,7 @@ async function capture(
     client_op_id: clientOpId,
     local_entity_id: null, // mutates an existing order; creates no new local entity
     canonical_entity_id: input.orderLocal ? null : input.orderId,
-    dependency_ids: [],
+    dependency_ids: Array.from(new Set(input.dependencyIds ?? [])),
     // An offline-created target order must sync first; the orchestrator gates on this local id.
     depends_on_local_entities: input.orderLocal ? [input.orderLocal] : [],
     payload: { payload: input.payload, order_local: input.orderLocal },
@@ -94,4 +94,19 @@ export async function captureEditOrderNoteOffline(input: {
   clientOpId: string;
 }): Promise<CaptureDeliveryActionResult> {
   return capture("editorder:", "edit_order", { ...input, orderLocal: input.orderLocal ?? null });
+}
+
+/** rc.9 — capture an offline delivery PROVIDER selection. `payload` = order_id, provider_id, cost,
+ *  cost_provided, client_op_id for pos_delivery_set_provider (replay-safe on p_client_op_id). The
+ *  provider MUST come from the cached authorized operational catalog (the caller checks); the server
+ *  re-validates at replay. Idempotent on the op id. No external provider is contacted. */
+export async function captureDeliveryProviderOffline(input: {
+  scope: DeliveryActionScope;
+  orderId: string | null;
+  orderLocal?: string | null;
+  payload: Record<string, unknown>;
+  clientOpId: string;
+  dependencyIds?: string[];
+}): Promise<CaptureDeliveryActionResult> {
+  return capture("delivprov:", "delivery_set_provider", { ...input, orderLocal: input.orderLocal ?? null });
 }

@@ -453,5 +453,8 @@ test("DELIVERY offline actions wired: Print reprints the keyed snapshot; ops + n
   assert.match(dw, /captureDeliveryOpsOffline\(\{/, "delivery-ops captured offline");
   assert.match(dw, /captureEditOrderNoteOffline\(\{/, "order note captured offline");
   assert.match(dw, /Changing the discount needs a connection/, "discount change is refused offline (documented)");
-  assert.match(dw, /Setting the delivery provider or cost needs a connection/, "provider stays external (controlled)");
+  // rc.9 — provider SELECTION offline from the cached authorized catalog (internal record, replay-safe);
+  // a provider outside that catalog stays reconnect-only.
+  assert.match(dw, /captureDeliveryProviderOffline\(\{/, "provider selection captured offline");
+  assert.match(dw, /That provider isn't in this device's saved provider list/, "only a cached, authorized provider");
 });

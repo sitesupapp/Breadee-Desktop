@@ -1,9 +1,9 @@
-// Phase F — SECOND-PASS runtime-first native blocker. The first fix (session.init
+// Phase F â€” SECOND-PASS runtime-first native blocker. The first fix (session.init
 // cache-restore) did NOT change the native symptom, so this pass does NOT make a
 // third speculative fix: it ships a DIAGNOSTIC RC that proves which build runs and
 // surfaces the offline access decision on-screen, so ONE reproduction localizes the
 // blocker. These tests lock three things:
-//   1. the reported symptom is a PARTIAL access context (not a fully-empty one) —
+//   1. the reported symptom is a PARTIAL access context (not a fully-empty one) â€”
 //      which is exactly what the on-screen readout is built to expose;
 //   2. the diagnostics are INERT by default (gated on env.RC_DIAGNOSTICS), so a
 //      normal / production build is byte-for-byte unaffected;
@@ -37,7 +37,7 @@ const srcOf = (rel: string) => stripComments(readFileSync(join(here, "..", rel),
 const rawOf = (rel: string) => readFileSync(join(here, "..", rel), "utf8");
 
 // The EXACT shape the native result reports: the workspace is usable (canOperatePOS
-// true → Takeaway renders and works) but the four gated sections refuse — because
+// true â†’ Takeaway renders and works) but the four gated sections refuse â€” because
 // access carries ONLY base POS (the `pos` feature + `pos.access`) and none of the
 // section-specific features/permissions. A FULLY-empty context would instead fail
 // canOperatePOS and show the denial screen (no rail at all), which is NOT what the
@@ -49,7 +49,7 @@ const BASE_ONLY: PosAccessContext = {
 };
 
 test("symptom is reproducible as a PARTIAL access context (Takeaway works, the four gated sections refuse)", () => {
-  assert.equal(canOperatePOS(BASE_ONLY), true, "workspace usable → explains 'Takeaway works'");
+  assert.equal(canOperatePOS(BASE_ONLY), true, "workspace usable â†’ explains 'Takeaway works'");
   assert.equal(canViewTables(BASE_ONLY).allowed, false, "Dine-in refused (needs pos.dine_in + pos.tables.view)");
   assert.equal(canViewDelivery(BASE_ONLY).allowed, false, "Delivery refused (needs pos.delivery)");
   assert.equal(canViewTransfers(BASE_ONLY).allowed, false, "Transfer refused (needs a transfer perm)");
@@ -65,7 +65,7 @@ test("env.ts exposes the RC build fingerprint (SHA / run / diagnostics flag)", (
   assert.match(src, /VITE_RC_DIAGNOSTICS/, "reads the VITE_RC_DIAGNOSTICS build var");
 });
 
-test("diagnostics are INERT by default — a normal build renders nothing and logs nothing", () => {
+test("diagnostics are INERT by default â€” a normal build renders nothing and logs nothing", () => {
   const diag = srcOf("src/lib/rcDiagnostics.ts");
   // The single switch is strictly VITE_RC_DIAGNOSTICS === "1" (absent everywhere else).
   assert.match(diag, /rcDiagnosticsOn = env\.RC_DIAGNOSTICS === true/);
@@ -105,7 +105,7 @@ test("PosWorkspace mounts the readout and traces the four nav clicks; main logs 
 
 test("the RC is a DISTINCT, identifiable build (version bumped; SHA/run/flag injected by CI)", () => {
   const conf = JSON.parse(rawOf("src-tauri/tauri.conf.json")) as { version: string; identifier: string };
-  assert.equal(conf.version, "1.0.37-rc.8", "version bumped so Windows cannot reuse the prior package");
+  assert.equal(conf.version, "1.0.37-rc.9", "version bumped so Windows cannot reuse the prior package");
   assert.equal(conf.identifier, "app.breadee.desktop.offlinerc", "isolated bundle identity preserved");
   const wf = rawOf(".github/workflows/desktop-windows-installer.yml");
   assert.match(wf, /VITE_BUILD_SHA: \$\{\{ github\.sha \}\}/);

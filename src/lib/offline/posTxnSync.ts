@@ -226,9 +226,13 @@ export type PosTxnSyncDeps = {
   /** Phase-E: edit one line of an open order (pos_edit_order_line). The payload is the exact
    *  pre-built p_payload (op/line/quantity/modifiers + expected_version + reason + client_op_id);
    *  the dep only re-points order_id to the canonical id when the order was created offline. */
-  editOrderLine: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  editOrderLine: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean; replacement_order_item_id?: string | null; pos_entity_version?: number | null }>;
   /** Phase-E: add new lines to an open delivery order (pos_add_order_items). Same payload contract. */
-  addOrderItems: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
+  addOrderItems: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean; pos_entity_version?: number | null }>;
+  /** rc.9: set an order's delivery PROVIDER (+ cost) chosen offline from the cached authorized catalog
+   *  (pos_delivery_set_provider, replay-safe on p_client_op_id). Payload: order_id, provider_id, cost,
+   *  cost_provided, client_op_id. Internal Breadee record — no external provider call. */
+  setDeliveryProviderOp: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-F (rc.8): set an order's internal delivery ops (pos_set_delivery_ops). Payload carries
    *  order_id + handler_type/delivered_by_user_id/person_ref/cost + client_op_id. Replay-safe. */
   setDeliveryOps: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
@@ -432,13 +436,29 @@ export const defaultDeps: PosTxnSyncDeps = {
     const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_edit_order_line", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
-    return { ok: row.ok !== false, idempotent };
+    return {
+      ok: row.ok !== false,
+      idempotent,
+      replacement_order_item_id: row.replacement_order_item_id == null ? null : String(row.replacement_order_item_id),
+      pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version),
+    };
   },
   addOrderItems: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_add_order_items", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
-    return { ok: row.ok !== false, idempotent };
+    return { ok: row.ok !== false, idempotent, pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
+  },
+  setDeliveryProviderOp: async (args) => {
+    const { setDeliveryProviderReplay } = await import("@/lib/pos/deliveryProviderCapture");
+    const p = args.payload;
+    const r = await setDeliveryProviderReplay({
+      orderId: String(p.order_id),
+      providerId: String(p.provider_id),
+      cost: { value: p.cost == null ? null : Number(p.cost), provided: p.cost_provided === true },
+      clientOpId: String(p.client_op_id),
+    });
+    return { ok: true, idempotent: r.idempotent };
   },
   setDeliveryOps: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");

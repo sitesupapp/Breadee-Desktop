@@ -17,6 +17,7 @@ import {
   addOperation,
   getOperation,
 } from "@/lib/offline/operationLog";
+import type { EditTargetRef } from "@/lib/offline/handlers";
 
 /** The immutable 5-dimensional scope an offline item edit is captured + replayed under. */
 export type ItemEditScope = {
@@ -33,10 +34,20 @@ function opScope(s: ItemEditScope): OperationScope {
 
 export type CaptureItemEditResult = { operationId: string; clientOpId: string; alreadyCaptured: boolean };
 
+/** rc.9 — the projection-derived replay chain for an item edit (see operationalProjection):
+ *  targetRef = which line (resolved to a canonical order_item id at replay); versionAfterOp = the prior
+ *  version-bumping op of this order (its server-returned version is the exact expected_version);
+ *  dependencyIds = the ops that must sync first (that prior op + the op that created the target line). */
+export type ItemEditChain = {
+  targetRef?: EditTargetRef | null;
+  versionAfterOp?: string | null;
+  dependencyIds?: string[];
+};
+
 async function capture(
   prefix: string,
   opType: "edit_order_line" | "add_order_items",
-  input: { scope: ItemEditScope; orderId: string | null; orderLocal: string | null; payload: Record<string, unknown>; clientOpId: string },
+  input: { scope: ItemEditScope; orderId: string | null; orderLocal: string | null; payload: Record<string, unknown>; clientOpId: string; chain?: ItemEditChain; previewItems?: unknown[] },
 ): Promise<CaptureItemEditResult> {
   const clientOpId = input.clientOpId;
   const operationId = prefix + clientOpId;
@@ -52,10 +63,18 @@ async function capture(
     client_op_id: clientOpId,
     local_entity_id: null, // mutates an existing order; creates no new local entity
     canonical_entity_id: input.orderLocal ? null : input.orderId,
-    dependency_ids: [],
+    dependency_ids: Array.from(new Set(input.chain?.dependencyIds ?? [])),
     // An offline-created target order must sync first; the orchestrator gates on this local id.
     depends_on_local_entities: input.orderLocal ? [input.orderLocal] : [],
-    payload: { payload: input.payload, order_local: input.orderLocal },
+    payload: {
+      payload: input.payload,
+      order_local: input.orderLocal,
+      ...(input.chain?.targetRef ? { target_ref: input.chain.targetRef } : {}),
+      ...(input.chain?.versionAfterOp ? { version_after_op: input.chain.versionAfterOp } : {}),
+      // Display-only captured menu prices for the operational projection (NEVER sent: the handler
+      // replays `payload` only, and the server resolves every price).
+      ...(input.previewItems && input.previewItems.length > 0 ? { preview_items: input.previewItems } : {}),
+    },
     status: "pending",
     retry_count: 0,
     last_attempt_at: null,
@@ -83,6 +102,7 @@ export async function captureEditOrderLineOffline(input: {
   orderLocal?: string | null;
   payload: Record<string, unknown>;
   clientOpId: string;
+  chain?: ItemEditChain;
 }): Promise<CaptureItemEditResult> {
   return capture("editline:", "edit_order_line", { ...input, orderLocal: input.orderLocal ?? null });
 }
@@ -94,6 +114,9 @@ export async function captureAddOrderItemsOffline(input: {
   orderLocal?: string | null;
   payload: Record<string, unknown>;
   clientOpId: string;
+  chain?: ItemEditChain;
+  /** rc.9 — display-only preview lines (captured menu prices) for the operational projection. */
+  previewItems?: unknown[];
 }): Promise<CaptureItemEditResult> {
   return capture("additems:", "add_order_items", { ...input, orderLocal: input.orderLocal ?? null });
 }

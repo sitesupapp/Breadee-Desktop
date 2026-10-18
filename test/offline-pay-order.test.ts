@@ -109,9 +109,14 @@ test("settle conflict on replay → needs_attention, never a second charge", asy
   assert.equal((await getOperation("payorder:c1"))?.status, "needs_attention");
 });
 
-test("DeliveryWorkspace source: offline COD captures pay_order for NON-provider orders only", () => {
+test("DeliveryWorkspace source: offline settle captures pay_order (rc.9: provider rule checked locally)", () => {
   const dw = srcOf("src/screens/pos/DeliveryWorkspace.tsx");
-  assert.match(dw, /if \(!online && !providerModeOn && itemEditOfflineScope\)/, "offline COD gated on offline + non-provider + scope");
+  assert.match(dw, /if \(!online && itemEditOfflineScope\)/, "offline settle gated on offline + scope");
+  // rc.9 — a provider-mode order settles offline only once the provider-before-pay rule passes against
+  // the projection (provider chosen offline from the cached authorized catalog); the server re-checks.
+  assert.match(dw, /if \(providerModeOn\) \{[\s\S]{0,400}deliveryProviderFinalizeBlock\(/);
+  assert.match(dw, /online: online \|\| \(itemEditOfflineScope != null && \(!providersFeatureOn \|\| providersKnown\)\)/);
+  assert.match(dw, /dependencyIds: proj\?\.mutationOpIds \?\? \[\]/, "settle replays after every pending mutation");
   assert.match(dw, /await capturePayOrderOffline\(/, "captures a pay_order op offline");
   assert.match(dw, /await performDeliverySettlement\(/, "the ONLINE settlement path is preserved");
 });

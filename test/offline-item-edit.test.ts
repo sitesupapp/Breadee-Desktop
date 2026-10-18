@@ -88,10 +88,12 @@ test("capture + E2E add_order_items: drain → pos_add_order_items once", async 
   assert.equal(r.needsAttention.length, 0);
 });
 
-test("UI source: the hook branches to offline capture and skips reload offline; online path preserved", () => {
+test("UI source: the hook branches to offline capture (rc.9: re-derives the projection, no server read); online path preserved", () => {
   const h = srcOf("src/screens/pos/useDeliveryItemEditing.ts");
   assert.match(h, /const offlineCapable = !online && input\.offlineReady === true && input\.offlineScope != null;/);
-  assert.match(h, /if \(offlineCapable\)[\s\S]{0,260}dispatch\(\{ t: "submit_ok", key \}\);[\s\S]{0,160}return;/, "offline: submit_ok + no reload");
+  // offline: submit_ok, then (rc.9) ONLY the offline-aware projection reload — never a server re-read.
+  assert.match(h, /if \(offlineCapable\)[\s\S]{0,260}dispatch\(\{ t: "submit_ok", key \}\);[\s\S]{0,260}if \(input\.offlinePlan\) await reload\(\)\.catch\(\(\) => undefined\);[\s\S]{0,40}return;/, "offline: submit_ok + projection refresh");
+  assert.match(h, /if \(offlineCapable && offlineScope && t\) \{[\s\S]{0,400}chain: \{ targetRef: t\.ref, versionAfterOp: t\.versionAfterOp, dependencyIds: t\.dependencyIds \}/, "projection target + version chain");
   assert.match(h, /if \(offlineCapable && offlineScope\) await captureEditOrderLineOffline\(/, "line edit captures offline");
   assert.match(h, /if \(offlineCapable && offlineScope\) await captureAddOrderItemsOffline\(/, "add items captures offline");
   assert.match(h, /else await editOrderLine\(payload\);/, "online editOrderLine preserved");

@@ -19,6 +19,48 @@ import {
   isAlreadyPaid,
 } from "@/lib/offline/posTxnSync";
 import { resolveEntity } from "@/lib/offline/entityMap";
+import { getOperation } from "@/lib/offline/operationLog";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Resolve LOCAL line ids (client_line_id of a locally-sent round / offline order) to canonical
+ *  order_item ids: entityMap first, else pull the server's correlation (pos_order_item_map) for the
+ *  order and record it scope-exact, then re-check. Shared by split legs and item edits. Returns the
+ *  still-unresolved local ids (empty = all mapped) or a transport/blocked failure. */
+async function resolveLocalLines(
+  op: OfflineOperation,
+  ctx: HandlerContext,
+  orderId: string,
+  lineLocals: string[],
+  batchNo: number | null,
+): Promise<{ ok: true } | { ok: false; result: HandlerResult }> {
+  const unresolved = async () => {
+    for (const l of lineLocals) if (!(await ctx.canonicalFor(l))) return true;
+    return false;
+  };
+  if (!(await unresolved())) return { ok: true };
+  try {
+    const map = await ctx.deps.orderItemMap({ orderId, batchNo });
+    for (const m of map) {
+      await resolveEntity({
+        local_entity_id: m.client_line_id,
+        entity_type: "order_item",
+        canonical_id: m.order_item_id,
+        resolved_at: new Date().toISOString(),
+        tenant_id: op.scope.tenant_id,
+        branch_id: op.scope.branch_id,
+        device_id: op.scope.device_id,
+        cashier_user_id: op.scope.cashier_user_id,
+        terminal_id: op.scope.terminal_id,
+      });
+    }
+  } catch (e) {
+    if (ctx.deps.isTransport(e)) return { ok: false, result: { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "item_map: transport", message: errMsg(e) } };
+    return { ok: false, result: { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_map_unresolved", message: errMsg(e) } };
+  }
+  if (await unresolved()) return { ok: false, result: { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "order items not yet mapped" } };
+  return { ok: true };
+}
 
 /** A server message that means a concurrency/state CONFLICT the operator must resolve
  *  (never a hot retry, never a silent new bill): the Track-A expected-order guard, or the
@@ -264,7 +306,19 @@ export const dineinSendRoundHandler: OperationHandler = {
   schemaVersion: 1,
   async replay(op, ctx) {
     const p = (op.payload ?? {}) as DineinSendRoundPayload;
-    let payload: SubmitOrderPayload = { ...p.submit };
+    // rc.9 — strip a NON-uuid client_line_id (pre-rc.9 rounds carried the cart key "line-N"). The server
+    // casts it ::uuid, so it failed the WHOLE submit (22P02 → needs_attention + every dependent settle).
+    // Dropping it is lossless for the round itself (it is a correlation tag only) and makes a parked
+    // legacy round replayable exactly-once on an operator Retry. A uuid line id is kept verbatim.
+    let payload: SubmitOrderPayload = {
+      ...p.submit,
+      items: (p.submit?.items ?? []).map((it) => {
+        if (it.client_line_id === undefined || UUID_RE.test(String(it.client_line_id))) return it;
+        const { client_line_id: _drop, ...rest } = it;
+        void _drop;
+        return rest;
+      }),
+    };
 
     // Remap an ad-hoc local table id to its canonical server id (configured tables skip this).
     if (p.table_local) {
@@ -635,42 +689,14 @@ export const splitSettleHandler: OperationHandler = {
     // fully-offline leg carries a local line id resolved via entityMap. If a local mapping is not
     // yet present, populate entityMap from the server's correlation (pos_order_item_map) for this
     // order, then retry; still-missing → WAITING_FOR_DEPENDENCY (no partial allocation ever sent).
-    const needLocal = p.allocations.some((a) => !a.order_item_id && a.line_local);
-    if (needLocal) {
-      const stillUnresolved = async () => {
-        for (const a of p.allocations) {
-          if (a.order_item_id) continue;
-          if (!a.line_local) return true;
-          if (!(await ctx.canonicalFor(a.line_local))) return true;
-        }
-        return false;
-      };
-      if (await stillUnresolved()) {
-        // Pull the server's client_line_id -> order_item_id correlation and record it scope-exact.
-        try {
-          const map = await ctx.deps.orderItemMap({ orderId, batchNo: p.batch_no ?? null });
-          for (const m of map) {
-            await resolveEntity({
-              local_entity_id: m.client_line_id,
-              entity_type: "order_item",
-              canonical_id: m.order_item_id,
-              resolved_at: new Date().toISOString(),
-              tenant_id: op.scope.tenant_id,
-              branch_id: op.scope.branch_id,
-              device_id: op.scope.device_id,
-              cashier_user_id: op.scope.cashier_user_id,
-              terminal_id: op.scope.terminal_id,
-            });
-          }
-        } catch (e) {
-          if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "item_map: transport", message: errMsg(e) };
-          // A non-transport failure reading the map is a genuine block (e.g. not yet synced).
-          return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_map_unresolved", message: errMsg(e) };
-        }
-        if (await stillUnresolved()) {
-          return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "order items not yet mapped" };
-        }
-      }
+    if (p.allocations.some((a) => !a.order_item_id && !a.line_local)) {
+      return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "allocation item not mapped" };
+    }
+    const locals = p.allocations.filter((a) => !a.order_item_id && a.line_local).map((a) => a.line_local as string);
+    if (locals.length > 0) {
+      // Pull the server's client_line_id -> order_item_id correlation and record it scope-exact.
+      const r = await resolveLocalLines(op, ctx, orderId, locals, p.batch_no ?? null);
+      if (!r.ok) return r.result;
     }
 
     const resolved: { order_item_id: string; quantity: number }[] = [];
@@ -822,13 +848,60 @@ export const customerUpsertHandler: OperationHandler = {
   },
 };
 
+/** rc.9 — which line an offline item edit targets, resolved to a canonical order_item id AT REPLAY:
+ *  canonical = a hydrated server line; local = a line of a locally-sent round / offline order (its
+ *  client_line_id, mapped via pos_order_item_map); after = the replacement/delta line produced by an
+ *  EARLIER offline edit of this order (that op's result_meta.replacement_order_item_id). */
+export type EditTargetRef =
+  | { kind: "canonical"; order_item_id: string }
+  | { kind: "local"; line_local: string; batch_no?: number | null }
+  | { kind: "after"; op_id: string };
+
 type ItemEditPayload = {
   /** The exact pre-built p_payload for the RPC (carries expected_version + client_op_id + reason). */
   payload: Record<string, unknown>;
   /** Local order entity id to remap to the canonical order id (an offline-created order); null when
    *  payload.order_id is already canonical (a hydrated order). */
   order_local: string | null;
+  /** rc.9 — the line target, resolved at replay (absent on pre-rc.9 ops: payload.target_item_id as-is). */
+  target_ref?: EditTargetRef | null;
+  /** rc.9 — the previous version-bumping op of this order captured on this device: when it synced with
+   *  a server-returned pos_entity_version, THAT is the exact expected_version (else the captured one). */
+  version_after_op?: string | null;
 };
+
+/** Resolve an edit's target line + exact expected_version (rc.9). */
+async function resolveEditTarget(
+  op: OfflineOperation,
+  p: ItemEditPayload,
+  payload: Record<string, unknown>,
+  ctx: HandlerContext,
+): Promise<{ payload: Record<string, unknown> } | { result: HandlerResult }> {
+  let out = payload;
+  if (p.version_after_op) {
+    const prev = await getOperation(p.version_after_op);
+    const v = prev?.status === "synced" ? prev.result_meta?.pos_entity_version : undefined;
+    if (typeof v === "number" && Number.isFinite(v)) out = { ...out, expected_version: v };
+  }
+  const ref = p.target_ref;
+  if (!ref) return { payload: out };
+  if (ref.kind === "canonical") return { payload: { ...out, target_item_id: ref.order_item_id } };
+  if (ref.kind === "after") {
+    const prev = await getOperation(ref.op_id);
+    const id = prev?.status === "synced" ? prev.result_meta?.replacement_order_item_id : undefined;
+    if (typeof id !== "string" || id === "") {
+      return { result: { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "edited line not yet synced" } };
+    }
+    return { payload: { ...out, target_item_id: id } };
+  }
+  const orderId = String(out.order_id ?? "");
+  if (!orderId) return { result: { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" } };
+  const r = await resolveLocalLines(op, ctx, orderId, [ref.line_local], ref.batch_no ?? null);
+  if (!r.ok) return { result: r.result };
+  const id = await ctx.canonicalFor(ref.line_local);
+  if (!id) return { result: { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "item_unresolved", message: "line not yet mapped" } };
+  return { payload: { ...out, target_item_id: id } };
+}
 
 /** Resolve the target order id for an item-edit op: remap order_local → canonical when the order was
  *  created offline, else use the payload's canonical order_id. Returns null when still unresolved. */
@@ -852,9 +925,16 @@ export const editOrderLineHandler: OperationHandler = {
     if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no edit payload" };
     const resolved = await resolveEditOrder(p, ctx);
     if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    const target = await resolveEditTarget(op, p, resolved.payload, ctx);
+    if ("result" in target) return target.result;
     try {
-      const r = await ctx.deps.editOrderLine({ payload: resolved.payload });
-      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+      const r = await ctx.deps.editOrderLine({ payload: target.payload });
+      return {
+        ok: true,
+        canonicalId: (target.payload.order_id as string) ?? null,
+        // rc.9 — the replacement line + the new version chain the NEXT offline edit of this order/line.
+        resultMeta: { idempotent: r.idempotent, replacement_order_item_id: r.replacement_order_item_id ?? null, pos_entity_version: r.pos_entity_version ?? null },
+      };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "edit_order_line: transport", message: msg };
@@ -876,9 +956,12 @@ export const addOrderItemsHandler: OperationHandler = {
     if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no add payload" };
     const resolved = await resolveEditOrder(p, ctx);
     if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    // rc.9 — exact expected_version from the previous offline mutation of this order (no target line).
+    const target = await resolveEditTarget(op, { ...p, target_ref: null }, resolved.payload, ctx);
+    if ("result" in target) return target.result;
     try {
-      const r = await ctx.deps.addOrderItems({ payload: resolved.payload });
-      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+      const r = await ctx.deps.addOrderItems({ payload: target.payload });
+      return { ok: true, canonicalId: (target.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent, pos_entity_version: r.pos_entity_version ?? null } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "add_order_items: transport", message: msg };
@@ -909,6 +992,34 @@ export const deliveryOpsHandler: OperationHandler = {
       if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "delivery_ops_conflict", message: msg };
       const t = terminalClass(msg);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+    }
+  },
+};
+
+/** delivery_set_provider (rc.9) — record the order's delivery PROVIDER (+ optional cost) chosen offline
+ *  from the cached, previously-synced AUTHORIZED operational catalog, via pos_delivery_set_provider —
+ *  replay-safe on p_client_op_id (pos_op_replay + pos_op_record). This is an internal Breadee record: it
+ *  calls no external provider. The server re-validates the provider (active, same OU) + permission at
+ *  replay; a provider that became invalid meanwhile → CONFLICT → needs_attention (never silently
+ *  dropped, never a different provider). order_local → canonical when the order was created offline. */
+export const deliverySetProviderHandler: OperationHandler = {
+  type: "delivery_set_provider",
+  schemaVersion: 1,
+  async replay(op, ctx) {
+    const p = (op.payload ?? {}) as ItemEditPayload;
+    if (!p.payload || typeof p.payload !== "object") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no provider payload" };
+    const resolved = await resolveEditOrder(p, ctx);
+    if ("blocked" in resolved) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "order not yet synced" };
+    try {
+      const r = await ctx.deps.setDeliveryProviderOp({ payload: resolved.payload });
+      return { ok: true, canonicalId: (resolved.payload.order_id as string) ?? null, resultMeta: { idempotent: r.idempotent } };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "delivery_set_provider: transport", message: msg };
+      const t = terminalKind(msg);
+      if (t === "permission") return { ok: false, retryClass: "AUTHORITY_REFUSED", code: "permission", message: msg };
+      // Provider no longer active / not in this OU / order no longer open → the operator re-chooses.
+      return { ok: false, retryClass: "CONFLICT", code: "provider_invalid", message: msg };
     }
   },
 };
@@ -1084,6 +1195,7 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${receivableCollectHandler.type}@${receivableCollectHandler.schemaVersion}`]: receivableCollectHandler,
   [`${deliveryOpsHandler.type}@${deliveryOpsHandler.schemaVersion}`]: deliveryOpsHandler,
   [`${editOrderHandler.type}@${editOrderHandler.schemaVersion}`]: editOrderHandler,
+  [`${deliverySetProviderHandler.type}@${deliverySetProviderHandler.schemaVersion}`]: deliverySetProviderHandler,
 };
 
 export function handlerFor(type: string, schemaVersion: number): OperationHandler | undefined {

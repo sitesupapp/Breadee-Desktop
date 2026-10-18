@@ -137,9 +137,20 @@ import {
   loadShiftOpenMap,
   orderShiftOpen,
   readHistoricalReceipt,
+  buildHistoricalReceipt,
   toOpenDeliveryOrder,
   type OrderParty,
 } from "@/lib/pos/deliveryHistory";
+import {
+  deliveryEditBlock,
+  editTargetFor,
+  getOperationalOrderProjection,
+  orderChainFor,
+  overlayDeliveryQueue,
+  type OperationalDeliveryOrder,
+} from "@/lib/offline/operationalProjection";
+import { captureDeliveryProviderOffline } from "@/lib/offline/deliveryActionOffline";
+import { cacheDeliveryLines, cacheDeliveryProviders, readCachedDeliveryProviders } from "@/lib/offline/db";
 import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
 import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
 import { DeliveryReport } from "@/components/pos/DeliveryReport";
@@ -409,23 +420,36 @@ export function useDeliveryWorkspace(input: {
   // operational RPC (active-only, minimal fields — never the delivery_providers
   // table). Only when the advanced feature is on; the server re-checks the feature,
   // the permission and exact-OU access. A branch switch reloads.
+  // rc.9 — the authorized catalog is mirrored per tenant+OU after every successful online read, and
+  // served from that mirror offline, so a previously-synced provider can be CHOSEN offline (an internal
+  // Breadee record — no external provider call; the server re-validates it at replay). `providersKnown`
+  // = the catalog is known on this device (live or mirrored) — offline settlement requires it so a
+  // provider-mode order is never settled without the provider rule being checkable.
+  const [providersKnown, setProvidersKnown] = useState(false);
   useEffect(() => {
     if (!active || !providersFeatureOn || !branchId) {
       setProviders([]);
+      setProvidersKnown(!providersFeatureOn);
       return;
     }
     let cancelled = false;
     void loadOperationalProviders(branchId)
       .then((rows) => {
-        if (!cancelled) setProviders(rows);
+        if (cancelled) return;
+        setProviders(rows);
+        setProvidersKnown(true);
+        void cacheDeliveryProviders(rows, pos.tenantId, branchId).catch(() => {});
       })
-      .catch(() => {
-        if (!cancelled) setProviders([]);
+      .catch(async () => {
+        const cached = await readCachedDeliveryProviders(pos.tenantId, branchId).catch(() => null);
+        if (cancelled) return;
+        setProviders(cached ? (cached.providers as OperationalProvider[]) : []);
+        setProvidersKnown(cached != null);
       });
     return () => {
       cancelled = true;
     };
-  }, [active, providersFeatureOn, branchId]);
+  }, [active, providersFeatureOn, branchId, pos.tenantId, online]);
 
   // The friendly, UX-only pre-pay guard for the order on the detail panel and for
   // the just-sent summary. It mirrors the server rule; the server stays the sole
@@ -937,7 +961,7 @@ export function useDeliveryWorkspace(input: {
       completionDone.current = false;
       try {
         const custName = state.selected?.name ?? null;
-        const payload = buildDeliveryPayload({
+        const built = buildDeliveryPayload({
           branchId: snapshot.branchId,
           shiftId: snapshot.shiftId,
           clientOpId: snapshot.clientOpId,
@@ -947,6 +971,10 @@ export function useDeliveryWorkspace(input: {
           orderNote: snapshot.note,
           deliveryFee: snapshot.deliveryFee.provided ? snapshot.deliveryFee.value : null,
         });
+        // rc.9 — every line of an OFFLINE order carries a stable uuid client_line_id (stored by the
+        // server, read back via pos_order_item_map), so a later OFFLINE item edit of this not-yet-synced
+        // order can target its exact canonical line on replay. Online payloads are unchanged.
+        const payload = { ...built, items: built.items.map((it) => ({ ...it, client_line_id: crypto.randomUUID() })) };
         const dev = getDeviceIdentity();
         const feeValue = snapshot.deliveryFee.provided ? (snapshot.deliveryFee.value ?? 0) : 0;
         const subtotal = cartSubtotal(snapshot.lines);
@@ -1232,7 +1260,11 @@ export function useDeliveryWorkspace(input: {
         shiftId: input.shiftId,
         now: new Date(),
       });
-      setQueue(rows);
+      // rc.9 — keep the RAW rows as the projection base (never re-project a projected row), and
+      // offline show every row through the ONE operational projection (list == detail == pay).
+      for (const r of rows) baseRows.current.set(r.id, r);
+      const scope = itemEditOfflineScopeRef.current;
+      setQueue(offline && scope ? await overlayDeliveryQueue(scope, rows).catch(() => rows) : rows);
       setQueueOffline(offline);
       const [who, shifts] = await Promise.all([
         loadOrderParties(rows).catch(() => new Map<string, OrderParty>()),
@@ -1247,14 +1279,52 @@ export function useDeliveryWorkspace(input: {
     }
   }, [pos.tenantId, branchId, input.shiftId]);
 
+  /** rc.9 — the selected order's ONE operational projection (offline only; null online). */
+  const [detailProj, setDetailProj] = useState<OperationalDeliveryOrder | null>(null);
+  /** The last order row each order was opened from (the queue row / snapshot), keyed by id — the base
+   *  the offline projection overlays (never a re-projected row, so nothing is applied twice). */
+  const baseRows = useRef(new Map<string, DeliveryQueueOrder>());
+  /** The 5-D offline scope (declared below with the item-edit hook); a ref so the loaders above read it. */
+  const itemEditOfflineScopeRef = useRef<{ tenantId: string; branchId: string | null; cashierUserId: string; deviceId: string; terminalId: string | null } | null>(null);
+
+  /** rc.9 — build the ONE operational projection for an order from what this device knows. */
+  const projectOrder = useCallback(
+    async (orderId: string): Promise<OperationalDeliveryOrder | null> => {
+      const row = baseRows.current.get(orderId) ?? null;
+      if (!row || !itemEditOfflineScopeRef.current) return null;
+      return getOperationalOrderProjection(itemEditOfflineScopeRef.current, row);
+    },
+    [],
+  );
+
   /** Re-read ONE order and its lines. The authority behind every 3D control. */
   const refreshDetail = useCallback(async (orderId: string) => {
     setDetailLoading(true);
     setDetailError(null);
     try {
+      // rc.9 — OFFLINE: the order's lines/totals/provider/ops come from the ONE operational projection
+      // (local offline order payload or the cached line snapshot + unsynced local mutations), never a
+      // raw "Failed to fetch" with no lines (the rc.8 gap that hid every line control offline).
+      if (!(await isBackendReachable())) {
+        const p = await projectOrder(orderId);
+        setDetailProj(p);
+        if (p) {
+          setDetail(p.row);
+          setDetailLines(p.lines);
+          // The list row follows the SAME projection (list == detail == payment base).
+          setQueue((prev) => prev.map((r) => (r.id === orderId ? p.row : r)));
+          if (!p.linesKnown) setDetailError("This order's items aren't saved on this device yet. Reconnect to see them.");
+        }
+        return;
+      }
+      setDetailProj(null);
+      const fetchedAt = Date.now();
       const [fresh, lines] = await Promise.all([readDeliveryOrder(orderId), loadDeliveryOrderLines(orderId)]);
       setDetail(fresh);
       setDetailLines(lines);
+      if (fresh) baseRows.current.set(orderId, fresh);
+      // Write-through so the same order is visible + editable offline later.
+      void cacheDeliveryLines(orderId, lines, pos.tenantId, branchId, fetchedAt).catch(() => {});
       if (fresh?.shift_id) {
         const shifts = await loadShiftOpenMap([fresh.shift_id]).catch(() => new Map<string, boolean>());
         setShiftOpenMap((prev) => new Map([...prev, ...shifts]));
@@ -1264,10 +1334,12 @@ export function useDeliveryWorkspace(input: {
     } finally {
       setDetailLoading(false);
     }
-  }, []);
+  }, [projectOrder, pos.tenantId, branchId]);
 
   const openDetail = useCallback(
     (order: DeliveryQueueOrder) => {
+      // The queue row may already be a PROJECTED row offline; the raw base was recorded by refreshQueue.
+      if (!baseRows.current.has(order.id)) baseRows.current.set(order.id, order);
       // The row is shown immediately so the panel is never blank, then replaced
       // by an authoritative re-read - the list may be seconds old, and every
       // action on this panel is decided by the fresh copy.
@@ -1297,6 +1369,7 @@ export function useDeliveryWorkspace(input: {
         : null,
     [pos.tenantId, pos.userId, pos.branch.id],
   );
+  itemEditOfflineScopeRef.current = itemEditOfflineScope;
   const itemEditing = useDeliveryItemEditing({
     order: detail,
     access: pos.access,
@@ -1307,6 +1380,23 @@ export function useDeliveryWorkspace(input: {
     // in memory when the connection drops, so a captured edit replays exactly-once on reconnect.
     offlineReady: itemEditOfflineScope != null && detail != null,
     offlineScope: itemEditOfflineScope,
+    // rc.9 — offline, every edit resolves its exact replay target + version chain from the ONE
+    // operational projection (never `pos_entity_version ?? 0` against a fake line id — the rc.8 OFF-*
+    // defect), and the paid-item / discount / lines-unknown walls refuse with a controlled reason.
+    offlinePlan: {
+      lineTarget: (lineId) => {
+        if (!detailProj) return { ok: false, reason: "This order isn't available offline. Reconnect to change it." };
+        const block = deliveryEditBlock(detailProj);
+        if (block) return { ok: false, reason: block };
+        return editTargetFor(detailProj, lineId);
+      },
+      orderTarget: () => {
+        if (!detailProj) return { ok: false, reason: "This order isn't available offline. Reconnect to change it." };
+        const block = deliveryEditBlock(detailProj);
+        if (block) return { ok: false, reason: block };
+        return orderChainFor(detailProj.orders[0]);
+      },
+    },
   });
   const [addPickerOpen, setAddPickerOpen] = useState(false);
   const canEditLineModifiers = useCallback(
@@ -1384,6 +1474,7 @@ export function useDeliveryWorkspace(input: {
             clientOpId,
           });
           setOpsEditing(false);
+          await refreshDetail(target.id);
           toast.push({ tone: "success", message: "Delivery details saved offline", detail: "They will sync when you reconnect." });
         } catch (e) {
           setOpsError(classifyError(e).message);
@@ -1431,9 +1522,51 @@ export function useDeliveryWorkspace(input: {
         setProvError(costCaptureGate.reason ?? "You do not have permission to set the delivery provider or cost.");
         return;
       }
-      // External provider settlement is server/provider-authoritative; no offline capture → controlled reason.
+      // rc.9 — OFFLINE: choosing a provider is an INTERNAL Breadee record (pos_delivery_set_provider,
+      // replay-safe on p_client_op_id) — no external provider is contacted. Allowed ONLY for a provider in
+      // the previously-synced AUTHORIZED operational catalog cached on this device; the server re-validates
+      // it at replay (an invalid provider → needs_attention, never silently dropped). The external
+      // settlement itself still runs server-side at finalization (pay), unchanged.
       if (!online) {
-        setProvError("Setting the delivery provider or cost needs a connection.");
+        if (!itemEditOfflineScope) {
+          setProvError("Setting the delivery provider needs the POS to be ready offline.");
+          return;
+        }
+        if (!providers.some((p) => p.id === values.providerId)) {
+          setProvError("That provider isn't in this device's saved provider list. Reconnect to choose it.");
+          return;
+        }
+        if (!provLatch.current.acquire()) return;
+        setProvBusy(true);
+        setProvError(null);
+        try {
+          const txn = await getPosOfflineTxn(target.id).catch(() => undefined);
+          const pending = txn ? txn.status !== "synced" : false;
+          const clientOpId = deterministicUuid([
+            target.id, "delivery_set_provider", values.providerId, values.cost.provided ? String(values.cost.value ?? "") : "~",
+          ]);
+          await captureDeliveryProviderOffline({
+            scope: itemEditOfflineScope,
+            orderId: pending ? null : target.id,
+            orderLocal: pending ? target.id : null,
+            payload: {
+              order_id: target.id,
+              provider_id: values.providerId,
+              cost: values.cost.provided ? values.cost.value : null,
+              cost_provided: values.cost.provided,
+              client_op_id: clientOpId,
+            },
+            clientOpId,
+          });
+          setProvEditing(false);
+          await refreshDetail(target.id);
+          toast.push({ tone: "success", message: "Delivery provider saved offline", detail: "It will sync when you reconnect." });
+        } catch (e) {
+          setProvError(classifyError(e).message);
+        } finally {
+          setProvBusy(false);
+          provLatch.current.release();
+        }
         return;
       }
       if (!provLatch.current.acquire()) return;
@@ -1452,7 +1585,7 @@ export function useDeliveryWorkspace(input: {
         provLatch.current.release();
       }
     },
-    [detail, costCaptureGate, online, refreshDetail, refreshQueue, toast],
+    [detail, costCaptureGate, online, refreshDetail, refreshQueue, toast, itemEditOfflineScope, providers],
   );
 
   // Load the queue when Orders is opened, and whenever the shift changes under
@@ -1488,29 +1621,38 @@ export function useDeliveryWorkspace(input: {
     if (view === "orders" && detail) {
       return {
         order: toOpenDeliveryOrder(detail),
-        shiftOpen: orderShiftOpen(detail, shiftOpenMap),
+        // rc.9 — offline the shift-open map is unreadable (pos_shifts) and fell back to EMPTY, which
+        // refused Pay on EVERY order ("This order's shift is closed") — the rc.8 Pay-disabled root
+        // cause. Offline, an order of THIS session's open shift (or a locally-created, not-yet-synced
+        // order) is known open on this device; any other shift stays unproven → refused (unchanged).
+        shiftOpen: orderShiftOpen(detail, shiftOpenMap) ||
+          (!online && ((input.shiftId != null && detail.shift_id === input.shiftId) || detailProj?.localPending === true)),
         fromQueue: true,
       };
     }
     return { order: submitted?.order ?? null, shiftOpen: Boolean(input.shiftId), fromQueue: false };
-  }, [view, detail, shiftOpenMap, submitted?.order, input.shiftId]);
+  }, [view, detail, shiftOpenMap, submitted?.order, input.shiftId, online, detailProj]);
 
-  const payGate: Gate = useMemo(
-    () =>
-      deliveryPaymentGate({
-        deliveryAccess: accessGate,
-        takePayments: input.takePayments,
-        order: payTarget.order,
-        hasOpenShift: payTarget.shiftOpen,
-        // Phase F (GAP 3): an in-house (non-provider) delivery can settle its COD cash OFFLINE by
-        // capturing a pay_order op, so connectivity is satisfied for the gate in that case. The gate
-        // still enforces access, open shift and currency. Provider-mode orders stay online.
-        online: online || (!providerModeOn && itemEditOfflineScope != null),
-        currencyBlockedReason: paymentBlockedReason(input.currency, input.rate),
-        paying,
-      }),
-    [accessGate, input.takePayments, payTarget, online, providerModeOn, itemEditOfflineScope, input.currency, input.rate, paying],
-  );
+  const payGate: Gate = useMemo(() => {
+    const g = deliveryPaymentGate({
+      deliveryAccess: accessGate,
+      takePayments: input.takePayments,
+      order: payTarget.order,
+      hasOpenShift: payTarget.shiftOpen,
+      // Phase F (GAP 3) + rc.9: a delivery can settle OFFLINE by capturing a pay_order op (the
+      // replay-safe pos_pay_order engine), so connectivity is satisfied for the gate when the 5-D scope
+      // exists AND — with advanced providers on — the AUTHORIZED provider catalog is known on this
+      // device (so the provider-before-pay rule is checkable locally; the server re-checks at replay).
+      online: online || (itemEditOfflineScope != null && (!providersFeatureOn || providersKnown)),
+      currencyBlockedReason: paymentBlockedReason(input.currency, input.rate),
+      paying,
+    });
+    // Never offer a SECOND offline settle of an order already settled on this device.
+    if (g.allowed && !online && payTarget.fromQueue && detailProj?.settlingOpId) {
+      return { allowed: false, reason: "This order was settled offline — it will sync when you reconnect." };
+    }
+    return g;
+  }, [accessGate, input.takePayments, payTarget, online, providersFeatureOn, providersKnown, itemEditOfflineScope, input.currency, input.rate, paying, detailProj]);
 
   /**
    * WHOSE order this is, for a receipt.
@@ -1575,12 +1717,32 @@ export function useDeliveryWorkspace(input: {
       // delivery, where the cash is unambiguously Breadee-recorded; a provider order keeps its online
       // settlement so a provider's external step is never faked offline. An offline-created order is
       // remapped local→canonical on replay; a settle conflict → needs_attention, never a second charge.
-      if (!online && !providerModeOn && itemEditOfflineScope) {
+      if (!online && itemEditOfflineScope) {
         setPaying(true);
         setPayError(null);
         try {
           const localTxn = await getPosOfflineTxn(order.id).catch(() => undefined);
-          const orderLocal = localTxn ? order.id : null;
+          const orderLocal = localTxn && localTxn.status !== "synced" ? order.id : null;
+          // rc.9 — the settle replays only AFTER every unsynced mutation of this order (item edits,
+          // provider, ops, note) from the ONE operational projection, so the server never charges a
+          // pre-edit total or finalizes before the provider is recorded.
+          const proj = payTarget.fromQueue ? await projectOrder(order.id) : null;
+          if (proj?.settlingOpId) {
+            setPayError("This order was settled offline — it will sync when you reconnect.");
+            return;
+          }
+          if (providerModeOn) {
+            const block = deliveryProviderFinalizeBlock({
+              providerModeOn,
+              providerId: proj?.row.delivery_provider_id ?? (payTarget.fromQueue ? detail?.delivery_provider_id ?? null : null),
+              deliveryCost: proj?.row.delivery_cost ?? (payTarget.fromQueue ? detail?.delivery_cost ?? null : null),
+              providers,
+            });
+            if (block) {
+              setPayError(block);
+              return;
+            }
+          }
           const clientOpId = payOrderClientOpId(itemEditOfflineScope, order.id, confirm.method, confirm.currency);
           await capturePayOrderOffline({
             scope: itemEditOfflineScope,
@@ -1590,9 +1752,11 @@ export function useDeliveryWorkspace(input: {
             currency: confirm.currency,
             clientOpId,
             orderNumber: order.order_number ?? null,
+            dependencyIds: proj?.mutationOpIds ?? [],
           });
           setPayOpen(false);
           toast.push({ tone: "success", message: "Delivery settled offline", detail: "Recorded on this device — it will sync when you reconnect." });
+          if (payTarget.fromQueue && detail) void refreshDetail(detail.id);
           await input.refreshCashBox().catch(() => {});
         } catch (e) {
           setPayError(e instanceof Error ? e.message : "The delivery could not be settled offline.");
@@ -1751,7 +1915,7 @@ export function useDeliveryWorkspace(input: {
         setPaying(false);
       }
     },
-    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast, online, providerModeOn, itemEditOfflineScope],
+    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast, online, providerModeOn, itemEditOfflineScope, projectOrder, providers, detail],
   );
 
   /**
@@ -1993,6 +2157,7 @@ export function useDeliveryWorkspace(input: {
             clientOpId,
           });
           setEditOpen(false);
+          void refreshDetail(target.id);
           toast.push({ tone: "success", message: "Order note saved offline", detail: "It will sync when you reconnect." });
           return;
         }
@@ -2214,10 +2379,38 @@ export function useDeliveryWorkspace(input: {
           input.onPresentReceipt(snap.data as ReceiptData);
           return;
         }
+        // rc.9 — no stored receipt (an unpaid order never presented): print the order CHECK from the ONE
+        // operational projection — the SAME pure builder the online reprint uses (buildHistoricalReceipt;
+        // it already renders unpaid orders as paid:false), fed the projection's lines + totals instead of
+        // server reads. A provisional check, never a payment receipt; nothing is stored or mutated.
+        const proj = await projectOrder(order.id).catch(() => null);
+        if (proj && proj.linesKnown && proj.lines.length > 0) {
+          input.onPresentReceipt(
+            buildHistoricalReceipt({
+              tenantName: pos.tenantName,
+              branchName: pos.branch.name,
+              staffName: pos.userName,
+              order: proj.row,
+              payment: null,
+              lines: proj.lines.map((l) => ({
+                name: l.name,
+                qty: l.quantity,
+                unitPrice: l.quantity > 0 ? l.lineTotal / l.quantity : 0,
+                lineTotal: l.lineTotal,
+                modifiers: l.modifiers.map((m) => ({ name: m.name, price_delta: m.priceDelta, quantity: m.quantity })),
+                ...(l.kitchenNote ? { note: l.kitchenNote } : {}),
+              })),
+              party: receiptIdentity(order),
+              fallbackCurrency: input.currency,
+              at: order.created_at ? new Date(order.created_at).toLocaleString() : "",
+            }),
+          );
+          return;
+        }
         toast.push({
           tone: "info",
           message: "Reconnect to open this order's receipt",
-          detail: "No receipt is saved on this device for this order yet; the order stays available offline.",
+          detail: "This order's items aren't saved on this device yet; the order stays available offline.",
         });
         return;
       }
@@ -2241,7 +2434,7 @@ export function useDeliveryWorkspace(input: {
         setReceiptBusy(false);
       }
     },
-    [online, receiptIdentity, pos.tenantName, pos.branch.name, pos.userName, input, toast],
+    [online, receiptIdentity, pos.tenantName, pos.branch.name, pos.userName, input, toast, projectOrder],
   );
 
   /**
@@ -2869,7 +3062,23 @@ export function useDeliveryWorkspace(input: {
         onClose={() => setAddPickerOpen(false)}
         onConfirm={(items) => {
           setAddPickerOpen(false);
-          void itemEditing.addItems(items);
+          // rc.9 — display-only captured menu prices for the OFFLINE projection (the server still
+          // resolves every price on replay; online this preview is ignored).
+          const preview = items.map((it) => {
+            const mi = input.menu.items.find((m) => m.id === it.menu_item_id);
+            return {
+              menu_item_id: it.menu_item_id,
+              name: mi?.name ?? "Item",
+              base_price: Number(mi?.price ?? 0) || 0,
+              quantity: it.quantity,
+              kitchen_note: it.kitchen_note ?? null,
+              modifiers: (it.modifiers ?? []).map((m) => {
+                const opt = input.menu.options.find((o) => o.id === m.option_id);
+                return { group_id: opt?.modifier_group_id ?? null, option_id: m.option_id, name: m.name ?? opt?.name ?? "Extra", price_delta: Number(opt?.extra_price ?? 0) || 0, quantity: m.quantity ?? 1 };
+              }),
+            };
+          });
+          void itemEditing.addItems(items, preview);
         }}
       />
 

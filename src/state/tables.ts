@@ -13,7 +13,44 @@ import { EMPTY_TABLE_MAP, type TableBill, type TableMap } from "@/types/tables";
 import { loadTableMap } from "@/lib/pos/tables";
 import { loadTableBill } from "@/lib/pos/tableBill";
 import { isBackendReachable } from "@/lib/offline/reachability";
-import { cacheTableMap, readCachedTableMap } from "@/lib/offline/db";
+import { cacheBill, cacheTableMap, readCachedTableMap } from "@/lib/offline/db";
+import type { TableSummary } from "@/types/tables";
+
+/** rc.9 — per-session signature of the last bill pre-warmed for a table, so a map refresh re-reads a
+ *  bill only when the table's bill actually moved (orders/total/version/order no.). */
+const prewarmedSig = new Map<string, string>();
+const billSig = (t: TableSummary) => `${t.orders}|${t.total ?? ""}|${t.pos_entity_version}|${t.order_number ?? ""}`;
+
+/**
+ * rc.9 — pre-hydrate the CANONICAL open bill of every occupied table (bounded concurrency) during
+ * normal online use, so the offline operational projection has real canonical lines (not just the
+ * map total) for every table that was open when the connection dropped. Online-only; never throws.
+ * Read-only: it only caches what the server returned.
+ */
+export async function prewarmOpenBills(
+  ctx: Context,
+  tables: TableSummary[],
+  load: typeof loadTableBill = loadTableBill,
+): Promise<number> {
+  if (!ctx.tenantId) return 0;
+  const todo = tables.filter((t) => t.orders > 0 && prewarmedSig.get(`${ctx.branchId}:${t.id}`) !== billSig(t));
+  let done = 0;
+  const worker = async () => {
+    for (let t = todo.shift(); t; t = todo.shift()) {
+      const fetchedAt = Date.now();
+      try {
+        const bill = await load({ tableId: t.id, tenantId: ctx.tenantId as string, branchId: ctx.branchId });
+        await cacheBill(t.id, bill, ctx.tenantId, ctx.branchId, fetchedAt);
+        prewarmedSig.set(`${ctx.branchId}:${t.id}`, billSig(t));
+        done += 1;
+      } catch {
+        /* best-effort: the next refresh retries this table */
+      }
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  return done;
+}
 
 /** How long a loaded map is considered fresh before the UI flags it. */
 export const STALE_AFTER_MS = 30_000;
@@ -121,6 +158,8 @@ export const useTables = create<TableState>((set, get) => ({
         bill: stillThere ? get().bill : null,
       });
       if (stillThere) await get().loadBill(ctx);
+      // rc.9 — keep every occupied table's canonical bill offline-ready (fire-and-forget, bounded).
+      void prewarmOpenBills(ctx, map.tables);
     } catch (e) {
       // Reachable but the load failed (RLS, slow replica): fall back to a valid
       // cache if we have one rather than erasing the operator's view.
@@ -143,16 +182,19 @@ export const useTables = create<TableState>((set, get) => ({
   loadBill: async (ctx) => {
     const tableId = get().selectedTableId;
     if (!tableId || !ctx.tenantId) return;
-    // The detailed bill is a separate server read with no offline cache in this
-    // hotfix. Offline, show a clear reason rather than a raw transport error; the
-    // map's own bill summary (order number, total) still shows on the card.
+    // Offline the Dine-In workspace renders the OPERATIONAL projection (cached canonical bill + local
+    // rounds/edits/legs — lib/offline/operationalProjection), never this server bill; this store keeps
+    // only the server-authoritative bill, so offline it holds none and says why.
     if (!(await isBackendReachable())) {
       set({ billLoading: false, billError: "Reconnect to view the full bill for this table." });
       return;
     }
     set({ billLoading: true, billError: null });
     try {
+      const fetchedAt = Date.now();
       const bill = await loadTableBill({ tableId, tenantId: ctx.tenantId, branchId: ctx.branchId });
+      // rc.9 — write-through the canonical bill so the offline projection has its real lines.
+      void cacheBill(tableId, bill, ctx.tenantId, ctx.branchId, fetchedAt).catch(() => {});
       // The selection may have moved while the read was in flight.
       if (get().selectedTableId !== tableId) return;
       set({ bill, billLoading: false });

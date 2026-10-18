@@ -65,6 +65,14 @@ function opScope(scope: DineinScope): OperationScope {
   };
 }
 
+/** True for an RFC-4122-shaped uuid. `_pos_insert_order_items` casts client_line_id to ::uuid, so a
+ *  non-uuid value (the pre-rc.9 cart key "line-N") makes the WHOLE round submit fail (22P02) — the
+ *  rc.8 dine-in replay bug. Only a uuid line id is ever sent; anything else is omitted (the round
+ *  still replays; that legacy line simply cannot be correlated for a later offline split/edit). */
+export function isUuid(v: unknown): v is string {
+  return typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+}
+
 function lineToItem(l: DineDraftLine): SubmitOrderItem {
   return {
     menu_item_id: l.menu_item_id ?? "",
@@ -74,8 +82,8 @@ function lineToItem(l: DineDraftLine): SubmitOrderItem {
     kitchen_note: l.kitchen_note,
     // Phase D — the stable local line id travels as client_line_id so the server can correlate the
     // inserted canonical order_item back to this local line (pos_order_item_map), enabling offline
-    // split of a fully-offline session. Online/other callers omit it (server stores NULL).
-    client_line_id: l.line_id,
+    // split/edit of a locally-sent round. Online/other callers omit it (server stores NULL).
+    ...(isUuid(l.line_id) ? { client_line_id: l.line_id } : {}),
     ...(l.customization_json ? { customization_json: l.customization_json as SubmitOrderItem["customization_json"] } : {}),
     modifiers: l.modifiers.map((m) => ({ ...m })),
   } as SubmitOrderItem;
@@ -124,10 +132,17 @@ export async function openTableOffline(args: {
   sectionId?: string | null;
   origin?: "offline" | "online";
   baseOrderVersion?: number | null;
+  /** rc.9 — the table's ALREADY-OPEN canonical order (from the cached bill), when this local session
+   *  continues an occupied table. The session is then BOUND to it: round 1 pins expected_order_id to
+   *  it (a remotely closed/replaced bill is refused → needs_attention, never a silent second bill), and
+   *  the open op adopts the occupied table (no table-version CAS, which a stale cached map would trip
+   *  for a table that is already occupied — the order pin is the precise guard). */
+  canonicalOrderId?: string | null;
 }): Promise<DineDraft> {
   const now = new Date().toISOString();
   const localSessionId = nid();
   const openOpId = nid();
+  const bound = typeof args.canonicalOrderId === "string" && args.canonicalOrderId !== "";
   const op: OfflineOperation = {
     operation_id: openOpId,
     operation_type: "dinein_open_table",
@@ -139,7 +154,7 @@ export async function openTableOffline(args: {
     canonical_entity_id: null,
     dependency_ids: [],
     depends_on_local_entities: [],
-    payload: { name: args.tableName, seats: args.seats, expected_version: args.baseOrderVersion ?? null },
+    payload: { name: args.tableName, seats: args.seats, expected_version: bound ? null : (args.baseOrderVersion ?? null) },
     status: "pending",
     retry_count: 0,
     last_attempt_at: null,
@@ -161,7 +176,7 @@ export async function openTableOffline(args: {
     table_name: args.tableName,
     currency: args.currency,
     open_operation_id: openOpId,
-    canonical_order_id: null,
+    canonical_order_id: bound ? (args.canonicalOrderId as string) : null,
     origin: args.origin ?? "offline",
     base_order_version: args.baseOrderVersion ?? null,
     status: "open",
@@ -269,6 +284,9 @@ export async function sendRoundOffline(sessionId: string): Promise<DineDraft> {
         client_op_id: clientOpId,
         notes: d.notes,
         table_id: d.table_id,
+        // rc.9 — a session that CONTINUES an occupied table's canonical bill pins round 1 to it (rounds
+        // >= 2 pin via session_local at replay). Absent for a table opened fresh offline (unchanged).
+        ...(isFirst && d.canonical_order_id ? { expected_order_id: d.canonical_order_id } : {}),
         items: unsent.map(lineToItem),
       };
       const op: OfflineOperation = {
@@ -334,29 +352,66 @@ const SETTLE_OP_PREFIX = "paytable:";
 
 /** Durably capture an offline dine-in table settle. Atomic; idempotent on a deterministic id
  *  (same session + method + currency → same op). Requires at least one sent round. */
+/** rc.9 — the settle/on-account target when the table has NO local session: an occupied CANONICAL
+ *  table whose bill is known on this device only from the cached bill (no offline round yet). */
+export type CanonicalTableTarget = {
+  scope: DineinScope;
+  tableId: string;
+  tableName: string;
+  currency: string;
+  /** The cached bill's canonical order ids — part of the idempotency key so a later, different bill on
+   *  the same table is never deduped against an earlier settle. */
+  orderIds: string[];
+};
+
+function canonicalTableScope(t: CanonicalTableTarget): OperationScope {
+  return opScope(t.scope);
+}
+
+/** Deterministic op id for a canonical-only table action: full 5-D scope + table + the exact bill
+ *  (its canonical order ids) + the action parts — a double-tap / restart is exactly-once. */
+function canonicalTableOpId(t: CanonicalTableTarget, parts: string[]): string {
+  const s = t.scope;
+  return deterministicUuid([s.tenantId, s.branchId ?? "", s.cashierUserId, s.deviceId, s.terminalId ?? "", t.tableId, ...[...t.orderIds].sort(), ...parts]);
+}
+
 export async function settleTableOffline(input: {
-  sessionId: string;
+  sessionId: string | null;
+  /** Used only when sessionId is null (a canonical-only occupied table). */
+  table?: CanonicalTableTarget;
   method: string;
   discount?: { discount_type?: string; discount_value?: number };
   /** Best-effort LOCAL USD amount of the bill, for the drawer projection only (NOT authoritative;
    *  the server derives the real charge). Omitted when the local USD amount is unknowable. */
   cashAmountUsd?: number | null;
+  /** rc.9 — every still-unsynced mutation of this bill (item edits / split legs) from the operational
+   *  projection: the settle replays only AFTER them, so the server never charges a pre-edit total. */
+  extraDependencyIds?: string[];
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
-    const d = await localdb.dineDrafts.get(input.sessionId);
-    if (!d) throw new Error("dine session not found");
-    if (d.rounds.length === 0) throw new Error("Nothing has been sent to settle on this table.");
-    const clientOpId = deterministicUuid([d.local_session_id, "pay_table", input.method, d.currency]);
+    const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
+    if (input.sessionId && !d) throw new Error("dine session not found");
+    if (!d && !input.table) throw new Error("This table isn't available offline. Reconnect to settle it.");
+    if (d && d.rounds.length === 0 && !input.table) throw new Error("Nothing has been sent to settle on this table.");
+    const tableId = d ? d.table_id : (input.table as CanonicalTableTarget).tableId;
+    const currency = d ? d.currency : (input.table as CanonicalTableTarget).currency;
+    const tableName = d ? d.table_name : (input.table as CanonicalTableTarget).tableName;
+    const clientOpId = d
+      ? deterministicUuid([d.local_session_id, "pay_table", input.method, d.currency])
+      : canonicalTableOpId(input.table as CanonicalTableTarget, ["pay_table", input.method, currency]);
     const operationId = SETTLE_OP_PREFIX + clientOpId;
     const existing = await localdb.operations.get(operationId);
     if (existing) return { operationId, clientOpId, alreadyCaptured: true };
-    const scope: OperationScope = {
-      tenant_id: d.tenant_id,
-      branch_id: d.branch_id,
-      device_id: d.device_id,
-      terminal_id: d.terminal_id ?? "",
-      cashier_user_id: d.cashier_user_id,
-    };
+    const scope: OperationScope = d
+      ? {
+          tenant_id: d.tenant_id,
+          branch_id: d.branch_id,
+          device_id: d.device_id,
+          terminal_id: d.terminal_id ?? "",
+          cashier_user_id: d.cashier_user_id,
+        }
+      : canonicalTableScope(input.table as CanonicalTableTarget);
+    const sessionDeps = d ? [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)] : [];
     const op: OfflineOperation = {
       operation_id: operationId,
       operation_type: "pay_table",
@@ -365,16 +420,16 @@ export async function settleTableOffline(input: {
       created_at: new Date().toISOString(),
       client_op_id: clientOpId,
       local_entity_id: null,
-      canonical_entity_id: d.table_id,
-      // Settle only AFTER the table's open + every round has synced (the orders must exist server-side).
-      dependency_ids: [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)],
+      canonical_entity_id: tableId,
+      // Settle only AFTER the table's open + every round + every pending item edit/split leg has synced.
+      dependency_ids: Array.from(new Set([...sessionDeps, ...(input.extraDependencyIds ?? [])])),
       depends_on_local_entities: [],
       payload: {
-        table_id: d.table_id,
+        table_id: tableId,
         table_local: null,
         method: input.method,
-        currency: d.currency,
-        table_name: d.table_name,
+        currency,
+        table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
         ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
       },
@@ -399,24 +454,37 @@ const ONACCOUNT_OP_PREFIX = "onaccounttable:";
  *  idempotent, draft unchanged. The customer is canonical today; a future offline-created customer
  *  is carried as customer_local so Phase E can remap it. Requires at least one sent round. */
 export async function tableOnAccountOffline(input: {
-  sessionId: string;
+  sessionId: string | null;
+  /** Used only when sessionId is null (a canonical-only occupied table). */
+  table?: CanonicalTableTarget;
   customerId: string | null;
   customerLocal?: string | null;
   amount: number;
   method: string;
   discount?: { discount_type?: string; discount_value?: number };
+  /** rc.9 — still-unsynced item edits / split legs of this bill (replay after them). */
+  extraDependencyIds?: string[];
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
-    const d = await localdb.dineDrafts.get(input.sessionId);
-    if (!d) throw new Error("dine session not found");
-    if (d.rounds.length === 0) throw new Error("Nothing has been sent to put on account for this table.");
+    const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
+    if (input.sessionId && !d) throw new Error("dine session not found");
+    if (!d && !input.table) throw new Error("This table isn't available offline. Reconnect to put it on account.");
+    if (d && d.rounds.length === 0 && !input.table) throw new Error("Nothing has been sent to put on account for this table.");
     if (!input.customerId && !input.customerLocal) throw new Error("A customer is required to put this table on account.");
-    const clientOpId = deterministicUuid([d.local_session_id, "on_account_table", input.customerId ?? input.customerLocal ?? "", input.method, String(input.amount)]);
+    const who = input.customerId ?? input.customerLocal ?? "";
+    const clientOpId = d
+      ? deterministicUuid([d.local_session_id, "on_account_table", who, input.method, String(input.amount)])
+      : canonicalTableOpId(input.table as CanonicalTableTarget, ["on_account_table", who, input.method, String(input.amount)]);
     const operationId = ONACCOUNT_OP_PREFIX + clientOpId;
     const existing = await localdb.operations.get(operationId);
     if (existing) return { operationId, clientOpId, alreadyCaptured: true };
-    const scope: OperationScope = { tenant_id: d.tenant_id, branch_id: d.branch_id, device_id: d.device_id, terminal_id: d.terminal_id ?? "", cashier_user_id: d.cashier_user_id };
+    const scope: OperationScope = d
+      ? { tenant_id: d.tenant_id, branch_id: d.branch_id, device_id: d.device_id, terminal_id: d.terminal_id ?? "", cashier_user_id: d.cashier_user_id }
+      : canonicalTableScope(input.table as CanonicalTableTarget);
+    const tableId = d ? d.table_id : (input.table as CanonicalTableTarget).tableId;
+    const tableName = d ? d.table_name : (input.table as CanonicalTableTarget).tableName;
     const dependsLocal: string[] = input.customerLocal ? [input.customerLocal] : [];
+    const sessionDeps = d ? [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)] : [];
     const op: OfflineOperation = {
       operation_id: operationId,
       operation_type: "on_account_table",
@@ -425,17 +493,17 @@ export async function tableOnAccountOffline(input: {
       created_at: new Date().toISOString(),
       client_op_id: clientOpId,
       local_entity_id: null,
-      canonical_entity_id: d.table_id,
-      dependency_ids: [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)],
+      canonical_entity_id: tableId,
+      dependency_ids: Array.from(new Set([...sessionDeps, ...(input.extraDependencyIds ?? [])])),
       depends_on_local_entities: dependsLocal,
       payload: {
-        table_id: d.table_id,
+        table_id: tableId,
         table_local: null,
         customer_id: input.customerId,
         customer_local: input.customerLocal ?? null,
         amount: input.amount,
         method: input.method,
-        table_name: d.table_name,
+        table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
       },
       status: "pending",
@@ -558,6 +626,83 @@ export async function splitDineDraftOffline(input: {
   });
 }
 
+/**
+ * rc.9 — capture ONE offline split leg against the table's OPERATIONAL bill (a canonical order and/or
+ * its locally-sent round lines), reusing the SAME split_settle op + handler. Allocations reference a
+ * canonical order_item_id (hydrated line) or a local line id (a locally-sent round line, resolved via
+ * pos_order_item_map at replay). The caller validates remaining quantities against the operational
+ * projection; `dependencyIds` = the session open + rounds + every pending item edit of that order + the
+ * previous leg, so a leg never replays before the lines it pays for exist. Deterministic/idempotent.
+ */
+export async function splitOperationalBillOffline(input: {
+  scope: DineinScope;
+  orderId: string | null;
+  orderLocal: string | null;
+  allocations: { order_item_id?: string | null; line_local?: string | null; quantity: number }[];
+  method: string;
+  currency: string;
+  tableName: string;
+  orderNumber?: string | null;
+  dependencyIds: string[];
+}): Promise<DineSplitCaptureResult> {
+  const allocs = input.allocations.filter((a) => Number(a.quantity) > 0 && (a.order_item_id || a.line_local));
+  if (allocs.length === 0) return { ok: false, reason: "Select at least one item to split." };
+  if (!input.orderId && !input.orderLocal) return { ok: false, reason: "This bill isn't available offline. Reconnect to split it." };
+  const keyOf = (a: { order_item_id?: string | null; line_local?: string | null }) => a.order_item_id ?? `L:${a.line_local}`;
+  const sorted = [...allocs].sort((x, y) => keyOf(x).localeCompare(keyOf(y)));
+  const allocKey = sorted.map((a) => `${keyOf(a)}:${a.quantity}`).join(",");
+  const orderRef = input.orderId ?? (input.orderLocal as string);
+  const s = input.scope;
+  const clientOpId = deterministicUuid([s.tenantId, s.branchId ?? "", s.cashierUserId, s.deviceId, s.terminalId ?? "", "split_settle", orderRef, input.method, allocKey]);
+  const operationId = SPLIT_OP_PREFIX + clientOpId;
+  return localdb.transaction("rw", localdb.operations, async () => {
+    const existing = await getOperation(operationId);
+    if (existing) return { ok: true, operationId, clientOpId, alreadyCaptured: true };
+    const rows = await localdb.operations.where("operation_type").equals("split_settle").toArray();
+    const legs = rows
+      .filter((o) => {
+        if (o.status === "cancelled") return false;
+        const p = (o.payload ?? {}) as { order_id?: string | null; order_local?: string | null };
+        return (input.orderId != null && p.order_id === input.orderId) || (input.orderLocal != null && p.order_local === input.orderLocal);
+      })
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const prevLeg = legs.length > 0 ? legs[legs.length - 1].operation_id : null;
+    const op: OfflineOperation = {
+      operation_id: operationId,
+      operation_type: "split_settle",
+      schema_version: OPERATION_SCHEMA_VERSION,
+      scope: opScope(s),
+      created_at: new Date().toISOString(),
+      client_op_id: clientOpId,
+      local_entity_id: null,
+      canonical_entity_id: input.orderId,
+      dependency_ids: Array.from(new Set([...input.dependencyIds, ...(prevLeg ? [prevLeg] : [])])),
+      depends_on_local_entities: input.orderLocal ? [input.orderLocal] : [],
+      payload: {
+        order_id: input.orderId,
+        order_local: input.orderLocal,
+        method: input.method,
+        currency: input.currency,
+        allocations: sorted.map((a) => (a.order_item_id ? { order_item_id: a.order_item_id, quantity: a.quantity } : { line_local: a.line_local, quantity: a.quantity })),
+        expected_version: null, // NULL offline — remaining-qty + state checks under the row lock are the guard
+        batch_no: null,
+        split_seq: legs.length + 1,
+        table_name: input.tableName,
+        order_number: input.orderNumber ?? null,
+      },
+      status: "pending",
+      retry_count: 0,
+      last_attempt_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      result_meta: null,
+      synced_at: null,
+    };
+    await localdb.operations.add(op);
+    return { ok: true, operationId, clientOpId, alreadyCaptured: false };
+  });
+}
+
 /** Any captured pay_table op for this session's table in its exact scope (for the UI to show a
  *  table as "settling offline" and to avoid offering a second settle). */
 export async function findSettleOpForSession(sessionId: string): Promise<OfflineOperation | undefined> {
@@ -603,7 +748,11 @@ export async function reconcileDineDraftsFromOperations(): Promise<void> {
 /** Map a live cart line to a draft line (captured prices preserved). */
 export function draftLineFromCart(c: CartLine): Omit<DineDraftLine, "line_id" | "sent_round"> & { line_id: string } {
   return {
-    line_id: c.key,
+    // rc.9 — a fresh uuid, NEVER the cart key: cart keys are a per-process counter ("line-N") that
+    // restarts with the app, so they collide across rounds/sessions/restarts AND are not a uuid (the
+    // server casts client_line_id ::uuid — the rc.8 round-replay failure). The line id is the local
+    // entity id the split/edit engines correlate through pos_order_item_map, so it must be unique.
+    line_id: nid(),
     menu_item_id: c.menu_item_id,
     name: c.name,
     base_price: c.base_price,

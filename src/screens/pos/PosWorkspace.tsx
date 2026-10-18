@@ -97,6 +97,9 @@ import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { prewarmFloorCache, floorPrewarmCached } from "@/state/floor";
 import { prewarmDeliveryQueue } from "@/lib/offline/deliveryQueueOffline";
+import { FEATURES, hasFeature } from "@/lib/features";
+import { loadOperationalProviders } from "@/lib/pos/deliveryProviderCapture";
+import { cacheDeliveryProviders } from "@/lib/offline/db";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
 import { pendingCount, readCachedFloor } from "@/lib/offline/db";
@@ -291,6 +294,15 @@ function PosWorkspaceInner() {
     if (!pos.allowed || !tenantId || !pos.branch.id || !online) return;
     if (!canViewOrders(pos.access).allowed) return;
     void prewarmDeliveryQueue({ tenantId, branchId: pos.branch.id, shiftId, now: new Date() });
+    // rc.9 — mirror the branch's AUTHORIZED operational provider catalog (server-gated by feature +
+    // permission + exact OU) so a previously-synced provider can be chosen offline. Read-only; a refusal
+    // (no permission / feature off) simply caches nothing.
+    if (hasFeature(pos.access.features, FEATURES.POS_DELIVERY_PROVIDERS)) {
+      const branch = pos.branch.id;
+      void loadOperationalProviders(branch)
+        .then((rows) => cacheDeliveryProviders(rows, tenantId, branch))
+        .catch(() => {});
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pos.allowed, tenantId, pos.branch.id, shiftId, online]);
 

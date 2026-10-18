@@ -58,8 +58,14 @@ test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a serve
   // confirmPay branches to the local CAPTURE offline; the ONLINE charge path is preserved.
   assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,1400}settleTableOffline\(/, "offline settle captures via settleTableOffline");
   assert.match(src, /await performTablePayment\(/, "the ONLINE table payment path is preserved unchanged");
-  // Fail-closed: no local draft for the table → blocked with a reconnect message, no capture.
-  assert.match(src, /if \(!draft\)[\s\S]{0,160}isn't available offline/);
+  // rc.9 — fail-closed via the ONE operational projection: no open bill / already settled offline /
+  // part-paid bill → blocked with a controlled reason, no capture. A canonical-only occupied table
+  // (no offline round yet) now settles by its table id (CanonicalTableTarget).
+  assert.match(src, /const offlineSettleTarget = useCallback\(/);
+  assert.match(src, /if \(p\.bill\.orders\.length === 0\) return \{ ok: false, reason: "This table has no open bill to settle\." \}/);
+  assert.match(src, /if \(p\.settlingOpId\) return \{ ok: false/);
+  assert.match(src, /if \(p\.paidPending > 0 \|\| p\.collected > 0\)/);
+  assert.match(src, /extraDependencyIds: target\.deps/, "settle replays after every pending edit/leg");
 });
 
 test("PosWorkspace threads readiness + a five-dimensional capture scope equal to the drain scope", () => {
@@ -78,7 +84,8 @@ test("Phase D: dine-in ON-ACCOUNT is offline-capable via CAPTURE only, cached-cu
   // the ONLINE performOnAccount path is preserved.
   assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,700}tableOnAccountOffline\(/);
   assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
-  assert.match(src, /if \(!draft\)[\s\S]{0,160}Reconnect to put it on account/);
+  // rc.9 — the SAME projection-derived target as the settle (fail-closed with a controlled reason).
+  assert.match(src, /const target = await offlineSettleTarget\(table\);[\s\S]{0,120}setPayError\(target\.reason\)/);
 });
 
 test("Phase D: Takeaway On-Account is offline-capable via CAPTURE (order → chained receivable)", () => {
@@ -102,13 +109,15 @@ test("Phase D: Delivery On-Account is offline-capable via CAPTURE (local-vs-cano
   assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
 });
 
-test("Phase D: Dine-In SPLIT is offline-capable via CAPTURE (fully-offline bill, local line ids)", () => {
+test("Phase D + rc.9: Dine-In SPLIT is offline-capable via CAPTURE over the ONE operational projection", () => {
   const src = ts(DW);
-  // openSplit offline builds the panel from the local draft projection; online loadSplitState kept.
-  assert.match(src, /if \(offlineCapture && input\.offlineScope && selected\)[\s\S]{0,400}splitDineDraftRemaining\(/);
+  // rc.9 — openSplit offline builds the panel from the OPERATIONAL projection (cached canonical + local
+  // round lines), not the draft alone; online loadSplitState kept.
+  assert.match(src, /if \(offlineCapture && input\.offlineScope && selected\)[\s\S]{0,400}getOperationalTableBill\(/);
+  assert.match(src, /projectionSplit\(p, selected\.name\)/);
   assert.match(src, /loadSplitState\(order\.id\)/, "online split-state load preserved");
-  // paySplit offline captures a leg via splitDineDraftOffline; online settleSplit preserved.
-  assert.match(src, /if \(offlineCapture\)[\s\S]{0,400}splitDineDraftOffline\(/);
+  // paySplit offline captures a leg via the generalized split capture (same split_settle op + handler).
+  assert.match(src, /if \(offlineCapture\)[\s\S]{0,2600}splitOperationalBillOffline\(/);
   assert.match(src, /await settleSplit\(/, "online settleSplit path preserved");
 });
 

@@ -37,6 +37,15 @@ import {
 } from "@/lib/pos/deliveryItemEdit";
 import type { ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { captureEditOrderLineOffline, captureAddOrderItemsOffline, type ItemEditScope } from "@/lib/offline/itemEditOffline";
+import type { EditTargetResult, PreviewLine } from "@/lib/offline/operationalProjection";
+
+/** rc.9 — how an OFFLINE edit resolves its exact replay target from the operational projection. */
+export type OfflineEditPlan = {
+  /** The replay target + version chain for one line, or a controlled reason (paid-item wall …). */
+  lineTarget: (lineId: string) => EditTargetResult;
+  /** The order-level chain for an add (no target line). */
+  orderTarget: () => EditTargetResult;
+};
 
 type Toast = { push: (t: { tone: "info" | "success" | "warning" | "error"; message: string; detail?: string }) => unknown };
 
@@ -58,8 +67,9 @@ export type UseDeliveryItemEditing = {
   removeLine: (line: DeliveryOrderLine) => void;
   /** Open the modifier editor for a line (the workspace, which holds the menu, decides when to offer it). */
   editModifiers: (line: DeliveryOrderLine) => void;
-  /** Commit new menu-item lines (server resolves all prices). */
-  addItems: (items: AddItemInput[]) => Promise<void>;
+  /** Commit new menu-item lines (server resolves all prices). `preview` = display-only captured menu
+   *  prices, used ONLY offline for the operational projection (index-aligned with `items`). */
+  addItems: (items: AddItemInput[], preview?: Omit<PreviewLine, "client_line_id">[]) => Promise<void>;
   // reason dialog
   reasonPrompt: DeliveryReasonPrompt | null;
   reasonForRemoval: boolean;
@@ -81,6 +91,8 @@ export function useDeliveryItemEditing(input: {
   online?: boolean;
   offlineReady?: boolean;
   offlineScope?: ItemEditScope | null;
+  /** rc.9 — projection-derived targets for offline capture (absent → legacy capture, unchanged). */
+  offlinePlan?: OfflineEditPlan;
 }): UseDeliveryItemEditing {
   const { order, access, reload, toast } = input;
   const online = input.online ?? true;
@@ -116,6 +128,9 @@ export function useDeliveryItemEditing(input: {
         if (offlineCapable) {
           dispatch({ t: "submit_ok", key });
           toast.push({ tone: "info", message: "Change saved offline — it will apply when the connection returns." });
+          // rc.9 — re-derive the ONE operational projection (reload is offline-aware) so the lines,
+          // totals and payment base reflect the captured edit immediately.
+          if (input.offlinePlan) await reload().catch(() => undefined);
           return;
         }
         await reload();
@@ -133,20 +148,42 @@ export function useDeliveryItemEditing(input: {
         toast.push({ tone: "warning", message: "The change did not apply. The order was reloaded.", detail: msg });
       }
     },
-    [order, state, reload, toast],
+    [order, state, reload, toast, input.offlinePlan],
+  );
+
+  /** rc.9 — resolve an offline target, or surface the controlled reason (never a silent no-op). */
+  const offlineTarget = useCallback(
+    (lineId: string | null) => {
+      const plan = input.offlinePlan;
+      if (!plan) return null;
+      const r = lineId ? plan.lineTarget(lineId) : plan.orderTarget();
+      if (!r.ok) {
+        toast.push({ tone: "warning", message: r.reason });
+        return "refused" as const;
+      }
+      return r.target;
+    },
+    [input.offlinePlan, toast],
   );
 
   const submitQuantity = useCallback(
     (line: DeliveryOrderLine, newQuantity: number, reason: string | null) => {
       if (!order) return;
       const key = editKey(newQuantity === 0 ? "remove" : "qty", line.id);
+      const t = offlineCapable && offlineScope ? offlineTarget(line.id) : null;
+      if (t === "refused") return;
       void run(key, async (opId, expectedVersion) => {
+        if (offlineCapable && offlineScope && t) {
+          const payload = buildSetQuantityPayload({ orderId: t.payloadOrderId, lineId: line.id, newQuantity, expectedVersion: t.expectedVersion, clientOpId: opId, reason });
+          await captureEditOrderLineOffline({ scope: offlineScope, orderId: t.orderId, orderLocal: t.orderLocal, payload: payload as unknown as Record<string, unknown>, clientOpId: opId, chain: { targetRef: t.ref, versionAfterOp: t.versionAfterOp, dependencyIds: t.dependencyIds } });
+          return;
+        }
         const payload = buildSetQuantityPayload({ orderId: order.id, lineId: line.id, newQuantity, expectedVersion, clientOpId: opId, reason });
         if (offlineCapable && offlineScope) await captureEditOrderLineOffline({ scope: offlineScope, orderId: order.id, payload: payload as unknown as Record<string, unknown>, clientOpId: opId });
         else await editOrderLine(payload);
       });
     },
-    [order, run],
+    [order, run, offlineCapable, offlineScope, offlineTarget],
   );
 
   const changeQuantity = useCallback(
@@ -183,7 +220,14 @@ export function useDeliveryItemEditing(input: {
     (line: DeliveryOrderLine, result: ItemOptionsResult, reason: string | null) => {
       if (!order) return;
       const key = editKey("modifier", line.id);
+      const t = offlineCapable && offlineScope ? offlineTarget(line.id) : null;
+      if (t === "refused") return;
       void run(key, async (opId, expectedVersion) => {
+        if (offlineCapable && offlineScope && t) {
+          const p = buildChangeModifiersPayload({ orderId: t.payloadOrderId, lineId: line.id, quantity: result.quantity, modifiers: result.modifiers, expectedVersion: t.expectedVersion, clientOpId: opId, reason });
+          await captureEditOrderLineOffline({ scope: offlineScope, orderId: t.orderId, orderLocal: t.orderLocal, payload: p as unknown as Record<string, unknown>, clientOpId: opId, chain: { targetRef: t.ref, versionAfterOp: t.versionAfterOp, dependencyIds: t.dependencyIds } });
+          return;
+        }
         const payload = buildChangeModifiersPayload({
           orderId: order.id,
           lineId: line.id,
@@ -197,7 +241,7 @@ export function useDeliveryItemEditing(input: {
         else await editOrderLine(payload);
       });
     },
-    [order, run],
+    [order, run, offlineCapable, offlineScope, offlineTarget],
   );
 
   // The modifier dialog resolved. Close it, then decide: a change that DROPS/REPLACES a component needs an
@@ -221,17 +265,29 @@ export function useDeliveryItemEditing(input: {
   );
 
   const addItems = useCallback(
-    async (items: AddItemInput[]) => {
+    async (items: AddItemInput[], preview?: Omit<PreviewLine, "client_line_id">[]) => {
       if (!order || !gate.allowed || state.busy || items.length === 0) return;
       // A fresh add is its own logical intent, keyed by a nonce so its op id is reused only on ITS retry.
       const key = editKey("add", newClientOpId());
+      const t = offlineCapable && offlineScope ? offlineTarget(null) : null;
+      if (t === "refused") return;
       await run(key, async (opId, expectedVersion) => {
+        if (offlineCapable && offlineScope && t) {
+          // Each added line carries a stable uuid client_line_id (server-stored, read back via
+          // pos_order_item_map) so a LATER offline edit of an added line targets it exactly.
+          const ids = items.map(() => crypto.randomUUID());
+          const built = buildAddItemsPayload({ orderId: t.payloadOrderId, items, expectedVersion: t.expectedVersion, clientOpId: opId });
+          const payload = { ...built, items: built.items.map((it, i) => ({ ...it, client_line_id: ids[i] })) };
+          const previewItems = (preview ?? []).map((pv, i) => ({ ...pv, client_line_id: ids[i] }));
+          await captureAddOrderItemsOffline({ scope: offlineScope, orderId: t.orderId, orderLocal: t.orderLocal, payload: payload as unknown as Record<string, unknown>, clientOpId: opId, chain: { versionAfterOp: t.versionAfterOp, dependencyIds: t.dependencyIds }, previewItems });
+          return;
+        }
         const payload = buildAddItemsPayload({ orderId: order.id, items, expectedVersion, clientOpId: opId });
         if (offlineCapable && offlineScope) await captureAddOrderItemsOffline({ scope: offlineScope, orderId: order.id, payload: payload as unknown as Record<string, unknown>, clientOpId: opId });
         else await addOrderItems(payload);
       });
     },
-    [order, gate.allowed, state.busy, run],
+    [order, gate.allowed, state.busy, run, offlineCapable, offlineScope, offlineTarget],
   );
 
   // The reason dialog resolves the pending quantity/modifier edit it is holding.

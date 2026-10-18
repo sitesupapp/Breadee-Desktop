@@ -839,10 +839,51 @@ export async function readCachedDeliveryReport(tenantId: string | null, branchId
   return { report: row.data, cachedAt: row.cached_at };
 }
 
-/** Cache an authoritative open bill for a table (call only after a successful online load). */
-export async function cacheBill(tableId: string, bill: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
+/** Cache an authoritative open bill for a table (call only after a successful online load). rc.9:
+ *  `fetchedAt` = when the READ STARTED (not when the write lands), so the operational projection's
+ *  "already reflected" test (op synced_at <= fetchedAt) can never treat a round that synced DURING
+ *  the read as included when the read actually predates it. */
+export async function cacheBill(tableId: string, bill: unknown, tenantId: string | null, branchId: string | null, fetchedAt?: number): Promise<void> {
   if (!tenantId || !tableId) return;
-  await localdb.snapshots.put({ key: billKey(branchId, tableId), tenant_id: tenantId, branch_id: branchId, data: bill, cached_at: new Date().toISOString() });
+  const at = fetchedAt != null && Number.isFinite(fetchedAt) ? new Date(fetchedAt) : new Date();
+  await localdb.snapshots.put({ key: billKey(branchId, tableId), tenant_id: tenantId, branch_id: branchId, data: bill, cached_at: at.toISOString() });
+}
+
+// rc.9 — Delivery order LINE snapshot (per canonical order), reusing `snapshots`. Written on every
+// successful online detail read (and a bounded hydration prewarm of open unpaid orders) so an order's
+// lines are visible + editable offline. Read-only continuity; the server stays authoritative.
+const deliveryLinesKey = (orderId: string) => `delivery_lines:${orderId}`;
+
+export async function cacheDeliveryLines(orderId: string, lines: unknown, tenantId: string | null, branchId: string | null, fetchedAt?: number): Promise<void> {
+  if (!tenantId || !orderId) return;
+  const at = fetchedAt != null && Number.isFinite(fetchedAt) ? new Date(fetchedAt) : new Date();
+  await localdb.snapshots.put({ key: deliveryLinesKey(orderId), tenant_id: tenantId, branch_id: branchId, data: lines, cached_at: at.toISOString() });
+}
+
+export async function readCachedDeliveryLines(orderId: string, tenantId: string | null, branchId: string | null): Promise<{ lines: unknown; cachedAt: number } | null> {
+  if (!tenantId || !orderId) return null;
+  const row = await localdb.snapshots.get(deliveryLinesKey(orderId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { lines: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
+// rc.9 — the branch's ACTIVE operational delivery-provider catalog (delivery_providers_operational),
+// mirrored per tenant+OU after a successful AUTHORIZED online read. Offline, a provider may be chosen
+// ONLY from this previously-synced list (the server re-validates it at replay).
+const providersKey = (branchId: string | null) => `delivery_providers:${branchId ?? "none"}`;
+
+export async function cacheDeliveryProviders(providers: unknown[], tenantId: string | null, branchId: string | null): Promise<void> {
+  if (!tenantId || !branchId) return;
+  await localdb.snapshots.put({ key: providersKey(branchId), tenant_id: tenantId, branch_id: branchId, data: providers, cached_at: new Date().toISOString() });
+}
+
+export async function readCachedDeliveryProviders(tenantId: string | null, branchId: string | null): Promise<{ providers: unknown[]; cachedAt: number } | null> {
+  if (!tenantId || !branchId) return null;
+  const row = await localdb.snapshots.get(providersKey(branchId));
+  if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
+  const cachedAt = Date.parse(row.cached_at);
+  return { providers: Array.isArray(row.data) ? (row.data as unknown[]) : [], cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
 }
 
 /** The cached open bill for a table, or null. Scope-checked. */

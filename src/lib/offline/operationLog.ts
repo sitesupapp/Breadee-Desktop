@@ -91,7 +91,11 @@ export type OperationType =
   // client_op_id; every field is a SET so replay converges). NOTE ONLY: an offline discount change is
   // NOT captured here (server-authoritative pricing recompute + the local projection cannot show an
   // accurate payable offline). Target order may be canonical or offline-created (order_local remap).
-  | "edit_order";
+  | "edit_order"
+  // rc.9 — offline DELIVERY PROVIDER selection from the cached, previously-synced AUTHORIZED operational
+  // catalog → pos_delivery_set_provider (replay-safe on p_client_op_id). An internal Breadee record; no
+  // external provider is contacted. An invalid provider at replay → CONFLICT → needs_attention.
+  | "delivery_set_provider";
 
 /** Durable lifecycle of a logged operation. Terminal = synced | cancelled. */
 export type OperationStatus =

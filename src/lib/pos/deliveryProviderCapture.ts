@@ -154,6 +154,23 @@ export async function setDeliveryProvider(input: {
 }
 
 /**
+ * rc.9 — the REPLAY form of the same single write: identical args (buildSetProviderArgs — the same
+ * financial firewall) plus `p_client_op_id`, which routes the server through pos_op_replay /
+ * pos_op_record so an offline-captured provider selection applies EXACTLY ONCE on reconnect. Used only
+ * by the offline drain (delivery_set_provider op); the online editor path is unchanged.
+ */
+export async function setDeliveryProviderReplay(input: {
+  orderId: string;
+  providerId: string;
+  cost: { value: number | null; provided: boolean };
+  clientOpId: string;
+}): Promise<{ idempotent: boolean }> {
+  const data = await rpcCall("pos_delivery_set_provider", { ...buildSetProviderArgs(input), p_client_op_id: input.clientOpId });
+  const r = asRecord(data);
+  return { idempotent: r.idempotent === true || r.result_code === "DUPLICATE_REPLAY_RETURNED" };
+}
+
+/**
  * Whether the advanced provider surface is live for this order's branch: the
  * feature is on AND the branch has at least one active provider. With zero active
  * providers the server intentionally preserves legacy delivery (finalize is a
