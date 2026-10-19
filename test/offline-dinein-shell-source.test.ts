@@ -29,10 +29,11 @@ test("open: offline branch routes to the local engine, gated on unreachable + re
 test("send: offline branch captures a round via the engine; online performRound preserved", () => {
   const src = ts(DW);
   assert.match(src, /if \(offlineCapture && input\.offlineScope\)/, "sendRound has an offline-capture branch");
-  assert.match(src, /const updated = await sendRoundOffline\(draft\.local_session_id\)/, "the offline branch captures via sendRoundOffline");
+  // rc.12 — the current shift rides along so a pre-rc.12 session is attached only when provably its own.
+  assert.match(src, /const updated = await sendRoundOffline\(draft\.local_session_id, \{\s*currentShift:/, "the offline branch captures via sendRoundOffline");
   assert.match(src, /const outcome = await performRound\(/, "the ONLINE performRound path is preserved unchanged");
   // Durable-capture-before-clear: the cart reset is INSIDE the offline branch, after capture.
-  assert.match(src, /sendRoundOffline\(draft\.local_session_id\)[\s\S]{0,2200}useCart\.getState\(\)\.reset\(\);/, "cart cleared (statement form) only after durable capture");
+  assert.match(src, /sendRoundOffline\(draft\.local_session_id, \{[\s\S]{0,2400}useCart\.getState\(\)\.reset\(\);/, "cart cleared (statement form) only after durable capture");
 });
 
 test("offlineCapture is exactly backend-unreachable AND ready AND scope present", () => {
@@ -40,14 +41,21 @@ test("offlineCapture is exactly backend-unreachable AND ready AND scope present"
   assert.match(src, /const offlineCapture = !input\.online && input\.offlineReady === true && input\.offlineScope != null;/);
 });
 
-test("Phase E: Move/Merge are offline-capturable; Close/Clear stay WALLED offline", () => {
+// rc.12 — CONTRACT CHANGE (F3/F4, documented): Move and Merge are SERVER-COORDINATED. The rc.4–rc.11
+// offline capture showed nothing on the floor and was refused at replay (shift-less orders, a non-uuid
+// merge client_op_id, destinations still occupied server-side), so offline the gate now refuses them with
+// an explicit, VISIBLE reason — like Close/Clear. No offline capture branch remains for any table op.
+test("rc.12: Move/Merge (like Close/Clear) are online-only with an explicit offline reason — never a silent no-op", () => {
   const src = ts(DW);
-  // The shared op context now carries offlineCapable (the gate honours it ONLY for move/merge).
-  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: offlineTableOp \};/);
-  // Move and Merge capture durably offline; Close and Clear have NO offline capture branch.
-  assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,400}captureMoveTableOffline\(/, "move captures offline");
-  assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,400}captureMergeTablesOffline\(/, "merge captures offline");
-  assert.ok(!/captureCloseTableOffline|captureClearTableOffline/.test(src), "Close/Clear are NOT offline-capturable");
+  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: false \};/);
+  assert.match(src, /needs a connection — the server moves the whole bill \(rounds, payments, balance\) in one step/);
+  assert.match(src, /move: serverCoordinated\(canMoveTable\(pos\.access\), "move"/);
+  assert.match(src, /merge: serverCoordinated\(canMergeTables\(pos\.access\), "merge"/);
+  assert.ok(!/captureMoveTableOffline\(|captureMergeTablesOffline\(|captureCloseTableOffline|captureClearTableOffline/.test(src), "no table op is captured offline");
+  // The reason is SHOWN on the bill panel (a disabled button with only a hover title read as "does nothing").
+  const panel = ts("src/components/pos/TableBillPanel.tsx");
+  assert.match(panel, /includes\("needs a connection"\)/);
+  assert.match(panel, /role="note"/);
 });
 
 test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a server charge offline)", () => {

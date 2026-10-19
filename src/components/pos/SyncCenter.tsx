@@ -9,7 +9,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Glyph } from "@/components/Glyph";
 import { historySummary, listHistory, type SyncHistoryEvent } from "@/lib/offline/syncHistory";
 import { currentCaptureBuild, listOperations, requeueOperation } from "@/lib/offline/operationLog";
-import { buildDiagnostic } from "@/lib/offline/queueForensics";
+import { buildDiagnostic, loadSyncCenterRows, type SyncCenterRow } from "@/lib/offline/queueForensics";
+import { useShift } from "@/state/shift";
 
 type Summary = { pending: number; syncing: number; needsAttention: number; synced: number };
 
@@ -40,10 +41,23 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
 
   const [requeuing, setRequeuing] = useState<string | null>(null);
 
+  // rc.12 — OPERATIONS (default): one row per operation in its CURRENT state, with the dependency chain;
+  // HISTORY: the preserved append-only event log. rc.11 showed only history events, so one operation
+  // appeared as Synced, Syncing and Needs attention at the same time.
+  const [tab, setTab] = useState<"operations" | "history">("operations");
+  const [rows, setRows] = useState<SyncCenterRow[]>([]);
+  const [expandedOp, setExpandedOp] = useState<string | null>(null);
+
+  // rc.12 — the live shift (canonical or offline-opened local id), so work of an OLDER shift is
+  // classified UNRELATED_OLD_SHIFT rather than mistaken for this shift's failure.
+  const currentShiftId = useShift((s) => s.pendingLocalId ?? s.shift?.id ?? null);
+
   const refresh = useCallback(async () => {
     setSummary(await historySummary(tenantId, branchId).catch(() => ({ pending: 0, syncing: 0, needsAttention: 0, synced: 0 })));
-    if (open) setEvents(await listHistory(tenantId, branchId, 100).catch(() => []));
-  }, [tenantId, branchId, open]);
+    if (!open) return;
+    if (tab === "history") setEvents(await listHistory(tenantId, branchId, 100).catch(() => []));
+    else setRows(await loadSyncCenterRows({ tenantId, branchId, currentBuild: currentCaptureBuild(), currentShiftId }).catch(() => []));
+  }, [tenantId, branchId, open, tab, currentShiftId]);
 
   // Conflict Center: put a parked (needs-attention) operation back in the queue. Only a
   // needs_attention op is affected; it syncs on the next connection. Never touches in-flight work.
@@ -71,15 +85,16 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
   const [diagNote, setDiagNote] = useState<string | null>(null);
   const copyDiagnostics = useCallback(async () => {
     try {
-      const ops = (await listOperations()).filter((o) => o.scope.tenant_id === tenantId && (branchId == null || (o.scope.branch_id ?? null) === branchId));
-      const rows = buildDiagnostic(ops, currentCaptureBuild());
+      const all = await listOperations();
+      const ops = all.filter((o) => o.scope.tenant_id === tenantId && (branchId == null || (o.scope.branch_id ?? null) === branchId));
+      const rows = buildDiagnostic(ops, currentCaptureBuild(), { allOps: all, currentShiftId });
       const text = JSON.stringify({ build: currentCaptureBuild(), exported_at: new Date().toISOString(), operations: rows }, null, 1);
       await navigator.clipboard.writeText(text);
       setDiagNote(`Copied diagnostics for ${rows.length} operation${rows.length === 1 ? "" : "s"}.`);
     } catch {
       setDiagNote("Could not copy the diagnostics on this device.");
     }
-  }, [tenantId, branchId]);
+  }, [tenantId, branchId, currentShiftId]);
 
   // Chip text + tone. Needs-attention dominates, then in-flight, else all-synced.
   const chip =
@@ -124,6 +139,84 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
               {diagNote && <span className="ml-2 text-[11px] text-sub">{diagNote}</span>}
             </div>
 
+            <div className="flex gap-1 border-b border-line px-5 py-2" role="tablist">
+              {(["operations", "history"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === t}
+                  onClick={() => setTab(t)}
+                  className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold ${tab === t ? "bg-brand-soft text-brand-dark" : "text-sub hover:bg-slate-50"}`}
+                >
+                  {t === "operations" ? "Operations" : "Sync history"}
+                </button>
+              ))}
+            </div>
+
+            {tab === "operations" ? (
+              <div className="flex-1 overflow-auto">
+                {rows.length === 0 ? (
+                  <p className="px-5 py-8 text-center text-sm text-sub">No offline operations on this device.</p>
+                ) : (
+                  <ul className="divide-y divide-line">
+                    {rows.map((r) => (
+                      <li key={r.operation_id}>
+                        <button
+                          type="button"
+                          onClick={() => setExpandedOp(expandedOp === r.operation_id ? null : r.operation_id)}
+                          className="flex w-full items-center justify-between gap-3 px-5 py-2.5 text-left hover:bg-slate-50"
+                        >
+                          <span className="flex min-w-0 flex-col">
+                            <span className="truncate text-sm font-semibold capitalize text-ink">{r.label}</span>
+                            <span className="truncate text-[11px] text-sub">
+                              {fmtTime(r.created_at)} · {eraLabel(r.era)}
+                              {r.blocking ? ` · ${r.blocking}` : ""}
+                            </span>
+                          </span>
+                          <span className={`shrink-0 text-[11px] font-semibold ${r.status === "needs_attention" ? "text-amber-700" : r.status === "synced" ? "text-emerald-700" : "text-sub"}`}>
+                            {statusLabel(r.status as SyncHistoryEvent["status"])}
+                          </span>
+                        </button>
+                        {expandedOp === r.operation_id && (
+                          <div className="space-y-0.5 bg-slate-50 px-5 pb-3 pt-1 text-[11px] text-sub">
+                            <div>Operation: {r.operation_id}</div>
+                            <div>Type: {r.type} · Build: {r.build ?? "pre-rc.10"} ({eraLabel(r.era)})</div>
+                            {r.shift && <div>Shift: {r.shift}</div>}
+                            {r.ou && <div>Operating unit: {r.ou}</div>}
+                            {r.canonical && <div>Server ref: {r.canonical}</div>}
+                            <div>Classification: {r.category} · {r.disposition}</div>
+                            {r.blocking && <div>Blocking: {r.blocking}</div>}
+                            {r.depends_on.length > 0 && (
+                              <div>
+                                Depends on:
+                                <ul className="ml-3 list-disc">
+                                  {r.depends_on.map((d) => (
+                                    <li key={d.op}>
+                                      {d.type} {d.op} — {d.status}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {r.status === "needs_attention" && (
+                              <button
+                                type="button"
+                                onClick={() => void retry(r.operation_id)}
+                                disabled={requeuing === r.operation_id}
+                                className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60"
+                              >
+                                {requeuing === r.operation_id ? "Queuing…" : "Try again on next sync"}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : (
             <div className="flex-1 overflow-auto">
               {events.length === 0 ? (
                 <p className="px-5 py-8 text-center text-sm text-sub">No offline activity yet.</p>
@@ -170,9 +263,21 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
                 </ul>
               )}
             </div>
+            )}
           </div>
         </div>
       )}
     </>
   );
+}
+
+/** rc.12 — which build captured an operation, in operator words. */
+function eraLabel(era: SyncCenterRow["era"]): string {
+  switch (era) {
+    case "HISTORICAL_RC8_RC9": return "earlier test build (rc.8/9)";
+    case "HISTORICAL_RC10": return "rc.10";
+    case "RC11": return "rc.11";
+    case "CURRENT": return "this build";
+    default: return "other build";
+  }
 }

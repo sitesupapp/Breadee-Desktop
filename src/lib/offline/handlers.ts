@@ -303,6 +303,8 @@ type DineinSendRoundPayload = {
   /** For rounds >= 2: the ROUND-1 local entity id whose canonical order id pins expected_order_id;
    *  null for round 1 (which establishes the session order). */
   session_local: string | null;
+  /** rc.12 — the LOCAL id of a shift opened offline, remapped to the canonical shift id (submit.shift_id). */
+  shift_local?: string | null;
 };
 
 /** dinein_send_round — send a dine-in round to the table's open order via pos_submit_order
@@ -334,6 +336,29 @@ export const dineinSendRoundHandler: OperationHandler = {
       const canonicalTable = await ctx.canonicalFor(p.table_local);
       if (!canonicalTable) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "table_unresolved", message: "table not yet synced" };
       payload = { ...payload, table_id: canonicalTable };
+    }
+
+    // rc.12 — a round captured BEFORE rc.12 carries no shift. If its session has since been attached to a
+    // shift (provable upgrade backfill at the next send), use that; never create a shift-less order.
+    let shiftLocal = p.shift_local ?? null;
+    if (!payload.shift_id && !shiftLocal) {
+      const sessionId = p.session_local ?? op.local_entity_id;
+      const { localdb } = await import("@/lib/offline/db");
+      const d = sessionId ? await localdb.dineDrafts.get(sessionId).catch(() => undefined) : undefined;
+      if (d?.shift_id) payload = { ...payload, shift_id: d.shift_id };
+      else if (d?.shift_local) shiftLocal = d.shift_local;
+    }
+    // rc.12 — an offline-opened shift: the order is created on its CANONICAL shift (never shift-less).
+    if (shiftLocal) {
+      const canonicalShift = await ctx.canonicalFor(shiftLocal);
+      if (!canonicalShift) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "shift_unresolved", message: "shift not yet synced" };
+      payload = { ...payload, shift_id: canonicalShift };
+    }
+    // FAIL CLOSED: a round that would CREATE a new server order without a shift is parked for review
+    // (nothing sent) — the server would accept it and the order could then never be settled/moved/merged.
+    // Appends (expected_order_id / a later round) keep the existing order's shift server-side.
+    if (!payload.shift_id && !p.session_local && !payload.expected_order_id) {
+      return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "shift_missing", message: "Dine-in order captured without a shift (pre-rc.12) — not sent; it would not be attached to an open shift." };
     }
 
     // Rounds >= 2: bind to the session's canonical order (resolved by round 1).
@@ -830,13 +855,17 @@ export const customerUpsertHandler: OperationHandler = {
     try {
       const r = await ctx.deps.upsertCustomer({ payload: upsert, clientOpId: op.client_op_id });
       if (!r.customer_id) return { ok: false, retryClass: "SERVER_RETRYABLE", code: "no_customer_id", message: "no customer id returned" };
-      // Drop the pending-local picker row now it has a canonical id — the local→canonical mapping
-      // lives in the entityMap (so any not-yet-replayed dependent still resolves), and the canonical
-      // customer is re-cached by the normal online search/profile mirror. Prevents a stale local row
-      // lingering as selectable after sync. Best-effort; a create carries its local id in local_entity_id.
+      // rc.12 — ONE logical customer: the pending-local picker row is PROMOTED to the canonical id
+      // (local address ids remapped), atomically — still searchable offline, never listed twice. rc.11
+      // deleted it and nothing re-cached the canonical customer (F5). The entity map keeps the
+      // local→canonical alias for any not-yet-replayed dependent. Best-effort (cache, not authority).
+      const addrMap: Record<string, string> = p.local_address_id && r.address_id ? { [p.local_address_id]: r.address_id } : {};
       if (op.local_entity_id) {
-        const { deletePendingLocalCustomer } = await import("@/lib/offline/db");
-        await deletePendingLocalCustomer(op.local_entity_id).catch(() => undefined);
+        const { promotePendingLocalCustomer } = await import("@/lib/offline/db");
+        await promotePendingLocalCustomer(op.local_entity_id, r.customer_id, addrMap).catch(() => undefined);
+      } else if (p.local_address_id && r.address_id) {
+        const { remapCachedCustomerAddress } = await import("@/lib/offline/db");
+        await remapCachedCustomerAddress(r.customer_id, p.local_address_id, r.address_id).catch(() => undefined);
       }
       // Record the address mapping (create-with-address) so a dependent order resolves address_local.
       if (p.local_address_id && r.address_id) {

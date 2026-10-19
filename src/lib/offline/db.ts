@@ -263,6 +263,12 @@ export interface DineDraft {
   /** rc.10 — the captured settle / on-account op that settled this session locally (status=settled). */
   settled_operation_id?: string | null;
   settled_at?: string | null;
+  /** rc.12 — the shift this session's orders belong to: the canonical shift id, or (shift opened
+   *  offline) the pending shift's LOCAL id, remapped at replay. A dine-in order sent without a shift is
+   *  created shift-less on the server and can then never be settled, moved or merged
+   *  (`_pos_lock_open_shift`: "This order is not attached to an open shift"). Absent on pre-rc.12 drafts. */
+  shift_id?: string | null;
+  shift_local?: string | null;
   lines: DineDraftLine[];
   rounds: DineDraftRound[];
   /** Monotonic; bumped on every mutation. A deterministic client_op_id input for a send. */
@@ -582,6 +588,14 @@ export async function listCachedCustomers(tenantId: string | null, branchId: str
   return all.filter((c) => (c.branch_id ?? null) === (branchId ?? null));
 }
 
+/** rc.12 — cached customers with this exact normalised phone, via the phone_e164 INDEX (no table scan),
+ *  scope-checked. */
+export async function findCachedCustomersByPhoneE164(tenantId: string | null, branchId: string | null, e164: string): Promise<CachedCustomer[]> {
+  if (!tenantId || !e164) return [];
+  const hits = await localdb.posCustomers.where("phone_e164").equals(e164).toArray();
+  return hits.filter((c) => c.tenant_id === tenantId && (c.branch_id ?? null) === (branchId ?? null));
+}
+
 /** One cached customer by server id, scope-checked. */
 export async function getCachedCustomer(
   id: string,
@@ -631,6 +645,60 @@ export async function listPendingLocalCustomers(tenantId: string | null, branchI
  *  online search/profile mirror). Best-effort; never throws on a missing row. */
 export async function deletePendingLocalCustomer(localId: string): Promise<void> {
   await localdb.posCustomers.delete(localId).catch(() => undefined);
+}
+
+function remapAddresses(list: unknown[] | null | undefined, map: Record<string, string>): Record<string, unknown>[] {
+  return (Array.isArray(list) ? list : []).map((a) => {
+    const r = (a && typeof a === "object" ? a : {}) as Record<string, unknown>;
+    const id = typeof r.id === "string" ? r.id : null;
+    if (id && map[id]) {
+      const { pending_local: _p, ...rest } = r;
+      void _p;
+      return { ...rest, id: map[id] };
+    }
+    return r;
+  });
+}
+
+/**
+ * rc.12 — the ONE logical customer after sync. Through rc.11 the synced pending-local row was simply
+ * DELETED and nothing cached the canonical customer, so the next OFFLINE search for that phone found
+ * nothing (F5). Now, in one transaction, the pending-local row is PROMOTED to the canonical id (merged
+ * into an already-cached canonical row without downgrading its profile), its local address ids are
+ * remapped to the canonical ones, and the local row is removed — one result, never two.
+ */
+export async function promotePendingLocalCustomer(localId: string, canonicalId: string, addressMap: Record<string, string>): Promise<void> {
+  await localdb.transaction("rw", localdb.posCustomers, async () => {
+    const local = await localdb.posCustomers.get(localId);
+    if (!local) return;
+    const existing = localId === canonicalId ? undefined : await localdb.posCustomers.get(canonicalId);
+    const localAddrs = remapAddresses(local.addresses, addressMap);
+    const prior = remapAddresses(existing?.addresses ?? null, addressMap);
+    const merged = [...prior, ...localAddrs.filter((a) => !prior.some((p) => p.id === a.id))];
+    const promoted: CachedCustomer = {
+      id: canonicalId,
+      tenant_id: existing?.tenant_id ?? local.tenant_id,
+      branch_id: existing?.branch_id ?? local.branch_id,
+      name: existing?.name ?? local.name,
+      phone: existing?.phone ?? local.phone,
+      phone_e164: existing?.phone_e164 ?? local.phone_e164,
+      addresses: merged.length > 0 ? merged : null,
+      notes: existing?.notes ?? local.notes,
+      has_profile: (existing?.has_profile ?? false) || local.has_profile,
+      cached_at: new Date().toISOString(),
+    };
+    await localdb.posCustomers.put(promoted);
+    if (localId !== canonicalId) await localdb.posCustomers.delete(localId);
+  });
+}
+
+/** rc.12 — after an offline NEW address syncs, the cached customer's address carries its canonical id. */
+export async function remapCachedCustomerAddress(customerId: string, localAddressId: string, canonicalAddressId: string): Promise<void> {
+  await localdb.transaction("rw", localdb.posCustomers, async () => {
+    const c = await localdb.posCustomers.get(customerId);
+    if (!c || !Array.isArray(c.addresses)) return;
+    await localdb.posCustomers.put({ ...c, addresses: remapAddresses(c.addresses, { [localAddressId]: canonicalAddressId }) });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +943,23 @@ export async function readCachedDeliveryLines(orderId: string, tenantId: string 
   if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return null;
   const cachedAt = Date.parse(row.cached_at);
   return { lines: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
+}
+
+/** rc.12 — many orders' cached line snapshots in ONE read (bulkGet), scope-checked, keyed by order id. */
+export async function readCachedDeliveryLinesMany(
+  orderIds: string[],
+  tenantId: string | null,
+  branchId: string | null,
+): Promise<Map<string, { lines: unknown; cachedAt: number }>> {
+  const out = new Map<string, { lines: unknown; cachedAt: number }>();
+  if (!tenantId || orderIds.length === 0) return out;
+  const rows = await localdb.snapshots.bulkGet(orderIds.map(deliveryLinesKey));
+  rows.forEach((row, i) => {
+    if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return;
+    const cachedAt = Date.parse(row.cached_at);
+    out.set(orderIds[i], { lines: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() });
+  });
+  return out;
 }
 
 // rc.9 — the branch's ACTIVE operational delivery-provider catalog (delivery_providers_operational),

@@ -51,10 +51,14 @@ export async function listHistory(
   limit = 200,
 ): Promise<SyncHistoryEvent[]> {
   if (!tenantId) return [];
-  const rows = await localdb.syncHistory.orderBy("id").reverse().toArray();
-  return rows
+  // rc.12 — newest-first CURSOR that stops after `limit` scoped rows (Dexie filter + limit), instead of
+  // materialising the whole (up to thousands of rows) history table every 4 s while the dialog is open.
+  return localdb.syncHistory
+    .orderBy("id")
+    .reverse()
     .filter((e) => e.tenant_id === tenantId && (branchId == null || (e.branch_id ?? null) === branchId))
-    .slice(0, limit);
+    .limit(limit)
+    .toArray();
 }
 
 /** Rolled-up status for the global badge, scoped to the active context. */
@@ -65,7 +69,8 @@ export async function historySummary(
   const out = { pending: 0, syncing: 0, needsAttention: 0, synced: 0 };
   if (!tenantId) return out;
   // Summary is derived from the live operation log (current truth), not the append-only
-  // history (which keeps past events). Scope-filtered.
+  // history (which keeps past events). Scope-filtered. (rc.12 measured: ONE bulk read beats per-status
+  // index cursors by ~35× on QA-sized logs — cursor steps are individually async.)
   const ops = await localdb.operations.toArray();
   for (const o of ops) {
     if (o.scope.tenant_id !== tenantId) continue;

@@ -123,6 +123,20 @@ export function evaluateDineinOfflineReady(i: OfflineReadyInput): { ready: boole
 // C5 — open table offline (atomic: dinein_open_table op + dineDraft projection)
 // ---------------------------------------------------------------------------
 
+/**
+ * rc.12 — the shift reference a dine-in session's orders are created under. The active shift id is
+ * either canonical, or the LOCAL id of a shift opened offline (a pendingShifts row): the local one
+ * travels as `shift_local` and is remapped to the canonical shift at replay (exactly like an offline
+ * takeaway/delivery sale), so the server never creates a shift-less dine-in order.
+ */
+export async function resolveShiftRef(shiftId: string | null | undefined): Promise<{ shift_id: string | null; shift_local: string | null }> {
+  if (!shiftId) return { shift_id: null, shift_local: null };
+  const pending = await localdb.pendingShifts.get(shiftId).catch(() => undefined);
+  if (!pending) return { shift_id: shiftId, shift_local: null };
+  if (pending.server_shift_id) return { shift_id: pending.server_shift_id, shift_local: null };
+  return { shift_id: null, shift_local: shiftId };
+}
+
 export async function openTableOffline(args: {
   scope: DineinScope;
   tableId: string; // canonical table id (configured tables) — known from the cached map/floor
@@ -175,8 +189,10 @@ export async function openTableOffline(args: {
     result_meta: null,
     synced_at: null,
   };
+  const shiftRef = await resolveShiftRef(args.scope.shiftId);
   const draft: DineDraft = {
     local_session_id: localSessionId,
+    ...shiftRef,
     tenant_id: args.scope.tenantId,
     branch_id: args.scope.branchId,
     cashier_user_id: args.scope.cashierUserId,
@@ -257,18 +273,41 @@ export async function setDraftNotes(sessionId: string, notes: string | null): Pr
  *  the durable correctness boundary; this only avoids a redundant concurrent attempt). */
 const sendingSessions = new Set<string>();
 
-export async function sendRoundOffline(sessionId: string): Promise<DineDraft> {
+/** rc.12 — refused send of a NEW dine-in order with no provable shift (never a shift-less server order). */
+export const SHIFT_MISSING_MESSAGE =
+  "This table's bill was started by an earlier build without a shift, so it cannot be sent offline safely. Reconnect and send it online, or open the table again on this shift.";
+
+export async function sendRoundOffline(
+  sessionId: string,
+  /** rc.12 — the cashier's CURRENT shift. A pre-rc.12 session (no shift reference) is attached to it only
+   *  when PROVABLY its own: the session was opened at/after this shift opened (same 5-D scope). */
+  opts: { currentShift?: { id: string; openedAt: string | null } | null } = {},
+): Promise<DineDraft> {
   if (sendingSessions.has(sessionId)) {
     const existing = await localdb.dineDrafts.get(sessionId);
     if (existing) return existing;
   }
   sendingSessions.add(sessionId);
   try {
+    // Upgrade backfill (resolved OUTSIDE the transaction: it reads pendingShifts).
+    let backfill: { shift_id: string | null; shift_local: string | null } | null = null;
+    const pre = await localdb.dineDrafts.get(sessionId);
+    const cur = opts.currentShift ?? null;
+    if (pre && !pre.shift_id && !pre.shift_local && cur?.id && cur.openedAt) {
+      const created = Date.parse(pre.created_at);
+      const opened = Date.parse(cur.openedAt);
+      if (Number.isFinite(created) && Number.isFinite(opened) && created >= opened - 1000) backfill = await resolveShiftRef(cur.id);
+    }
     return await localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
       const d = await localdb.dineDrafts.get(sessionId);
       if (!d) throw new Error("dine session not found");
       const unsent = d.lines.filter((l) => l.sent_round === null);
       if (unsent.length === 0) return d; // nothing to send
+      if (!d.shift_id && !d.shift_local && backfill) Object.assign(d, backfill);
+      // FAIL CLOSED: a round that would CREATE a new server order (round 1 of an unbound session) is
+      // never sent without a shift — that is exactly the rc.4–rc.11 shift-less order the server can then
+      // never settle. Appends (bound session / later rounds) keep the order's own shift server-side.
+      if (!d.shift_id && !d.shift_local && d.rounds.length === 0 && !d.canonical_order_id) throw new Error(SHIFT_MISSING_MESSAGE);
 
       const seq = d.rounds.length + 1;
       const lineIds = unsent.map((l) => l.line_id).sort();
@@ -292,7 +331,9 @@ export async function sendRoundOffline(sessionId: string): Promise<DineDraft> {
         branch_id: d.branch_id,
         order_type: "dine_in",
         status: "sent_to_kitchen",
-        shift_id: "", // the drain fills nothing here; dine-in append keys on table_id + open order
+        // rc.12 — the session's shift (canonical now, or remapped from shift_local at replay). It was ""
+        // through rc.11, which created every offline dine-in order SHIFT-LESS on the server.
+        shift_id: d.shift_id ?? "",
         client_op_id: clientOpId,
         notes: d.notes,
         table_id: d.table_id,
@@ -312,9 +353,10 @@ export async function sendRoundOffline(sessionId: string): Promise<DineDraft> {
         canonical_entity_id: null,
         // Strict op-completion chain: open -> R1 -> R2 -> ... (acyclic; a failed prereq blocks).
         dependency_ids: [prevRoundOpId],
-        // R>=2 depends on the session's canonical order (resolved by R1).
-        depends_on_local_entities: isFirst ? [] : [d.local_session_id],
-        payload: { submit, table_local: null, session_local: isFirst ? null : d.local_session_id, table_name: d.table_name, round_seq: seq },
+        // R>=2 depends on the session's canonical order (resolved by R1); an offline-opened shift
+        // must resolve before any round (the order is created ON that shift).
+        depends_on_local_entities: [...(isFirst ? [] : [d.local_session_id]), ...(d.shift_local ? [d.shift_local] : [])],
+        payload: { submit, table_local: null, session_local: isFirst ? null : d.local_session_id, shift_local: d.shift_local ?? null, table_name: d.table_name, round_seq: seq },
         status: "pending",
         retry_count: 0,
         last_attempt_at: null,

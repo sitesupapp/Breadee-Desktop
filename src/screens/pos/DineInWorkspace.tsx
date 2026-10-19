@@ -72,7 +72,6 @@ import {
   tableOpGate,
   type TableOpKind,
 } from "@/lib/pos/tableOps";
-import { captureMoveTableOffline, captureMergeTablesOffline } from "@/lib/offline/tableOpOffline";
 import {
   addItemsGate as computeAddItemsGate,
   describeBillChange,
@@ -103,6 +102,7 @@ import {
   type OnAccountVerdict,
 } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
+import { useShift } from "@/state/shift";
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
@@ -419,18 +419,24 @@ export function useDineInWorkspace(input: {
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
   const opGates = useMemo(() => {
-    // Move/Merge are offline-capturable (server CAS catches drift) when the POS is offline-ready +
-    // scope present; Close/Clear stay online-only. (Same flag as `offlineCapture` below, inlined
-    // here because that const is declared after this memo.)
-    const offlineTableOp = !input.online && input.offlineReady === true && input.offlineScope != null;
-    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: offlineTableOp };
+    // rc.12 — Move and Merge are SERVER-COORDINATED (online only), like Close/Clear. The server re-homes
+    // the bill (orders, rounds, payments, version) atomically under the shift lock; offline the device
+    // cannot predict that result (merged order/item ids, partial-payment re-allocation), so rc.4–rc.11's
+    // offline capture showed nothing on the floor and was refused at replay (F3/F4). Offline the gate says
+    // so explicitly — never a button that silently does nothing.
+    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: false };
+    // Permission first (an unpermitted operator is told that, online or not), then connectivity.
+    const serverCoordinated = (permitted: Gate, kind: "move" | "merge", what: string, verb: string): Gate =>
+      permitted.allowed && !input.online
+        ? { allowed: false, reason: `${what} needs a connection — the server moves the whole bill (rounds, payments, balance) in one step. Reconnect to ${verb}.` }
+        : tableOpGate({ kind, permitted, ...common });
     return {
-      move: tableOpGate({ kind: "move", permitted: canMoveTable(pos.access), ...common }),
+      move: serverCoordinated(canMoveTable(pos.access), "move", "Moving a table", "move it"),
       close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
-      merge: tableOpGate({ kind: "merge", permitted: canMergeTables(pos.access), ...common }),
+      merge: serverCoordinated(canMergeTables(pos.access), "merge", "Merging tables", "merge them"),
     };
-  }, [pos.access, selected, hasOpenShift, input.online, input.offlineReady, input.offlineScope]);
+  }, [pos.access, selected, hasOpenShift, input.online]);
 
   // Phase C/D — offline capture is live when the backend is unreachable AND the device is
   // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
@@ -532,20 +538,7 @@ export function useDineInWorkspace(input: {
       if (!selected || !opGates.move.allowed) return;
       const from = selected.name;
       const to = tables.map.tables.find((t) => t.id === destinationId)?.name ?? "the new table";
-      // OFFLINE: capture a durable move_table op (CAS on the from-table's version) — it replays
-      // exactly-once on reconnect; a floor drift → needs_attention. Online path unchanged.
-      if (offlineCapture && input.offlineScope) {
-        const scope = input.offlineScope;
-        void runOp(
-          "move",
-          async () => {
-            await captureMoveTableOffline({ scope, fromTableId: selected.id, toTableId: destinationId, expectedVersion: selected.pos_entity_version > 0 ? selected.pos_entity_version : null });
-            return `Move of ${from} to ${to} saved offline — it will apply when the connection returns.`;
-          },
-          { offline: true },
-        );
-        return;
-      }
+      // rc.12 — server-coordinated only (the gate refuses offline with the reason); see opGates.
       void runOp(
         "move",
         async () => moveOutcomeMessage(await moveTable({ fromTableId: selected.id, toTableId: destinationId }), from, to),
@@ -553,7 +546,7 @@ export function useDineInWorkspace(input: {
         { selectAfter: destinationId },
       );
     },
-    [selected, opGates.move.allowed, tables.map.tables, runOp, offlineCapture, input.offlineScope],
+    [selected, opGates.move.allowed, tables.map.tables, runOp],
   );
 
   const confirmClose = useCallback(() => {
@@ -589,22 +582,8 @@ export function useDineInWorkspace(input: {
         .filter((t): t is TableSummary => t != null);
       const expected = buildMergeExpected(selected, sources);
       const sig = mergeAttemptSignature(selected.id, sourceTableIds);
-      // OFFLINE: capture a durable merge_tables op keyed by the stable target-set signature (so a
-      // re-submit of the SAME set is idempotent), carrying the per-table version-map CAS. The server
-      // re-checks every table atomically on replay; any drift → needs_attention, never a silent
-      // destructive merge. Online path unchanged.
-      if (offlineCapture && input.offlineScope) {
-        const scope = input.offlineScope;
-        void runOp(
-          "merge",
-          async () => {
-            await captureMergeTablesOffline({ scope, primaryTableId: selected.id, sourceTableIds, expected, clientOpId: sig });
-            return `Merge of ${sources.length} table${sources.length === 1 ? "" : "s"} into ${primaryName} saved offline — it will apply when the connection returns.`;
-          },
-          { offline: true },
-        );
-        return;
-      }
+      // rc.12 — server-coordinated only (the gate refuses offline with the reason). The rc.4–rc.11
+      // offline capture sent this signature ("a|b") as client_op_id → 22P02 at replay.
       mergeOpId.current = stableMergeOpId(mergeOpId.current, sig);
       const clientOpId = mergeOpId.current.id;
       void runOp("merge", async () => {
@@ -619,7 +598,7 @@ export function useDineInWorkspace(input: {
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
-    [selected, opGates.merge.allowed, displayMap.tables, runOp, offlineCapture, input.offlineScope],
+    [selected, opGates.merge.allowed, displayMap.tables, runOp],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -912,7 +891,12 @@ export function useDineInWorkspace(input: {
           });
         }
         for (const l of submitted) await addDraftLine(draft.local_session_id, draftLineFromCart(l));
-        const updated = await sendRoundOffline(draft.local_session_id); // durable capture (atomic)
+        // durable capture (atomic). rc.12 — the CURRENT shift lets a pre-rc.12 session (no shift ref) be
+        // attached only when provably its own; otherwise a new order is refused, never sent shift-less.
+        const liveShift = useShift.getState().shift;
+        const updated = await sendRoundOffline(draft.local_session_id, {
+          currentShift: liveShift && input.shiftId === liveShift.id ? { id: liveShift.id, openedAt: liveShift.opened_at ?? null } : null,
+        });
         const round = updated.rounds[updated.rounds.length - 1];
         // Local kitchen print — independent of server sync; failure never reverses the round.
         try {

@@ -42,6 +42,72 @@ function inScope(op: OfflineOperation, s: EndShiftScope): boolean {
 const END_SHIFT_OP_PREFIX = "endshift:";
 
 /**
+ * rc.12 — the operation types a canonical shift CLOSE actually depends on: everything that creates,
+ * changes or settles money / orders of the shift (pos_end_shift refuses open orders and computes the
+ * expected drawer from server payments). Customer records, table moves/merges, delivery logistics and
+ * order notes never change what the close counts, so they never hold the close hostage.
+ */
+export const CLOSE_RELEVANT_TYPES: ReadonlySet<string> = new Set([
+  "open_shift",
+  "takeaway_sale",
+  "dinein_open_table",
+  "dinein_send_round",
+  "edit_order_line",
+  "add_order_items",
+  "pay_table",
+  "pay_order",
+  "split_settle",
+  "on_account_table",
+  "on_account_order",
+  "void_refund",
+  "payout",
+  "receivable_collect",
+]);
+
+export type CloseBarrierState =
+  | { ready: true }
+  | { ready: false; waiting: string[]; parked: string[]; missing: string[] };
+
+/**
+ * rc.12 — the prerequisites that GATE the canonical close: every declared dependency EXCEPT those that
+ * provably cannot affect it (a known non-close-relevant op, or a cancelled op that never reaches the
+ * server). A MISSING dependency stays in (the generic evaluator still diagnoses it — never assumed done),
+ * and the generic scope / cycle checks still run over these.
+ */
+export function closeEffectiveDependencies(op: OfflineOperation, byId: Map<string, OfflineOperation>): string[] {
+  return op.dependency_ids.filter((id) => {
+    const d = byId.get(id);
+    if (!d) return true;
+    return d.status !== "cancelled" && CLOSE_RELEVANT_TYPES.has(String(d.operation_type));
+  });
+}
+
+/**
+ * rc.12 — PURE. The End Shift barrier, evaluated at replay. Through rc.11 the close used the generic
+ * rule: ANY prerequisite in needs_attention made the close itself TERMINAL ("A prerequisite could not be
+ * completed") — permanently, even after the operator fixed that prerequisite — and the server shift
+ * stayed open forever (the "Open Shift succeeded but No open shift" loop). Now:
+ *   - synced / cancelled prerequisites            → satisfied (cancelled work never reaches the server)
+ *   - non-close-relevant prerequisites (any state) → satisfied (never affect the close)
+ *   - pending / syncing / blocked / retryable       → WAIT
+ *   - close-relevant needs_attention                → WAIT (parked, named), never terminal: the close
+ *     proceeds automatically once the operator resolves it.
+ */
+export function evaluateCloseBarrier(op: OfflineOperation, byId: Map<string, OfflineOperation>): CloseBarrierState {
+  const waiting: string[] = [];
+  const parked: string[] = [];
+  const missing: string[] = [];
+  for (const id of closeEffectiveDependencies(op, byId)) {
+    const d = byId.get(id);
+    if (!d) missing.push(id); // never assumed satisfied — the generic evaluator diagnoses it
+    else if (d.status === "synced") continue;
+    else if (d.status === "needs_attention") parked.push(id);
+    else waiting.push(id);
+  }
+  return waiting.length === 0 && parked.length === 0 && missing.length === 0 ? { ready: true } : { ready: false, waiting, parked, missing };
+}
+
+/**
  * Durably capture an offline End Shift. The dependency barrier is a snapshot of EVERY non-terminal,
  * non-end_shift op in this exact scope — the orchestrator will not replay the close until all of
  * them are `synced`. Deterministic op id (scope + shift) makes a double-tap / restart idempotent.
@@ -76,6 +142,8 @@ export async function captureEndShiftOffline(input: {
       .filter(
         (o) =>
           o.operation_type !== "end_shift" &&
+          // rc.12 — only work the canonical close depends on (see CLOSE_RELEVANT_TYPES).
+          CLOSE_RELEVANT_TYPES.has(String(o.operation_type)) &&
           o.status !== "cancelled" &&
           o.status !== "synced" &&
           inScope(o, input.scope) &&

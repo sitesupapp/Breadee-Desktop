@@ -18,6 +18,14 @@ import {
 } from "@/lib/offline/operationLog";
 import { evaluateDependencies, resolveEntity, canonicalIdForInScope } from "@/lib/offline/entityMap";
 import { handlerFor, type HandlerContext } from "@/lib/offline/handlers";
+import { closeEffectiveDependencies } from "@/lib/offline/endShiftOffline";
+
+/** rc.12 — the generic evaluator over an End Shift's CLOSE-RELEVANT prerequisites (non-relevant /
+ *  cancelled ones never gate the close; missing ones are still diagnosed; cycles still detected over the
+ *  full graph), so a parked customer edit or table move can never block or fail the close. */
+function evaluateCloseDependencies(op: OfflineOperation, byId: Map<string, OfflineOperation>, resolved: Set<string>) {
+  return evaluateDependencies({ ...op, dependency_ids: closeEffectiveDependencies(op, byId) }, byId, resolved);
+}
 import { appendHistory } from "@/lib/offline/syncHistory";
 import { type PosTxnSyncContext, type PosTxnSyncDeps, defaultDeps } from "@/lib/offline/posTxnSync";
 
@@ -229,7 +237,27 @@ export async function drainOperations(
       for (const op of working) {
         if (TERMINAL.includes(op.status)) continue;
 
-        const dep = evaluateDependencies(op, byId, resolvedLocalEntities);
+        // rc.12 — the End Shift close is gated by its CLOSE-RELEVANT prerequisites only, through the SAME
+        // generic evaluator (scope / missing / cycle checks intact). The one difference: a same-scope
+        // prerequisite parked in needs_attention makes the close WAIT non-terminally, naming it (it
+        // proceeds by itself once the operator resolves it) — through rc.11 it turned the close itself
+        // terminal forever ("A prerequisite could not be completed").
+        let dep = op.operation_type === "end_shift" ? evaluateCloseDependencies(op, byId, resolvedLocalEntities) : evaluateDependencies(op, byId, resolvedLocalEntities);
+        if (op.operation_type === "end_shift" && !dep.ready && dep.reason === "dependency_failed") {
+          const parked = dep.failed.filter((id) => {
+            const d = byId.get(id);
+            return d != null && d.status === "needs_attention" && d.scope.tenant_id === op.scope.tenant_id && (d.scope.branch_id ?? null) === (op.scope.branch_id ?? null) && d.scope.device_id === op.scope.device_id && d.scope.cashier_user_id === op.scope.cashier_user_id;
+          });
+          if (parked.length === dep.failed.length) {
+            const message = parked.join(",");
+            if (op.status !== "blocked_dependency" || op.last_error_code !== "awaiting_parked_prerequisite" || op.last_error_message !== message) {
+              await commit(op, { status: "blocked_dependency", last_error_code: "awaiting_parked_prerequisite", last_error_message: message });
+              await history(op, "blocked_dependency", "waiting for an operation that needs attention");
+            }
+            continue;
+          }
+          dep = { ready: false, reason: "dependency_failed", failed: dep.failed.filter((id) => !parked.includes(id)) };
+        }
         if (!dep.ready) {
           if (dep.reason === "circular") {
             await commit(op, { status: "needs_attention", last_error_code: "circular_dependency", last_error_message: dep.cycle.join(" -> ") });
@@ -243,8 +271,10 @@ export async function drainOperations(
             await commit(op, { status: "needs_attention", last_error_code: "dependency_failed", last_error_message: dep.failed.join(",") });
             await history(op, "needs_attention", "a prerequisite could not be completed");
             progress = true;
-          } else if (op.status !== "blocked_dependency") {
-            await commit(op, { status: "blocked_dependency" });
+          } else if (op.status !== "blocked_dependency" || op.last_error_code === "awaiting_parked_prerequisite") {
+            // (rc.12: a close that was waiting on a PARKED prerequisite now waits on an ordinary one —
+            // clear the stale parked label so the Sync Center diagnostic stays exact.)
+            await commit(op, { status: "blocked_dependency", ...(op.last_error_code === "awaiting_parked_prerequisite" ? { last_error_code: null, last_error_message: null } : {}) });
             await history(op, "blocked_dependency", null);
           }
           continue;

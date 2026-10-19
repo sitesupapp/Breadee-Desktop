@@ -26,6 +26,7 @@ import {
 } from "@/lib/offline/operationLog";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
 import { normalizeCustomerRef } from "@/lib/offline/operationLog";
+import { normalizePhoneE164 } from "@/lib/pos/phone";
 
 /** The immutable 5-dimensional scope an offline customer upsert is captured + replayed under. */
 export type CustomerOpScope = {
@@ -139,7 +140,11 @@ export async function captureCustomerUpsertOffline(input: {
       branch_id: scope.branchId,
       name: input.display?.name ?? (typeof upsert.name === "string" ? upsert.name : null),
       phone: input.display?.phone ?? (typeof upsert.phone === "string" ? upsert.phone : null),
-      phone_e164: input.display?.phone_e164 ?? null,
+      // rc.12 — the SAME normalisation the server stores (lib/pos/phone = port of _phone_normalize_e164),
+      // so the offline customer is found by the indexed phone lookup ("78900000" == "+96178900000").
+      phone_e164:
+        input.display?.phone_e164 ??
+        normalizePhoneE164(input.display?.phone ?? (typeof upsert.phone === "string" ? upsert.phone : null)),
       addresses,
       notes: typeof upsert.notes === "string" ? upsert.notes : null,
       has_profile: true, // we hold the locally-entered details

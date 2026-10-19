@@ -396,12 +396,16 @@ test("Q2 historical recovery: the line-N round + its dependent settle re-queue O
   const sc = { tenant_id: "t1", branch_id: "b1", device_id: "dev1", terminal_id: "term1", cashier_user_id: "u1" };
   await localdb.operations.add({ operation_id: "open:1", operation_type: "dinein_open_table", schema_version: 1, scope: sc, created_at: "2026-10-17T10:00:00.000Z", client_op_id: crypto.randomUUID(), local_entity_id: "TBL-9", canonical_entity_id: "TBL-9", dependency_ids: [], depends_on_local_entities: [], payload: { name: "9" }, status: "synced", retry_count: 1, last_attempt_at: null, last_error_code: null, last_error_message: null, result_meta: null, synced_at: "2026-10-17T10:01:00.000Z" });
   await localdb.operations.add({ ...parked("round:1", "dinein_send_round", "validation", 'invalid input syntax for type uuid: "line-3"', ["open:1"], { submit: { branch_id: "b1", order_type: "dine_in", status: "sent_to_kitchen", shift_id: "", client_op_id: "r1", notes: null, table_id: "TBL-9", items: [{ menu_item_id: "m", name: "x", base_price: 1, quantity: 1, kitchen_note: null, client_line_id: "line-3", modifiers: [] }] }, table_local: null, session_local: null }), local_entity_id: "SESS-9", created_at: "2026-10-17T10:02:00.000Z" });
+  // rc.12 — the legacy round carries no shift; its session was (provably) attached to the shift by the
+  // upgrade backfill, so the replay sends it ON that shift (an un-attached one is parked — rc12 K3).
+  await localdb.dineDrafts.add({ local_session_id: "SESS-9", tenant_id: "t1", branch_id: "b1", cashier_user_id: "u1", device_id: "dev1", terminal_id: "term1", floor_id: null, section_id: null, table_id: "TBL-9", table_name: "9", currency: "LBP", open_operation_id: "open:1", canonical_order_id: null, origin: "offline", base_order_version: null, status: "open", shift_id: "SH-1", shift_local: null, lines: [], rounds: [], draft_revision: 1, notes: null, created_at: "2026-10-17T10:00:00.000Z", updated_at: "2026-10-17T10:00:00.000Z" });
   await localdb.operations.add({ ...parked("pay:1", "pay_table", "dependency_failed", "round:1", ["open:1", "round:1"], { table_id: "TBL-9", table_local: null, method: "cash", currency: "LBP" }), created_at: "2026-10-17T10:03:00.000Z" });
   await localdb.operations.add({ ...parked("other:1", "edit_order_line", "edit_conflict", "VERSION_CONFLICT"), created_at: "2026-10-17T10:04:00.000Z" });
   const calls: Call[] = [];
   const r = await drainOffline(CTX, "reconnect", deps(calls));
   assert.deepEqual(calls.map((c) => c.name), ["round", "pay_table"]);
   assert.equal("client_line_id" in ((calls[0].arg as { items: Record<string, unknown>[] }).items[0]), false, "the non-uuid id is stripped");
+  assert.equal((calls[0].arg as { shift_id: string }).shift_id, "SH-1", "created on the session's shift, never shift-less");
   assert.equal((await getOperation("other:1"))?.status, "needs_attention", "a genuine conflict is never auto-retried");
   assert.equal(r.needsAttention.filter((n) => n.id !== "other:1").length, 0);
   const again: Call[] = [];

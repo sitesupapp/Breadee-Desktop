@@ -15,10 +15,12 @@
 import { isBackendReachable } from "@/lib/offline/reachability";
 import {
   cacheCustomers,
+  findCachedCustomersByPhoneE164,
   getCachedCustomer,
   listCachedCustomers,
   type CachedCustomer,
 } from "@/lib/offline/db";
+import { canonicalIds } from "@/lib/offline/entityMap";
 import {
   searchCustomers,
   loadCustomerProfile,
@@ -149,8 +151,31 @@ export async function searchCustomersOfflineAware(query: string): Promise<Custom
     void cacheCustomerMatches(results, scope).catch(() => {});
     return results;
   }
-  const rows = await listCachedCustomers(scope.tenantId, scope.branchId).catch(() => []);
-  return matchCachedCustomers(rows, query);
+  return searchCachedCustomers(scope, query);
+}
+
+/**
+ * rc.12 — the OFFLINE customer search. A full phone number is answered from the phone_e164 INDEX (the
+ * same normalisation the server stores, so "78900000", "03 …", "+961 …" are one key) — no scan of the
+ * customer table per keystroke. Names / partial numbers fall back to the scoped scan. A pending-local
+ * row that already has a canonical twin (entity map) is never listed twice.
+ */
+export async function searchCachedCustomers(scope: CustomerScope, query: string): Promise<CustomerMatch[]> {
+  const term = query.trim();
+  if (term === "") return [];
+  const e164 = looksLikePhone(term) ? normalizePhoneE164(term) : null;
+  let rows: CachedCustomer[] = [];
+  if (e164) rows = await findCachedCustomersByPhoneE164(scope.tenantId, scope.branchId, e164).catch(() => []);
+  if (rows.length === 0) rows = await listCachedCustomers(scope.tenantId, scope.branchId).catch(() => []);
+  const hits = matchCachedCustomers(rows, term);
+  const pending = rows.filter((c) => c.pending_local === true && hits.some((h) => h.id === c.id));
+  if (pending.length === 0) return hits;
+  const canon = await canonicalIds(pending.map((c) => c.id)).catch(() => ({}) as Record<string, string | null>);
+  const ids = new Set(hits.map((h) => h.id));
+  return hits.filter((h) => {
+    const twin = canon[h.id];
+    return !(twin && ids.has(twin));
+  });
 }
 
 /** The result of an offline-aware customer write — the online CustomerUpsertResult, plus a

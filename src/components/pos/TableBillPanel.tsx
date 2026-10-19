@@ -287,6 +287,16 @@ export function TableBillPanel(props: TableBillPanelProps) {
             Merge tables
           </GatedButton>
         </div>
+        {/* rc.12 — Move / Merge are server-coordinated: offline the reason is SHOWN (a disabled button
+            with only a hover title read as "Merge does nothing" on a touch POS). */}
+        {(() => {
+          const note = [props.moveGate, props.mergeGate].find((g) => !g.allowed && (g.reason ?? "").includes("needs a connection"))?.reason;
+          return note ? (
+            <p role="note" className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] font-semibold text-amber-900">
+              {note}
+            </p>
+          ) : null;
+        })()}
 
         <div className="mt-2 border-t border-dashed border-line pt-2">
           <GatedButton

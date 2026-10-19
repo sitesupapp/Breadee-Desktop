@@ -156,6 +156,15 @@ function PosWorkspaceInner() {
   const [backendReachable, setBackendReachable] = useState(true);
   const online = session.online && !session.offlineMode && backendReachable;
 
+  // rc.12 — an offline End Shift the server REFUSED (e.g. orders still open): the shift is open again on
+  // this device. Tell the operator once, with the server's reason (never a silent re-appearing shift).
+  const closeRefused = shiftStore.closeRefused;
+  useEffect(() => {
+    if (!closeRefused) return;
+    useShift.getState().clearCloseRefused();
+    toast.push({ tone: "warning", message: "Previous shift is still open", detail: closeRefused.message });
+  }, [closeRefused, toast]);
+
   // --- menu ------------------------------------------------------------------
   const [menu, setMenu] = useState<MenuData>(EMPTY_MENU);
   const [menuState, setMenuState] = useState<"loading" | "ready" | "error">("loading");
@@ -2314,9 +2323,12 @@ function PosWorkspaceInner() {
       setBusy(true);
       setShiftError(null);
       try {
-        await shiftStore.open({ tenantId, userId, branchId: pos.branch.id, openingCash, currency });
+        const result = await shiftStore.open({ tenantId, userId, branchId: pos.branch.id, openingCash, currency });
         setOpenShiftOpen(false);
         const pendingOpen = useShift.getState().pendingLocalId != null;
+        // rc.12 — the server handed back the PREVIOUS shift because it refused that shift's offline close:
+        // never "Shift opened" for an old shift (the closeRefused effect shows the reason).
+        if (result?.continuedPrevious) return;
         toast.push({
           tone: "success",
           message: pendingOpen ? "Shift opened offline" : "Shift opened",

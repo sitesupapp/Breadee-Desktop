@@ -17,7 +17,7 @@
 // go through the existing op-log engines; the server stays authoritative after sync. The ONLY totals
 // calculator is `foldBill` (lib/pos/tableBill) over captured line prices.
 
-import { localdb, readCachedBill, readCachedDeliveryLines, type DineDraft, type DineDraftLine, type PosOfflineTxn } from "@/lib/offline/db";
+import { localdb, readCachedBill, readCachedDeliveryLines, readCachedDeliveryLinesMany, type DineDraft, type DineDraftLine, type PosOfflineTxn } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import type { EditTargetRef } from "@/lib/offline/handlers";
 import { foldBill } from "@/lib/pos/tableBill";
@@ -513,31 +513,35 @@ export async function scopedOperations(scope: ProjectionScope): Promise<OfflineO
   return all.filter((o) => opInScope(o, scope));
 }
 
-async function openDraftForTable(scope: ProjectionScope, tableId: string): Promise<DineDraft | null> {
-  if (!scope.tenantId) return null;
+/** This scope's OPEN local dine-in sessions (one indexed read). */
+async function openDraftsInScope(scope: ProjectionScope): Promise<DineDraft[]> {
+  if (!scope.tenantId) return [];
   const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
-  return (
-    all.find(
-      (d) =>
-        d.table_id === tableId &&
-        d.status === "open" &&
-        (d.branch_id ?? null) === (scope.branchId ?? null) &&
-        d.cashier_user_id === scope.cashierUserId &&
-        d.device_id === scope.deviceId &&
-        (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
-    ) ?? null
+  return all.filter(
+    (d) =>
+      d.status === "open" &&
+      (d.branch_id ?? null) === (scope.branchId ?? null) &&
+      d.cashier_user_id === scope.cashierUserId &&
+      d.device_id === scope.deviceId &&
+      (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
   );
 }
 
-/** `getOperationalTableBill` — the ONE operational bill for a table (async loader over Dexie). */
+async function openDraftForTable(scope: ProjectionScope, tableId: string): Promise<DineDraft | null> {
+  return (await openDraftsInScope(scope)).find((d) => d.table_id === tableId) ?? null;
+}
+
+/** `getOperationalTableBill` — the ONE operational bill for a table (async loader over Dexie).
+ *  rc.12 — `preloadedDrafts` lets a whole-floor caller read the sessions ONCE (not once per table). */
 export async function getOperationalTableBill(
   scope: ProjectionScope,
   table: TableSummary,
   preloadedOps?: OfflineOperation[],
+  preloadedDrafts?: DineDraft[],
 ): Promise<OperationalTableBill> {
   const [cached, draft, ops] = await Promise.all([
     readCachedBill(table.id, scope.tenantId, scope.branchId).catch(() => null),
-    openDraftForTable(scope, table.id),
+    preloadedDrafts ? Promise.resolve(preloadedDrafts.find((d) => d.table_id === table.id) ?? null) : openDraftForTable(scope, table.id),
     preloadedOps ? Promise.resolve(preloadedOps) : scopedOperations(scope),
   ]);
   const canonical = cached ? { bill: cached.bill as TableBill, fetchedAt: cached.cachedAt } : null;
@@ -553,9 +557,14 @@ export async function getOperationalTableTotals(
 ): Promise<Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>> {
   const out = new Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>();
   if (!scope.tenantId) return out;
-  const ops = await scopedOperations(scope);
+  // rc.12 — ONE read of the ops and ONE of the sessions for the whole floor (was one sessions read per
+  // table), and a free table with no local session is skipped without any read: it can have no bill
+  // (the projection would return an empty bill for it — the result is identical).
+  const [ops, drafts] = await Promise.all([scopedOperations(scope), openDraftsInScope(scope)]);
+  const withSession = new Set(drafts.map((d) => d.table_id));
   for (const t of tables) {
-    const p = await getOperationalTableBill(scope, t, ops);
+    if (t.orders === 0 && !withSession.has(t.id)) continue;
+    const p = await getOperationalTableBill(scope, t, ops, drafts);
     if (p.bill.orders.length === 0 && t.orders === 0) continue;
     if (p.bill.orders.length === 0) {
       // rc.10 — the canonical bill the map still shows was SETTLED locally: the table is available.
@@ -886,12 +895,18 @@ export async function getOperationalOrderProjection(
   ]);
   return projectDeliveryOrder({
     row,
-    txn: txn ?? null,
+    txn: txnInScope(txn, scope),
     cachedLines: cached ? { lines: cached.lines as DeliveryOrderLine[], fetchedAt: cached.cachedAt } : null,
     ops,
     aliases,
     ...(opts && "rowFetchedAt" in opts ? { rowFetchedAt: opts.rowFetchedAt ?? null } : {}),
   });
+}
+
+/** rc.12 — a local offline txn may only feed a projection inside its own tenant + operating unit. */
+export function txnInScope(txn: PosOfflineTxn | null | undefined, scope: ProjectionScope): PosOfflineTxn | null {
+  if (!txn) return null;
+  return txn.tenant_id === scope.tenantId && (txn.branch_id ?? null) === (scope.branchId ?? null) ? txn : null;
 }
 
 /** rc.11 — the local ids (offline-created order / txn) that resolved to this canonical order. */
@@ -921,18 +936,48 @@ export async function overlayDeliveryQueue(
   const maps = await localdb.entityMap.toArray().catch(() => []);
   const aliasOf = new Map<string, string[]>();
   for (const m of maps) aliasOf.set(m.canonical_id, [...(aliasOf.get(m.canonical_id) ?? []), m.local_entity_id]);
-  const touches = (o: OfflineOperation, ids: string[]) => {
+  // rc.12 — index the ops by the order they reference ONCE (measured: rows × all-ops re-scan + re-sort
+  // took 1.75 s median for 200 rows / 900 ops — the slow Delivery Orders open). Each row's projection
+  // then receives only ITS ops; projectDeliveryOrder only ever applies ops that reference the row, so the
+  // result is identical.
+  const keysOf = (o: OfflineOperation): string[] => {
     const p = rec(o.payload);
-    return ids.some((id) => p.order_local === id || p.order_id === id || rec(p.payload).order_id === id);
+    return [p.order_local, p.order_id, rec(p.payload).order_id].filter((x): x is string => typeof x === "string" && x !== "");
   };
-  return Promise.all(
-    rows.map(async (r) => {
-      const aliases = aliasOf.get(r.id) ?? [];
-      if (!ops.some((o) => touches(o, [r.id, ...aliases]))) return r;
-      const proj = await getOperationalOrderProjection(scope, r, all, { aliases, ...(opts && "rowFetchedAt" in opts ? { rowFetchedAt: rowAt ?? null } : {}) });
-      return proj.row;
-    }),
-  );
+  const byOrder = new Map<string, OfflineOperation[]>();
+  for (const o of all) for (const k of new Set(keysOf(o))) byOrder.set(k, [...(byOrder.get(k) ?? []), o]);
+  const deciding = new Set(ops.map((o) => o.operation_id));
+  const touched: { r: DeliveryQueueOrder; aliases: string[]; mine: OfflineOperation[] }[] = [];
+  for (const r of rows) {
+    const aliases = aliasOf.get(r.id) ?? [];
+    const mine = new Map<string, OfflineOperation>();
+    for (const id of [r.id, ...aliases]) for (const o of byOrder.get(id) ?? []) mine.set(o.operation_id, o);
+    if ([...mine.keys()].some((id) => deciding.has(id))) touched.push({ r, aliases, mine: [...mine.values()] });
+  }
+  if (touched.length === 0) return rows;
+  // ONE batched read each for the offline txns and the cached line snapshots of the touched rows
+  // (was two keyed reads per row), then the same pure projection.
+  const ids = touched.map((t) => t.r.id);
+  const [txns, lines] = await Promise.all([
+    localdb.posOfflineTxns.bulkGet(ids).catch(() => ids.map(() => undefined)),
+    readCachedDeliveryLinesMany(ids, scope.tenantId, scope.branchId).catch(() => new Map<string, { lines: unknown; cachedAt: number }>()),
+  ]);
+  const projectedById = new Map<string, DeliveryQueueOrder>();
+  touched.forEach((t, i) => {
+    const cached = lines.get(t.r.id);
+    const proj = projectDeliveryOrder({
+      row: t.r,
+      // OU wall: a local txn is only ever projected inside its own tenant + operating unit (an id match
+      // is not an authorization boundary).
+      txn: txnInScope(txns[i], scope),
+      cachedLines: cached ? { lines: cached.lines as DeliveryOrderLine[], fetchedAt: cached.cachedAt } : null,
+      ops: t.mine,
+      aliases: t.aliases,
+      ...(opts && "rowFetchedAt" in opts ? { rowFetchedAt: rowAt ?? null } : {}),
+    });
+    projectedById.set(t.r.id, proj.row);
+  });
+  return rows.map((r) => projectedById.get(r.id) ?? r);
 }
 
 /** Controlled refusals for offline delivery ITEM edits (beyond the paid-item wall in the chain). */
