@@ -288,8 +288,10 @@ test("D10 settle a canonical-only table offline (no draft): one op, replays AFTE
   await drainOffline(CTX, "reconnect", deps(calls));
   const names = calls.map((c) => c.name);
   assert.ok(names.indexOf("edit") >= 0 && names.indexOf("edit") < names.indexOf("pay_table"), "never charges a pre-edit total");
+  // rc.10 — the settled bill is CLOSED locally (no longer the table's active bill; kept in history).
   const after = await tableBill();
-  assert.equal(after.settlingOpId === null || after.outstanding === 0, true);
+  assert.equal(after.bill.orders.length, 0);
+  assert.equal(after.settledLocally, true);
 });
 
 // ================================================================ E — Delivery

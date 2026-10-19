@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client";
 import App from "@/App";
 import { bootTheme } from "@/lib/theme/apply";
 import { rcLogStartup } from "@/lib/rcDiagnostics";
+import { setCaptureBuild } from "@/lib/offline/operationLog";
+import { env } from "@/env";
 import "@/index.css";
 
 // BEFORE the first render, deliberately. Applying the stored theme from a React
@@ -13,6 +15,9 @@ bootTheme();
 // Temporary RC-only startup trace: prints which build is actually running
 // (SHA + CI run + binary version). No-op in every non-RC build. See rcDiagnostics.
 rcLogStartup();
+
+// rc.10 — stamp every captured offline operation with the running build (queue forensics).
+setCaptureBuild(env.BUILD_SHA);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

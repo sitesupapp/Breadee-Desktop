@@ -103,10 +103,13 @@ export function EndShiftDialog({
   onConfirm,
   onTransferOpenOrders,
   onForceEndShift,
+  offlineNote = null,
 }: {
   open: boolean;
   busy: boolean;
   expected: ShiftExpected | null;
+  /** rc.10 — set when ending the shift OFFLINE (no server expected available). */
+  offlineNote?: string | null;
   currency: CurrencyCode;
   gate: Gate;
   error: string | null;
@@ -249,6 +252,10 @@ export function EndShiftDialog({
                   {treatment === "excluded" && hasDeliveryFees ? " · delivery fees kept separate" : ""}
                 </p>
               </>
+            ) : offlineNote ? (
+              // rc.10 — offline: never a fabricated expected (the server's figure includes sales this
+              // device never saw); the server computes it + the difference when the close syncs.
+              <p className="rounded-lg bg-amber-50 px-2 py-2 text-sm text-amber-800">{offlineNote}</p>
             ) : (
               <p className="text-sm text-sub">Reading the expected cash...</p>
             )}

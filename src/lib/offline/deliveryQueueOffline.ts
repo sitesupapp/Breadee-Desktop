@@ -103,6 +103,9 @@ export async function loadDeliveryQueueOfflineAware(
   if (await reachable()) {
     const rows = await load(input);
     await cacheDeliveryQueue(rows, input.tenantId, input.branchId, input.shiftId).catch(() => {});
+    // rc.10 — every online queue read also keeps the open orders' LINES (+ their customers' profiles)
+    // offline-ready, so an order created/changed online after hydration is still editable offline.
+    if (!deps.load) void prewarmOpenDeliveryLines(input.tenantId, input.branchId, rows);
     return { orders: rows, offline: false };
   }
   const cachedRaw = await readCachedDeliveryQueue(input.tenantId, input.branchId, input.shiftId).catch(() => null);
@@ -160,5 +163,25 @@ export async function prewarmOpenDeliveryLines(
     }
   };
   await Promise.all([worker(), worker(), worker()]);
+  if (!load) void prewarmQueueCustomerProfiles(rows);
   return done;
+}
+
+const profileSeen = new Set<string>();
+
+/** rc.10 — cache the FULL profile (addresses) of the customers on open delivery orders, so they can be
+ *  selected for a NEW delivery order offline (a search hit alone caches only a compact match). Bounded,
+ *  once per customer per session, read-only, never throws. */
+async function prewarmQueueCustomerProfiles(rows: DeliveryQueueOrder[]): Promise<void> {
+  try {
+    const ids = Array.from(new Set(rows.map((r) => r.customer_id).filter((x): x is string => typeof x === "string" && x !== "" && !profileSeen.has(x)))).slice(0, 40);
+    if (ids.length === 0) return;
+    const { loadCustomerProfileOfflineAware } = await import("@/lib/offline/customerCache");
+    for (const id of ids) {
+      profileSeen.add(id);
+      await loadCustomerProfileOfflineAware(id).catch(() => undefined);
+    }
+  } catch {
+    /* best-effort */
+  }
 }

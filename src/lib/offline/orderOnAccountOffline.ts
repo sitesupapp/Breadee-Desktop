@@ -10,7 +10,7 @@
 // forward-compat for a Phase-E offline-created customer).
 
 import { localdb } from "@/lib/offline/db";
-import { type OfflineOperation, OPERATION_SCHEMA_VERSION, getOperation } from "@/lib/offline/operationLog";
+import { type OfflineOperation, OPERATION_SCHEMA_VERSION, getOperation, normalizeCustomerRef } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
 
@@ -53,6 +53,8 @@ export async function orderOnAccountOffline(input: {
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   if (!input.orderId && !input.orderLocal) throw new Error("An order is required to put on account.");
   if (!input.customerId && !input.customerLocal) throw new Error("A customer is required to put this order on account.");
+  // rc.10 — an offline-created customer travels as customer_local (waits for + remaps to canonical).
+  input = { ...input, ...(await normalizeCustomerRef(input.customerId, input.customerLocal)) };
   return localdb.transaction("rw", localdb.operations, async () => {
     const key = input.orderId ?? input.orderLocal ?? "";
     const cust = input.customerId ?? input.customerLocal ?? "";

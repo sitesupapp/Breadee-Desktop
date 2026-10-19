@@ -93,7 +93,7 @@ test("GC: drops only OLD synced ops; never unsettled work or recent synced", asy
 
 test("Sync Center source: a needs_attention event offers a requeue action; it calls requeueOperation", () => {
   const src = srcOf("src/components/pos/SyncCenter.tsx");
-  assert.match(src, /import \{ requeueOperation \} from "@\/lib\/offline\/operationLog";/);
+  assert.match(src, /import \{[^}]*\brequeueOperation\b[^}]*\} from "@\/lib\/offline\/operationLog";/);
   assert.match(src, /await requeueOperation\(operationId\)/);
   assert.match(src, /e\.status === "needs_attention" && e\.operation_id && \(/, "retry button gated on needs_attention");
 });

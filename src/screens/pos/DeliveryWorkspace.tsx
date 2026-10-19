@@ -1,4 +1,4 @@
-﻿// Delivery workspace (Level 3A: customer foundation).
+// Delivery workspace (Level 3A: customer foundation).
 //
 // Like Dine-in, this is a HOOK rather than a second shell - one PosShell, one
 // status bar, one layout resolver.
@@ -150,6 +150,7 @@ import {
   type OperationalDeliveryOrder,
 } from "@/lib/offline/operationalProjection";
 import { captureDeliveryProviderOffline } from "@/lib/offline/deliveryActionOffline";
+import { isOfflineCreatedAddress, normalizeCustomerRef } from "@/lib/offline/operationLog";
 import { cacheDeliveryLines, cacheDeliveryProviders, readCachedDeliveryProviders } from "@/lib/offline/db";
 import { DeliveryOrderQueue } from "@/components/pos/DeliveryOrderQueue";
 import { DeliveryOrderDetail } from "@/components/pos/DeliveryOrderDetail";
@@ -740,7 +741,7 @@ export function useDeliveryWorkspace(input: {
         // Phase E — OFFLINE: capture a durable customer_upsert and select the LOCAL customer so the
         // delivery flow continues; the op syncs exactly-once on reconnect (a same-OU clash surfaces as
         // needs_attention). A deterministic client_op_id makes a double-tap idempotent.
-        if (!online && customerOfflineReady) {
+        if (customerOfflineReady && (!online || !(await isBackendReachable()))) {
           try {
             const clientOpId = deterministicUuid([branchId ?? "", values.phone ?? "", values.name ?? "", "delivery_customer_create"]);
             const r = await upsertCustomerOfflineAware(payload as unknown as Record<string, unknown>, clientOpId);
@@ -845,7 +846,7 @@ export function useDeliveryWorkspace(input: {
         });
         // Phase E — OFFLINE: capture the edit as a durable customer_upsert (it replays exactly-once;
         // a same-OU clash surfaces as needs_attention). The card keeps its locally-known details.
-        if (!online && customerOfflineReady) {
+        if (customerOfflineReady && (!online || !(await isBackendReachable()))) {
           const clientOpId = deterministicUuid([selected.id, values.name ?? "", values.phone ?? "", values.notes ?? "", "delivery_customer_edit"]);
           await upsertCustomerOfflineAware(editPayload as unknown as Record<string, unknown>, clientOpId);
           await useCustomers.getState().refresh();
@@ -887,7 +888,7 @@ export function useDeliveryWorkspace(input: {
         // (pending-local) customer a LOCAL address id is minted and appended to the cached profile so
         // it is immediately selectable and a dependent offline order chains to address_local; the
         // handler remaps it on replay. A deterministic client_op_id makes a double-tap idempotent.
-        if (!online && customerOfflineReady) {
+        if (customerOfflineReady && (!online || !(await isBackendReachable()))) {
           const clientOpId = deterministicUuid([selected.id, values.street ?? "", dialog.addressId ?? "", "delivery_address"]);
           const r = await upsertCustomerOfflineAware(addressPayload as unknown as Record<string, unknown>, clientOpId);
           await useCustomers.getState().refresh();
@@ -984,10 +985,13 @@ export function useDeliveryWorkspace(input: {
         // Phase E (E3): if the chosen customer was CREATED offline, its customer/address ids are
         // LOCAL. Carry them so replay waits for the customer_upsert and remaps them to canonical
         // before pos_submit_order (never submits a local id). A cached server customer → nulls.
+        // rc.10 — decided from the OPERATION LOG (scope-independent), not a cache lookup whose OU key could
+        // miss: an id minted by an offline customer create is LOCAL; an address minted by an offline
+        // upsert (new address on a local OR a canonical customer) is LOCAL independently of its customer.
         const cachedCust = await getCachedCustomer(snapshot.customerId, pos.tenantId, snapshot.branchId).catch(() => undefined);
-        const isPendingLocal = cachedCust?.pending_local === true;
-        const customerLocal = isPendingLocal ? snapshot.customerId : null;
-        const addressLocal = isPendingLocal ? snapshot.addressId : null;
+        const custRef = await normalizeCustomerRef(snapshot.customerId, cachedCust?.pending_local === true ? snapshot.customerId : null);
+        const customerLocal = custRef.customerLocal;
+        const addressLocal = customerLocal || (await isOfflineCreatedAddress(snapshot.addressId)) ? snapshot.addressId : null;
         if (existing) {
           await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued", customer_local: customerLocal, address_local: addressLocal });
         } else {
@@ -1306,7 +1310,7 @@ export function useDeliveryWorkspace(input: {
       // (local offline order payload or the cached line snapshot + unsynced local mutations), never a
       // raw "Failed to fetch" with no lines (the rc.8 gap that hid every line control offline).
       if (!(await isBackendReachable())) {
-        const p = await projectOrder(orderId);
+        const p = await projectOrder(orderId).catch(() => null);
         setDetailProj(p);
         if (p) {
           setDetail(p.row);
@@ -1340,6 +1344,9 @@ export function useDeliveryWorkspace(input: {
     (order: DeliveryQueueOrder) => {
       // The queue row may already be a PROJECTED row offline; the raw base was recorded by refreshQueue.
       if (!baseRows.current.has(order.id)) baseRows.current.set(order.id, order);
+      // rc.10 — never let the previous order's projection serve this one (a captured Add could
+      // otherwise target the wrong order while the new detail loads).
+      setDetailProj(null);
       // The row is shown immediately so the panel is never blank, then replaced
       // by an authoritative re-read - the list may be seconds old, and every
       // action on this panel is decided by the fresh copy.
@@ -1356,6 +1363,25 @@ export function useDeliveryWorkspace(input: {
     [refreshDetail],
   );
 
+  // rc.10 — when connectivity flips, rebuild the open detail (and the list) from the right source: an
+  // order opened ONLINE has no offline projection, so after a drop every edit refused until the order
+  // was re-opened; and back online the projection must yield to the server read. Skips the first run.
+  const onlineSeen = useRef<boolean | null>(null);
+  const detailIdRef = useRef<string | null>(null);
+  detailIdRef.current = detail?.id ?? null;
+  useEffect(() => {
+    if (onlineSeen.current === null) {
+      onlineSeen.current = online;
+      return;
+    }
+    if (onlineSeen.current === online) return;
+    onlineSeen.current = online;
+    if (!active) return;
+    if (detailIdRef.current) void refreshDetail(detailIdRef.current);
+    if (view === "orders") void refreshQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online]);
+
   // R2 — Delivery Order Item Editing. The hook owns the mutation lifecycle (serialize, op-id replay, reason
   // gating); the workspace supplies the menu-derived modifier context. Every success re-reads via reloadDetail.
   const reloadDetail = useCallback(
@@ -1370,12 +1396,17 @@ export function useDeliveryWorkspace(input: {
     [pos.tenantId, pos.userId, pos.branch.id],
   );
   itemEditOfflineScopeRef.current = itemEditOfflineScope;
+  // rc.10 — the projection belongs to THIS detail only.
+  const liveProj = detailProj && detail && detailProj.row.id === detail.id ? detailProj : null;
   const itemEditing = useDeliveryItemEditing({
     order: detail,
     access: pos.access,
     reload: reloadDetail,
     toast,
-    online: input.online,
+    // rc.10 — ONE connectivity decision for edits: a detail that was loaded OFFLINE (its projection
+    // exists) always CAPTURES — even while the slow navigator/probe `online` flag is still stale-true —
+    // so an edit never hits the live RPC after the device already found the backend unreachable.
+    online: input.online && liveProj == null,
     // An edit needs the order loaded (its version is known) + the 5-D scope; the detail is already
     // in memory when the connection drops, so a captured edit replays exactly-once on reconnect.
     offlineReady: itemEditOfflineScope != null && detail != null,
@@ -1385,16 +1416,16 @@ export function useDeliveryWorkspace(input: {
     // defect), and the paid-item / discount / lines-unknown walls refuse with a controlled reason.
     offlinePlan: {
       lineTarget: (lineId) => {
-        if (!detailProj) return { ok: false, reason: "This order isn't available offline. Reconnect to change it." };
-        const block = deliveryEditBlock(detailProj);
+        if (!liveProj) return { ok: false, reason: "This order is still loading offline. Try again in a moment." };
+        const block = deliveryEditBlock(liveProj);
         if (block) return { ok: false, reason: block };
-        return editTargetFor(detailProj, lineId);
+        return editTargetFor(liveProj, lineId);
       },
       orderTarget: () => {
-        if (!detailProj) return { ok: false, reason: "This order isn't available offline. Reconnect to change it." };
-        const block = deliveryEditBlock(detailProj);
+        if (!liveProj) return { ok: false, reason: "This order is still loading offline. Try again in a moment." };
+        const block = deliveryEditBlock(liveProj);
         if (block) return { ok: false, reason: block };
-        return orderChainFor(detailProj.orders[0]);
+        return orderChainFor(liveProj.orders[0]);
       },
     },
   });
@@ -2846,7 +2877,9 @@ export function useDeliveryWorkspace(input: {
             hint="Open an order from the list to see its items, edit it, take payment or cancel it."
           />
         )
-      ) : submitted && customers.selected ? (
+      ) : submitted && customers.selected && !(view === "add_items" && deliveryLines.length > 0) ? (
+        // rc.10 — once the operator starts a NEW basket (Add items + a line), the cart/Send panel wins
+        // over the previous order's summary; before that the summary (with its Pay) stays.
         <DeliveryOrderSummary
           order={submitted.order}
           customer={customers.selected}

@@ -84,6 +84,13 @@ type CartState = {
   lastRemoved: RemovedLine | null;
   /** Null while the buffer is empty and unclaimed. */
   owner: CartOwner | null;
+  /**
+   * rc.10 — the buffer's lines are DURABLY saved elsewhere (an offline Send wrote them to the local
+   * order store, resumable from the offline queue). Like `savedOrder`, such a buffer is not exclusive
+   * work any more: another context may reclaim it (the lock lifetime ends at durable capture, never at
+   * network success). Cleared by any edit of the lines.
+   */
+  durable: boolean;
 
   addLine: (input: { menuItemId: string; name: string; basePrice: number; quantity?: number; modifiers?: SelectedModifier[]; note?: string | null; removedIngredients?: string[] }) => string;
   setQuantity: (key: string, quantity: number) => void;
@@ -102,6 +109,10 @@ type CartState = {
   /** Ensure an operation id exists for the current cart; returns it. */
   ensureOpId: () => string;
   setSavedOrder: (order: SubmitOrderResult | null) => void;
+  /** rc.10 — the current lines were durably captured (offline Send). */
+  markDurable: () => void;
+  /** rc.10 — release the buffer ONLY if it belongs to `owner` (a settled/closed context's leftovers). */
+  releaseIfOwner: (owner: CartOwner) => boolean;
   /** Cart edited after a submit: the saved order no longer matches, start fresh. */
   invalidateSavedOrder: () => void;
   /** Definitive completion (paid) or an explicit new order. */
@@ -174,6 +185,7 @@ export const useCart = create<CartState>((set, get) => ({
   savedOrder: null,
   lastRemoved: null,
   owner: null,
+  durable: false,
 
   claim: (owner) => {
     const state = get();
@@ -181,7 +193,15 @@ export const useCart = create<CartState>((set, get) => ({
       set({ owner });
       return true;
     }
-    return sameOwner(state.owner, owner);
+    if (sameOwner(state.owner, owner)) return true;
+    // rc.10 — a buffer whose lines are durably saved (submitted, or captured by an offline Send) holds
+    // no unsaved work: reclaiming it loses nothing (the order is in the shift / offline queue), so the
+    // lock ends here instead of showing "The cart is in use" over an apparently empty panel.
+    if (state.savedOrder || state.durable) {
+      set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null, durable: false, owner });
+      return true;
+    }
+    return false;
   },
 
   addLine: ({ menuItemId, name, basePrice, quantity = 1, modifiers = [], note = null, removedIngredients = [] }) => {
@@ -192,6 +212,7 @@ export const useCart = create<CartState>((set, get) => ({
         lines: state.lines.map((l) => (l.key === existing.key ? { ...l, quantity: l.quantity + quantity } : l)),
         selectedKey: existing.key,
         savedOrder: null,
+        durable: false,
       });
       return existing.key;
     }
@@ -212,6 +233,7 @@ export const useCart = create<CartState>((set, get) => ({
       lines: [...state.lines, line],
       selectedKey: key,
       savedOrder: null,
+      durable: false,
       clientOpId: state.clientOpId ?? newClientOpId(),
     });
     return key;
@@ -220,19 +242,21 @@ export const useCart = create<CartState>((set, get) => ({
   setQuantity: (key, quantity) =>
     set((s) => {
       if (quantity <= 0) return s; // removal is an explicit, undoable action
-      return { lines: s.lines.map((l) => (l.key === key ? { ...l, quantity } : l)), savedOrder: null };
+      return { lines: s.lines.map((l) => (l.key === key ? { ...l, quantity } : l)), savedOrder: null, durable: false };
     }),
 
   adjustQuantity: (key, delta) =>
     set((s) => ({
       lines: s.lines.map((l) => (l.key === key ? { ...l, quantity: Math.max(1, l.quantity + delta) } : l)),
       savedOrder: null,
+      durable: false,
     })),
 
   setNote: (key, note) =>
     set((s) => ({
       lines: s.lines.map((l) => (l.key === key ? { ...l, kitchen_note: note } : l)),
       savedOrder: null,
+      durable: false,
     })),
 
   removeLine: (key) =>
@@ -242,7 +266,7 @@ export const useCart = create<CartState>((set, get) => ({
       const line = s.lines[index];
       const lines = s.lines.filter((l) => l.key !== key);
       const selectedKey = s.selectedKey === key ? (lines[Math.min(index, lines.length - 1)]?.key ?? null) : s.selectedKey;
-      return { lines, selectedKey, lastRemoved: { line, index }, savedOrder: null };
+      return { lines, selectedKey, lastRemoved: { line, index }, savedOrder: null, durable: false };
     }),
 
   undoRemove: () =>
@@ -250,7 +274,7 @@ export const useCart = create<CartState>((set, get) => ({
       if (!s.lastRemoved) return s;
       const lines = [...s.lines];
       lines.splice(Math.min(s.lastRemoved.index, lines.length), 0, s.lastRemoved.line);
-      return { lines, selectedKey: s.lastRemoved.line.key, lastRemoved: null, savedOrder: null };
+      return { lines, selectedKey: s.lastRemoved.line.key, lastRemoved: null, savedOrder: null, durable: false };
     }),
 
   select: (key) => set({ selectedKey: key }),
@@ -275,8 +299,17 @@ export const useCart = create<CartState>((set, get) => ({
 
   invalidateSavedOrder: () => set({ savedOrder: null }),
 
+  markDurable: () => set((s) => (s.lines.length > 0 ? { durable: true } : s)),
+
+  releaseIfOwner: (owner) => {
+    const s = get();
+    if (s.lines.length === 0 || !sameOwner(s.owner, owner)) return false;
+    set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null, owner: null, durable: false });
+    return true;
+  },
+
   reset: () =>
-    set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null, owner: null }),
+    set({ lines: [], selectedKey: null, clientOpId: null, savedOrder: null, lastRemoved: null, owner: null, durable: false }),
 
   snapshot: () => {
     const s = get();
@@ -298,6 +331,7 @@ export const useCart = create<CartState>((set, get) => ({
       owner: snapshot.owner,
       // Cleared rather than carried: see `CartSnapshot`.
       lastRemoved: null,
+      durable: false,
     }),
 }));
 

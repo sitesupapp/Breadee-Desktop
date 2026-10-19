@@ -8,7 +8,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Glyph } from "@/components/Glyph";
 import { historySummary, listHistory, type SyncHistoryEvent } from "@/lib/offline/syncHistory";
-import { requeueOperation } from "@/lib/offline/operationLog";
+import { currentCaptureBuild, listOperations, requeueOperation } from "@/lib/offline/operationLog";
+import { buildDiagnostic } from "@/lib/offline/queueForensics";
 
 type Summary = { pending: number; syncing: number; needsAttention: number; synced: number };
 
@@ -65,6 +66,21 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
     return () => clearInterval(t);
   }, [refresh]);
 
+  // rc.10 — a REDACTED queue diagnostic (operation type / status / build / timestamps / error class —
+  // never payloads, customer data or secrets), classified historical vs this build, copied for support.
+  const [diagNote, setDiagNote] = useState<string | null>(null);
+  const copyDiagnostics = useCallback(async () => {
+    try {
+      const ops = (await listOperations()).filter((o) => o.scope.tenant_id === tenantId && (branchId == null || (o.scope.branch_id ?? null) === branchId));
+      const rows = buildDiagnostic(ops, currentCaptureBuild());
+      const text = JSON.stringify({ build: currentCaptureBuild(), exported_at: new Date().toISOString(), operations: rows }, null, 1);
+      await navigator.clipboard.writeText(text);
+      setDiagNote(`Copied diagnostics for ${rows.length} operation${rows.length === 1 ? "" : "s"}.`);
+    } catch {
+      setDiagNote("Could not copy the diagnostics on this device.");
+    }
+  }, [tenantId, branchId]);
+
   // Chip text + tone. Needs-attention dominates, then in-flight, else all-synced.
   const chip =
     summary.needsAttention > 0
@@ -98,6 +114,14 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
               {summary.needsAttention > 0 && <span className="font-semibold text-amber-700">{summary.needsAttention} need attention · </span>}
               {summary.pending + summary.syncing > 0 && <span className="font-semibold text-brand-dark">{summary.pending + summary.syncing} pending · </span>}
               <span className="text-sub">{summary.synced} synced</span>
+              <button
+                type="button"
+                onClick={() => void copyDiagnostics()}
+                className="ml-3 rounded-lg border border-line px-2 py-0.5 text-[11px] font-semibold text-sub hover:bg-slate-50"
+              >
+                Copy diagnostics
+              </button>
+              {diagNote && <span className="ml-2 text-[11px] text-sub">{diagNote}</span>}
             </div>
 
             <div className="flex-1 overflow-auto">

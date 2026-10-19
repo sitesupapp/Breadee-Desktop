@@ -265,14 +265,23 @@ export const dineinOpenTableHandler: OperationHandler = {
   type: "dinein_open_table",
   schemaVersion: 1,
   async replay(op, ctx) {
-    const p = (op.payload ?? {}) as DineinOpenTablePayload;
+    const p = (op.payload ?? {}) as DineinOpenTablePayload & { version_after_op?: string | null };
+    // rc.10 — a table REUSED after a local offline settle: take the expected table version from that
+    // settle's server-returned version (our own settle bumped it), so the CAS still protects against a
+    // foreign change but never trips on our own settle. Unknown → adopt (null), as for an occupied table.
+    let expected = p.expected_version ?? null;
+    if (p.version_after_op) {
+      const prev = await getOperation(p.version_after_op);
+      const v = prev?.status === "synced" ? prev.result_meta?.pos_entity_version : undefined;
+      expected = typeof v === "number" && Number.isFinite(v) ? v : null;
+    }
     try {
       const r = await ctx.deps.openTable({
         branch_id: op.scope.branch_id,
         name: p.name,
         seats: p.seats ?? null,
         client_op_id: op.client_op_id,
-        expected_version: p.expected_version ?? null,
+        expected_version: expected,
       });
       return { ok: true, canonicalId: r.table_id, resultMeta: { table_id: r.table_id, pos_entity_version: r.pos_entity_version } };
     } catch (e) {
@@ -441,7 +450,7 @@ export const payTableHandler: OperationHandler = {
     if (!tableId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_table", message: "no table id" };
     try {
       const r = await ctx.deps.payTable({ tableId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id });
-      return { ok: true, canonicalId: tableId, resultMeta: { amount: r.amount, idempotent: r.idempotent } };
+      return { ok: true, canonicalId: tableId, resultMeta: { amount: r.amount, idempotent: r.idempotent, pos_entity_version: r.pos_entity_version ?? null } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "pay_table: transport", message: msg };

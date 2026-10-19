@@ -40,7 +40,8 @@ export default function App() {
   const { loading, init } = useSession();
 
   useEffect(() => {
-    void init();
+    // rc.10 — a startup failure must never strand the app on the splash (or surface a raw error).
+    void init().catch(() => useSession.setState({ loading: false }));
     const on = () => {
       useSession.setState({ online: true });
       // A role/permission change made on the web while this till was already running

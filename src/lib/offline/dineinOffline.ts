@@ -17,6 +17,7 @@ import {
   type OfflineOperation,
   OPERATION_SCHEMA_VERSION,
   getOperation,
+  normalizeCustomerRef,
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
@@ -138,11 +139,17 @@ export async function openTableOffline(args: {
    *  the open op adopts the occupied table (no table-version CAS, which a stale cached map would trip
    *  for a table that is already occupied — the order pin is the precise guard). */
   canonicalOrderId?: string | null;
+  /** rc.10 — the table was SETTLED locally (offline) and is being reused for a NEW order: the new open
+   *  replays only AFTER that settle (dependency) and takes its expected table version from the settle's
+   *  server-returned version (pos_pay_table bumps it) — so the new bill can never join the old one and
+   *  our own settle never trips the new open's CAS. */
+  afterSettleOpId?: string | null;
 }): Promise<DineDraft> {
   const now = new Date().toISOString();
   const localSessionId = nid();
   const openOpId = nid();
   const bound = typeof args.canonicalOrderId === "string" && args.canonicalOrderId !== "";
+  const afterSettle = typeof args.afterSettleOpId === "string" && args.afterSettleOpId !== "" ? args.afterSettleOpId : null;
   const op: OfflineOperation = {
     operation_id: openOpId,
     operation_type: "dinein_open_table",
@@ -152,9 +159,14 @@ export async function openTableOffline(args: {
     client_op_id: nid(),
     local_entity_id: args.tableId, // canonical for configured tables (identity remap)
     canonical_entity_id: null,
-    dependency_ids: [],
+    dependency_ids: afterSettle ? [afterSettle] : [],
     depends_on_local_entities: [],
-    payload: { name: args.tableName, seats: args.seats, expected_version: bound ? null : (args.baseOrderVersion ?? null) },
+    payload: {
+      name: args.tableName,
+      seats: args.seats,
+      expected_version: bound || afterSettle ? null : (args.baseOrderVersion ?? null),
+      ...(afterSettle ? { version_after_op: afterSettle } : {}),
+    },
     status: "pending",
     retry_count: 0,
     last_attempt_at: null,
@@ -387,6 +399,10 @@ export async function settleTableOffline(input: {
   /** rc.9 — every still-unsynced mutation of this bill (item edits / split legs) from the operational
    *  projection: the settle replays only AFTER them, so the server never charges a pre-edit total. */
   extraDependencyIds?: string[];
+  /** rc.10 — exactly what this settle covers: the canonical order ids of the ACTIVE bill and whether a
+   *  canonical SUMMARY (no cached lines) is part of it. Recorded on the op so the operational projection
+   *  can close exactly that bill locally (the table becomes reusable) without guessing. */
+  covers?: { orderIds: string[]; summary: boolean };
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
@@ -401,7 +417,10 @@ export async function settleTableOffline(input: {
       : canonicalTableOpId(input.table as CanonicalTableTarget, ["pay_table", input.method, currency]);
     const operationId = SETTLE_OP_PREFIX + clientOpId;
     const existing = await localdb.operations.get(operationId);
-    if (existing) return { operationId, clientOpId, alreadyCaptured: true };
+    if (existing) {
+      if (d && d.status === "open") await markDraftSettled(d, operationId);
+      return { operationId, clientOpId, alreadyCaptured: true };
+    }
     const scope: OperationScope = d
       ? {
           tenant_id: d.tenant_id,
@@ -432,6 +451,8 @@ export async function settleTableOffline(input: {
         table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
         ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
+        // Projection-only metadata (the handler sends table_id/method/currency/discount only).
+        covers: settleCovers(d, input.covers, input.table),
       },
       status: "pending",
       retry_count: 0,
@@ -442,8 +463,28 @@ export async function settleTableOffline(input: {
       synced_at: null,
     };
     await localdb.operations.add(op);
+    // rc.10 — LOCAL SETTLEMENT: the session is no longer the table's ACTIVE bill (atomic with the op).
+    if (d) await markDraftSettled(d, operationId);
     return { operationId, clientOpId, alreadyCaptured: false };
   });
+}
+
+/** The projection-only record of exactly which bill a settle covers. */
+function settleCovers(d: DineDraft | undefined, covers: { orderIds: string[]; summary: boolean } | undefined, table: CanonicalTableTarget | undefined) {
+  return {
+    session_local: d?.local_session_id ?? null,
+    order_ids: Array.from(new Set([...(covers?.orderIds ?? []), ...(table?.orderIds ?? []), ...(d?.canonical_order_id ? [d.canonical_order_id] : [])])),
+    summary: covers?.summary === true,
+  };
+}
+
+/** rc.10 — LOCAL SETTLEMENT transition: OPEN → SETTLED (pending sync). The draft is kept durably
+ *  (lines, rounds, the settle op) for receipt / Sync History / audit, but is never again returned as
+ *  the table's active session, so the next order on the table opens a NEW session. Must run inside a
+ *  transaction that includes `dineDrafts`. */
+async function markDraftSettled(d: DineDraft, settleOpId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await localdb.dineDrafts.update(d.local_session_id, { status: "settled", settled_operation_id: settleOpId, settled_at: now, updated_at: now });
 }
 
 const ONACCOUNT_OP_PREFIX = "onaccounttable:";
@@ -464,7 +505,11 @@ export async function tableOnAccountOffline(input: {
   discount?: { discount_type?: string; discount_value?: number };
   /** rc.9 — still-unsynced item edits / split legs of this bill (replay after them). */
   extraDependencyIds?: string[];
+  /** rc.10 — the exact bill this on-account closes (see settleTableOffline). */
+  covers?: { orderIds: string[]; summary: boolean };
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
+  // rc.10 — an offline-created customer travels as customer_local (waits for + remaps to canonical).
+  input = { ...input, ...(await normalizeCustomerRef(input.customerId, input.customerLocal)) };
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
     if (input.sessionId && !d) throw new Error("dine session not found");
@@ -477,7 +522,10 @@ export async function tableOnAccountOffline(input: {
       : canonicalTableOpId(input.table as CanonicalTableTarget, ["on_account_table", who, input.method, String(input.amount)]);
     const operationId = ONACCOUNT_OP_PREFIX + clientOpId;
     const existing = await localdb.operations.get(operationId);
-    if (existing) return { operationId, clientOpId, alreadyCaptured: true };
+    if (existing) {
+      if (d && d.status === "open") await markDraftSettled(d, operationId);
+      return { operationId, clientOpId, alreadyCaptured: true };
+    }
     const scope: OperationScope = d
       ? { tenant_id: d.tenant_id, branch_id: d.branch_id, device_id: d.device_id, terminal_id: d.terminal_id ?? "", cashier_user_id: d.cashier_user_id }
       : canonicalTableScope(input.table as CanonicalTableTarget);
@@ -505,6 +553,7 @@ export async function tableOnAccountOffline(input: {
         method: input.method,
         table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
+        covers: settleCovers(d, input.covers, input.table),
       },
       status: "pending",
       retry_count: 0,
@@ -515,6 +564,8 @@ export async function tableOnAccountOffline(input: {
       synced_at: null,
     };
     await localdb.operations.add(op);
+    // rc.10 — the table's bill is closed into a receivable: LOCALLY SETTLED, table reusable.
+    if (d) await markDraftSettled(d, operationId);
     return { operationId, clientOpId, alreadyCaptured: false };
   });
 }
@@ -836,15 +887,37 @@ export async function getDineDraftForTable(scope: {
 }, tableId: string): Promise<DineDraft | null> {
   if (!scope.tenantId || !tableId) return null;
   const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
-  return (
-    all.find(
-      (d) =>
-        d.table_id === tableId &&
-        d.status === "open" &&
-        (d.branch_id ?? null) === (scope.branchId ?? null) &&
-        d.cashier_user_id === scope.cashierUserId &&
-        d.device_id === scope.deviceId &&
-        (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
-    ) ?? null
+  const open = all.filter(
+    (d) =>
+      d.table_id === tableId &&
+      d.status === "open" &&
+      (d.branch_id ?? null) === (scope.branchId ?? null) &&
+      d.cashier_user_id === scope.cashierUserId &&
+      d.device_id === scope.deviceId &&
+      (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
+  );
+  for (const d of open) {
+    // rc.10 repair: a pre-rc.10 session that a captured settle / on-account already covers is a
+    // SETTLED bill, never the table's active one (rc.9 left it "open" → the table could not be reused
+    // and a new round re-attached to the paid bill). Close it locally (kept for history) and skip it.
+    const cover = await coveringSettleOp(d);
+    if (cover) {
+      await localdb.dineDrafts.update(d.local_session_id, { status: "settled", settled_operation_id: cover.operation_id, settled_at: cover.created_at, updated_at: new Date().toISOString() });
+      continue;
+    }
+    return d;
+  }
+  return null;
+}
+
+/** The live settle / on-account op that covers a session (by its recorded `covers.session_local`, or —
+ *  for ops captured before rc.10 — by depending on the session's open op), if any. */
+export async function coveringSettleOp(d: DineDraft): Promise<OfflineOperation | undefined> {
+  const rows = await localdb.operations.where("operation_type").anyOf("pay_table", "on_account_table").toArray();
+  return rows.find(
+    (o) =>
+      o.status !== "cancelled" &&
+      ((o.payload as { covers?: { session_local?: string | null } } | null)?.covers?.session_local === d.local_session_id ||
+        o.dependency_ids.includes(d.open_operation_id)),
   );
 }

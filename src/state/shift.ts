@@ -24,6 +24,11 @@ import { createLocalPendingShift, pendingShiftToActiveShift } from "@/lib/offlin
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { isTransportFailure } from "@/lib/offline/posTxnSync";
 import { createLatestGate } from "@/lib/offline/latestGate";
+import { captureEndShiftOffline, endShiftOpForShift, unsyncedEndShiftOp } from "@/lib/offline/endShiftOffline";
+
+/** rc.10 — the shift was ENDED on this device while offline: its canonical close (end_shift op) waits
+ *  behind every op of the shift and replays LAST. Until it syncs, the shift is operationally closed. */
+export type EndedPendingSync = { operationId: string; shiftId: string; dependencyCount: number };
 
 type ShiftState = {
   loading: boolean;
@@ -44,6 +49,8 @@ type ShiftState = {
   pendingLocalId: string | null;
   /** The report returned by the most recent end-shift, kept for the summary view. */
   lastReport: ShiftReport | null;
+  /** rc.10 — set when the last End Shift was CAPTURED offline (pending sync); null otherwise. */
+  endedPendingSync: EndedPendingSync | null;
   error: string | null;
 
   /**
@@ -73,6 +80,18 @@ type ShiftState = {
     notes: string | null;
     deliveryFeeCashTreatment?: DeliveryFeeCashTreatment;
   }) => Promise<ShiftReport>;
+  /**
+   * rc.10 — End Shift while OFFLINE: capture the durable end_shift op (dependency barrier over every
+   * op of this shift → the canonical close replays LAST), then mark the shift ENDED-pending-sync on
+   * this device (no server call, no raw fetch). The local session snapshot is cleared so no restart
+   * restores the closed shift.
+   */
+  closeOffline: (input: {
+    scope: { tenantId: string; branchId: string | null; cashierUserId: string; deviceId: string; terminalId: string | null };
+    actualCashCounted: number;
+    notes: string | null;
+    deliveryFeeCashTreatment?: DeliveryFeeCashTreatment;
+  }) => Promise<EndedPendingSync>;
   clearReport: () => void;
   clear: () => void;
 };
@@ -97,6 +116,7 @@ export const useShift = create<ShiftState>((set, get) => ({
   offlineRestored: false,
   pendingLocalId: null,
   lastReport: null,
+  endedPendingSync: null,
   error: null,
 
   refresh: async (tenantId, userId, branchId = null, isCurrent) => {
@@ -117,8 +137,18 @@ export const useShift = create<ShiftState>((set, get) => ({
       // sibling branch/OU must NOT surface as this POS context's active shift; fall
       // through to the branch-scoped pending/none handling below instead.
       if (shift && (shift.branch_id ?? null) === (branchId ?? null)) {
+        // rc.10 — a shift END captured offline that has not synced yet: the server still reports it
+        // open, but on this device it is CLOSED (its close replays after its last op). Never re-open it
+        // for new orders (they would land after the barrier and be refused once the close lands).
+        const ended = await endShiftOpForShift(shift.id).catch(() => undefined);
+        if (superseded()) return;
+        if (ended && ended.status !== "synced") {
+          set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, endedPendingSync: { operationId: ended.operation_id, shiftId: shift.id, dependencyCount: ended.dependency_ids.length } });
+          clearPosSessionSnapshot();
+          return;
+        }
         // Server is the authority: a real open shift supersedes any offline state.
-        set({ shift, loading: false, offlineRestored: false, pendingLocalId: null });
+        set({ shift, loading: false, offlineRestored: false, pendingLocalId: null, endedPendingSync: null });
         await get().refreshCashBox(superseded);
         return;
       }
@@ -128,7 +158,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       // THIS exact tenant+branch/OU+cashier+device; pending_sync only.
       const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
       if (superseded()) return;
-      if (pending) {
+      if (pending && !(await endShiftOpForShift(pending.local_shift_id).catch(() => undefined))) {
         set({
           shift: pendingShiftToActiveShift(pending),
           cashBox: null,
@@ -166,6 +196,14 @@ export const useShift = create<ShiftState>((set, get) => ({
         cashierUserId: userId,
         branchId,
       });
+      // rc.10 — a shift whose End Shift was captured offline is CLOSED on this device: never restore it.
+      const restoredEnded = restored ? await endShiftOpForShift(restored.id).catch(() => undefined) : undefined;
+      if (restored && restoredEnded) {
+        if (superseded()) return;
+        clearPosSessionSnapshot();
+        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null, endedPendingSync: { operationId: restoredEnded.operation_id, shiftId: restored.id, dependencyCount: restoredEnded.dependency_ids.length } });
+        return;
+      }
       if (restored) {
         if (superseded()) return;
         set({ shift: restored, cashBox: null, loading: false, offlineRestored: true, pendingLocalId: null, error: null });
@@ -174,6 +212,12 @@ export const useShift = create<ShiftState>((set, get) => ({
       // 2) a shift opened offline on this device for THIS exact context (Case 2).
       const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
       if (superseded()) return;
+      const pendingEnded = pending ? await endShiftOpForShift(pending.local_shift_id).catch(() => undefined) : undefined;
+      if (pending && pendingEnded) {
+        if (superseded()) return;
+        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null, endedPendingSync: { operationId: pendingEnded.operation_id, shiftId: pending.local_shift_id, dependencyCount: pendingEnded.dependency_ids.length } });
+        return;
+      }
       if (pending) {
         set({
           shift: pendingShiftToActiveShift(pending),
@@ -238,6 +282,14 @@ export const useShift = create<ShiftState>((set, get) => ({
         if (!isTransportFailure(e)) throw e;
       }
     }
+    // rc.10 — a previous shift's End Shift captured offline has not synced yet: opening another shift
+    // offline would replay pos_open_shift BEFORE that close, and the server's single-open rule would
+    // ADOPT the still-open old shift. Refuse with the reason (never a raw error).
+    const dev = getDeviceIdentity();
+    const endPending = await unsyncedEndShiftOp({ tenantId, branchId, cashierUserId: userId, deviceId: dev.device_id, terminalId: dev.terminal_id ?? null }).catch(() => undefined);
+    if (endPending) {
+      throw new Error("The previous shift is still closing on this device. Reconnect so it syncs, then open a new shift.");
+    }
     // Offline: capture a durable pending shift and surface it as the active shift.
     const pending = await createLocalPendingShift({
       tenantId,
@@ -272,8 +324,38 @@ export const useShift = create<ShiftState>((set, get) => ({
     // so the durable snapshot must go too or a later offline restart would restore
     // a closed shift.
     clearPosSessionSnapshot();
-    set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: report });
+    set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: report, endedPendingSync: null });
     return report;
+  },
+
+  closeOffline: async ({ scope, actualCashCounted, notes, deliveryFeeCashTreatment }) => {
+    const shift = get().shift;
+    if (!shift) throw new Error("There is no open shift to end.");
+    const pendingLocalId = get().pendingLocalId;
+    // Stage this device's offline sales (posOfflineTxns) into the operation log FIRST so they join the
+    // barrier — otherwise a takeaway/delivery sale captured offline could replay after the close.
+    // Idempotent, local-only (the same staging the drain runs); a failure never blocks the close.
+    try {
+      const { migrateLegacyToOperations } = await import("@/lib/offline/migration");
+      await migrateLegacyToOperations();
+    } catch {
+      /* staging is retried by every drain; the close still waits behind every op already logged */
+    }
+    const r = await captureEndShiftOffline({
+      scope,
+      shiftId: pendingLocalId ? null : shift.id,
+      shiftLocal: pendingLocalId,
+      actualCashCounted,
+      notes,
+      deliveryFeeCashTreatment,
+      shiftOpenedAt: shift.opened_at,
+    });
+    // Operationally CLOSED on this device: no restart may restore it (snapshot cleared; refresh()
+    // also refuses any shift with a captured end_shift op).
+    clearPosSessionSnapshot();
+    const ended: EndedPendingSync = { operationId: r.operationId, shiftId: pendingLocalId ?? shift.id, dependencyCount: r.dependencyCount };
+    set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: ended, error: null });
+    return ended;
   },
 
   clearReport: () => set({ lastReport: null }),
@@ -283,7 +365,7 @@ export const useShift = create<ShiftState>((set, get) => ({
     // before sign-out must not resolve afterwards and repopulate shift state for a
     // session that no longer exists.
     shiftRefreshGate.invalidate();
-    set({ loading: false, shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, error: null });
+    set({ loading: false, shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: null, error: null });
   },
 }));
 

@@ -97,6 +97,7 @@ import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { prewarmFloorCache, floorPrewarmCached } from "@/state/floor";
 import { prewarmDeliveryQueue } from "@/lib/offline/deliveryQueueOffline";
+import { isTransportFailure } from "@/lib/offline/posTxnSync";
 import { FEATURES, hasFeature } from "@/lib/features";
 import { loadOperationalProviders } from "@/lib/pos/deliveryProviderCapture";
 import { cacheDeliveryProviders } from "@/lib/offline/db";
@@ -1316,6 +1317,12 @@ function PosWorkspaceInner() {
    * there is one cart, and it serves one context at a time.
    */
   const claimBuffer = useCallback((): boolean => {
+    // rc.10 — Delivery Add Items with no customer chosen must never fall back to claiming the buffer
+    // as TAKEAWAY (the delivery basket would then hide those lines and the next add would refuse).
+    if (addingToDelivery && !delivery.cartOwner) {
+      toast.push({ tone: "warning", message: "Choose the customer first", detail: "Pick the delivery customer before adding items." });
+      return false;
+    }
     // Delivery's owner carries the CUSTOMER, so a basket built for one caller
     // can never be claimed - and therefore never sent - for another.
     const owner: CartOwner =
@@ -1332,10 +1339,19 @@ function PosWorkspaceInner() {
       if (owner.kind === "takeaway") setViewingSavedOrder(false);
       return true;
     }
+    // rc.10 — say WHOSE unsent work holds the buffer (each workspace hides another owner's lines, so
+    // the generic message looked like a lock on an empty cart).
+    const held = useCart.getState();
+    const where =
+      held.owner?.kind === "table"
+        ? `an unsent round for ${useTables.getState().map.tables.find((t) => t.id === (held.owner as { tableId: string }).tableId)?.name ?? "another table"}`
+        : held.owner?.kind === "delivery"
+          ? "an unsent delivery basket"
+          : "an unsent takeaway order";
     toast.push({
       tone: "warning",
       message: "The cart is in use",
-      detail: "Send or clear the current order before starting another one.",
+      detail: `It holds ${held.lines.length} item${held.lines.length === 1 ? "" : "s"} in ${where}. Send or clear it there first.`,
     });
     return false;
   }, [addingToDelivery, delivery.cartOwner, addingToTable, dineIn.selected, toast]);
@@ -1609,7 +1625,9 @@ function PosWorkspaceInner() {
       }
       void refreshOfflineQueue();
       toast.push({ tone: "success", message: "Saved offline - sent to kitchen", detail: `Ref ${ref}. It will sync when the connection returns.` });
-      // Cart is kept so the operator can Pay the SAME order next.
+      // Cart is kept so the operator can Pay the SAME order next. rc.10 — but it is now DURABLY saved
+      // (resumable from the offline queue), so it no longer locks the cart against Dine-In / Delivery.
+      useCart.getState().markDurable();
     },
     [buildOfflinePayload, currency, pos.branch.id, pos.userName, provisionalResult, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
@@ -2314,18 +2332,37 @@ function PosWorkspaceInner() {
     [currency, pos.branch.id, shiftStore, tenantId, toast, userId],
   );
 
+  // rc.10 — set while the End Shift dialog is open OFFLINE: the server computes the expected cash and
+  // the difference when the close syncs (pos_end_shift), so no fabricated local "expected" is shown.
+  const [endShiftOfflineNote, setEndShiftOfflineNote] = useState<string | null>(null);
+  const END_SHIFT_OFFLINE_NOTE =
+    "Offline — the expected cash and the difference are calculated by the server when this close syncs. Count the drawer and enter the cash counted.";
+
   const startEndShift = useCallback(async () => {
     if (!shiftId) return;
     setShiftError(null);
     setEndShiftBlocked(false);
     setExpected(null);
+    setEndShiftOfflineNote(null);
     setEndShiftOpen(true);
+    // rc.10 — OFFLINE (or an offline-opened shift that has no server shift yet): no server read at all —
+    // the rc.9 raw "TypeError: Failed to fetch" came from this pos_shift_expected call.
+    if (!online || useShift.getState().pendingLocalId) {
+      setEndShiftOfflineNote(END_SHIFT_OFFLINE_NOTE);
+      return;
+    }
     try {
       setExpected(await getShiftExpected(shiftId));
     } catch (e) {
-      setShiftError(classifyError(e).message);
+      if (isTransportFailure(e)) {
+        setEndShiftOfflineNote(END_SHIFT_OFFLINE_NOTE);
+        return;
+      }
+      const c = classifyError(e);
+      setShiftError(c.hint ? `${c.message} ${c.hint}` : c.message);
     }
-  }, [shiftId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shiftId, online]);
 
   const doEndShift = useCallback(
     async (input: { actual: number; notes: string | null; treatment: DeliveryFeeCashTreatment }) => {
@@ -2335,12 +2372,49 @@ function PosWorkspaceInner() {
       // order store follows it, so the report would otherwise describe an empty
       // shift - the one thing an end-of-shift report must not do.
       const closing = useShiftOrders.getState().orders;
-      try {
-        await shiftStore.close({
+      // rc.10 — OFFLINE End Shift: capture the durable end_shift op (barrier over every op of this shift
+      // → the canonical close replays LAST) through the already-certified engine; never the live RPC.
+      const closeOffline = async () => {
+        if (!offlineScope) throw new Error("Ending the shift offline needs this device's offline session. Reconnect to end the shift.");
+        const ended = await shiftStore.closeOffline({
+          scope: offlineScope,
           actualCashCounted: input.actual,
           notes: input.notes,
           deliveryFeeCashTreatment: input.treatment,
         });
+        setClosedShiftOrders(closing);
+        setEndShiftOpen(false);
+        setEndShiftOfflineNote(null);
+        newOrder();
+        toast.push({
+          tone: "success",
+          message: "Shift ended offline",
+          detail:
+            ended.dependencyCount > 0
+              ? `It will close on the server after this shift's ${ended.dependencyCount} pending operation${ended.dependencyCount === 1 ? "" : "s"} sync.`
+              : "It will close on the server when the connection returns.",
+        });
+      };
+      try {
+        if (!online || useShift.getState().pendingLocalId) {
+          await closeOffline();
+          return;
+        }
+        try {
+          await shiftStore.close({
+            actualCashCounted: input.actual,
+            notes: input.notes,
+            deliveryFeeCashTreatment: input.treatment,
+          });
+        } catch (e) {
+          // The connection dropped between the dialog and the close: capture it offline instead of a
+          // raw transport error (pos_end_shift is replay-safe; a duplicate would dedupe on client_op_id).
+          if (isTransportFailure(e)) {
+            await closeOffline();
+            return;
+          }
+          throw e;
+        }
         setClosedShiftOrders(closing);
         setEndShiftOpen(false);
         newOrder();
@@ -2353,7 +2427,8 @@ function PosWorkspaceInner() {
         setBusy(false);
       }
     },
-    [newOrder, shiftStore],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [newOrder, shiftStore, online, offlineScope, toast],
   );
 
   // --- keyboard --------------------------------------------------------------
@@ -3100,15 +3175,19 @@ function PosWorkspaceInner() {
             : (cart.savedOrder?.order_number ?? null)
         }
         error={payError}
+        // rc.10 — On Account / Partial OFFLINE: the capture engine (saveOfflineSend → orderOnAccountOffline,
+        // replay-safe pos_complete_on_account) already exists; rc.9 still hard-gated these props on
+        // `online`, so both modes were always locked offline. Offline they need what confirmOnAccount
+        // needs: this device's offline scope + an open shift (a customer is then chosen from the cache).
         onAccountDisabledReason={
-          pos.gates.takeOnAccount.allowed && online
-            ? null
-            : !pos.gates.takeOnAccount.allowed
-              ? pos.gates.takeOnAccount.reason
-              : "On-account sales need an internet connection."
+          !pos.gates.takeOnAccount.allowed
+            ? pos.gates.takeOnAccount.reason
+            : online || (offlineScope != null && Boolean(shiftId))
+              ? null
+              : "Open a shift on this device to put sales on account offline."
         }
         onAccount={
-          pos.gates.takeOnAccount.allowed && online
+          pos.gates.takeOnAccount.allowed && (online || (offlineScope != null && Boolean(shiftId)))
             ? {
                 enabled: true,
                 customer: customerPicker.selected,
@@ -3137,6 +3216,7 @@ function PosWorkspaceInner() {
         open={endShiftOpen}
         busy={busy}
         expected={expected}
+        offlineNote={endShiftOfflineNote}
         currency={currency}
         gate={pos.gates.endOwnShift}
         error={shiftError}

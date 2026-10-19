@@ -468,12 +468,10 @@ export function useDineInWorkspace(input: {
       settling: paying,
       branchId: pos.branch.id,
     });
-    // rc.9 — offline, never offer a SECOND settle of a bill already settled on this device.
-    if (g.allowed && offlineCapture && offlineProj?.settlingOpId) {
-      return { allowed: false, reason: "This table was settled offline — it will sync when you reconnect." };
-    }
+    // rc.10 — a bill settled offline is CLOSED locally (it leaves the active projection), so payTableGate
+    // already refuses a second settle of it ("no open bill"); a NEW bill on the reused table is payable.
     return g;
-  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying, offlineProj]);
+  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying]);
 
   const select = useCallback(
     (id: string) => {
@@ -650,13 +648,18 @@ export function useDineInWorkspace(input: {
           const localTableId = selected?.id ?? name; // canonical id for a mapped tap; name for an ad-hoc open
           const existing = await getDineDraftForTable(input.offlineScope, localTableId);
           if (!existing) {
+            // rc.10 — reusing a table whose bill was settled offline: the NEW session's open replays
+            // after that settle (never joins the paid bill; never trips its own CAS).
+            const raw = selected ? (tables.map.tables.find((t) => t.id === selected.id) ?? selected) : null;
+            const proj = raw ? await getOperationalTableBill(input.offlineScope, raw) : null;
             await openTableOffline({
               scope: input.offlineScope,
               tableId: localTableId,
               tableName: selected?.name ?? name,
               seats,
               currency: input.currency,
-              baseOrderVersion: selected?.pos_entity_version ?? null,
+              baseOrderVersion: raw?.pos_entity_version ?? null,
+              afterSettleOpId: proj?.settlingOpId ?? null,
             });
           }
           setSeatOpen(false);
@@ -689,7 +692,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, openGate.allowed, ctx, toast, input.online, input.offlineReady, input.offlineScope, input.currency],
+    [selected, openGate.allowed, ctx, toast, input.online, input.offlineReady, input.offlineScope, input.currency, tables.map],
   );
 
   // Phase F — refresh the branch's auto-seat setting from the canonical row when
@@ -749,8 +752,14 @@ export function useDineInWorkspace(input: {
     if (!base.allowed) return base;
     // The buffer is shared with Takeaway on purpose (one cart, one round at a
     // time). If someone else's work is in it, say whose rather than merging.
-    if (input.cartLines.length > 0 && cart.owner?.kind === "takeaway") {
+    // rc.10 — a takeaway buffer that is already durably saved (sent offline / submitted) is NOT a lock:
+    // claim() releases it (the order stays in the offline queue / shift orders).
+    const durablySaved = cart.durable || cart.savedOrder != null;
+    if (input.cartLines.length > 0 && cart.owner?.kind === "takeaway" && !durablySaved) {
       return { allowed: false, reason: "Finish or clear the takeaway order first - the cart is in use." };
+    }
+    if (input.cartLines.length > 0 && cart.owner?.kind === "delivery" && !durablySaved) {
+      return { allowed: false, reason: "A delivery basket is still open. Send or clear it in Delivery first." };
     }
     if (
       input.cartLines.length > 0 &&
@@ -761,7 +770,7 @@ export function useDineInWorkspace(input: {
       return { allowed: false, reason: "Another table has an unsent round. Send or discard it first." };
     }
     return base;
-  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, selected]);
+  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, cart.durable, cart.savedOrder, selected]);
 
   const submitGate: Gate = useMemo(
     () =>
@@ -808,6 +817,14 @@ export function useDineInWorkspace(input: {
     // mutation → re-derive the ONE projection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offlineCapture, selected?.id, input.offlineScope, roundBusy, busy, projRev, tables.map]);
+
+  // rc.10 — CART-LOCK LIFECYCLE: once a table's bill is SETTLED locally, any unsent round still
+  // buffered for that table belonged to the closed bill's context — release it, so the reused table
+  // starts clean and no other context sees "The cart is in use". (Kept out of the payment path itself,
+  // which never touches the cart buffer.)
+  useEffect(() => {
+    if (offlineProj?.settledLocally) useCart.getState().releaseIfOwner({ kind: "table", tableId: offlineProj.tableId });
+  }, [offlineProj]);
 
   /**
    * Enter Add Items. The bill is RE-READ first: the operator is about to build a
@@ -874,18 +891,23 @@ export function useDineInWorkspace(input: {
           // rc.9 — an OCCUPIED table with a cached canonical bill: bind this local session to that open
           // order (round 1 pins expected_order_id; the open op adopts the occupied table), so the rounds
           // append to the SAME bill and the projection merges them — never a second bill.
+          // Re-derive the ONE projection at send time (never a stale panel copy).
+          const raw = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
+          const proj = await getOperationalTableBill(input.offlineScope, raw);
           const canonicalOrderId =
-            selected.orders > 0 && offlineProj && !offlineProj.summaryOnly
-              ? (offlineProj.orders.find((o) => o.orderId && !o.orderLocal)?.orderId ?? null)
+            proj.bill.orders.length > 0 && !proj.summaryOnly
+              ? (proj.orders.find((o) => o.orderId && !o.orderLocal)?.orderId ?? null)
               : null;
           draft = await openTableOffline({
             scope: input.offlineScope,
             tableId: selected.id,
             tableName: selected.name,
             seats: selected.seats ?? null,
-            currency: offlineProj?.currency ?? input.currency,
-            baseOrderVersion: selected.pos_entity_version ?? null,
+            currency: proj.currency ?? input.currency,
+            baseOrderVersion: raw.pos_entity_version ?? null,
             canonicalOrderId,
+            // rc.10 — a table reused after a local settle: the new bill's open replays after it.
+            afterSettleOpId: canonicalOrderId ? null : proj.settlingOpId,
           });
         }
         for (const l of submitted) await addDraftLine(draft.local_session_id, draftLineFromCart(l));
@@ -983,7 +1005,7 @@ export function useDineInWorkspace(input: {
       setRoundBusy(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch, offlineProj, bumpProj]);
+  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch, tables.map, bumpProj]);
 
   // --- Level 2D: settlement ---------------------------------------------------
 
@@ -1017,29 +1039,33 @@ export function useDineInWorkspace(input: {
    */
   const offlineSettleTarget = useCallback(
     async (table: TableSummary): Promise<
-      | { ok: true; sessionId: string | null; table: CanonicalTableTarget | undefined; deps: string[] }
+      | { ok: true; sessionId: string | null; table: CanonicalTableTarget | undefined; deps: string[]; covers: { orderIds: string[]; summary: boolean } }
       | { ok: false; reason: string }
     > => {
       if (!input.offlineScope) return { ok: false, reason: "This table isn't available offline. Reconnect to settle it." };
       const raw = tables.map.tables.find((t) => t.id === table.id) ?? table;
       const p = await getOperationalTableBill(input.offlineScope, raw);
+      // rc.10 — a bill already settled offline is CLOSED locally (absent from the projection), so a
+      // second settle of it is impossible here; only the table's CURRENT active bill can be settled.
       if (p.bill.orders.length === 0) return { ok: false, reason: "This table has no open bill to settle." };
-      if (p.settlingOpId) return { ok: false, reason: "This table was already settled offline — it will sync when you reconnect." };
       if (p.paidPending > 0 || p.collected > 0) {
         return { ok: false, reason: "Part of this bill is already paid. Settle the remaining items with Split, or reconnect." };
       }
       const draft = await getDineDraftForTable(input.offlineScope, table.id);
-      const canonicalIds = p.orders.map((o) => o.orderId).filter((x): x is string => typeof x === "string" && x !== "");
+      const canonicalIds = p.orders.filter((o) => o.orderLocal == null).map((o) => o.orderId).filter((x): x is string => typeof x === "string" && x !== "");
       const hasCanonical = p.summaryOnly || canonicalIds.length > 0;
       return {
         ok: true,
-        sessionId: draft && draft.rounds.length > 0 ? draft.local_session_id : null,
+        // The table's open local session (even one with no round yet) is settled WITH the bill, so a
+        // stale empty session can never capture the next order's rounds into the paid bill.
+        sessionId: draft && (draft.rounds.length > 0 || hasCanonical) ? draft.local_session_id : null,
         // A canonical bill (cached or summary) with no offline round still settles by its table id.
-        table:
-          (!draft || draft.rounds.length === 0) && hasCanonical
-            ? { scope: input.offlineScope, tableId: table.id, tableName: table.name, currency: p.currency ?? input.currency, orderIds: canonicalIds }
-            : undefined,
+        table: hasCanonical
+          ? { scope: input.offlineScope, tableId: table.id, tableName: table.name, currency: p.currency ?? input.currency, orderIds: canonicalIds }
+          : undefined,
         deps: p.mutationOpIds,
+        // EXACTLY the bill on screen — the projection closes this and nothing else.
+        covers: { orderIds: canonicalIds, summary: p.summaryOnly },
       };
     },
     [input.offlineScope, input.currency, tables.map],
@@ -1650,12 +1676,13 @@ export function useDineInWorkspace(input: {
             discount: offlineDiscount.fields,
             cashAmountUsd,
             extraDependencyIds: target.deps,
+            covers: target.covers,
           });
           setPayOpen(false);
           toast.push({
             tone: "success",
             message: `${table.name} settled offline`,
-            detail: "Recorded on this device — it will sync automatically when you reconnect.",
+            detail: "The table is free for a new order. The payment syncs automatically when you reconnect.",
           });
           bumpProj();
         } catch (e) {
@@ -1818,12 +1845,13 @@ export function useDineInWorkspace(input: {
             method: dialog.method,
             discount: offDiscount,
             extraDependencyIds: target.deps,
+            covers: target.covers,
           });
           setPayOpen(false);
           toast.push({
             tone: "success",
             message: `${table.name} put on account offline`,
-            detail: "Recorded on this device — it will sync automatically when you reconnect.",
+            detail: "The table is free for a new order. It syncs automatically when you reconnect.",
           });
           bumpProj();
         } catch (e) {

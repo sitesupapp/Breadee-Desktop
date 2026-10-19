@@ -55,6 +55,9 @@ export async function captureEndShiftOffline(input: {
   actualCashCounted: number;
   notes: string | null;
   deliveryFeeCashTreatment?: string;
+  /** rc.10 — the shift's open time: the barrier covers THIS shift's work only (every op captured at or
+   *  after it). An unresolved op from an EARLIER shift must not hold this shift's close hostage. */
+  shiftOpenedAt?: string | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean; dependencyCount: number }> {
   return localdb.transaction("rw", localdb.operations, async () => {
     const key = input.shiftId ?? input.shiftLocal ?? "";
@@ -63,11 +66,24 @@ export async function captureEndShiftOffline(input: {
     const existing = await getOperation(operationId);
     if (existing) return { operationId, clientOpId, alreadyCaptured: true, dependencyCount: existing.dependency_ids.length };
 
-    // The barrier: every prior op in this scope that is not itself an end_shift and not terminal
-    // (synced ops are already satisfied; cancelled ops are excluded). Each must reach `synced`.
+    // The barrier: every op of this shift in this scope that is not itself an end_shift and not
+    // terminal-success (synced ops are already satisfied; cancelled ops are excluded). Each must reach
+    // `synced` before the canonical close replays — orders, rounds, edits, payments, partial/on-account,
+    // refunds, payouts, delivery changes, receivable collections (every op type: no type filter).
+    const since = input.shiftOpenedAt ? Date.parse(input.shiftOpenedAt) : NaN;
     const all = await localdb.operations.toArray();
     const dependencyIds = all
-      .filter((o) => o.operation_type !== "end_shift" && o.status !== "cancelled" && inScope(o, input.scope))
+      .filter(
+        (o) =>
+          o.operation_type !== "end_shift" &&
+          o.status !== "cancelled" &&
+          o.status !== "synced" &&
+          inScope(o, input.scope) &&
+          // Same shift: captured at/after it opened, or explicitly tied to it.
+          (!Number.isFinite(since) ||
+            Date.parse(o.created_at) >= since - 1000 ||
+            belongsToShift(o, input.shiftId, input.shiftLocal)),
+      )
       .map((o) => o.operation_id);
 
     const op: OfflineOperation = {
@@ -101,8 +117,36 @@ export async function captureEndShiftOffline(input: {
   });
 }
 
+/** True when an op explicitly references this shift (canonical id or its offline-opened local id). */
+function belongsToShift(o: OfflineOperation, shiftId: string | null, shiftLocal: string | null): boolean {
+  const p = (o.payload ?? {}) as Record<string, unknown>;
+  const op = (p.order_payload ?? {}) as Record<string, unknown>;
+  const ids = [p.shift_id, p.shift_local, op.shift_id].filter((x) => typeof x === "string");
+  return (shiftId != null && ids.includes(shiftId)) || (shiftLocal != null && ids.includes(shiftLocal)) || (shiftLocal != null && o.local_entity_id === shiftLocal);
+}
+
 /** The captured end_shift op for this scope (for the UI to show ENDED_PENDING_SYNC), or undefined. */
 export async function findEndShiftOp(scope: EndShiftScope): Promise<OfflineOperation | undefined> {
   const rows = await localdb.operations.where("operation_type").equals("end_shift").toArray();
   return rows.find((o) => inScope(o, scope));
+}
+
+/** rc.10 — the (non-cancelled) end_shift op that closes THIS shift (canonical id or offline local id),
+ *  if one was captured. A shift with such an op is ENDED (pending sync) on this device: it must never be
+ *  restored as the active shift by an offline restart, a snapshot, or a not-yet-synced server read. */
+export async function endShiftOpForShift(shiftIdOrLocal: string | null | undefined): Promise<OfflineOperation | undefined> {
+  if (!shiftIdOrLocal) return undefined;
+  const rows = await localdb.operations.where("operation_type").equals("end_shift").toArray();
+  return rows.find((o) => {
+    if (o.status === "cancelled") return false;
+    const p = (o.payload ?? {}) as { shift_id?: string | null; shift_local?: string | null };
+    return p.shift_id === shiftIdOrLocal || p.shift_local === shiftIdOrLocal;
+  });
+}
+
+/** rc.10 — any captured, NOT-yet-synced end_shift in this scope (blocks opening a new shift offline:
+ *  the server's single-open rule would otherwise adopt the still-open old shift on replay). */
+export async function unsyncedEndShiftOp(scope: EndShiftScope): Promise<OfflineOperation | undefined> {
+  const rows = await localdb.operations.where("operation_type").equals("end_shift").toArray();
+  return rows.find((o) => o.status !== "cancelled" && o.status !== "synced" && inScope(o, scope));
 }

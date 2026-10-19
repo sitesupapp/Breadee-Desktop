@@ -405,6 +405,15 @@ export async function drainOffline(
     } catch (e) {
       migrateError = e instanceof Error ? e.message : String(e);
     }
+    // rc.10 — re-queue (once) the provably replay-safe historical failures (pre-rc.10 rounds that sent
+    // a non-uuid line id → nothing applied server-side) + their dependency_failed dependents. Under the
+    // single-flight lock; never touches any other parked op.
+    try {
+      const { recoverHistoricalReplayFailures } = await import("@/lib/offline/queueForensics");
+      await recoverHistoricalReplayFailures();
+    } catch {
+      /* recovery is best-effort; the parked ops stay visible + operator-retryable */
+    }
     const report = await drainOperations(ctx, triggeredBy, deps, { assumeLocked: true });
     try {
       await reconcileLegacyFromOperations();

@@ -1,0 +1,132 @@
+// rc.10 — SYNC QUEUE FORENSICS + HISTORICAL RECOVERY.
+//
+// Classifies every unresolved operation (needs_attention / pending / blocked / retryable) so a final
+// acceptance run can tell rc.10 work from historical QA leftovers, exports a REDACTED diagnostic (no
+// payloads, no customer data, no secrets — type / status / build / timestamps / error class only), and
+// safely re-queues the ONE known historical defect that is provably replay-safe:
+//
+//   rc.8/rc.9 offline Dine-In rounds whose draft line ids were the cart key "line-N", sent as
+//   client_line_id → the server's ::uuid cast failed the WHOLE pos_submit_order transaction (22P02).
+//   Nothing was applied server-side (the transaction rolled back; the client_op_id was never recorded),
+//   and the round handler now strips non-uuid ids, so a re-queue replays it EXACTLY ONCE. Its dependents
+//   that parked with `dependency_failed` never reached the server either, so they are re-queued with it.
+//
+// Every other parked op is left untouched (operator-driven Retry in the Sync Center).
+
+import { localdb } from "@/lib/offline/db";
+import type { OfflineOperation } from "@/lib/offline/operationLog";
+
+export type ForensicCategory =
+  | "HISTORICAL_LINE_ID_BUG" // pre-rc.10 round 22P02 — auto-recoverable (replay-safe)
+  | "HISTORICAL_DEPENDENT" // parked only because a prerequisite failed
+  | "EXPECTED_CONFLICT" // the server state changed elsewhere (version / settled / identity …)
+  | "AUTHORITY_REFUSED" // permission refusal at replay
+  | "REAL_REPLAY_BUG" // unknown handler / missing dependency / unexplained validation refusal
+  | "WAITING" // pending / blocked / retryable — not a failure
+  | "SYNCED";
+
+const LINE_ID_BUG = /invalid input syntax for type uuid|22p02/i;
+const CONFLICT_CODES = new Set([
+  "version_conflict", "expected_order_mismatch", "settle_conflict", "split_conflict", "edit_conflict", "add_conflict",
+  "provider_invalid", "customer_identity_conflict", "refund_conflict", "move_conflict", "merge_conflict",
+  "shift_conflict", "shift_closed", "delivery_ops_conflict", "edit_order_conflict", "payout_source_drift", "receivable_conflict",
+]);
+
+/** PURE — classify one operation. */
+export function classifyOperation(op: OfflineOperation): { category: ForensicCategory; reason: string } {
+  if (op.status === "synced") return { category: "SYNCED", reason: "synced" };
+  if (op.status !== "needs_attention") return { category: "WAITING", reason: op.status };
+  const code = op.last_error_code ?? "";
+  const msg = op.last_error_message ?? "";
+  if (op.operation_type === "dinein_send_round" && LINE_ID_BUG.test(msg)) {
+    return { category: "HISTORICAL_LINE_ID_BUG", reason: "pre-rc.10 round sent a non-uuid line id (22P02); nothing applied server-side" };
+  }
+  if (code === "dependency_failed") return { category: "HISTORICAL_DEPENDENT", reason: "a prerequisite operation could not complete" };
+  if (code === "permission") return { category: "AUTHORITY_REFUSED", reason: "permission refused at replay" };
+  if (CONFLICT_CODES.has(code)) return { category: "EXPECTED_CONFLICT", reason: `server state changed (${code})` };
+  return { category: "REAL_REPLAY_BUG", reason: code || "unclassified refusal" };
+}
+
+/** A redacted, shareable diagnostic of the operation log (no payloads / customer data / secrets). */
+export type DiagnosticRow = {
+  op: string;
+  type: string;
+  status: string;
+  created_at: string;
+  build: string | null;
+  rc_current_build: boolean;
+  retries: number;
+  dependencies: number;
+  error_code: string | null;
+  error: string | null;
+  category: ForensicCategory;
+  reason: string;
+};
+
+export function buildDiagnostic(ops: OfflineOperation[], currentBuild: string | null): DiagnosticRow[] {
+  return [...ops]
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    .map((o) => {
+      const c = classifyOperation(o);
+      const build = (o as OfflineOperation & { captured_build?: string | null }).captured_build ?? null;
+      return {
+        op: o.operation_id.slice(0, 18),
+        type: String(o.operation_type),
+        status: o.status,
+        created_at: o.created_at,
+        build,
+        rc_current_build: currentBuild != null && build === currentBuild,
+        retries: o.retry_count,
+        dependencies: o.dependency_ids.length,
+        error_code: o.last_error_code,
+        // Server refusal text only, truncated; never the payload.
+        error: o.last_error_message ? o.last_error_message.slice(0, 160) : null,
+        category: c.category,
+        reason: c.reason,
+      };
+    });
+}
+
+/**
+ * Re-queue the provably replay-safe historical failures (see header), at most ONCE per op. Returns the
+ * re-queued operation ids. Must run inside the drain's single-flight lock (drainOffline does).
+ */
+export async function recoverHistoricalReplayFailures(): Promise<string[]> {
+  const all = await localdb.operations.toArray();
+  const byId = new Map(all.map((o) => [o.operation_id, o]));
+  const roots = all.filter(
+    (o) => o.status === "needs_attention" && classifyOperation(o).category === "HISTORICAL_LINE_ID_BUG" && o.result_meta?.rc10_recovered !== true,
+  );
+  if (roots.length === 0) return [];
+  const requeue = new Set(roots.map((o) => o.operation_id));
+  // Transitively: parked dependents whose ONLY failure is a prerequisite in the re-queue set.
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const o of all) {
+      if (requeue.has(o.operation_id) || o.status !== "needs_attention" || o.last_error_code !== "dependency_failed") continue;
+      if (o.result_meta?.rc10_recovered === true) continue;
+      const failed = (o.last_error_message ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      const deps = failed.length > 0 ? failed : o.dependency_ids;
+      if (deps.some((d) => requeue.has(d) || byId.get(d)?.status === "synced")) {
+        if (deps.every((d) => requeue.has(d) || byId.get(d)?.status === "synced" || byId.get(d)?.status === "pending")) {
+          requeue.add(o.operation_id);
+          grew = true;
+        }
+      }
+    }
+  }
+  await localdb.transaction("rw", localdb.operations, async () => {
+    for (const id of requeue) {
+      const o = byId.get(id);
+      if (!o || o.status !== "needs_attention") continue;
+      await localdb.operations.update(id, {
+        status: "pending",
+        last_error_code: null,
+        last_error_message: null,
+        result_meta: { ...(o.result_meta ?? {}), rc10_recovered: true },
+      });
+    }
+  });
+  return [...requeue];
+}

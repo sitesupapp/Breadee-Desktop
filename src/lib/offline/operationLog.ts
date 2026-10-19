@@ -155,7 +155,24 @@ export interface OfflineOperation {
   /** Result metadata from a successful replay (safe summary, no sensitive payload). */
   result_meta: Record<string, unknown> | null;
   synced_at: string | null;
+  /** rc.10 — the app build (git SHA) that CAPTURED this op, stamped automatically on creation, so queue
+   *  forensics can separate this build's work from historical QA leftovers. Absent on older ops. */
+  captured_build?: string | null;
 }
+
+// rc.10 — build provenance: every new operation is stamped with the running build (set once at startup
+// from the injected VITE_BUILD_SHA). One Dexie creating-hook covers every capture path.
+let captureBuild: string | null = null;
+export function setCaptureBuild(build: string | null | undefined): void {
+  captureBuild = build && build.trim() !== "" ? build.trim() : null;
+}
+export function currentCaptureBuild(): string | null {
+  return captureBuild;
+}
+localdb.operations.hook("creating", (_pk, obj) => {
+  const o = obj as OfflineOperation;
+  if (o.captured_build == null && captureBuild) o.captured_build = captureBuild;
+});
 
 /** The schema version new captures are written at. Bump when the envelope/payload shape changes. */
 export const OPERATION_SCHEMA_VERSION = 1;
@@ -168,6 +185,30 @@ export const UNSETTLED_STATUSES: OperationStatus[] = [
   "retryable",
   "needs_attention",
 ];
+
+/**
+ * rc.10 — normalize a customer reference for an offline capture. A customer CREATED offline is selected
+ * in the UI by its LOCAL id (the customer_upsert op's local_entity_id); sending that as `customer_id`
+ * would replay a non-canonical id (the handlers only remap `customer_local`). Any id minted by an
+ * offline customer create is therefore carried as `customer_local` — the orchestrator then waits for
+ * the create to sync and the handler remaps it to canonical. A canonical id is returned unchanged.
+ */
+export async function normalizeCustomerRef(customerId: string | null, customerLocal: string | null | undefined): Promise<{ customerId: string | null; customerLocal: string | null }> {
+  if (customerLocal) return { customerId: null, customerLocal };
+  if (!customerId) return { customerId: null, customerLocal: null };
+  const created = await localdb.operations.where("local_entity_id").equals(customerId).toArray().catch(() => [] as OfflineOperation[]);
+  if (created.some((o) => o.operation_type === "customer_upsert" && o.status !== "cancelled")) {
+    return { customerId: null, customerLocal: customerId };
+  }
+  return { customerId, customerLocal: null };
+}
+
+/** rc.10 — true when `addressId` was minted by an offline customer upsert (its payload.local_address_id). */
+export async function isOfflineCreatedAddress(addressId: string | null | undefined): Promise<boolean> {
+  if (!addressId) return false;
+  const ups = await localdb.operations.where("operation_type").equals("customer_upsert").toArray().catch(() => [] as OfflineOperation[]);
+  return ups.some((o) => o.status !== "cancelled" && (o.payload as { local_address_id?: string | null } | null)?.local_address_id === addressId);
+}
 
 /** Durably append a new operation BEFORE the UI reports success. Returns its id. */
 export async function addOperation(op: OfflineOperation): Promise<string> {

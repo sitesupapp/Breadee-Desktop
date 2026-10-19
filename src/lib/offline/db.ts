@@ -221,8 +221,11 @@ export interface DineDraftRound {
   sent_at: string;
 }
 
-/** Lifecycle of a local Dine-In session (local-only; never a replayable op itself). */
-export type DineDraftStatus = "open" | "closed";
+/** Lifecycle of a local Dine-In session (local-only; never a replayable op itself).
+ *  rc.10 — `settled` = a full settle / on-account was CAPTURED offline for this session: it is no
+ *  longer the table's ACTIVE bill (the table is reusable locally), but it is kept durably — lines,
+ *  rounds, the settle op reference — for receipt / Sync History / audit until it syncs. */
+export type DineDraftStatus = "open" | "settled" | "closed";
 
 /**
  * The durable LOCAL Dine-In projection — the active bill the operator sees and edits
@@ -254,6 +257,9 @@ export interface DineDraft {
   /** Server order version captured at hydration (conflict detection for online-opened tables). */
   base_order_version: number | null;
   status: DineDraftStatus;
+  /** rc.10 — the captured settle / on-account op that settled this session locally (status=settled). */
+  settled_operation_id?: string | null;
+  settled_at?: string | null;
   lines: DineDraftLine[];
   rounds: DineDraftRound[];
   /** Monotonic; bumped on every mutation. A deterministic client_op_id input for a send. */

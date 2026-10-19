@@ -8,6 +8,8 @@ import { backendLabel } from "@/lib/environment";
 export function Login() {
   const navigate = useNavigate();
   const signIn = useSession((s) => s.signIn);
+  // rc.10 — a controlled notice from the cold start (e.g. expired offline authority on this device).
+  const authNotice = useSession((s) => s.authNotice);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
@@ -35,6 +37,9 @@ export function Login() {
         <Card className="p-7">
           <h2 className="text-lg font-extrabold">Welcome back</h2>
           <p className="mt-1 text-sm text-sub">Sign in to your Breadee account</p>
+          {authNotice && !error && (
+            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">{authNotice}</p>
+          )}
           <form onSubmit={onSubmit} className="mt-5 space-y-3">
             <Input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />
             <div className="relative">

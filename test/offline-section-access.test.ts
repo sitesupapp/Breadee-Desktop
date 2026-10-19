@@ -85,9 +85,12 @@ test("session.init restores the durable offline cache WITHOUT requiring a live g
     !/if \(cache && Date\.now\(\) - cache\.cachedAt < OFFLINE_TTL_MS && data\.session\)/.test(src),
     "offline restore must not require data.session",
   );
-  assert.match(src, /if \(cache && Date\.now\(\) - cache\.cachedAt < OFFLINE_TTL_MS\) \{/, "restores on a valid, non-expired cache alone");
-  assert.match(src, /permissions: cache\.permissions,/, "restores cached permissions (so section gates pass offline)");
-  assert.match(src, /features: cache\.features,/, "restores cached features");
+  // rc.10 — the decision is the pure decideOfflineAuthority (7-day TTL, behaviour-tested in
+  // offline-closure-rc10 A1–A3), applied BEFORE any auth network call when the backend is unreachable.
+  assert.match(src, /decideOfflineAuthority\(await readAuthorityCache\(\)/, "restores on a valid, non-expired cache alone");
+  assert.match(src, /if \(!\(await isBackendReachable\(\)\.catch\(\(\) => false\)\)\) \{\s*apply\(decision, true\);/, "offline: restore before any auth call");
+  assert.match(src, /permissions: c\.permissions,/, "restores cached permissions (so section gates pass offline)");
+  assert.match(src, /features: c\.features,/, "restores cached features");
 });
 
 test("PosShell gates rail items on permission (enabled), never on online; Takeaway stays unconditional", () => {

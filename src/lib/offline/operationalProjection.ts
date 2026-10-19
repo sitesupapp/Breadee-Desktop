@@ -229,8 +229,12 @@ export type OperationalTableBill = {
   mutationOpIds: string[];
   /** Ops in this projection parked for the operator (needs_attention). */
   attention: number;
-  /** A captured, unsynced settle / on-account of this table (the bill is settling offline). */
+  /** The latest captured, not-yet-reflected settle / on-account of this table (its covered bill is
+   *  closed locally; a NEW session on the table chains its open after it). */
   settlingOpId: string | null;
+  /** rc.10 — the table's bill was fully settled locally and nothing new is open: the table is
+   *  AVAILABLE for a new order (the settled bill stays in history until it syncs). */
+  settledLocally: boolean;
   /** True when part of the bill is known only as a canonical SUMMARY (no cached lines). */
   summaryOnly: boolean;
   /** The local session, when one exists. */
@@ -266,16 +270,47 @@ export function projectTableBill(input: {
   draft: DineDraft | null;
   ops: OfflineOperation[];
 }): OperationalTableBill {
-  const { tableId, mapRow, draft } = input;
+  const { tableId, mapRow } = input;
   const fetchedAt = input.canonical?.fetchedAt ?? null;
   const meta = new Map<string, LineMeta>();
   const porders: ProjectedOrder[] = [];
   const bills: BillOrder[] = [];
   let summaryOnly = false;
+
+  // 0 — LOCAL SETTLEMENT (rc.10). A captured, not-yet-reflected settle / on-account of this table
+  // closes EXACTLY the bill it recorded (`covers`): those canonical orders, that local session, the
+  // canonical summary. Closed parts leave the ACTIVE bill (the table becomes reusable) but stay in
+  // history (the draft + op are durable). Ops captured before rc.10 carry no `covers`: they close the
+  // session they depend on and every canonical order already in a snapshot fetched before they were
+  // captured (and the summary) — exactly the bill that was on screen when they were taken.
+  const settleOps = [...input.ops]
+    .filter((o) => (o.operation_type === "pay_table" || o.operation_type === "on_account_table") && live(o) && !reflectedIn(o, fetchedAt) && rec(o.payload).table_id === tableId)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const coveredOrders = new Set<string>();
+  let coveredSummary = false;
+  const coveredSessions = new Set<string>();
+  for (const s of settleOps) {
+    const cv = rec(rec(s.payload).covers);
+    if (Object.keys(cv).length > 0) {
+      for (const id of (cv.order_ids as string[] | undefined) ?? []) coveredOrders.add(id);
+      if (cv.summary === true) coveredSummary = true;
+      if (typeof cv.session_local === "string") coveredSessions.add(cv.session_local);
+    } else {
+      const at = Date.parse(s.created_at);
+      if (fetchedAt != null && Number.isFinite(at) && fetchedAt <= at) for (const o of input.canonical?.bill.orders ?? []) coveredOrders.add(o.id);
+      coveredSummary = true;
+    }
+  }
+  const draftSettled =
+    input.draft != null &&
+    (coveredSessions.has(input.draft.local_session_id) || settleOps.some((s) => s.dependency_ids.includes((input.draft as DineDraft).open_operation_id)));
+  const draft = draftSettled ? null : input.draft;
+  const lastSettleOpId = settleOps.length > 0 ? settleOps[settleOps.length - 1].operation_id : null;
   const collected = Math.max(0, Number(mapRow?.collected ?? 0) || 0);
 
   // 1 — canonical snapshot (cached bill), else the canonical SUMMARY from the cached map row.
-  const canonOrders = input.canonical?.bill.orders ?? [];
+  const canonOrders = (input.canonical?.bill.orders ?? []).filter((o) => !coveredOrders.has(o.id));
+  const canonCoveredAll = (input.canonical?.bill.orders ?? []).length > 0 && canonOrders.length === 0;
   if (canonOrders.length > 0) {
     for (const o of canonOrders) {
       const copy: BillOrder = { ...o, lines: o.lines.map((l) => ({ ...l, modifiers: [...l.modifiers] })) };
@@ -283,7 +318,7 @@ export function projectTableBill(input: {
       porders.push({ key: o.id, orderId: o.id, orderLocal: null, baseVersion: o.pos_entity_version, bumpOps: [], partiallyPaid: o.payment_status !== "unpaid" || collected > 0, pendingSplitOps: [] });
       for (const l of copy.lines) meta.set(l.id, { ref: { kind: "canonical", order_item_id: l.id }, orderKey: o.id, creatorOpId: null, paidQty: 0 });
     }
-  } else if (mapRow && mapRow.orders > 0 && mapRow.total != null) {
+  } else if (!canonCoveredAll && !coveredSummary && mapRow && mapRow.orders > 0 && mapRow.total != null) {
     summaryOnly = true;
     const key = `summary:${tableId}`;
     const total = Number(mapRow.total);
@@ -428,33 +463,31 @@ export function projectTableBill(input: {
     note(op);
   }
 
-  // 5 — a captured settle / on-account of this table.
-  let settlingOpId: string | null = null;
-  for (const op of sorted) {
-    if ((op.operation_type !== "pay_table" && op.operation_type !== "on_account_table") || !live(op) || reflectedIn(op, fetchedAt)) continue;
-    if (rec(op.payload).table_id !== tableId) continue;
-    settlingOpId = op.operation_id;
-    if (op.status === "needs_attention") attention += 1;
-  }
+  // 5 — captured settles / on-accounts of this table (the closed bills are already excluded above).
+  for (const s of settleOps) if (s.status === "needs_attention") attention += 1;
 
   for (const b of bills) recomputeOrder(b);
   const nonEmpty = bills.filter((b) => b.lines.length > 0);
   const bill = foldBill(tableId, nonEmpty);
   const gross = bill.total;
-  const outstanding = gross == null ? null : settlingOpId ? 0 : Math.max(0, Math.round((gross - collected - paidPending) * 100) / 100);
+  // The map row's server-collected amount belongs to the canonical bill; once that bill is settled
+  // locally it no longer reduces the (new) active bill.
+  const activeCollected = canonCoveredAll || coveredSummary ? 0 : collected;
+  const outstanding = gross == null ? null : Math.max(0, Math.round((gross - activeCollected - paidPending) * 100) / 100);
   return {
     tableId,
     bill,
     orders: porders.filter((p) => nonEmpty.some((b) => b.id === p.key)),
     meta,
     gross,
-    collected,
+    collected: activeCollected,
     paidPending,
     outstanding,
     currency: bill.currency,
     mutationOpIds,
     attention,
-    settlingOpId,
+    settlingOpId: lastSettleOpId,
+    settledLocally: lastSettleOpId != null && nonEmpty.length === 0,
     summaryOnly,
     sessionId: draft?.local_session_id ?? null,
   };
@@ -511,12 +544,18 @@ export async function getOperationalTableTotals(
   for (const t of tables) {
     const p = await getOperationalTableBill(scope, t, ops);
     if (p.bill.orders.length === 0 && t.orders === 0) continue;
-    out.set(t.id, { total: p.gross, currency: p.currency, orders: Math.max(t.orders, p.bill.orders.length > 0 ? 1 : 0), pending: p.mutationOpIds.length > 0 });
+    if (p.bill.orders.length === 0) {
+      // rc.10 — the canonical bill the map still shows was SETTLED locally: the table is available.
+      if (p.settledLocally) out.set(t.id, { total: null, currency: t.currency, orders: 0, pending: true });
+      continue;
+    }
+    out.set(t.id, { total: p.gross, currency: p.currency, orders: Math.max(t.orders, 1), pending: p.mutationOpIds.length > 0 });
   }
   return out;
 }
 
-/** Overlay the operational totals onto the cached map rows (offline). Pure. */
+/** Overlay the operational totals onto the cached map rows (offline). Pure. A row with `orders: 0`
+ *  is a table whose bill was settled locally: it renders (and gates) as AVAILABLE for a new order. */
 export function overlayTableTotals(
   tables: TableSummary[],
   totals: Map<string, { total: number | null; currency: CurrencyCode | null; orders: number }>,
@@ -525,7 +564,10 @@ export function overlayTableTotals(
   return tables.map((t) => {
     const o = totals.get(t.id);
     if (!o) return t;
-    return { ...t, total: o.total, currency: o.currency ?? t.currency, orders: o.orders, occupied: t.occupied || o.orders > 0 };
+    if (o.orders === 0) {
+      return { ...t, total: null, collected: null, outstanding: null, orders: 0, order_number: null, opened_at: null, status: "available", occupied: false, mixed_currency: false };
+    }
+    return { ...t, total: o.total, currency: o.currency ?? t.currency, orders: o.orders, occupied: true };
   });
 }
 

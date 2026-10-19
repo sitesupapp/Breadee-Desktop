@@ -157,7 +157,7 @@ export type PosTxnSyncDeps = {
     currency: CurrencyCode;
     discount?: { discount_type?: string; discount_value?: number };
     clientOpId: string;
-  }) => Promise<{ ok: boolean; amount: number; idempotent: boolean }>;
+  }) => Promise<{ ok: boolean; amount: number; idempotent: boolean; pos_entity_version?: number | null }>;
   /** Phase-D: settle a single ORDER (pos_pay_order) offline. client_op_id → exactly-once;
    *  expectedVersion pins the order when known. */
   payOrderOp: (args: {
@@ -325,7 +325,7 @@ export const defaultDeps: PosTxnSyncDeps = {
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
     const row = (await callPosRpc("pos_pay_table", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
-    return { ok: row.ok === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent };
+    return { ok: row.ok === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent, pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
   },
   payOrderOp: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");

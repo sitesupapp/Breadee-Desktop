@@ -63,7 +63,10 @@ test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a serve
   // (no offline round yet) now settles by its table id (CanonicalTableTarget).
   assert.match(src, /const offlineSettleTarget = useCallback\(/);
   assert.match(src, /if \(p\.bill\.orders\.length === 0\) return \{ ok: false, reason: "This table has no open bill to settle\." \}/);
-  assert.match(src, /if \(p\.settlingOpId\) return \{ ok: false/);
+  // rc.10 — a bill settled offline is CLOSED locally (absent from the projection), so a second settle
+  // of it is impossible by construction; the settle records exactly what it covers.
+  assert.match(src, /covers: \{ orderIds: canonicalIds, summary: p\.summaryOnly \}/);
+  assert.match(src, /covers: target\.covers/);
   assert.match(src, /if \(p\.paidPending > 0 \|\| p\.collected > 0\)/);
   assert.match(src, /extraDependencyIds: target\.deps/, "settle replays after every pending edit/leg");
 });

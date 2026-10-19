@@ -12,6 +12,7 @@
 // only CAPTURES; the canonical customer is the source of truth after sync.
 
 import {
+  cacheCustomers,
   cachePendingLocalCustomer,
   getCachedCustomer,
   type CachedCustomer,
@@ -155,6 +156,14 @@ export async function captureCustomerUpsertOffline(input: {
         has_profile: true,
         cached_at: new Date().toISOString(),
       }).catch(() => undefined);
+    } else if (existing && addressRec) {
+      // rc.10 — a NEW address on a CANONICAL customer offline: append it (marked pending_local on the
+      // ADDRESS only; the customer stays canonical) so it is selectable for an offline delivery order.
+      // The order carries it as address_local and the replay remaps it once this upsert syncs.
+      const prior = Array.isArray(existing.addresses) ? (existing.addresses as unknown[]) : [];
+      await cacheCustomers([
+        { ...existing, addresses: [...prior, { ...addressRec, id: localAddressId, pending_local: true }], cached_at: new Date().toISOString() },
+      ]).catch(() => undefined);
     }
   }
 
