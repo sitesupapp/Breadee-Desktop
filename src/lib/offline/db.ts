@@ -116,6 +116,9 @@ export interface PosOfflineTxn {
    */
   customer_local?: string | null;
   address_local?: string | null;
+  /** rc.11 — DISPLAY ONLY: the customer identity as captured at order time (the last-resort source of
+   *  the unified Delivery customer projection). Never replayed, never authoritative. */
+  party_snapshot?: { customer_name: string | null; customer_phone: string | null; address_text: string | null } | null;
 }
 
 /** Lifecycle of an offline-opened shift that has not yet reached the server. */

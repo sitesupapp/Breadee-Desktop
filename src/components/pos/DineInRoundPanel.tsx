@@ -171,7 +171,8 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
                                 <button
                                   type="button"
                                   aria-label={`Decrease ${l.name}`}
-                                  disabled={editing || l.quantity <= 1}
+                                  /* rc.11 — at quantity 1 a decrease IS a removal (audited reason). */
+                                  disabled={editing}
                                   onClick={() => props.onEditSentQty?.(l, -1)}
                                   className="flex h-7 w-7 items-center justify-center rounded-lg border border-line bg-white text-sm font-bold text-ink disabled:opacity-40"
                                 >

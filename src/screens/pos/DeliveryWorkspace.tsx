@@ -76,6 +76,7 @@ import {
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
 import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
+import { resolveOrderParties } from "@/lib/offline/deliveryParties";
 import { proveOfflineReversible, captureOfflineRefund } from "@/lib/offline/refundOffline";
 import { captureDeliveryOpsOffline, captureEditOrderNoteOffline } from "@/lib/offline/deliveryActionOffline";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
@@ -992,8 +993,13 @@ export function useDeliveryWorkspace(input: {
         const custRef = await normalizeCustomerRef(snapshot.customerId, cachedCust?.pending_local === true ? snapshot.customerId : null);
         const customerLocal = custRef.customerLocal;
         const addressLocal = customerLocal || (await isOfflineCreatedAddress(snapshot.addressId)) ? snapshot.addressId : null;
+        // rc.11 — the order-time customer identity (display-only last-resort source of the unified
+        // Delivery customer projection: List / Detail / Receipt agree even before any cache resolves).
+        const selCust = state.selected && state.selected.id === snapshot.customerId ? state.selected : null;
+        const selAddr = selCust?.addresses.find((x) => x.id === snapshot.addressId) ?? null;
+        const partySnapshot = { customer_name: selCust?.name ?? custName, customer_phone: selCust?.phone ?? null, address_text: selAddr ? addressLine(selAddr) : null };
         if (existing) {
-          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued", customer_local: customerLocal, address_local: addressLocal });
+          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued", customer_local: customerLocal, address_local: addressLocal, party_snapshot: partySnapshot });
         } else {
           await addPosOfflineTxn({
             local_txn_id: localId,
@@ -1017,6 +1023,7 @@ export function useDeliveryWorkspace(input: {
             attempts: 0,
             customer_local: customerLocal,
             address_local: addressLocal,
+            party_snapshot: partySnapshot,
           });
         }
         const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
@@ -1258,22 +1265,26 @@ export function useDeliveryWorkspace(input: {
       // reads that snapshot merged with locally-known offline delivery orders — never a raw
       // "Failed to fetch". `loadOrderParties` / `loadShiftOpenMap` already fail soft to empty maps
       // offline, so no raw network error reaches the UI from them either.
-      const { orders: rows, offline } = await loadDeliveryQueueOfflineAware({
+      const { orders: rows, offline, fetchedAt } = await loadDeliveryQueueOfflineAware({
         tenantId: pos.tenantId,
         branchId,
         shiftId: input.shiftId,
         now: new Date(),
       });
       // rc.9 — keep the RAW rows as the projection base (never re-project a projected row), and
-      // offline show every row through the ONE operational projection (list == detail == pay).
+      // show every row through the ONE operational projection (list == detail == pay). rc.11 — ONLINE
+      // too: a fresh server row is overlaid only by local ops it does not reflect yet (rowFetchedAt), so
+      // a settlement awaiting sync is never shown as Unpaid behind the canonical refresh.
       for (const r of rows) baseRows.current.set(r.id, r);
       const scope = itemEditOfflineScopeRef.current;
-      setQueue(offline && scope ? await overlayDeliveryQueue(scope, rows).catch(() => rows) : rows);
+      setQueue(scope ? await overlayDeliveryQueue(scope, rows, { rowFetchedAt: fetchedAt }).catch(() => rows) : rows);
       setQueueOffline(offline);
-      const [who, shifts] = await Promise.all([
+      const [server, shifts] = await Promise.all([
         loadOrderParties(rows).catch(() => new Map<string, OrderParty>()),
         loadShiftOpenMap(rows.map((o) => o.shift_id)).catch(() => new Map<string, boolean>()),
       ]);
+      // rc.11 — the unified customer projection (canonical → local cache → remap alias → order snapshot).
+      const who = await resolveOrderParties(rows, server, { tenantId: pos.tenantId, branchId }).catch(() => server);
       setParties(who);
       setShiftOpenMap(shifts);
     } catch (e) {
@@ -1324,9 +1335,14 @@ export function useDeliveryWorkspace(input: {
       setDetailProj(null);
       const fetchedAt = Date.now();
       const [fresh, lines] = await Promise.all([readDeliveryOrder(orderId), loadDeliveryOrderLines(orderId)]);
-      setDetail(fresh);
+      // rc.11 — a local settlement (or other op) not yet reflected in this fresh read still shows
+      // (Paid / On Account · pending sync), and Pay stays withdrawn: never a second charge.
+      const scope = itemEditOfflineScopeRef.current;
+      const shown = fresh && scope ? ((await overlayDeliveryQueue(scope, [fresh], { rowFetchedAt: fetchedAt }).catch(() => [fresh]))[0] ?? fresh) : fresh;
+      setDetail(shown);
       setDetailLines(lines);
       if (fresh) baseRows.current.set(orderId, fresh);
+      if (shown && shown !== fresh) setQueue((prev) => prev.map((r) => (r.id === orderId ? shown : r)));
       // Write-through so the same order is visible + editable offline later.
       void cacheDeliveryLines(orderId, lines, pos.tenantId, branchId, fetchedAt).catch(() => {});
       if (fresh?.shift_id) {

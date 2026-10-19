@@ -815,12 +815,20 @@ export const customerUpsertHandler: OperationHandler = {
   type: "customer_upsert",
   schemaVersion: 1,
   async replay(op, ctx) {
-    const p = (op.payload ?? {}) as CustomerUpsertPayload;
+    const p = (op.payload ?? {}) as CustomerUpsertPayload & { customer_local?: string | null };
     if (!p.upsert || typeof p.upsert !== "object") {
       return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_payload", message: "no customer payload" };
     }
+    // rc.11 — an edit of an OFFLINE-CREATED customer: remap its local id to the canonical id (resolved
+    // by the create op), never send the local id to the server.
+    let upsert = p.upsert;
+    if (p.customer_local) {
+      const canonical = await ctx.canonicalFor(p.customer_local);
+      if (!canonical) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "customer_unresolved", message: "customer not yet synced" };
+      upsert = { ...upsert, id: canonical };
+    }
     try {
-      const r = await ctx.deps.upsertCustomer({ payload: p.upsert, clientOpId: op.client_op_id });
+      const r = await ctx.deps.upsertCustomer({ payload: upsert, clientOpId: op.client_op_id });
       if (!r.customer_id) return { ok: false, retryClass: "SERVER_RETRYABLE", code: "no_customer_id", message: "no customer id returned" };
       // Drop the pending-local picker row now it has a canonical id — the local→canonical mapping
       // lives in the entityMap (so any not-yet-replayed dependent still resolves), and the canonical

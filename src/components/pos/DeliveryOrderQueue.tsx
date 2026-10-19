@@ -19,8 +19,8 @@ import {
   orderStateLabel,
   orderStateTone,
   orderTimeLabel,
-  paymentStateLabel,
-  paymentStateTone,
+  paymentDisplayLabel,
+  paymentDisplayTone,
   UNKNOWN_PARTY,
   type OrderParty,
 } from "@/lib/pos/deliveryHistory";
@@ -118,8 +118,8 @@ export function DeliveryOrderQueue(props: DeliveryOrderQueueProps) {
                       </span>
                       <div className="flex items-center gap-1">
                         <Badge tone={orderStateTone(o.status)}>{orderStateLabel(o.status)}</Badge>
-                        <Badge tone={paymentStateTone(o.payment_status)}>
-                          {paymentStateLabel(o.payment_status)}
+                        <Badge tone={paymentDisplayTone(o)}>
+                          {paymentDisplayLabel(o)}
                         </Badge>
                       </div>
                     </div>

@@ -18,6 +18,7 @@ import type { OfflineOperation } from "@/lib/offline/operationLog";
 
 export type ForensicCategory =
   | "HISTORICAL_LINE_ID_BUG" // pre-rc.10 round 22P02 — auto-recoverable (replay-safe)
+  | "HISTORICAL_LOCAL_CUSTOMER_EDIT" // pre-rc.11 edit of an offline-created customer sent its LOCAL id — auto-recoverable
   | "HISTORICAL_DEPENDENT" // parked only because a prerequisite failed
   | "EXPECTED_CONFLICT" // the server state changed elsewhere (version / settled / identity …)
   | "AUTHORITY_REFUSED" // permission refusal at replay
@@ -40,6 +41,9 @@ export function classifyOperation(op: OfflineOperation): { category: ForensicCat
   const msg = op.last_error_message ?? "";
   if (op.operation_type === "dinein_send_round" && LINE_ID_BUG.test(msg)) {
     return { category: "HISTORICAL_LINE_ID_BUG", reason: "pre-rc.10 round sent a non-uuid line id (22P02); nothing applied server-side" };
+  }
+  if (op.operation_type === "customer_upsert" && /customer not found for this operating unit/i.test(msg)) {
+    return { category: "HISTORICAL_LOCAL_CUSTOMER_EDIT", reason: "pre-rc.11 edit of an offline-created customer sent its local id (refused before any write)" };
   }
   if (code === "dependency_failed") return { category: "HISTORICAL_DEPENDENT", reason: "a prerequisite operation could not complete" };
   if (code === "permission") return { category: "AUTHORITY_REFUSED", reason: "permission refused at replay" };
@@ -92,13 +96,42 @@ export function buildDiagnostic(ops: OfflineOperation[], currentBuild: string | 
  * re-queued operation ids. Must run inside the drain's single-flight lock (drainOffline does).
  */
 export async function recoverHistoricalReplayFailures(): Promise<string[]> {
-  const all = await localdb.operations.toArray();
+  let all = await localdb.operations.toArray();
+  // rc.11 — repair (ONCE) a pre-rc.11 edit of an offline-created customer: it was refused before any
+  // write, so re-pointing it at the customer's create (customer_local + dependency) and re-queuing it is
+  // exactly-once. Only when the target id is provably an offline-created customer (its create op exists).
+  const creates = new Set(all.filter((o) => o.operation_type === "customer_upsert" && o.local_entity_id).map((o) => o.local_entity_id as string));
+  const custFix = all.filter(
+    (o) =>
+      o.status === "needs_attention" &&
+      classifyOperation(o).category === "HISTORICAL_LOCAL_CUSTOMER_EDIT" &&
+      o.result_meta?.rc10_recovered !== true &&
+      creates.has(String(((o.payload as { upsert?: { id?: string } } | null)?.upsert?.id) ?? "")),
+  );
+  if (custFix.length > 0) {
+    await localdb.transaction("rw", localdb.operations, async () => {
+      for (const o of custFix) {
+        const p = (o.payload ?? {}) as { upsert: { id: string } };
+        await localdb.operations.update(o.operation_id, {
+          status: "pending",
+          last_error_code: null,
+          last_error_message: null,
+          canonical_entity_id: null,
+          depends_on_local_entities: [p.upsert.id],
+          payload: { ...(o.payload as object), customer_local: p.upsert.id },
+          result_meta: { ...(o.result_meta ?? {}), rc10_recovered: true },
+        });
+      }
+    });
+    all = await localdb.operations.toArray();
+  }
   const byId = new Map(all.map((o) => [o.operation_id, o]));
   const roots = all.filter(
     (o) => o.status === "needs_attention" && classifyOperation(o).category === "HISTORICAL_LINE_ID_BUG" && o.result_meta?.rc10_recovered !== true,
   );
-  if (roots.length === 0) return [];
-  const requeue = new Set(roots.map((o) => o.operation_id));
+  if (roots.length === 0 && custFix.length === 0) return [];
+  // The re-queue seeds: the historical line-id rounds + the repaired customer edits (already pending).
+  const requeue = new Set([...roots.map((o) => o.operation_id), ...custFix.map((o) => o.operation_id)]);
   // Transitively: parked dependents whose ONLY failure is a prerequisite in the re-queue set.
   let grew = true;
   while (grew) {

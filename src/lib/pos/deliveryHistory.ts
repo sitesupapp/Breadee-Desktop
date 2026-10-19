@@ -88,6 +88,24 @@ export function paymentStateTone(paymentStatus: string): ChipTone {
   return "amber";
 }
 
+/**
+ * rc.11 — the payment chip for a row that may carry a LOCALLY-captured settlement (offline operational
+ * projection). A server row (no local markers) reads exactly as `paymentStateLabel`; a local settlement
+ * reads Paid / Partially Paid · On Account / On Account, marked "(pending sync)" until it syncs.
+ */
+export function paymentDisplayLabel(o: { payment_status: string; settlement_mode?: string | null; local_pending_sync?: boolean }): string {
+  let base: string;
+  if (o.settlement_mode === "on_account") base = o.payment_status === "partial" ? "Partially Paid · On Account" : "On Account";
+  else if (o.local_pending_sync && o.payment_status === "partial") base = "Partially Paid";
+  else base = paymentStateLabel(o.payment_status);
+  return o.local_pending_sync ? `${base} (pending sync)` : base;
+}
+
+export function paymentDisplayTone(o: { payment_status: string; settlement_mode?: string | null }): ChipTone {
+  if (o.settlement_mode === "on_account") return "blue";
+  return paymentStateTone(o.payment_status);
+}
+
 /** Mirrors `BadgeTone`, declared here so this module stays importable by tests. */
 export type ChipTone = "slate" | "green" | "amber" | "red" | "blue";
 

@@ -583,8 +583,9 @@ export function useDineInWorkspace(input: {
     (sourceTableIds: string[]) => {
       if (!selected || !opGates.merge.allowed || sourceTableIds.length === 0) return;
       const primaryName = selected.name;
+      // rc.11 — the SAME projected rows the picker offered (a bill settled locally is not a source).
       const sources = sourceTableIds
-        .map((id) => tables.map.tables.find((t) => t.id === id))
+        .map((id) => displayMap.tables.find((t) => t.id === id))
         .filter((t): t is TableSummary => t != null);
       const expected = buildMergeExpected(selected, sources);
       const sig = mergeAttemptSignature(selected.id, sourceTableIds);
@@ -618,7 +619,7 @@ export function useDineInWorkspace(input: {
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
-    [selected, opGates.merge.allowed, tables.map.tables, runOp, offlineCapture, input.offlineScope],
+    [selected, opGates.merge.allowed, displayMap.tables, runOp, offlineCapture, input.offlineScope],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -2369,7 +2370,7 @@ export function useDineInWorkspace(input: {
       <MoveTableDialog
         open={opDialog === "move"}
         table={selected}
-        tables={tables.map.tables}
+        tables={displayMap.tables}
         busy={opBusy}
         gate={opGates.move}
         error={opError}
@@ -2380,7 +2381,7 @@ export function useDineInWorkspace(input: {
       <MergeTablesDialog
         open={opDialog === "merge"}
         primary={selected}
-        sources={mergeableSources(tables.map.tables, selected)}
+        sources={mergeableSources(displayMap.tables, selected)}
         busy={opBusy}
         gate={opGates.merge}
         error={opError}

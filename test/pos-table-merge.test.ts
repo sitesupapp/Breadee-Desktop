@@ -134,7 +134,9 @@ test("J the dine-in workspace opens the merge dialog and confirms through the se
   const code = stripJsxComments(read("screens", "pos", "DineInWorkspace.tsx"));
   assert.match(code, /<MergeTablesDialog/);
   assert.match(code, /opDialog === "merge"/);
-  assert.match(code, /mergeableSources\(tables\.map\.tables, selected\)/);
+  // rc.11 — sources come from the PROJECTED map (displayMap == tables.map online; offline a bill settled
+  // locally is not offered as a source — the stale 5,455,000 Move/Merge defect).
+  assert.match(code, /mergeableSources\(displayMap\.tables, selected\)/);
   // confirmMerge builds the stale-floor `expected` version map and a HOISTED,
   // retry-stable client_op_id (not a fresh UUID minted inline per call).
   assert.match(code, /mergeTables\(\{/);

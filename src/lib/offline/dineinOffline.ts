@@ -914,10 +914,16 @@ export async function getDineDraftForTable(scope: {
  *  for ops captured before rc.10 — by depending on the session's open op), if any. */
 export async function coveringSettleOp(d: DineDraft): Promise<OfflineOperation | undefined> {
   const rows = await localdb.operations.where("operation_type").anyOf("pay_table", "on_account_table").toArray();
-  return rows.find(
-    (o) =>
-      o.status !== "cancelled" &&
-      ((o.payload as { covers?: { session_local?: string | null } } | null)?.covers?.session_local === d.local_session_id ||
-        o.dependency_ids.includes(d.open_operation_id)),
-  );
+  // rc.11 — the legacy (no `covers`) match additionally requires that NO round of the session was sent
+  // after that settle: a later round is an ACTIVE bill and the session must not be repaired as settled.
+  const noLaterRound = (o: OfflineOperation) => {
+    const at = Date.parse(o.created_at);
+    return !d.rounds.some((r) => Number.isFinite(at) && Date.parse(r.sent_at) > at);
+  };
+  return rows.find((o) => {
+    if (o.status === "cancelled") return false;
+    const covers = (o.payload as { covers?: { session_local?: string | null } } | null)?.covers;
+    if (covers && Object.keys(covers).length > 0) return covers.session_local === d.local_session_id;
+    return o.dependency_ids.includes(d.open_operation_id) && noLaterRound(o);
+  });
 }

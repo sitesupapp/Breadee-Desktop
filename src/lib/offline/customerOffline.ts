@@ -25,6 +25,7 @@ import {
   getOperation,
 } from "@/lib/offline/operationLog";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
+import { normalizeCustomerRef } from "@/lib/offline/operationLog";
 
 /** The immutable 5-dimensional scope an offline customer upsert is captured + replayed under. */
 export type CustomerOpScope = {
@@ -94,6 +95,12 @@ export async function captureCustomerUpsertOffline(input: {
     return { operationId, clientOpId, localCustomerId, localAddressId, alreadyCaptured: true };
   }
 
+  // rc.11 — an EDIT (e.g. a new address) of a customer that was itself CREATED offline targets the
+  // customer's LOCAL id. rc.10 sent that local id as upsert.id → the server raised "Customer not found
+  // for this operating unit" (42501 → 403) and every delivery order on that address stayed blocked. The
+  // edit now WAITS for the create (dependency) and the handler remaps upsert.id → canonical at replay.
+  const editTargetLocal = isEdit ? (await normalizeCustomerRef(upsert.id as string, null)).customerLocal : null;
+
   const op: OfflineOperation = {
     operation_id: operationId,
     operation_type: "customer_upsert",
@@ -102,10 +109,10 @@ export async function captureCustomerUpsertOffline(input: {
     created_at: new Date().toISOString(),
     client_op_id: clientOpId,
     local_entity_id: localCustomerId, // CREATE → the local customer id; EDIT → null
-    canonical_entity_id: isEdit ? (upsert.id as string) : null,
+    canonical_entity_id: isEdit && !editTargetLocal ? (upsert.id as string) : null,
     dependency_ids: [],
-    depends_on_local_entities: [],
-    payload: { upsert, local_address_id: localAddressId },
+    depends_on_local_entities: editTargetLocal ? [editTargetLocal] : [],
+    payload: { upsert, local_address_id: localAddressId, ...(editTargetLocal ? { customer_local: editTargetLocal } : {}) },
     status: "pending",
     retry_count: 0,
     last_attempt_at: null,

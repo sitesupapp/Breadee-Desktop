@@ -85,6 +85,11 @@ export type DeliveryQueueOrder = {
   /** R2: optimistic-concurrency token. The item-edit RPCs require it as expected_version.
    *  Optional so pre-R2 fixtures/callers need not set it; the reader populates it. */
   pos_entity_version?: number | null;
+  /** rc.11 — DISPLAY ONLY (offline operational projection, never sent to the server): the shown
+   *  payment/status comes from a locally-captured settlement that has not synced yet. */
+  local_pending_sync?: boolean;
+  /** rc.11 — DISPLAY ONLY: "on_account" when that local settlement is a receivable. */
+  settlement_mode?: "on_account" | null;
 };
 
 export function isTerminal(status: string): boolean {

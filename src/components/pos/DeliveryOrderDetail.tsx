@@ -22,8 +22,8 @@ import { customerDisplayName } from "@/lib/pos/customerDisplay";
 import {
   orderStateLabel,
   orderStateTone,
-  paymentStateLabel,
-  paymentStateTone,
+  paymentDisplayLabel,
+  paymentDisplayTone,
   UNKNOWN_PARTY,
   type OrderParty,
 } from "@/lib/pos/deliveryHistory";
@@ -167,7 +167,7 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
 
         <div className="mt-2 flex flex-wrap items-center gap-1">
           <Badge tone={orderStateTone(o.status)}>{orderStateLabel(o.status)}</Badge>
-          <Badge tone={paymentStateTone(o.payment_status)}>{paymentStateLabel(o.payment_status)}</Badge>
+          <Badge tone={paymentDisplayTone(o)}>{paymentDisplayLabel(o)}</Badge>
         </div>
 
         <div className="mt-3 space-y-0.5 border-t border-line pt-3">
@@ -292,7 +292,7 @@ export function DeliveryOrderDetail(props: DeliveryOrderDetailProps) {
       <div className="rounded-2xl border border-line bg-white p-4">
         <p className="text-xs font-extrabold text-ink">Payment</p>
         <div className="mt-2 space-y-1">
-          <Row label="Status" value={paymentStateLabel(o.payment_status)} />
+          <Row label="Status" value={paymentDisplayLabel(o)} />
           {o.payment_method && <Row label="Method" value={o.payment_method} />}
           <Row label="Currency" value={currency} />
           {o.shift_id && <Row label="Shift" value={o.shift_id.slice(0, 8)} />}

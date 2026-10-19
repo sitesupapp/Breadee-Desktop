@@ -20,6 +20,7 @@ import {
   listPosOfflineTxns,
   type PosOfflineTxn,
 } from "@/lib/offline/db";
+import { canonicalIds } from "@/lib/offline/entityMap";
 import { loadDeliveryQueue, type DeliveryQueueOrder } from "@/lib/pos/deliveryOrderManagement";
 
 export type DeliveryQueueInput = {
@@ -67,12 +68,16 @@ export async function projectLocalDeliveryOrders(
 ): Promise<DeliveryQueueOrder[]> {
   if (!tenantId) return [];
   const txns = await listPosOfflineTxns().catch(() => [] as PosOfflineTxn[]);
-  return txns
+  const scoped = txns
     .filter((t) => t.tenant_id === tenantId && (t.branch_id ?? null) === (branchId ?? null))
     .filter((t) => rec(t.order_payload).order_type === "delivery")
     .filter((t) => (shiftId ? t.shift_id === shiftId : true))
-    .filter((t) => t.status !== "synced")
-    .map(projectTxnToQueueOrder);
+    .filter((t) => t.status !== "synced");
+  // rc.11 — an order whose submit already synced (entity map resolved) but whose legacy row is not yet
+  // reconciled projects under its CANONICAL id, so the merge de-dups it against the server row instead
+  // of showing it twice in the window between the op sync and the legacy reconcile.
+  const resolved = await canonicalIds(scoped.map((t) => t.local_txn_id)).catch(() => ({}) as Record<string, string | null>);
+  return scoped.map((t) => projectTxnToQueueOrder(resolved[t.local_txn_id] ? { ...t, server_order_id: resolved[t.local_txn_id] } : t));
 }
 
 /** Merge a canonical snapshot with local projections, de-duped by id (a synced local order projects its
@@ -92,26 +97,31 @@ export function mergeDeliveryQueue(cached: DeliveryQueueOrder[], locals: Deliver
 export type DeliveryQueueDeps = {
   reachable?: () => Promise<boolean>;
   load?: (input: DeliveryQueueInput) => Promise<DeliveryQueueOrder[]>;
+  locals?: (tenantId: string | null, branchId: string | null, shiftId: string | null) => Promise<DeliveryQueueOrder[]>;
 };
 
 export async function loadDeliveryQueueOfflineAware(
   input: DeliveryQueueInput,
   deps: DeliveryQueueDeps = {},
-): Promise<{ orders: DeliveryQueueOrder[]; offline: boolean }> {
+): Promise<{ orders: DeliveryQueueOrder[]; offline: boolean; fetchedAt: number | null }> {
   const reachable = deps.reachable ?? isBackendReachable;
   const load = deps.load ?? loadDeliveryQueue;
+  const locals = () => (deps.locals ?? projectLocalDeliveryOrders)(input.tenantId, input.branchId, input.shiftId).catch(() => [] as DeliveryQueueOrder[]);
   if (await reachable()) {
+    const fetchedAt = Date.now();
     const rows = await load(input);
+    // The snapshot holds SERVER rows only (locals are re-derived from the outbox on every read).
     await cacheDeliveryQueue(rows, input.tenantId, input.branchId, input.shiftId).catch(() => {});
     // rc.10 — every online queue read also keeps the open orders' LINES (+ their customers' profiles)
     // offline-ready, so an order created/changed online after hydration is still editable offline.
     if (!deps.load) void prewarmOpenDeliveryLines(input.tenantId, input.branchId, rows);
-    return { orders: rows, offline: false };
+    // rc.11 — ONLINE also merges the offline-created orders that have NOT synced yet (e.g. waiting on a
+    // dependency): a reconnect must never make a created/paid offline order vanish from the list.
+    return { orders: mergeDeliveryQueue(rows, await locals()), offline: false, fetchedAt };
   }
   const cachedRaw = await readCachedDeliveryQueue(input.tenantId, input.branchId, input.shiftId).catch(() => null);
   const cached = Array.isArray(cachedRaw?.rows) ? (cachedRaw?.rows as DeliveryQueueOrder[]) : [];
-  const locals = await projectLocalDeliveryOrders(input.tenantId, input.branchId, input.shiftId);
-  return { orders: mergeDeliveryQueue(cached, locals), offline: true };
+  return { orders: mergeDeliveryQueue(cached, await locals()), offline: true, fetchedAt: cachedRaw?.cachedAt ?? null };
 }
 
 /** Pre-warm the delivery queue snapshot during normal online POS hydration, so the Orders tab is

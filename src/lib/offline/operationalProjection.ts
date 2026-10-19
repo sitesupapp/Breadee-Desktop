@@ -170,11 +170,16 @@ function applyItemOp(
       setMeta();
       return true;
     }
-    order.lines.splice(idx, 1);
+    // rc.11 — a REDUCTION replaces the line IN PLACE (same position / round) on the projection, so the
+    // operator sees the quantity drop where the item is — not the item vanish from its round and
+    // reappear as a new one (the rc.10 "decrease did nothing" report). The server's own batch numbering
+    // takes over after sync; totals, ids and the edit chain are unchanged.
     meta.delete(line.id);
     if (n > 0) {
-      order.lines.push({ ...line, id: newId, quantity: n, line_total: line.final_unit_price * n, batch_no: nextBatch() });
+      order.lines.splice(idx, 1, { ...line, id: newId, quantity: n, line_total: line.final_unit_price * n });
       setMeta();
+    } else {
+      order.lines.splice(idx, 1);
     }
     return true;
   }
@@ -182,16 +187,15 @@ function applyItemOp(
     const q = Number(body.quantity ?? line.quantity);
     const mods = (Array.isArray(body.modifiers) ? body.modifiers : []) as { group_id: string | null; option_id: string | null; name: string; price_delta: number; quantity: number }[];
     const unit = unitOf(line.base_price, mods);
-    order.lines.splice(idx, 1);
     meta.delete(line.id);
-    order.lines.push({
+    // rc.11 — in place, like a reduction (see above).
+    order.lines.splice(idx, 1, {
       ...line,
       id: newId,
       quantity: q,
       modifiers_total: unit - line.base_price,
       final_unit_price: unit,
       line_total: unit * q,
-      batch_no: nextBatch(),
       modifiers: mods.map((m) => ({ group_id: m.group_id ?? null, option_id: m.option_id ?? null, name: m.name, price_delta: Number(m.price_delta), quantity: Number(m.quantity ?? 1) })),
     });
     setMeta();
@@ -301,9 +305,18 @@ export function projectTableBill(input: {
       coveredSummary = true;
     }
   }
+  // rc.11 — the LEGACY rule (a pre-rc.10 settle with no `covers`, matched only by its dependency on the
+  // session's open) closes the session ONLY when no round was sent AFTER that settle: a later round is
+  // an active bill on the table and must stay visible (never hidden behind an old payment).
+  const legacyCovers = (s: OfflineOperation, d: DineDraft): boolean => {
+    if (!s.dependency_ids.includes(d.open_operation_id)) return false;
+    const at = Date.parse(s.created_at);
+    return !d.rounds.some((r) => Number.isFinite(at) && Date.parse(r.sent_at) > at);
+  };
   const draftSettled =
     input.draft != null &&
-    (coveredSessions.has(input.draft.local_session_id) || settleOps.some((s) => s.dependency_ids.includes((input.draft as DineDraft).open_operation_id)));
+    (coveredSessions.has(input.draft.local_session_id) ||
+      settleOps.some((s) => Object.keys(rec(rec(s.payload).covers)).length === 0 && legacyCovers(s, input.draft as DineDraft)));
   const draft = draftSettled ? null : input.draft;
   const lastSettleOpId = settleOps.length > 0 ? settleOps[settleOps.length - 1].operation_id : null;
   const collected = Math.max(0, Number(mapRow?.collected ?? 0) || 0);
@@ -698,10 +711,19 @@ export function projectDeliveryOrder(input: {
   txn: PosOfflineTxn | null;
   cachedLines: { lines: DeliveryOrderLine[]; fetchedAt: number } | null;
   ops: OfflineOperation[];
+  /** rc.11 — when the ROW (status / payment_status) was read from the server. A settle synced AFTER it
+   *  is not in the row yet (a stale snapshot must never downgrade a confirmed payment). Defaults to
+   *  the line snapshot time (pre-rc.11 behaviour). */
+  rowFetchedAt?: number | null;
+  /** rc.11 — local ids that resolved to this canonical order (entity map / synced txn): ops captured
+   *  against the offline-created order (order_local) still belong to its canonical row. */
+  aliases?: string[];
 }): OperationalDeliveryOrder {
   const { row, txn } = input;
   const localPending = txn != null && txn.status !== "synced";
   const fetchedAt = localPending ? null : (input.cachedLines?.fetchedAt ?? null);
+  const rowFetchedAt = localPending ? null : input.rowFetchedAt !== undefined ? input.rowFetchedAt : fetchedAt;
+  const ids = new Set<string>([row.id, ...(input.aliases ?? []), ...(txn ? [txn.local_txn_id] : [])]);
   const meta = new Map<string, LineMeta>();
   const key = row.id;
   const base: BillOrder = {
@@ -759,16 +781,19 @@ export function projectDeliveryOrder(input: {
   let settlingOpId: string | null = null;
   let providerOpId: string | null = null;
   const overlay: Partial<DeliveryQueueOrder> = {};
+  let payOverlay: Partial<DeliveryQueueOrder> | null = null;
   let itemsChanged = false;
   const sorted = [...input.ops].sort((a, b) => a.created_at.localeCompare(b.created_at));
   for (const op of sorted) {
-    if (!live(op) || reflectedIn(op, fetchedAt)) continue;
+    const settle = op.operation_type === "pay_order" || op.operation_type === "on_account_order";
+    // Item/metadata ops are judged against the LINE snapshot; a settle against the ROW snapshot.
+    if (!live(op) || reflectedIn(op, settle ? rowFetchedAt : fetchedAt)) continue;
     const p = rec(op.payload);
     const body = rec(p.payload);
     const mine =
-      (typeof p.order_local === "string" && p.order_local === row.id) ||
-      (typeof body.order_id === "string" && body.order_id === row.id && !p.order_local) ||
-      (typeof p.order_id === "string" && p.order_id === row.id);
+      (typeof p.order_local === "string" && ids.has(p.order_local)) ||
+      (typeof body.order_id === "string" && ids.has(body.order_id) && !p.order_local) ||
+      (typeof p.order_id === "string" && ids.has(p.order_id));
     if (!mine) continue;
     switch (op.operation_type) {
       case "edit_order_line":
@@ -793,6 +818,19 @@ export function projectDeliveryOrder(input: {
       case "pay_order":
       case "on_account_order":
         settlingOpId = op.operation_id;
+        // rc.11 — PAYMENT PRECEDENCE: an unresolved local settlement > a newer confirmed canonical
+        // settlement > an older cached row. A valid (pending / blocked / retrying / synced-after-the-row)
+        // settle overlays the status, so a stale snapshot can never show a paid order as Unpaid. A
+        // REFUSED settle (needs_attention) never claims payment — the server row stands, flagged.
+        if (op.status !== "needs_attention") {
+          const pending = op.status !== "synced";
+          if (op.operation_type === "pay_order") {
+            payOverlay = { payment_status: "paid", status: "completed", settlement_mode: null, local_pending_sync: pending };
+          } else {
+            const paidNow = Number(p.amount) || 0;
+            payOverlay = { payment_status: paidNow > 0 ? "partial" : "unpaid", status: "completed", settlement_mode: "on_account", local_pending_sync: pending };
+          }
+        }
         break;
       default:
         continue;
@@ -804,6 +842,11 @@ export function projectDeliveryOrder(input: {
   recomputeOrder(base);
   const fee = Number(row.delivery_fee ?? 0) || 0;
   const projected: DeliveryQueueOrder = { ...row, ...overlay };
+  // A server row already refunded / voided is never re-labelled by a local settle.
+  // A row the server already shows PAID is the confirmed truth (never downgraded, nothing to add).
+  if (payOverlay && !["refunded", "voided", "cancelled"].includes(row.status) && !["paid", "refunded"].includes(row.payment_status)) {
+    Object.assign(projected, payOverlay);
+  }
   if (linesKnown && itemsChanged) {
     // Item edits are only captured on an UNDISCOUNTED order (see deliveryEditBlock), so the payable is
     // exactly items + fee — the same arithmetic the server's finance layer applies.
@@ -833,32 +876,62 @@ export async function getOperationalOrderProjection(
   scope: ProjectionScope,
   row: DeliveryQueueOrder,
   preloadedOps?: OfflineOperation[],
+  opts?: { rowFetchedAt?: number | null; aliases?: string[] },
 ): Promise<OperationalDeliveryOrder> {
-  const [txn, cached, ops] = await Promise.all([
+  const [txn, cached, ops, aliases] = await Promise.all([
     localdb.posOfflineTxns.get(row.id).catch(() => undefined),
     readCachedDeliveryLines(row.id, scope.tenantId, scope.branchId).catch(() => null),
     preloadedOps ? Promise.resolve(preloadedOps) : scopedOperations(scope),
+    opts?.aliases ? Promise.resolve(opts.aliases) : localAliasesOf(row.id),
   ]);
   return projectDeliveryOrder({
     row,
     txn: txn ?? null,
     cachedLines: cached ? { lines: cached.lines as DeliveryOrderLine[], fetchedAt: cached.cachedAt } : null,
     ops,
+    aliases,
+    ...(opts && "rowFetchedAt" in opts ? { rowFetchedAt: opts.rowFetchedAt ?? null } : {}),
   });
 }
 
-/** Offline: overlay every queue row with its operational projection, so the Orders LIST shows the
- *  SAME total / provider / note as the detail and the payment base (list == detail == pay). Rows no
- *  local mutation touches are returned as-is. Never mutates the input. */
-export async function overlayDeliveryQueue(scope: ProjectionScope, rows: DeliveryQueueOrder[]): Promise<DeliveryQueueOrder[]> {
-  const ops = (await scopedOperations(scope)).filter((o) => live(o) && DELIVERY_MUTATIONS.has(o.operation_type));
+/** rc.11 — the local ids (offline-created order / txn) that resolved to this canonical order. */
+export async function localAliasesOf(canonicalId: string): Promise<string[]> {
+  const rows = await localdb.entityMap.filter((m) => m.canonical_id === canonicalId).toArray().catch(() => []);
+  return rows.map((m) => m.local_entity_id);
+}
+
+/** Overlay every queue row with its operational projection, so the Orders LIST shows the SAME total /
+ *  provider / note / payment state as the detail and the payment base (list == detail == pay). Rows no
+ *  local mutation touches are returned as-is. Never mutates the input. rc.11 — also ONLINE: a fresh
+ *  server row (rowFetchedAt = read time) is only overlaid by ops NOT yet reflected in it, so a
+ *  just-captured settlement awaiting sync is not lost behind the canonical refresh. */
+export async function overlayDeliveryQueue(
+  scope: ProjectionScope,
+  rows: DeliveryQueueOrder[],
+  opts?: { rowFetchedAt?: number | null },
+): Promise<DeliveryQueueOrder[]> {
+  const rowAt = opts?.rowFetchedAt;
+  const all = (await scopedOperations(scope)).filter((o) => live(o) && DELIVERY_MUTATIONS.has(o.operation_type));
+  // Only ops the row does not already reflect decide WHETHER a row is projected; the projection itself
+  // still judges every op against its own snapshot (lines vs row), so nothing applies twice.
+  const ops = rowAt == null ? all : all.filter((o) => !reflectedIn(o, rowAt));
   if (ops.length === 0) return rows;
-  const touches = (o: OfflineOperation, id: string) => {
+  // Reverse entity map (canonical → local ids) once, so ops captured against an offline-created order
+  // still touch its canonical row after the order itself synced.
+  const maps = await localdb.entityMap.toArray().catch(() => []);
+  const aliasOf = new Map<string, string[]>();
+  for (const m of maps) aliasOf.set(m.canonical_id, [...(aliasOf.get(m.canonical_id) ?? []), m.local_entity_id]);
+  const touches = (o: OfflineOperation, ids: string[]) => {
     const p = rec(o.payload);
-    return p.order_local === id || p.order_id === id || rec(p.payload).order_id === id;
+    return ids.some((id) => p.order_local === id || p.order_id === id || rec(p.payload).order_id === id);
   };
   return Promise.all(
-    rows.map(async (r) => (ops.some((o) => touches(o, r.id)) ? (await getOperationalOrderProjection(scope, r, ops)).row : r)),
+    rows.map(async (r) => {
+      const aliases = aliasOf.get(r.id) ?? [];
+      if (!ops.some((o) => touches(o, [r.id, ...aliases]))) return r;
+      const proj = await getOperationalOrderProjection(scope, r, all, { aliases, ...(opts && "rowFetchedAt" in opts ? { rowFetchedAt: rowAt ?? null } : {}) });
+      return proj.row;
+    }),
   );
 }
 
