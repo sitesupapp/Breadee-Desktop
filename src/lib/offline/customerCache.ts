@@ -147,11 +147,63 @@ export function matchCachedCustomers(rows: CachedCustomer[], query: string): Cus
 export async function searchCustomersOfflineAware(query: string): Promise<CustomerMatch[]> {
   const scope = await currentCustomerScope();
   if (await isBackendReachable()) {
-    const results = await searchCustomers(query);
+    let results: CustomerMatch[];
+    try {
+      results = await searchCustomers(query);
+    } catch {
+      // rc.13 — a server lookup that FAILS (network flap, an access token expired while offline and not
+      // refreshed yet, a 5xx) is NOT an authentication failure: answer from this device's customers
+      // instead of an error (the session is untouched; only a real sign-out ever leaves the POS).
+      return searchCachedCustomers(scope, query);
+    }
     void cacheCustomerMatches(results, scope).catch(() => {});
-    return results;
+    // rc.13 — a customer created OFFLINE on this device that has not synced yet is not on the server:
+    // keep it findable (one logical customer — its canonical twin, once synced, wins). Only when such a
+    // create exists (indexed op-log read), so a normal online search never scans the local cache.
+    if (!(await hasUnsyncedCustomerCreate().catch(() => false))) return results;
+    return mergePendingLocalMatches(results, await searchCachedCustomersFlagged(scope, query).catch(() => []));
   }
   return searchCachedCustomers(scope, query);
+}
+
+/** rc.13 — any offline customer CREATE on this device not yet on the server (operation_type index). */
+async function hasUnsyncedCustomerCreate(): Promise<boolean> {
+  const { localdb } = await import("@/lib/offline/db");
+  const n = await localdb.operations
+    .where("operation_type")
+    .equals("customer_upsert")
+    .filter((o) => o.local_entity_id != null && o.status !== "synced" && o.status !== "cancelled")
+    .count();
+  return n > 0;
+}
+
+/** rc.13 — PURE. Server matches + this device's still-unsynced (pending-local) matches, de-duplicated by
+ *  normalised phone (the server row wins — never two results for one person). */
+export function mergePendingLocalMatches(server: CustomerMatch[], local: (CustomerMatch & { pending_local?: boolean })[]): CustomerMatch[] {
+  const phones = new Set(server.map((s) => s.phone_e164 ?? normalizePhoneE164(s.phone)).filter((x): x is string => !!x));
+  const ids = new Set(server.map((s) => s.id));
+  const extra: CustomerMatch[] = [];
+  for (const l of local) {
+    if (l.pending_local !== true || ids.has(l.id)) continue;
+    const ph = l.phone_e164 ?? normalizePhoneE164(l.phone);
+    if (ph && phones.has(ph)) continue;
+    // Konan rc.13 — pending-local rows are de-duplicated against EACH OTHER too (id + normalised phone).
+    ids.add(l.id);
+    if (ph) phones.add(ph);
+    extra.push({ id: l.id, name: l.name, phone: l.phone, phone_e164: l.phone_e164 });
+  }
+  return [...server, ...extra].slice(0, SEARCH_LIMIT);
+}
+
+/**
+ * rc.13 — remember a customer just created/edited ONLINE in the local cache immediately, so it is found
+ * again offline (rc.12: an online-created customer existed only on the server until some later online
+ * search happened to return it — "newly registered customer cannot be found again"). Never downgrades a
+ * cached full profile.
+ */
+export async function rememberCustomer(c: { id: string; name: string | null; phone: string | null }): Promise<void> {
+  const scope = await currentCustomerScope();
+  await cacheCustomerMatches([{ id: c.id, name: c.name, phone: c.phone, phone_e164: normalizePhoneE164(c.phone) }], scope);
 }
 
 /**
@@ -161,14 +213,19 @@ export async function searchCustomersOfflineAware(query: string): Promise<Custom
  * row that already has a canonical twin (entity map) is never listed twice.
  */
 export async function searchCachedCustomers(scope: CustomerScope, query: string): Promise<CustomerMatch[]> {
+  return (await searchCachedCustomersFlagged(scope, query)).map(({ id, name, phone, phone_e164 }) => ({ id, name, phone, phone_e164 }));
+}
+
+async function searchCachedCustomersFlagged(scope: CustomerScope, query: string): Promise<(CustomerMatch & { pending_local: boolean })[]> {
   const term = query.trim();
   if (term === "") return [];
   const e164 = looksLikePhone(term) ? normalizePhoneE164(term) : null;
   let rows: CachedCustomer[] = [];
   if (e164) rows = await findCachedCustomersByPhoneE164(scope.tenantId, scope.branchId, e164).catch(() => []);
   if (rows.length === 0) rows = await listCachedCustomers(scope.tenantId, scope.branchId).catch(() => []);
-  const hits = matchCachedCustomers(rows, term);
-  const pending = rows.filter((c) => c.pending_local === true && hits.some((h) => h.id === c.id));
+  const pendingIds = new Set(rows.filter((c) => c.pending_local === true).map((c) => c.id));
+  const hits = matchCachedCustomers(rows, term).map((h) => ({ ...h, pending_local: pendingIds.has(h.id) }));
+  const pending = hits.filter((h) => h.pending_local);
   if (pending.length === 0) return hits;
   const canon = await canonicalIds(pending.map((c) => c.id)).catch(() => ({}) as Record<string, string | null>);
   const ids = new Set(hits.map((h) => h.id));

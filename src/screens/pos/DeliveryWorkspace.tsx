@@ -76,7 +76,8 @@ import {
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
 import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
 import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
-import { resolveOrderParties } from "@/lib/offline/deliveryParties";
+import { mergePartyMaps, persistResolvedParties, rememberOrderParty, resolveOrderParties } from "@/lib/offline/deliveryParties";
+import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
 import { proveOfflineReversible, captureOfflineRefund } from "@/lib/offline/refundOffline";
 import { captureDeliveryOpsOffline, captureEditOrderNoteOffline } from "@/lib/offline/deliveryActionOffline";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
@@ -1026,6 +1027,14 @@ export function useDeliveryWorkspace(input: {
             party_snapshot: partySnapshot,
           });
         }
+        // rc.13 — the durable order↔customer association (List / Detail survive any later failed read).
+        await rememberOrderParty({ tenantId: pos.tenantId, branchId }, localId, {
+          customerName: partySnapshot.customer_name,
+          customerPhone: partySnapshot.customer_phone,
+          addressText: partySnapshot.address_text,
+          customerId: snapshot.customerId,
+          addressId: snapshot.addressId,
+        });
         const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
         completionDone.current = true;
         setSubmitted({
@@ -1159,6 +1168,19 @@ export function useDeliveryWorkspace(input: {
         notes: snapshot.note,
         created_at: null,
       };
+      {
+        // rc.13 — the durable order↔customer association for the canonical order, PERSISTED before the send
+        // is reported (best-effort: the helper never throws, so a cache failure never fails the order).
+        const selCust = state.selected && state.selected.id === snapshot.customerId ? state.selected : null;
+        const selAddr = selCust?.addresses.find((x) => x.id === snapshot.addressId) ?? null;
+        await rememberOrderParty({ tenantId: pos.tenantId, branchId }, outcome.result.order_id, {
+          customerName: selCust?.name ?? null,
+          customerPhone: selCust?.phone ?? null,
+          addressText: selAddr ? addressLine(selAddr) : null,
+          customerId: snapshot.customerId,
+          addressId: snapshot.addressId,
+        });
+      }
       setOpenOrders(rows);
       setSubmitted({ order: authoritative, recovered: outcome.recovered });
 
@@ -1284,8 +1306,11 @@ export function useDeliveryWorkspace(input: {
         loadShiftOpenMap(rows.map((o) => o.shift_id)).catch(() => new Map<string, boolean>()),
       ]);
       // rc.11 — the unified customer projection (canonical → local cache → remap alias → order snapshot).
+      // rc.13 — + the durable order↔customer association; a refresh MERGES (a known party is never blanked
+      // by a failed read) and writes through what it resolved.
       const who = await resolveOrderParties(rows, server, { tenantId: pos.tenantId, branchId }).catch(() => server);
-      setParties(who);
+      setParties((prev) => mergePartyMaps(prev, who));
+      void persistResolvedParties({ tenantId: pos.tenantId, branchId }, rows, who);
       setShiftOpenMap(shifts);
     } catch (e) {
       setQueueError(classifyError(e).message);
@@ -1641,6 +1666,15 @@ export function useDeliveryWorkspace(input: {
   useEffect(() => {
     if (!active || view !== "orders" || !viewOrdersGate.allowed) return;
     void refreshQueue();
+  }, [active, view, viewOrdersGate.allowed, refreshQueue]);
+
+  // rc.13 — after a reconnect drain lands, re-read the queue once (canonical ids replace local ones; the
+  // durable association keeps each order's customer across that remap).
+  useEffect(() => {
+    if (!active || view !== "orders" || !viewOrdersGate.allowed || typeof window === "undefined") return;
+    const onDrained = () => void refreshQueue();
+    window.addEventListener(OFFLINE_DRAINED_EVENT, onDrained);
+    return () => window.removeEventListener(OFFLINE_DRAINED_EVENT, onDrained);
   }, [active, view, viewOrdersGate.allowed, refreshQueue]);
 
   // --- Level 3C: settlement ---------------------------------------------------

@@ -16,6 +16,10 @@ import { runFreshContextPasses } from "@/lib/offline/drainPasses";
 
 export type DrainContext = { tenantId: string; userId: string; branchId: string | null };
 
+/** rc.13 — dispatched after every reconnect drain pass, so live screens re-read the canonical state the
+ *  replay just produced (the Dine-In floor showed a stale pre-sync map after reconnect). */
+export const OFFLINE_DRAINED_EVENT = "breadee:offline-drained";
+
 export const drainContextKey = (c: DrainContext): string => `${c.tenantId}|${c.userId}|${c.branchId}`;
 
 export type ReconnectDrainDeps = {
@@ -54,6 +58,13 @@ export async function runReconnectDrain(d: ReconnectDrainDeps): Promise<void> {
     drainContextKey,
     async (c) => {
       await d.sync(c).catch(() => {});
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        try {
+          window.dispatchEvent(new Event(OFFLINE_DRAINED_EVENT));
+        } catch {
+          /* observability only */
+        }
+      }
       // A live-context predicate re-evaluated at EVERY commit boundary, not once: the
       // context can move during the sync OR during either post-sync refresh. Each
       // commit step re-checks isCurrent() after its own async work, so a pass whose

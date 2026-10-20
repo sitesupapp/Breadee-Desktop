@@ -30,7 +30,7 @@ export type ForensicCategory =
   | "SYNCED";
 
 /** rc.12 — which build captured the op (captured_build was introduced in rc.10). */
-export type BuildEra = "HISTORICAL_RC8_RC9" | "HISTORICAL_RC10" | "RC11" | "CURRENT" | "OTHER_BUILD";
+export type BuildEra = "HISTORICAL_RC8_RC9" | "HISTORICAL_RC10" | "RC11" | "RC12" | "CURRENT" | "OTHER_BUILD";
 
 /** rc.12 — what the operator should do with it. Never an automatic bulk retry. */
 export type Disposition = "SYNCED" | "WAITING" | "RETRY_SAFE" | "EXPECTED_CONFLICT" | "UNRELATED_OLD_SHIFT" | "MANUAL_REVIEW" | "REAL_FAILURE";
@@ -39,6 +39,7 @@ export type Disposition = "SYNCED" | "WAITING" | "RETRY_SAFE" | "EXPECTED_CONFLI
 const RC_BUILDS: { prefix: string; era: BuildEra }[] = [
   { prefix: "aa11f48", era: "HISTORICAL_RC10" },
   { prefix: "f61fbd8", era: "RC11" },
+  { prefix: "b51d4fb", era: "RC12" },
 ];
 
 export function buildEra(captured: string | null | undefined, currentBuild: string | null): BuildEra {

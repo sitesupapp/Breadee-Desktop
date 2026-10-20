@@ -126,8 +126,13 @@ import {
   getOperationalTableBill,
   getOperationalTableTotals,
   overlayTableTotals,
+  shiftlessCanonicalOrders,
+  SUMMARY_ONLY_SETTLE_MESSAGE,
+  shiftlessRefusal,
+  tablesWithUnreflectedWork,
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
+import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
 import { captureEditOrderLineOffline } from "@/lib/offline/itemEditOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -370,33 +375,79 @@ export function useDineInWorkspace(input: {
   const [projRev, setProjRev] = useState(0);
   const bumpProj = useCallback(() => setProjRev((r) => r + 1), []);
   const [opTotals, setOpTotals] = useState<Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>>(new Map());
+  // rc.13 — tables whose local offline settle has not reached the server yet (online actions held).
+  const [syncingSettle, setSyncingSettle] = useState<Set<string>>(new Set());
+  const projScopeKey = useRef<string | null>(null);
   useEffect(() => {
     let live = true;
-    if (!offlineProjOn || !input.offlineScope) {
+    if (!input.offlineScope) {
+      projScopeKey.current = null;
       setOpTotals(new Map());
+      setSyncingSettle(new Set());
       return;
     }
-    void getOperationalTableTotals(input.offlineScope, tables.map.tables)
-      .then((m) => {
-        if (live) setOpTotals(m);
-      })
-      .catch(() => {
+    const scope = input.offlineScope;
+    // Konan rc.13 — a NEW operating scope (branch / OU / cashier / device) never inherits the previous
+    // scope's totals or settle holds while its own projection loads.
+    const key = [scope.tenantId, scope.branchId, scope.cashierUserId, scope.deviceId, scope.terminalId].join("|");
+    if (projScopeKey.current !== key) {
+      projScopeKey.current = key;
+      setOpTotals(new Map());
+      setSyncingSettle(new Set());
+    }
+    void (async () => {
+      // OFFLINE: every table through the ONE operational projection (rc.9). ONLINE (rc.13 — canonical
+      // refresh is a MERGE): only tables with local dine-in work the loaded map does not reflect yet, so a
+      // stale/offline-cached map can never show a bill settled on this device as unpaid again.
+      const work = offlineProjOn ? null : await tablesWithUnreflectedWork(scope, tables.lastLoadedAt);
+      if (live) setSyncingSettle(work?.syncingSettle ?? new Set());
+      if (work && work.touched.size === 0) {
         if (live) setOpTotals(new Map());
-      });
+        return;
+      }
+      const m = await getOperationalTableTotals(scope, tables.map.tables, work?.touched);
+      if (live) setOpTotals(m);
+    })().catch(() => {
+      if (live) {
+        setOpTotals(new Map());
+        setSyncingSettle(new Set());
+      }
+    });
     return () => {
       live = false;
     };
-  }, [offlineProjOn, input.offlineScope, tables.map.tables, projRev]);
+  }, [offlineProjOn, input.offlineScope, tables.map.tables, tables.lastLoadedAt, projRev]);
   const displayMap = useMemo(
-    () => (offlineProjOn && opTotals.size > 0 ? { ...tables.map, tables: overlayTableTotals(tables.map.tables, opTotals) } : tables.map),
-    [offlineProjOn, opTotals, tables.map],
+    () => (opTotals.size > 0 ? { ...tables.map, tables: overlayTableTotals(tables.map.tables, opTotals) } : tables.map),
+    [opTotals, tables.map],
   );
+
+  // rc.13 — after every reconnect drain, re-read the canonical floor: the work that just replayed is now
+  // the server's truth (never a stale pre-sync map on screen).
+  useEffect(() => {
+    if (!active) return;
+    const onDrained = () => {
+      if (ctx.branchId) void tables.refresh(ctx);
+      bumpProj();
+    };
+    window.addEventListener(OFFLINE_DRAINED_EVENT, onDrained);
+    return () => window.removeEventListener(OFFLINE_DRAINED_EVENT, onDrained);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, ctx.tenantId, ctx.branchId, bumpProj]);
 
   const selected = pickSelected({ map: displayMap, selectedTableId: tables.selectedTableId });
   const visible = useMemo(() => filterTables(displayMap.tables, query), [displayMap.tables, query]);
   const stale = isMapStale(tables.lastLoadedAt, now);
 
+  // rc.13 — ONLINE, a table whose offline settle has not reached the server yet is held: opening, adding
+  // to or paying it now could append to / charge the bill that is mid-settle on the server.
+  const settleSyncHoldReason: string | null =
+    input.online && selected && syncingSettle.has(selected.id)
+      ? "This table's offline payment is still syncing — wait a moment; the floor refreshes when it lands."
+      : null;
+
   const openGate: Gate = useMemo(() => {
+    if (settleSyncHoldReason) return { allowed: false, reason: settleSyncHoldReason };
     const base = canOpenTable(pos.access, hasOpenShift);
     if (!base.allowed) return base;
     if (!selected) return { allowed: false, reason: "Select a table first." };
@@ -414,7 +465,7 @@ export function useDineInWorkspace(input: {
       };
     }
     return { allowed: true, reason: null };
-  }, [pos.access, hasOpenShift, selected, input.online, input.offlineReady, input.offlineReadyMissing, input.offlineScope]);
+  }, [pos.access, hasOpenShift, selected, input.online, input.offlineReady, input.offlineReadyMissing, input.offlineScope, settleSyncHoldReason]);
 
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
@@ -465,6 +516,7 @@ export function useDineInWorkspace(input: {
    * a pay_table op instead of charging the server. Online behaviour is unchanged.
    */
   const payGate: Gate = useMemo(() => {
+    if (settleSyncHoldReason) return { allowed: false, reason: settleSyncHoldReason };
     const g = payTableGate({
       takePayments: pos.gates.takePayments,
       table: selected,
@@ -477,7 +529,7 @@ export function useDineInWorkspace(input: {
     // rc.10 — a bill settled offline is CLOSED locally (it leaves the active projection), so payTableGate
     // already refuses a second settle of it ("no open bill"); a NEW bill on the reused table is payable.
     return g;
-  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying]);
+  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying, settleSyncHoldReason]);
 
   const select = useCallback(
     (id: string) => {
@@ -728,6 +780,7 @@ export function useDineInWorkspace(input: {
   );
 
   const addItemsGate: Gate = useMemo(() => {
+    if (settleSyncHoldReason) return { allowed: false, reason: settleSyncHoldReason };
     const base = computeAddItemsGate({ ctx: gateCtx, createOrders: input.createOrders });
     if (!base.allowed) return base;
     // The buffer is shared with Takeaway on purpose (one cart, one round at a
@@ -750,7 +803,7 @@ export function useDineInWorkspace(input: {
       return { allowed: false, reason: "Another table has an unsent round. Send or discard it first." };
     }
     return base;
-  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, cart.durable, cart.savedOrder, selected]);
+  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, cart.durable, cart.savedOrder, selected, settleSyncHoldReason]);
 
   const submitGate: Gate = useMemo(
     () =>
@@ -1037,6 +1090,14 @@ export function useDineInWorkspace(input: {
         return { ok: false, reason: "Part of this bill is already paid. Settle the remaining items with Split, or reconnect." };
       }
       const draft = await getDineDraftForTable(input.offlineScope, table.id);
+      // rc.13 — LOCAL SUCCESS RULE: a bill the server holds WITHOUT a shift can never be settled
+      // (_pos_lock_open_shift refuses it), so it is never shown as paid locally (the rc.12 native
+      // "paid bill resurrects" was exactly this: rc.10/rc.11 shift-less orders settled offline).
+      const shiftless = shiftlessCanonicalOrders(p.bill, draft);
+      if (shiftless.length > 0) return { ok: false, reason: shiftlessRefusal(shiftless) };
+      // Konan rc.13 — a bill known only as a map SUMMARY (its order never cached on this device) cannot
+      // prove its shift either: fail closed BEFORE any capture (full payment and On Account alike).
+      if (p.summaryOnly) return { ok: false, reason: SUMMARY_ONLY_SETTLE_MESSAGE };
       const canonicalIds = p.orders.filter((o) => o.orderLocal == null).map((o) => o.orderId).filter((x): x is string => typeof x === "string" && x !== "");
       const hasCanonical = p.summaryOnly || canonicalIds.length > 0;
       return {
@@ -1205,6 +1266,12 @@ export function useDineInWorkspace(input: {
             if (m.creatorOpId) creators.push(m.creatorOpId);
           }
           const draft = p.sessionId ? await getDineDraftForTable(input.offlineScope, selected.id) : null;
+          // rc.13 — a split leg of a bill the server holds without a shift can never apply (LOCAL SUCCESS RULE).
+          const shiftless = shiftlessCanonicalOrders({ orders: p.bill.orders.filter((o) => o.id === po.key) }, draft);
+          if (shiftless.length > 0) {
+            setSplitError(shiftlessRefusal(shiftless));
+            return;
+          }
           const sessionDeps = draft ? [draft.open_operation_id, ...draft.rounds.map((r) => r.operation_id)] : [];
           const cap = await splitOperationalBillOffline({
             scope: input.offlineScope,

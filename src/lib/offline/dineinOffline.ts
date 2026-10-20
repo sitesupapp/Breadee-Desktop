@@ -20,6 +20,7 @@ import {
   normalizeCustomerRef,
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
+import { settleStillCovers } from "@/lib/offline/operationalProjection";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
 import type { CartLine, SelectedModifier } from "@/types/pos";
 import type { CurrencyCode } from "@/lib/currency";
@@ -404,6 +405,10 @@ export async function setRoundPrintState(sessionId: string, roundLocalId: string
 
 const SETTLE_OP_PREFIX = "paytable:";
 
+/** rc.13 — a repeat of a settle / on-account the server already REFUSED (the bill is still unpaid). */
+export const SETTLE_REFUSED_MESSAGE =
+  "This table's earlier payment was refused by the server, so the bill is still unpaid. Review it in the Sync Center, or settle it online.";
+
 /** Durably capture an offline dine-in table settle. Atomic; idempotent on a deterministic id
  *  (same session + method + currency → same op). Requires at least one sent round. */
 /** rc.9 — the settle/on-account target when the table has NO local session: an occupied CANONICAL
@@ -460,6 +465,10 @@ export async function settleTableOffline(input: {
     const operationId = SETTLE_OP_PREFIX + clientOpId;
     const existing = await localdb.operations.get(operationId);
     if (existing) {
+      // rc.13 — the SAME settle was already refused by the server (SETTLEMENT_CONFLICT): re-tapping Pay must
+      // never mark the bill paid again on top of a refusal (LOCAL SUCCESS RULE). The operator resolves it
+      // in the Sync Center (retry once the cause is fixed) or online.
+      if (!settleStillCovers(existing)) throw new Error(SETTLE_REFUSED_MESSAGE);
       if (d && d.status === "open") await markDraftSettled(d, operationId);
       return { operationId, clientOpId, alreadyCaptured: true };
     }
@@ -565,6 +574,7 @@ export async function tableOnAccountOffline(input: {
     const operationId = ONACCOUNT_OP_PREFIX + clientOpId;
     const existing = await localdb.operations.get(operationId);
     if (existing) {
+      if (!settleStillCovers(existing)) throw new Error(SETTLE_REFUSED_MESSAGE);
       if (d && d.status === "open") await markDraftSettled(d, operationId);
       return { operationId, clientOpId, alreadyCaptured: true };
     }
@@ -821,6 +831,30 @@ export async function findSettleOpForSession(sessionId: string): Promise<Offline
 // ---------------------------------------------------------------------------
 
 export async function reconcileDineDraftsFromOperations(): Promise<void> {
+  // rc.13 — a session closed locally by a settle the SERVER REFUSED (money not applied) is the table's
+  // active bill again (SETTLEMENT_CONFLICT) — unless a newer session is already open on that table (that
+  // one stays the active local session; the refused settle stays visible in the Sync Center for review).
+  // Konan rc.13 — ONE Dexie transaction (read + decide + write, no interleaving with a capture), and a
+  // deterministic chronology: candidates are taken NEWEST session first, so with several refused historical
+  // sessions on one table only the newest becomes active; a table that already has an open session (older
+  // or newer) never gets a second one — the refused session then stays visible for review in the Sync Center.
+  await localdb.transaction("rw", localdb.dineDrafts, localdb.operations, async () => {
+    const settled = (await localdb.dineDrafts.where("status").equals("settled").toArray()).sort(
+      (a, b) => b.created_at.localeCompare(a.created_at) || b.local_session_id.localeCompare(a.local_session_id),
+    );
+    for (const d of settled) {
+      if (!d.settled_operation_id) continue;
+      const s = await localdb.operations.get(d.settled_operation_id);
+      if (!s || settleStillCovers(s)) continue;
+      const other = await localdb.dineDrafts
+        .where("tenant_id")
+        .equals(d.tenant_id)
+        .filter((x) => x.status === "open" && x.table_id === d.table_id && (x.branch_id ?? null) === (d.branch_id ?? null) && x.device_id === d.device_id && x.cashier_user_id === d.cashier_user_id)
+        .count();
+      if (other > 0) continue;
+      await localdb.dineDrafts.update(d.local_session_id, { status: "open", settled_operation_id: null, settled_at: null, updated_at: new Date().toISOString() });
+    }
+  });
   const drafts = await localdb.dineDrafts.where("status").equals("open").toArray();
   for (const d of drafts) {
     if (d.canonical_order_id) continue;
@@ -963,7 +997,8 @@ export async function coveringSettleOp(d: DineDraft): Promise<OfflineOperation |
     return !d.rounds.some((r) => Number.isFinite(at) && Date.parse(r.sent_at) > at);
   };
   return rows.find((o) => {
-    if (o.status === "cancelled") return false;
+    // rc.13 — a REFUSED settle never closes the session (the money was not applied).
+    if (!settleStillCovers(o)) return false;
     const covers = (o.payload as { covers?: { session_local?: string | null } } | null)?.covers;
     if (covers && Object.keys(covers).length > 0) return covers.session_local === d.local_session_id;
     return o.dependency_ids.includes(d.open_operation_id) && noLaterRound(o);

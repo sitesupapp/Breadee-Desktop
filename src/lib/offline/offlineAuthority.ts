@@ -97,6 +97,27 @@ export async function clearAuthorityCache(): Promise<void> {
   await localdb.snapshots.delete(MIRROR_KEY).catch(() => undefined);
 }
 
+/**
+ * rc.13 — True ONLY for a definitive server-side INVALIDATION of this device's sign-in (the refresh token
+ * was revoked / rotated away / not found, the session or user no longer exists, the user is banned).
+ * Anything else that makes a token refresh fail — a gateway / proxy / 5xx response, a captive portal, a
+ * flapping link that passed the reachability probe — is NOT an auth failure and must never send a device
+ * with a still-valid 7-day authority to Sign In (rc.12 native: "a temporary network failure redirects to
+ * Sign In").
+ */
+export function isAuthInvalidation(e: unknown): boolean {
+  if (!e || isAuthTransportError(e)) return false;
+  const status = Number((e as { status?: unknown }).status);
+  const code = String((e as { code?: unknown }).code ?? "").toLowerCase();
+  const message = String((e as { message?: unknown }).message ?? "").toLowerCase();
+  const INVALIDATION_CODES = new Set(["refresh_token_not_found", "refresh_token_already_used", "session_not_found", "session_expired", "user_not_found", "user_banned", "bad_jwt"]);
+  if (INVALIDATION_CODES.has(code)) return true;
+  if ([400, 401, 403].includes(status)) {
+    return /invalid refresh token|refresh token (not found|already used)|session (not found|expired)|user (not found|banned)|invalid_grant|revoked/.test(message);
+  }
+  return false;
+}
+
 /** True for a NETWORK-level auth failure (supabase-js AuthRetryableFetchError / a fetch TypeError),
  *  as opposed to a definitive refusal (wrong password, disabled user). */
 export function isAuthTransportError(e: unknown): boolean {

@@ -13,6 +13,7 @@ import {
   REAUTH_MESSAGE,
   clearAuthorityCache,
   decideOfflineAuthority,
+  isAuthInvalidation,
   isAuthTransportError,
   readAuthorityCache,
   writeAuthorityCache,
@@ -132,14 +133,29 @@ export const useSession = create<SessionState>((set, get) => ({
     try {
       const r = await supabase.auth.getSession();
       session = r.data.session;
-      // The token refresh failed at the NETWORK level although the probe passed (a flapping link):
-      // this is an offline start, not a sign-out.
-      if (!session && r.error && isAuthTransportError(r.error)) {
+      // The token refresh FAILED although the probe passed (a flapping link, a gateway/proxy/5xx answer):
+      // this is an offline start, not a sign-out. rc.13 — only a definitive INVALIDATION (revoked / unknown
+      // refresh token, deleted / banned user) is a sign-out; every other refresh failure keeps a device with
+      // a valid 7-day authority inside the POS (rc.12 native: "network failure redirects to Sign In").
+      if (!session && r.error && !isAuthInvalidation(r.error)) {
         apply(decision, true);
         return;
       }
+      // rc.13 (Konan) — a definitive INVALIDATION also drops the cached offline authority, so a revoked /
+      // banned identity can never regain offline access on a later unreachable launch.
+      if (!session && r.error && isAuthInvalidation(r.error)) {
+        await clearAuthorityCache().catch(() => undefined);
+        set({ loading: false, offlineMode: false, userId: null, authNotice: null });
+        return;
+      }
     } catch (e) {
-      apply(decision, isAuthTransportError(e));
+      // A definitive invalidation is a sign-out (never an offline restore); anything else is offline.
+      if (isAuthInvalidation(e)) {
+        await clearAuthorityCache().catch(() => undefined);
+        set({ loading: false, offlineMode: false, userId: null, authNotice: null });
+        return;
+      }
+      apply(decision, true);
       return;
     }
     if (session) {

@@ -277,6 +277,7 @@ function eraLabel(era: SyncCenterRow["era"]): string {
     case "HISTORICAL_RC8_RC9": return "earlier test build (rc.8/9)";
     case "HISTORICAL_RC10": return "rc.10";
     case "RC11": return "rc.11";
+    case "RC12": return "rc.12";
     case "CURRENT": return "this build";
     default: return "other build";
   }

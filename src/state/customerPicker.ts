@@ -40,7 +40,7 @@ import {
 } from "@/lib/pos/access";
 import type { CustomerSearchProps } from "@/components/pos/CustomerSearch";
 import { SEARCH_DEBOUNCE_MS } from "@/state/customers";
-import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
+import { rememberCustomer, searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/offline/customerCache";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
 
 /** The minimal customer identity the payment dialog and the receipt need. */
@@ -268,7 +268,12 @@ export function useCustomerPicker(input: {
       try {
         const outcome = await performCustomerCreate({
           payload,
-          submit: upsertCustomer,
+          // rc.13 — the customer just created online is remembered locally at once (found again offline).
+          submit: async (p) => {
+            const r = await upsertCustomer(p);
+            await rememberCustomer({ id: r.customer_id, name: decision.name ?? null, phone: decision.phone ?? null }).catch(() => undefined);
+            return r;
+          },
           recoverSearch: (phone) => searchCustomers(phone),
           latch: latch.current,
         });
@@ -318,6 +323,7 @@ export function useCustomerPicker(input: {
       setConflictError(null);
       try {
         const r = await resolveCustomerConflict(conflict.payload, conflict.error.conflictToken);
+        await rememberCustomer({ id: r.customer_id, name: conflict.name, phone: conflict.phone }).catch(() => undefined);
         setSelected({ id: r.customer_id, name: conflict.name, phone: conflict.phone });
         setConflict(null);
         setResults(null);
