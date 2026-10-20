@@ -1465,6 +1465,21 @@ function PosWorkspaceInner() {
     setViewingSavedOrder(false);
   }, [cart]);
 
+  // When an all-branches operator switches the operational branch, the per-branch menu re-fetches, so an
+  // UNSENT cart built against the previous branch must not carry across — otherwise items/prices resolved for
+  // one branch could be submitted under another. A server-ACCEPTED unpaid order is deliberately NOT dropped
+  // (dropping its reference is what once made an order uncollectable); it stays for the operator to resolve.
+  // Guarded by a ref so this never fires on the initial branch resolution, only on a genuine change.
+  const prevOperationalBranchRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevOperationalBranchRef.current;
+    const next = pos.branch.id;
+    prevOperationalBranchRef.current = next;
+    if (prev && next && prev !== next && !useCart.getState().savedOrder) {
+      newOrder();
+    }
+  }, [pos.branch.id, newOrder]);
+
   /**
    * Create the order if it does not exist yet, reusing the SAME client_op_id for
    * any retry. Returns the saved order, or null when the server refused.

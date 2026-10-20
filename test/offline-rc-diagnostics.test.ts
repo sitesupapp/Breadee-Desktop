@@ -103,12 +103,22 @@ test("PosWorkspace mounts the readout and traces the four nav clicks; main logs 
   assert.match(main, /rcLogStartup\(\);/, "startup trace wired");
 });
 
-test("the RC is a DISTINCT, identifiable build (version bumped; SHA/run/flag injected by CI)", () => {
-  const conf = JSON.parse(rawOf("src-tauri/tauri.conf.json")) as { version: string; identifier: string };
-  assert.equal(conf.version, "1.0.37-rc.14", "version bumped so Windows cannot reuse the prior package");
-  assert.equal(conf.identifier, "app.breadee.desktop.offlinerc", "isolated bundle identity preserved");
+test("1.0.37 PRODUCTION identity: normal bundle, production channel, no RC identity (diagnostics only in the staging RC workflow)", () => {
+  const conf = JSON.parse(rawOf("src-tauri/tauri.conf.json")) as {
+    version: string;
+    identifier: string;
+    productName: string;
+    plugins: { updater: { endpoints: string[]; pubkey: string } };
+  };
+  assert.equal(conf.version, "1.0.37", "plain SemVer — no RC suffix reaches tenants");
+  assert.equal(conf.identifier, "app.breadee.desktop", "the installed fleet's identity (updater + data folder)");
+  assert.equal(conf.productName, "Breadee");
+  assert.deepEqual(conf.plugins.updater.endpoints, ["https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json"]);
+  assert.match(conf.plugins.updater.pubkey, /^dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3Nzk5OUQ4MjFGODJGRDcK/, "the SAME production updater key (never regenerated)");
+  assert.equal(JSON.parse(rawOf("package.json")).version, "1.0.37");
+  assert.match(rawOf("src-tauri/Cargo.toml"), /^version = "1\.0\.37"$/m);
+  // The RC diagnostics strip stays build-flag gated: only the staging RC/installer workflow sets it.
   const wf = rawOf(".github/workflows/desktop-windows-installer.yml");
-  assert.match(wf, /VITE_BUILD_SHA: \$\{\{ github\.sha \}\}/);
-  assert.match(wf, /VITE_BUILD_RUN: \$\{\{ github\.run_id \}\}/);
   assert.match(wf, /VITE_RC_DIAGNOSTICS: "1"/);
+  assert.doesNotMatch(rawOf("src-tauri/tauri.conf.json"), /offlinerc|Offline RC|-DISABLED/);
 });

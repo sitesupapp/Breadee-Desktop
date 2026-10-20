@@ -23,14 +23,24 @@ export function WhatsNew() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label="What's new">
-      <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-xl">
+      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white shadow-xl">
         <div className="flex flex-col items-center gap-3 px-6 pb-4 pt-8 text-center">
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-brand-soft text-brand-dark">
             <Glyph name={page.glyph} size={34} />
           </div>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">What&apos;s new · {i + 1} of {WHATS_NEW_PAGES.length}</p>
           <h2 className="text-lg font-extrabold text-ink">{page.title}</h2>
+          {page.titleAr && (
+            <p dir="rtl" lang="ar" className="text-base font-extrabold text-ink">
+              {page.titleAr}
+            </p>
+          )}
           <p className="text-sm leading-relaxed text-sub">{page.body}</p>
+          {page.bodyAr && (
+            <p dir="rtl" lang="ar" className="w-full text-right text-sm leading-relaxed text-sub">
+              {page.bodyAr}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center justify-center gap-1.5 pb-4">

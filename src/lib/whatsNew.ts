@@ -10,34 +10,24 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.34";
+export const WHATS_NEW_VERSION = "1.0.37";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
-export type WhatsNewPage = { glyph: GlyphName; title: string; body: string };
+/** `titleAr` / `bodyAr` (optional): the Arabic text, shown right-to-left beneath the English. */
+export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titleAr?: string; bodyAr?: string };
 
 // One short, business-worded page per shipped POS capability in this release. No
 // developer terminology; icons come from the existing Glyph set.
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
-    glyph: "pos",
-    title: "Transfer Open Orders Between Cashiers",
-    body: "A cashier with open orders at the end of a shift can now hand them to another cashier. The receiving cashier approves to take them on, and a manager can re-approve from the website if a transfer was declined — so a shift is never blocked by orders that belong to someone else.",
-  },
-  {
-    glyph: "pos",
-    title: "Clearer End-of-Shift Reporting",
-    body: "The End Shift report now lists items that were reduced or removed from submitted orders — with the quantity before, after and removed, the reason, and who made the change — shown separately from voided or cancelled orders.",
-  },
-  {
-    glyph: "pos",
-    title: "Reduction Receipts & Accurate Reprints",
-    body: "Optionally print a receipt whenever a submitted item is reduced or cancelled (a per-terminal setting). Reprints now always show the real payment method used — a non-cash payment never prints as Cash.",
-  },
-  {
-    glyph: "pos",
-    title: "Manage Payment Methods & Cashier Layout",
-    body: "Add, edit and activate your own POS payment methods from Settings, and the Categorized-menu control now lives with the Cashier Layout options. Everyday behavior and your existing records are unchanged.",
+    glyph: "sync",
+    title: "Full Offline Mode",
+    titleAr: "وضع عدم الاتصال الكامل",
+    body:
+      "Full Offline Mode is now expanded across Ready Desktop. You can keep working during internet or backend interruptions with broader offline support for Takeaway, Dine-In and Delivery, including locally supported order editing, payments, customers, table operations, printing and automatic synchronization when the connection returns. Your existing data, orders and settings are preserved. Breadee safely reconciles offline work after reconnecting and protects against duplicate transactions. Some operations that require live server authorization remain connection-required for safety.",
+    bodyAr:
+      "تم توسيع وضع عدم الاتصال الكامل في Ready Desktop. يمكنك متابعة العمل عند انقطاع الإنترنت أو تعذر الوصول إلى الخادم، مع دعم أوسع للطلبات في Takeaway وDine-In وDelivery، بما في ذلك تعديل الطلبات، وعمليات الدفع المدعومة، والعملاء، والطاولات، والطباعة، والمزامنة التلقائية عند عودة الاتصال. يتم الحفاظ على بياناتك الحالية وطلباتك وإعداداتك، وتقوم Breadee بمطابقة العمليات التي تمت دون اتصال بشكل آمن بعد عودة الاتصال مع الحماية من تكرار العمليات. بعض العمليات التي تحتاج إلى تحقق مباشر من الخادم ستبقى بحاجة إلى اتصال حفاظاً على الأمان.",
   },
 ];
 
