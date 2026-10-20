@@ -407,9 +407,10 @@ test("C5 Sync Center diagnostic classifies historical vs current vs conflicts (r
   assert.doesNotMatch(JSON.stringify(diag), /SECRET NAME/, "no payload / customer data in the export");
 });
 
-test("C6 release identity: an isolated 1.0.37 RC bundle (staging backend, updater disabled, offlinerc identifier)", () => {
+test("C6 release identity: 1.0.37 is the PRODUCTION bundle (no RC suffix, the fleet's identifier)", () => {
   const conf = JSON.parse(src("src-tauri/tauri.conf.json")) as { version: string; identifier: string };
-  // The exact RC number is pinned by offline-rc-diagnostics (bumped per RC); this suite only requires an RC.
-  assert.match(conf.version, /^1\.0\.37-rc\.\d+$/);
-  assert.equal(conf.identifier, "app.breadee.desktop.offlinerc");
+  // The RC stage (1.0.37-rc.N / app.breadee.desktop.offlinerc) ended at rc.14; the production release ships
+  // under the installed fleet's identity so the in-app update replaces it in place (offline-rc-diagnostics pins the rest).
+  assert.equal(conf.version, "1.0.37");
+  assert.equal(conf.identifier, "app.breadee.desktop");
 });
