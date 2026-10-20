@@ -16,11 +16,14 @@
 import { localdb } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import { closeEffectiveDependencies } from "@/lib/offline/endShiftOffline";
+import { canonicalIdFor } from "@/lib/offline/entityMap";
 
 export type ForensicCategory =
   | "HISTORICAL_LINE_ID_BUG" // pre-rc.10 round 22P02 — auto-recoverable (replay-safe)
   | "HISTORICAL_LOCAL_CUSTOMER_EDIT" // pre-rc.11 edit of an offline-created customer sent its LOCAL id — auto-recoverable
   | "HISTORICAL_SHIFTLESS_DINEIN" // pre-rc.12 offline dine-in order created WITHOUT a shift — server refuses every settle/move/merge
+  | "RC13_SHIFT_MAPPING" // rc.13-CAPTURED sale that sent a raw LOCAL shift id — refused before any write; recovered once (rc.14)
+  | "SHIFT_MAPPING_MISSING" // a sale whose offline-opened shift has no known canonical id — parked, nothing sent (manual review)
   | "SERVER_COORDINATION_REQUIRED" // pre-rc.12 offline table move/merge (now online-only)
   | "HISTORICAL_DEPENDENT" // parked only because a prerequisite failed
   | "EXPECTED_CONFLICT" // the server state changed elsewhere (version / settled / identity …)
@@ -30,7 +33,7 @@ export type ForensicCategory =
   | "SYNCED";
 
 /** rc.12 — which build captured the op (captured_build was introduced in rc.10). */
-export type BuildEra = "HISTORICAL_RC8_RC9" | "HISTORICAL_RC10" | "RC11" | "RC12" | "CURRENT" | "OTHER_BUILD";
+export type BuildEra = "HISTORICAL_RC8_RC9" | "HISTORICAL_RC10" | "RC11" | "RC12" | "RC13" | "CURRENT" | "OTHER_BUILD";
 
 /** rc.12 — what the operator should do with it. Never an automatic bulk retry. */
 export type Disposition = "SYNCED" | "WAITING" | "RETRY_SAFE" | "EXPECTED_CONFLICT" | "UNRELATED_OLD_SHIFT" | "MANUAL_REVIEW" | "REAL_FAILURE";
@@ -40,6 +43,7 @@ const RC_BUILDS: { prefix: string; era: BuildEra }[] = [
   { prefix: "aa11f48", era: "HISTORICAL_RC10" },
   { prefix: "f61fbd8", era: "RC11" },
   { prefix: "b51d4fb", era: "RC12" },
+  { prefix: "a83ba16", era: "RC13" }, // = RC13_BUILD_PREFIX (declared below)
 ];
 
 export function buildEra(captured: string | null | undefined, currentBuild: string | null): BuildEra {
@@ -50,6 +54,14 @@ export function buildEra(captured: string | null | undefined, currentBuild: stri
 
 const LINE_ID_BUG = /invalid input syntax for type uuid|22p02/i;
 const SHIFTLESS = /not attached to an open shift/i;
+/** rc.14 — an rc.13 sale that carried a raw LOCAL shift id (its offline-opened shift's marker was lost). */
+const SHIFT_NOT_FOUND = /shift not found for this tenant\/branch/i;
+/** rc.14 (Konan) — the rc.13 RC build SHA: the ONLY build whose captures the shift-mapping recovery may touch. */
+export const RC13_BUILD_PREFIX = "a83ba16";
+function isRc13Capture(o: OfflineOperation): boolean {
+  const b = (o as OfflineOperation & { captured_build?: string | null }).captured_build ?? null;
+  return typeof b === "string" && b.startsWith(RC13_BUILD_PREFIX);
+}
 const CONFLICT_CODES = new Set([
   "version_conflict", "expected_order_mismatch", "settle_conflict", "split_conflict", "edit_conflict", "add_conflict",
   "provider_invalid", "customer_identity_conflict", "refund_conflict", "move_conflict", "merge_conflict",
@@ -67,6 +79,14 @@ export function classifyOperation(op: OfflineOperation): { category: ForensicCat
   }
   if (op.operation_type === "customer_upsert" && /customer not found for this operating unit/i.test(msg)) {
     return { category: "HISTORICAL_LOCAL_CUSTOMER_EDIT", reason: "pre-rc.11 edit of an offline-created customer sent its local id (refused before any write)" };
+  }
+  // rc.14 (Konan) — ONLY a sale CAPTURED BY the rc.13 build is the known recoverable defect. The same
+  // refusal from any other build, and a current-build SHIFT_MAPPING_MISSING park, are never retry-safe.
+  if (op.operation_type === "takeaway_sale" && SHIFT_NOT_FOUND.test(msg) && isRc13Capture(op)) {
+    return { category: "RC13_SHIFT_MAPPING", reason: "rc.13 sale sent the LOCAL id of a shift opened offline (refused before any write); recovered once to its own canonical shift" };
+  }
+  if (code === "shift_mapping_missing") {
+    return { category: "SHIFT_MAPPING_MISSING", reason: "captured under a shift opened offline whose server shift is not known on this device; nothing was sent" };
   }
   if (SHIFTLESS.test(msg) || code === "shift_missing") {
     return { category: "HISTORICAL_SHIFTLESS_DINEIN", reason: "the order was created without a shift by a pre-rc.12 offline round; the server refuses to settle/move/merge it (nothing applied)" };
@@ -128,6 +148,7 @@ export function dispositionOf(o: OfflineOperation, category: ForensicCategory, c
   switch (category) {
     case "HISTORICAL_LINE_ID_BUG":
     case "HISTORICAL_LOCAL_CUSTOMER_EDIT":
+    case "RC13_SHIFT_MAPPING":
       return "RETRY_SAFE";
     case "EXPECTED_CONFLICT":
     case "AUTHORITY_REFUSED":
@@ -135,6 +156,7 @@ export function dispositionOf(o: OfflineOperation, category: ForensicCategory, c
     case "HISTORICAL_SHIFTLESS_DINEIN":
     case "SERVER_COORDINATION_REQUIRED":
     case "HISTORICAL_DEPENDENT":
+    case "SHIFT_MAPPING_MISSING":
       return "MANUAL_REVIEW";
     default:
       return "REAL_FAILURE";
@@ -294,13 +316,46 @@ export async function recoverHistoricalReplayFailures(): Promise<string[]> {
     });
     all = await localdb.operations.toArray();
   }
+  // rc.14 (F4) — an rc.13 Takeaway/Delivery sale refused with "Shift not found for this tenant/branch"
+  // because it carried the RAW LOCAL id of a shift opened offline (its local marker was lost). Recovered
+  // ONCE, and only when ALL hold: no server order was ever recorded for it (canonical_entity_id null — the
+  // refusal rolled the whole pos_submit_order transaction back), the shift it names IS a shift opened
+  // offline on this device (pendingShifts), and that shift now has a canonical id. The handler then
+  // remaps it to ITS OWN canonical shift; pos_submit_order is idempotent on client_op_id regardless.
+  const shiftFix: OfflineOperation[] = [];
+  for (const o of all) {
+    if (o.operation_type !== "takeaway_sale" || o.status !== "needs_attention" || o.canonical_entity_id) continue;
+    if (!SHIFT_NOT_FOUND.test(o.last_error_message ?? "") || o.result_meta?.rc14_recovered === true) continue;
+    // Konan — ONLY operations CAPTURED BY the rc.13 build (never another era's or a future build's work).
+    if (!isRc13Capture(o)) continue;
+    const sid = shiftOf(o);
+    if (!sid || !(await localdb.pendingShifts.get(sid).catch(() => undefined))) continue;
+    if (!(await canonicalIdFor(sid).catch(() => null))) continue;
+    shiftFix.push(o);
+  }
+  if (shiftFix.length > 0) {
+    await localdb.transaction("rw", localdb.operations, async () => {
+      for (const o of shiftFix) {
+        const sid = shiftOf(o) as string;
+        await localdb.operations.update(o.operation_id, {
+          status: "pending",
+          last_error_code: null,
+          last_error_message: null,
+          payload: { ...(o.payload as object), shift_local: sid },
+          result_meta: { ...(o.result_meta ?? {}), rc14_recovered: true },
+        });
+      }
+    });
+    all = await localdb.operations.toArray();
+  }
   const byId = new Map(all.map((o) => [o.operation_id, o]));
   const roots = all.filter(
     (o) => o.status === "needs_attention" && classifyOperation(o).category === "HISTORICAL_LINE_ID_BUG" && o.result_meta?.rc10_recovered !== true,
   );
-  if (roots.length === 0 && custFix.length === 0) return endFix.map((o) => o.operation_id);
-  // The re-queue seeds: the historical line-id rounds + the repaired customer edits (already pending).
-  const requeue = new Set([...roots.map((o) => o.operation_id), ...custFix.map((o) => o.operation_id), ...endFix.map((o) => o.operation_id)]);
+  if (roots.length === 0 && custFix.length === 0 && shiftFix.length === 0) return endFix.map((o) => o.operation_id);
+  // The re-queue seeds: the historical line-id rounds + the repaired customer edits / rc.13 shift-mapping
+  // sales (already pending).
+  const requeue = new Set([...roots.map((o) => o.operation_id), ...custFix.map((o) => o.operation_id), ...endFix.map((o) => o.operation_id), ...shiftFix.map((o) => o.operation_id)]);
   // Transitively: parked dependents whose ONLY failure is a prerequisite in the re-queue set.
   let grew = true;
   while (grew) {

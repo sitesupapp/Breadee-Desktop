@@ -563,6 +563,13 @@ export function shiftlessRefusal(orders: { order_number: string }[]): string {
   return `This bill${nums ? ` (${nums})` : ""} is not attached to a shift on the server, so it cannot be settled — offline or online. A manager must resolve it online first.`;
 }
 
+/** rc.14 — ONLINE: the actionable explanation for a historical shift-less bill (pay / move / merge are
+ *  refused by the server; its ownership is never re-attributed to a current shift automatically). */
+export function historicalShiftlessNotice(orders: { order_number: string }[]): string {
+  const nums = orders.map((o) => (o.order_number ? `#${o.order_number}` : "")).filter(Boolean).join(", ");
+  return `This bill${nums ? ` (${nums})` : ""} was created without a valid shift and cannot be paid, moved or merged automatically. Use an online manager reconciliation for it.`;
+}
+
 /** rc.13 (Konan) — the controlled refusal for a bill known only as a map summary (shift unprovable). */
 export const SUMMARY_ONLY_SETTLE_MESSAGE =
   "Part of this bill was sent before this device went offline, so it can't be confirmed as settleable offline. Reconnect to settle it.";

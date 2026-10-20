@@ -21,6 +21,7 @@ import { getDeviceIdentity } from "@/lib/device";
 import { clearPosSessionSnapshot, readPosSessionSnapshot, restoreShiftFromSnapshot } from "@/lib/offline/posSession";
 import { getActivePendingShift } from "@/lib/offline/db";
 import { createLocalPendingShift, pendingShiftToActiveShift } from "@/lib/offline/pendingShift";
+import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { isTransportFailure } from "@/lib/offline/posTxnSync";
 import { createLatestGate } from "@/lib/offline/latestGate";
@@ -289,12 +290,22 @@ export const useShift = create<ShiftState>((set, get) => ({
         return;
       }
       // 1) a previously-hydrated server open shift (Case 1), for THIS branch/OU only.
-      const restored = restoreShiftFromSnapshot(readPosSessionSnapshot(), {
+      let restored = restoreShiftFromSnapshot(readPosSessionSnapshot(), {
         deviceId,
         tenantId,
         cashierUserId: userId,
         branchId,
       });
+      // rc.14 (F4) — a snapshot written by rc.13 could hold a shift opened OFFLINE as if the server had
+      // confirmed it. Never restore a LOCAL id as a canonical shift: a still-pending one is handled as the
+      // pending shift below (Case 2, with its local marker); a synced one is restored under its OWN
+      // canonical id.
+      if (restored) {
+        const ref = await resolveOperationalShift(restored.id).catch(() => null);
+        if (superseded()) return;
+        if (ref?.shift_local) restored = null;
+        else if (ref?.shift_id && ref.shift_id !== restored.id) restored = { ...restored, id: ref.shift_id };
+      }
       // rc.10 — a shift whose End Shift was captured offline is CLOSED on this device: never restore it.
       const restoredEnded = restored ? await endShiftOpForShift(restored.id).catch(() => undefined) : undefined;
       if (restored && restoredEnded) {

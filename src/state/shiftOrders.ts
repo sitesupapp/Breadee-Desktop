@@ -17,7 +17,8 @@
 // a SELECT. Selecting, browsing and printing an order cannot change it.
 
 import { create } from "zustand";
-import { loadShiftOrders, stableSelectionIndex, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import { stableSelectionIndex, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import { loadOrdersHistoryOfflineAware } from "@/lib/offline/ordersHistoryOffline";
 
 type ShiftOrdersState = {
   /** Every order in the active shift, oldest first. */
@@ -36,7 +37,11 @@ type ShiftOrdersState = {
    * list contains it, it becomes the selection. Everything else follows
    * `stableSelectionIndex` - keep what was selected, else the newest.
    */
-  refresh: (input: { tenantId: string | null; shiftId: string | null; preferId?: string | null }) => Promise<void>;
+  refresh: (input: { tenantId: string | null; shiftId: string | null; branchId?: string | null; preferId?: string | null }) => Promise<void>;
+  /** rc.14 — the list was read from THIS device (offline). */
+  offline: boolean;
+  /** rc.14 — offline AND the shift's canonical orders were never saved here (only local orders shown). */
+  limited: boolean;
   /** Select by id. Used by the Shift Orders dropdown. No-op for an unknown id. */
   select: (orderId: string) => void;
   step: (direction: 1 | -1) => void;
@@ -54,8 +59,10 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
   loading: false,
   error: null,
   shiftId: null,
+  offline: false,
+  limited: false,
 
-  refresh: async ({ tenantId, shiftId, preferId }) => {
+  refresh: async ({ tenantId, shiftId, branchId, preferId }) => {
     // A shift change invalidates immediately, before the request - so nothing
     // from the previous shift is on screen while the new list loads.
     if (get().shiftId !== shiftId) {
@@ -67,7 +74,10 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
     }
     set({ loading: true, error: null });
     try {
-      const orders = await loadShiftOrders({ tenantId, shiftId });
+      // rc.14 (F3) — offline-aware: online = the server read + write-through snapshot; offline = that
+      // snapshot merged with this device's local orders (never a raw "Failed to fetch").
+      const res = await loadOrdersHistoryOfflineAware({ kind: "shift", tenantId, branchId: branchId ?? null, shiftId });
+      const orders = res.orders;
       // Discard a response that arrived after the shift moved on.
       if (get().shiftId !== shiftId) return;
       const previous = get();
@@ -76,6 +86,8 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
         orders,
         index: stableSelectionIndex(previousId, previous.index, orders, preferId ?? null),
         loading: false,
+        offline: res.offline,
+        limited: res.limited,
       });
     } catch (e) {
       set({
@@ -101,7 +113,7 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
     set({ index: next });
   },
 
-  reset: () => set({ orders: [], index: -1, loading: false, error: null, shiftId: null }),
+  reset: () => set({ orders: [], index: -1, loading: false, error: null, shiftId: null, offline: false, limited: false }),
 }));
 
 /** The selected order, or null. Exported so the invariant lives in one place. */

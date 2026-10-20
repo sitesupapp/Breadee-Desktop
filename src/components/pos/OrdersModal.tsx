@@ -18,8 +18,8 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Badge, Button, Input, cn } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
+import { loadOrdersHistoryOfflineAware, OFFLINE_HISTORY_LIMITED_NOTE, OFFLINE_HISTORY_NOTE } from "@/lib/offline/ordersHistoryOffline";
 import {
-  loadOrdersForDay,
   orderLifecycleLabel,
   orderLifecycleTone,
   orderRouteLabel,
@@ -56,6 +56,8 @@ export function OrdersModal(props: {
   tableNameFor: (tableId: string | null) => string | null;
   /** Current-shift orders, already loaded by the shared store. */
   shiftOrders: ShiftOpenOrder[];
+  /** rc.14 — the shared store read the shift's orders from THIS device (offline). */
+  shiftOffline?: { limited: boolean } | null;
   selectedOrderId: string | null;
   onSelectOrder: (orderId: string) => void;
   onPrintOrder: (order: ShiftOpenOrder) => void;
@@ -81,6 +83,7 @@ export function OrdersModal(props: {
   const [dayOrders, setDayOrders] = useState<ShiftOpenOrder[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dayOffline, setDayOffline] = useState<{ limited: boolean } | null>(null);
 
   const today = toDayKey(new Date());
   // The active shift is only a meaningful scope for today - browsing back to
@@ -99,9 +102,13 @@ export function OrdersModal(props: {
     let live = true;
     setLoading(true);
     setError(null);
-    loadOrdersForDay({ tenantId: props.tenantId, branchId: props.branchId, day })
-      .then((rows) => {
-        if (live) setDayOrders(rows);
+    // rc.14 (F3) — offline-aware: never a raw "Failed to fetch"; offline it shows what this device holds.
+    loadOrdersHistoryOfflineAware({ kind: "day", tenantId: props.tenantId, branchId: props.branchId, day })
+      .then((res) => {
+        if (live) {
+          setDayOrders(res.orders);
+          setDayOffline(res.offline ? { limited: res.limited } : null);
+        }
       })
       .catch((e: unknown) => {
         if (live) {
@@ -118,6 +125,9 @@ export function OrdersModal(props: {
   }, [props.open, scope, day, props.tenantId, props.branchId]);
 
   const source = scope === "shift" ? props.shiftOrders : (dayOrders ?? []);
+  // rc.14 — offline, say exactly what the list is (never a fake empty state).
+  const offlineState = scope === "shift" ? props.shiftOffline ?? null : dayOffline;
+  const offlineNote = offlineState ? (offlineState.limited ? OFFLINE_HISTORY_LIMITED_NOTE : OFFLINE_HISTORY_NOTE) : null;
   const rows = useMemo(
     () =>
       [...source]
@@ -190,6 +200,11 @@ export function OrdersModal(props: {
         </div>
 
         {error && <p className="rounded-lg bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700">{error}</p>}
+        {offlineNote && (
+          <p role="note" className="rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800">
+            {offlineNote}
+          </p>
+        )}
 
         <div className={cn("gap-3", props.detail ? "grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px]" : "block")}>
         <div className="max-h-[52vh] min-w-0 overflow-auto rounded-xl border border-line">

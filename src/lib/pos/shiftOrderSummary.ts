@@ -94,6 +94,9 @@ export type ShiftOpenOrder = {
   staff_name: string | null;
   notes: string | null;
   created_at: string | null;
+  /** rc.14 — offline only: this row (or its payment) exists on this device and is not yet confirmed by
+   *  the server. Absent on every server-read row. */
+  local_pending?: boolean;
 };
 
 /** Operator wording for a route. Matches the receipts and the routing screen. */

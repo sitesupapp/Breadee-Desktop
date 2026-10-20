@@ -109,7 +109,9 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
       if (t.status === "queued" && existingTxnOp.status === "synced") {
         await localdb.operations.update(id, {
           status: "pending",
-          payload: { order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true },
+          // rc.14 — MERGE over the op's payload: its remap fields (shift_local / customer_local /
+          // address_local) stay with the logical order (rc.13 replaced the payload and dropped them).
+          payload: { ...((existingTxnOp.payload as object | null) ?? {}), order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true },
           last_error_code: null,
           last_error_message: null,
         });

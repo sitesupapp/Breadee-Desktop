@@ -49,8 +49,9 @@ test("rc.12: Move/Merge (like Close/Clear) are online-only with an explicit offl
   const src = ts(DW);
   assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: false \};/);
   assert.match(src, /needs a connection — the server moves the whole bill \(rounds, payments, balance\) in one step/);
-  assert.match(src, /move: serverCoordinated\(canMoveTable\(pos\.access\), "move"/);
-  assert.match(src, /merge: serverCoordinated\(canMergeTables\(pos\.access\), "merge"/);
+  // rc.14 — wrapped (online) in the historical shift-less refusal; the online-only gate itself is unchanged.
+  assert.match(src, /move: (historical\()?serverCoordinated\(canMoveTable\(pos\.access\), "move"/);
+  assert.match(src, /merge: (historical\()?serverCoordinated\(canMergeTables\(pos\.access\), "merge"/);
   assert.ok(!/captureMoveTableOffline\(|captureMergeTablesOffline\(|captureCloseTableOffline|captureClearTableOffline/.test(src), "no table op is captured offline");
   // The reason is SHOWN on the bill panel (a disabled button with only a hover title read as "does nothing").
   const panel = ts("src/components/pos/TableBillPanel.tsx");

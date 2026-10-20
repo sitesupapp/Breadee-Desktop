@@ -108,6 +108,7 @@ import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPo
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
+import { isLocalShiftId, resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { getDeviceIdentity } from "@/lib/device";
 import { evaluateDineinOfflineReady, type DineinScope } from "@/lib/offline/dineinOffline";
@@ -354,9 +355,15 @@ function PosWorkspaceInner() {
     if (!online) return;
     const shift = shiftStore.shift;
     if (!shift || shift.status !== "open") return;
+    // rc.14 (F4) — a shift opened OFFLINE is not server-confirmed: never persist it as one (a later offline
+    // restore would present its LOCAL id as canonical, and sales captured under it would replay unmapped).
+    if (shiftStore.pendingLocalId) return;
     if (!tenantId || !userId || !pos.branch.id) return;
     if (!isPersistableBranchName(pos.branch.name)) return;
-    savePosSessionSnapshot({
+    let live = true;
+    void isLocalShiftId(shift.id).then((local) => {
+      if (!live || local) return;
+      savePosSessionSnapshot({
       version: 1,
       source: "server",
       savedAt: Date.now(),
@@ -373,8 +380,12 @@ function PosWorkspaceInner() {
         opening_cash_amount: shift.opening_cash_amount,
         branch_id: shift.branch_id,
       },
+      });
     });
-  }, [online, shiftStore.shift, tenantId, userId, pos.branch.id, pos.branch.name, currency]);
+    return () => {
+      live = false;
+    };
+  }, [online, shiftStore.shift, shiftStore.pendingLocalId, tenantId, userId, pos.branch.id, pos.branch.name, currency]);
 
   // --- offline: queue state + reconnect replay --------------------------------
   const [offlinePending, setOfflinePending] = useState(0);
@@ -638,8 +649,8 @@ function PosWorkspaceInner() {
   // Reload whenever the shift changes - including closing one, where the store
   // invalidates before the request so the previous shift is never on screen.
   useEffect(() => {
-    void useShiftOrders.getState().refresh({ tenantId, shiftId });
-  }, [tenantId, shiftId]);
+    void useShiftOrders.getState().refresh({ tenantId, shiftId, branchId: pos.branch.id });
+  }, [tenantId, shiftId, pos.branch.id]);
 
   /**
    * Re-read the shift's orders after something changed one.
@@ -651,9 +662,9 @@ function PosWorkspaceInner() {
    */
   const refreshShiftOrders = useCallback(
     (preferId?: string | null) => {
-      void useShiftOrders.getState().refresh({ tenantId, shiftId, preferId });
+      void useShiftOrders.getState().refresh({ tenantId, shiftId, branchId: pos.branch.id, preferId });
     },
-    [tenantId, shiftId],
+    [tenantId, shiftId, pos.branch.id],
   );
 
   // --- operations surfaces ---------------------------------------------------
@@ -1533,14 +1544,14 @@ function PosWorkspaceInner() {
    */
   const adoptCreatedOrder = useCallback(
     async (orderId: string): Promise<boolean> => {
-      await useShiftOrders.getState().refresh({ tenantId, shiftId, preferId: orderId });
+      await useShiftOrders.getState().refresh({ tenantId, shiftId, branchId: pos.branch.id, preferId: orderId });
       const found = useShiftOrders.getState().orders.some((o) => o.id === orderId);
       if (!found) return false;
       setViewingSavedOrder(true);
       useCart.getState().reset();
       return true;
     },
-    [shiftId, tenantId],
+    [shiftId, tenantId, pos.branch.id],
   );
 
   // --- offline service layer (adapter) ---------------------------------------
@@ -1585,12 +1596,16 @@ function PosWorkspaceInner() {
       // be a matched pair: reading them separately lets a reconnect canonicalization
       // interleave and persist a LOCAL shift id with no dependency marker (orphan).
       const shiftSnap = useShift.getState();
-      const activeShiftId = requireOpenShiftId(shiftSnap.shift);
-      const pendingLocalId = shiftSnap.pendingLocalId ?? null;
-      if (!activeShiftId || !tenantId || !userId) {
+      const capturedShiftId = requireOpenShiftId(shiftSnap.shift);
+      if (!capturedShiftId || !tenantId || !userId) {
         toast.push({ tone: "warning", message: "Open a shift before sending an order." });
         return;
       }
+      // rc.14 — the ONE shift-identity contract, decided from the captured id itself (never from the
+      // store's pendingLocalId flag, which a restored snapshot can drop — rc.13 native F4).
+      const shiftRef = await resolveOperationalShift(capturedShiftId);
+      const activeShiftId = (shiftRef.shift_id ?? shiftRef.shift_local) as string;
+      const pendingLocalId = shiftRef.shift_local;
       const opId = useCart.getState().ensureOpId();
       const dev = getDeviceIdentity();
       const payload = buildOfflinePayload(opId, lines, activeShiftId);
@@ -1598,7 +1613,7 @@ function PosWorkspaceInner() {
       const existing = await getPosOfflineTxnByOp(opId);
       const localId = existing?.local_txn_id ?? crypto.randomUUID();
       if (existing) {
-        await updatePosOfflineTxn(existing.local_txn_id, { sent_to_kitchen: true, order_payload: payload, total, status: "queued" });
+        await updatePosOfflineTxn(existing.local_txn_id, { sent_to_kitchen: true, order_payload: payload, total, status: "queued", shift_id: activeShiftId, pending_shift_local_id: pendingLocalId });
       } else {
         await addPosOfflineTxn({
           local_txn_id: localId,
@@ -1648,13 +1663,16 @@ function PosWorkspaceInner() {
       // pair (see saveOfflineSend) - reading them separately risks an orphan on a
       // reconnect canonicalization that interleaves between the two reads.
       const shiftSnap = useShift.getState();
-      const activeShiftId = requireOpenShiftId(shiftSnap.shift);
-      const pendingLocalId = shiftSnap.pendingLocalId ?? null;
-      if (!activeShiftId || !tenantId || !userId) {
+      const capturedShiftId = requireOpenShiftId(shiftSnap.shift);
+      if (!capturedShiftId || !tenantId || !userId) {
         toast.push({ tone: "warning", message: "Open a shift before taking payment." });
         return;
       }
       if (lines.length === 0) return;
+      // rc.14 — the ONE shift-identity contract (see saveOfflineSend).
+      const shiftRef = await resolveOperationalShift(capturedShiftId);
+      const activeShiftId = (shiftRef.shift_id ?? shiftRef.shift_local) as string;
+      const pendingLocalId = shiftRef.shift_local;
       const opId = useCart.getState().ensureOpId();
       const dev = getDeviceIdentity();
       const payload = buildOfflinePayload(opId, lines, activeShiftId);
@@ -1667,7 +1685,7 @@ function PosWorkspaceInner() {
       const existing = await getPosOfflineTxnByOp(opId);
       const localId = existing?.local_txn_id ?? crypto.randomUUID();
       if (existing) {
-        await updatePosOfflineTxn(existing.local_txn_id, { payment_intent: intent, order_payload: payload, total, sent_to_kitchen: true, status: "queued", paid: false });
+        await updatePosOfflineTxn(existing.local_txn_id, { payment_intent: intent, order_payload: payload, total, sent_to_kitchen: true, status: "queued", paid: false, shift_id: activeShiftId, pending_shift_local_id: pendingLocalId });
       } else {
         await addPosOfflineTxn({
           local_txn_id: localId,
@@ -3014,6 +3032,7 @@ function PosWorkspaceInner() {
         currency={currency}
         tableNameFor={(id) => (id ? (tableStore.map.tables.find((t) => t.id === id)?.name ?? null) : null)}
         shiftOrders={shiftOrders.orders}
+        shiftOffline={shiftOrders.offline ? { limited: shiftOrders.limited } : null}
         selectedOrderId={currentOrder?.id ?? null}
         /* View closes the modal and loads that exact order into the Current
            Order panel behind it - the one place an order is acted on. It is a

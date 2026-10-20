@@ -21,6 +21,7 @@ import {
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
 import { settleStillCovers } from "@/lib/offline/operationalProjection";
+import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
 import type { CartLine, SelectedModifier } from "@/types/pos";
 import type { CurrencyCode } from "@/lib/currency";
@@ -131,11 +132,8 @@ export function evaluateDineinOfflineReady(i: OfflineReadyInput): { ready: boole
  * takeaway/delivery sale), so the server never creates a shift-less dine-in order.
  */
 export async function resolveShiftRef(shiftId: string | null | undefined): Promise<{ shift_id: string | null; shift_local: string | null }> {
-  if (!shiftId) return { shift_id: null, shift_local: null };
-  const pending = await localdb.pendingShifts.get(shiftId).catch(() => undefined);
-  if (!pending) return { shift_id: shiftId, shift_local: null };
-  if (pending.server_shift_id) return { shift_id: pending.server_shift_id, shift_local: null };
-  return { shift_id: null, shift_local: shiftId };
+  // rc.14 — delegates to the ONE shift-identity contract (Takeaway / Delivery / Dine-In never diverge).
+  return resolveOperationalShift(shiftId);
 }
 
 export async function openTableOffline(args: {

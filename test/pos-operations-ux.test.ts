@@ -423,7 +423,9 @@ test("the Takeaway right panel keeps the live cart and its identity", () => {
 
 test("every surface reads the one shift-order store", () => {
   const store = readTs("state", "shiftOrders.ts");
-  assert.equal((store.match(/loadShiftOrders\(/g) ?? []).length, 1);
+  // rc.14 — one query path: the store → the offline-aware loader → the single server read.
+  assert.equal((store.match(/loadOrdersHistoryOfflineAware\(\{ kind: "shift"/g) ?? []).length, 1);
+  assert.equal((readTs("lib/offline", "ordersHistoryOffline.ts").match(/loadShiftOrders\)\(/g) ?? []).length, 1);
   for (const [name, src] of [["orders", ordersModal], ["delivery", deliveryModal], ["panel", currentOrder]] as const) {
     assert.equal(src.includes("loadShiftOrders"), false, `${name} renders, it does not query the shift`);
   }

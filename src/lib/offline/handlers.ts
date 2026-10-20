@@ -20,6 +20,8 @@ import {
 } from "@/lib/offline/posTxnSync";
 import { resolveEntity } from "@/lib/offline/entityMap";
 import { getOperation } from "@/lib/offline/operationLog";
+import { localdb } from "@/lib/offline/db";
+import { isLocalShiftId } from "@/lib/offline/shiftIdentity";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -165,7 +167,25 @@ export const takeawaySaleHandler: OperationHandler = {
 
     // Remap a pending-shift dependency to its canonical server shift id, durably. Prefer the
     // explicit field; fall back to the single legacy dependency id (pre-E ops had only a shift dep).
-    const shiftLocalId = p.shift_local !== undefined ? p.shift_local : (op.depends_on_local_entities[0] ?? null);
+    let shiftLocalId = p.shift_local !== undefined ? p.shift_local : (op.depends_on_local_entities[0] ?? null);
+    // rc.14 (F4) — FAIL CLOSED on a raw LOCAL shift id. rc.13 could capture a sale under an offline-opened
+    // shift WITHOUT its local marker (a restored snapshot dropped it) → pos_submit_order got the local id →
+    // "Shift not found for this tenant/branch". The captured id is checked against the durable pendingShifts
+    // record: a local shift is remapped to ITS OWN canonical shift (never to whatever shift is open now), or
+    // parked with a precise reason; a raw local id is never sent.
+    const capturedShift = (payload as { shift_id?: string | null }).shift_id ?? null;
+    if (!shiftLocalId && capturedShift && (await isLocalShiftId(capturedShift))) {
+      const own = await ctx.canonicalFor(capturedShift);
+      if (!own) {
+        const pending = await localdb.pendingShifts.get(capturedShift).catch(() => undefined);
+        if (pending && pending.status === "pending_sync") {
+          return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "shift_unresolved", message: "shift not yet synced" };
+        }
+        return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "shift_mapping_missing", message: "SHIFT_MAPPING_MISSING — this sale was captured under a shift opened offline whose server shift is not known on this device. Nothing was sent." };
+      }
+      shiftLocalId = capturedShift;
+      await ctx.update({ payload: { ...p, shift_local: capturedShift } });
+    }
     if (shiftLocalId) {
       const canonicalShift = await ctx.canonicalFor(shiftLocalId);
       if (!canonicalShift) {

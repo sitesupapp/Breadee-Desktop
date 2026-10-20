@@ -165,7 +165,8 @@ test("the count and the carousel are the same collection", () => {
   assert.match(statusBar, /Orders \{props\.shiftOrders\.length\}/);
   assert.match(workspace, /shiftOrders=\{shiftOrders\.orders\}/);
   assert.match(workspace, /count=\{shiftOrders\.orders\.length\}/);
-  assert.equal((ordersStore.match(/loadShiftOrders\(/g) ?? []).length, 1);
+  // rc.14 — the ONE query now goes through the offline-aware loader (which makes the single server read).
+  assert.equal((ordersStore.match(/loadOrdersHistoryOfflineAware\(\{ kind: "shift"/g) ?? []).length, 1);
   assert.equal(panel.includes("loadShiftOrders"), false, "the panel renders, it does not query");
 });
 

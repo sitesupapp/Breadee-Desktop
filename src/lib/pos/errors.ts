@@ -8,6 +8,8 @@
 
 export type RefusalKind =
   | "no_shift"
+  // rc.14 — a historical bill the server holds WITHOUT a shift (never re-attributed automatically).
+  | "historical_shiftless"
   | "shift_closed"
   // End Shift blocked because open orders remain (Part 6 — offer Transfer).
   | "open_orders_block"
@@ -125,6 +127,15 @@ export function mergeRefusalReason(message: string): string | null {
 }
 
 const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: boolean }[] = [
+  // rc.14 — a HISTORICAL bill created without a shift (rc.4–rc.11 offline rounds). The server refuses to
+  // pay / move / merge / transfer it; nothing can attach it to a shift automatically (by design — its
+  // ownership is never rewritten). Listed first so no generic shift / merge rule swallows it.
+  {
+    kind: "historical_shiftless",
+    test: /primary bill is not attached to a shift|selected orders are not attached to a shift|is not attached to a shift on the server/i,
+    hint: "This bill was created without a valid shift and cannot be paid, moved or merged automatically. Use an online manager reconciliation for it, and use a different table for new orders.",
+    expected: true,
+  },
   // --- Delivery customers (Level 3A). Listed first: several contain words the
   // generic permission/offline rules further down would swallow.
   {

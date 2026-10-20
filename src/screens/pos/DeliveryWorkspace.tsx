@@ -78,6 +78,7 @@ import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/o
 import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
 import { mergePartyMaps, persistResolvedParties, rememberOrderParty, resolveOrderParties } from "@/lib/offline/deliveryParties";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
+import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { proveOfflineReversible, captureOfflineRefund } from "@/lib/offline/refundOffline";
 import { captureDeliveryOpsOffline, captureEditOrderNoteOffline } from "@/lib/offline/deliveryActionOffline";
 import { deterministicUuid } from "@/lib/offline/dineinOffline";
@@ -964,9 +965,13 @@ export function useDeliveryWorkspace(input: {
       completionDone.current = false;
       try {
         const custName = state.selected?.name ?? null;
+        // rc.14 (F4) — the ONE shift-identity contract: a shift opened OFFLINE travels as its local id WITH
+        // the dependency marker (remapped to its own canonical shift at replay), never as a raw local id.
+        const shiftRef = await resolveOperationalShift(snapshot.shiftId);
+        const capturedShift = shiftRef.shift_id ?? shiftRef.shift_local;
         const built = buildDeliveryPayload({
           branchId: snapshot.branchId,
-          shiftId: snapshot.shiftId,
+          shiftId: capturedShift,
           clientOpId: snapshot.clientOpId,
           lines: snapshot.lines,
           customerId: snapshot.customerId,
@@ -1000,7 +1005,7 @@ export function useDeliveryWorkspace(input: {
         const selAddr = selCust?.addresses.find((x) => x.id === snapshot.addressId) ?? null;
         const partySnapshot = { customer_name: selCust?.name ?? custName, customer_phone: selCust?.phone ?? null, address_text: selAddr ? addressLine(selAddr) : null };
         if (existing) {
-          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued", customer_local: customerLocal, address_local: addressLocal, party_snapshot: partySnapshot });
+          await updatePosOfflineTxn(existing.local_txn_id, { order_payload: payload, sent_to_kitchen: true, status: "queued", customer_local: customerLocal, address_local: addressLocal, party_snapshot: partySnapshot, shift_id: capturedShift as string, pending_shift_local_id: shiftRef.shift_local });
         } else {
           await addPosOfflineTxn({
             local_txn_id: localId,
@@ -1011,7 +1016,8 @@ export function useDeliveryWorkspace(input: {
             terminal_id: dev.terminal_id,
             cashier_user_id: pos.userId as string,
             cashier_user_name: pos.userName,
-            shift_id: snapshot.shiftId as string,
+            shift_id: capturedShift as string,
+            pending_shift_local_id: shiftRef.shift_local,
             created_at: new Date().toISOString(),
             order_payload: payload,
             // No payment offline - the delivery order syncs UNPAID, exactly as an

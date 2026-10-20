@@ -127,6 +127,7 @@ import {
   getOperationalTableTotals,
   overlayTableTotals,
   shiftlessCanonicalOrders,
+  historicalShiftlessNotice,
   SUMMARY_ONLY_SETTLE_MESSAGE,
   shiftlessRefusal,
   tablesWithUnreflectedWork,
@@ -446,6 +447,15 @@ export function useDineInWorkspace(input: {
       ? "This table's offline payment is still syncing — wait a moment; the floor refreshes when it lands."
       : null;
 
+  // rc.14 (F1/F2/F5) — ONLINE, the selected table's loaded server bill holds an order WITHOUT a shift
+  // (historical rc.4–rc.11 contamination): pay / move / merge are refused up-front with the actionable
+  // explanation instead of a server refusal. Never re-attributed to a current shift. Clean bills unaffected.
+  const historicalShiftlessReason: string | null = useMemo(() => {
+    if (!input.online || !selected || !tables.bill || tables.bill.tableId !== selected.id) return null;
+    const hits = shiftlessCanonicalOrders(tables.bill, null);
+    return hits.length > 0 ? historicalShiftlessNotice(hits) : null;
+  }, [input.online, selected, tables.bill]);
+
   const openGate: Gate = useMemo(() => {
     if (settleSyncHoldReason) return { allowed: false, reason: settleSyncHoldReason };
     const base = canOpenTable(pos.access, hasOpenShift);
@@ -481,13 +491,16 @@ export function useDineInWorkspace(input: {
       permitted.allowed && !input.online
         ? { allowed: false, reason: `${what} needs a connection — the server moves the whole bill (rounds, payments, balance) in one step. Reconnect to ${verb}.` }
         : tableOpGate({ kind, permitted, ...common });
+    // rc.14 — a historical shift-less bill is refused as a Move / Merge source with the explanation
+    // (permission still first: an unpermitted operator keeps the permission reason).
+    const historical = (g: Gate): Gate => (g.allowed && historicalShiftlessReason ? { allowed: false, reason: historicalShiftlessReason } : g);
     return {
-      move: serverCoordinated(canMoveTable(pos.access), "move", "Moving a table", "move it"),
+      move: historical(serverCoordinated(canMoveTable(pos.access), "move", "Moving a table", "move it")),
       close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
-      merge: serverCoordinated(canMergeTables(pos.access), "merge", "Merging tables", "merge them"),
+      merge: historical(serverCoordinated(canMergeTables(pos.access), "merge", "Merging tables", "merge them")),
     };
-  }, [pos.access, selected, hasOpenShift, input.online]);
+  }, [pos.access, selected, hasOpenShift, input.online, historicalShiftlessReason]);
 
   // Phase C/D — offline capture is live when the backend is unreachable AND the device is
   // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
@@ -528,8 +541,9 @@ export function useDineInWorkspace(input: {
     });
     // rc.10 — a bill settled offline is CLOSED locally (it leaves the active projection), so payTableGate
     // already refuses a second settle of it ("no open bill"); a NEW bill on the reused table is payable.
+    if (g.allowed && historicalShiftlessReason) return { allowed: false, reason: historicalShiftlessReason };
     return g;
-  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying, settleSyncHoldReason]);
+  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying, settleSyncHoldReason, historicalShiftlessReason]);
 
   const select = useCallback(
     (id: string) => {
