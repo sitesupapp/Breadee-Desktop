@@ -108,8 +108,17 @@ jobs:
           $exe.FullName | Set-Content pre_exe.txt
           $exe.VersionInfo.FileVersion | Set-Content ev\pre_fileversion.txt -NoNewline
           "installed: $($exe.FullName) fileversion=$($exe.VersionInfo.FileVersion)"
+          # The silent installer may already have started an instance WITHOUT the debug flag; the app is
+          # single-instance (and WebView2 reuses a running browser for the same profile), so a second
+          # launch would be forwarded to it. Stop it first, then launch with remote debugging.
+          "running before launch:"; Get-Process | Where-Object { $_.Name -match 'breadee|msedgewebview2' } | Select-Object Name,Id,Path | Format-Table -Auto | Out-String
+          Get-Process | Where-Object { $_.Path -eq $exe.FullName } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 5
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
           Start-Process $exe.FullName
+          Start-Sleep 10
+          "running after launch:"; Get-Process | Where-Object { $_.Name -match 'breadee|msedgewebview2' } | Select-Object Name,Id | Format-Table -Auto | Out-String
+          Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Select-Object -First 1 -ExpandProperty CommandLine
           python ci\desktop-1037\cdp.py seed ev\seed.json
           $dd = "$env:LOCALAPPDATA\app.breadee.desktop"
           "datadir: $dd exists=$(Test-Path $dd)"
@@ -133,7 +142,7 @@ jobs:
           $running = Get-Process | Where-Object { $_.Path -eq $p }
           $cdp = $false; try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json -TimeoutSec 3 | Out-Null; $cdp = $true } catch {}
           "relaunched by installer: $([bool]$running) cdp: $cdp"
-          if(-not $cdp){ $running | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'; Start-Process $p }
+          if(-not $cdp){ $running | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 5; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'; Start-Process $p; Start-Sleep 10 }
           python ci\desktop-1037\cdp.py post ev\post.json
           $dd = "$env:LOCALAPPDATA\app.breadee.desktop"
           Get-ChildItem $dd -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName.Substring($dd.Length))`t$($_.Length)" } | Set-Content ev\datadir_post.txt
