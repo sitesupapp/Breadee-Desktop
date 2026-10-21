@@ -33,7 +33,18 @@ for name, pre in (seed.get("idb") or {}).items():
     check(f"IndexedDB '{name}' kept (version {pre.get('version')}->{(po or {}).get('version')}), no store lost/shrunk", ok and not lost, ",".join(lost))
 check("data-folder marker file preserved byte-for-byte", facts.get("marker_pre") and facts.get("marker_pre") == facts.get("marker_post"), "")
 check("data folder still present", facts.get("datadir_exists_post") is True, facts.get("datadir"))
-check("channel served latest.json and the installer", facts.get("served_manifest") and facts.get("served_installer"), "")
+if facts.get("live"):
+    # LIVE post-publish mode: the real production channel + the real GitHub Release asset.
+    check("LIVE: downloaded release asset SHA256 = signed build", facts.get("asset_sha256_ok") is True, facts.get("asset_sha256"))
+    post2 = load("post2.json")
+    check("second launch: still 1.0.37", post2.get("version") == "1.0.37", post2.get("version"))
+    check("second launch: markers still present", post2.get("lsMarker") == seed.get("planted") and (post2.get("idbMarker") or {}).get("marker") == seed.get("planted"), "")
+    a, b = (post.get("idb") or {}).get("breadee-desktop"), (post2.get("idb") or {}).get("breadee-desktop")
+    check("second launch: local DB migration idempotent (same version, same stores, no loss)", a is not None and b is not None and a.get("version") == b.get("version") and set(a.get("stores", {})) == set(b.get("stores", {})) and all(b["stores"][s] >= n for s, n in a.get("stores", {}).items()), f"{(a or {}).get('version')} -> {(b or {}).get('version')}")
+    hosts = set(post.get("hosts", [])) | set(post2.get("hosts", []))
+    check("production backend contacted; staging never", any("cltlqfqormkhppmbvyrv" in h for h in hosts) and not any("azjxprewycygsocusxjn" in h for h in hosts), ",".join(sorted(hosts)))
+else:
+    check("channel served latest.json and the installer", facts.get("served_manifest") and facts.get("served_installer"), "")
 
 ok = all(x["ok"] for x in checks)
 report = {"verdict": "PASS" if ok else "FAIL", "checks": checks}
