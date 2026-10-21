@@ -54,21 +54,30 @@ PostgREST: the migration ends with `notify pgrst, 'reload schema'`; even before 
 
 ## 5. Rollback / recovery
 
-### 5.1 Server (only if a contract change itself is proven harmful)
+### 5.1 Server
 
-`docs/offline/migrations/prod_1037_offline_contracts_ROLLBACK.sql` (rehearsed on production in a
-rolled-back transaction: restores byte-identical pre-image bodies and ACLs).
+**Before 1.0.37 is published to the production channel (no terminal can have adopted it):**
+`docs/offline/migrations/prod_1037_offline_contracts_ROLLBACK.sql` may be used (rehearsed on
+production in a rolled-back transaction: restores byte-identical pre-image bodies and ACLs). It
+refuses to run unless the same transaction sets
+`set local breadee.rollback_1037_ack = 'PRE_PUBLICATION_NO_ADOPTION'`, and it refuses if any
+`pos_order_items.client_line_id` is non-NULL (1.0.37 adoption evidence).
 
-- It **keeps** `pos_order_items.client_line_id` and its values. No reconciliation evidence is lost;
-  dropping the column is a separate explicit decision and is not part of this runbook.
-- It drops `pos_order_item_map` (read-only; no data).
-- Effect on 1.0.37 terminals after rollback: offline refund replays (which send
-  `p_expected_refund_usd`) and offline split correlation fail closed into **needs_attention** on the
-  device — the local records are preserved, no money moves, nothing is retried blindly. Re-applying
-  the forward migration (fix-forward) lets them be retried from the Sync Center.
-- Online selling on 1.0.37 is unaffected by a server rollback (online paths never send the new fields
-  except `expected_order_id` on offline dine-in rounds ≥ 2 — ignored by the old body, which is the
-  pre-1.0.37 behaviour).
+- It **keeps** `pos_order_items.client_line_id`; it drops `pos_order_item_map` (read-only; no data).
+
+**After publication: the exact-pre-image rollback is PROHIBITED — fix-forward only.**
+Reason: it would remove the C1 `EXPECTED_ORDER_MISMATCH` guard while installed 1.0.37 terminals
+(which cannot be downgraded) keep sending `expected_order_id` on offline dine-in rounds ≥ 2; the
+restored 1.0.36 body ignores that field, so a queued round whose original bill was closed or replaced
+would be silently appended to another open bill for the table.
+
+Post-publication recovery if a contract is proven harmful:
+- write a targeted, reviewed fix-forward migration that changes ONLY the harmful contract and keeps
+  C1 (and every other contract 1.0.37 depends on) in place; same PRE/POST guard discipline; Konan
+  review; explicit human GO;
+- never remove `p_expected_refund_usd` from `pos_void_order` while 1.0.37 is in the field (offline
+  refund replays would fail "function not found" — fail-closed to needs_attention, but avoidable);
+- the client side recovers via 1.0.38 on the same channel (§5.2).
 
 ### 5.2 Desktop updater channel
 
@@ -82,5 +91,6 @@ rolled-back transaction: restores byte-identical pre-image bodies and ACLs).
 ### 5.3 Queued offline operations
 
 Offline operations live in the device's `operations` store and are replayed exactly-once by
-`client_op_id`. Neither the server rollback nor a channel restore deletes them; a refused replay is
-parked in `needs_attention`, visible in the Sync Center, and never auto-discarded.
+`client_op_id`. A channel restore never deletes them; a refused replay is parked in
+`needs_attention`, visible in the Sync Center, and never auto-discarded. (Server-side, the C1 guard is
+never removed after publication — §5.1 — so a stale dine-in round is always refused, never misrouted.)

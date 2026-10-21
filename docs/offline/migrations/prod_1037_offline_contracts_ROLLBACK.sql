@@ -7,14 +7,36 @@
 -- correlation recorded after the release (fix-forward principle). Drop it only on an explicit
 -- decision (statement at the end, commented out).
 --
--- IMPORTANT: once 1.0.37 terminals are in the field, rolling the server back makes their
--- offline refund replay ("function not found") and offline split of offline rounds fail into
--- needs_attention (no money moves, nothing is lost). Prefer FIX-FORWARD; use this only if a
--- contract change itself is proven harmful.
+-- !!! PRE-PUBLICATION / NO-ADOPTION USE ONLY !!!
+-- This exact-pre-image rollback REMOVES the C1 EXPECTED_ORDER_MISMATCH guard. Installed 1.0.37
+-- terminals keep sending expected_order_id on offline dine-in rounds >= 2 (restoring the 1.0.36
+-- channel manifest does not downgrade them). Against the restored 1.0.36 pos_save_order body, a
+-- queued round whose original bill was closed/replaced would be SILENTLY APPENDED TO ANOTHER OPEN
+-- BILL for that table. Therefore:
+--   * before 1.0.37 is published to desktop-production-channel (or if no terminal has adopted it):
+--     this script may be used;
+--   * after publication: this script is PROHIBITED. Recovery is FIX-FORWARD ONLY — a targeted,
+--     reviewed migration that keeps C1 (and anything 1.0.37 depends on) and corrects only the
+--     contract proven harmful (runbook §5.1).
+-- Enforced below: it refuses unless the operator sets
+--   set local breadee.rollback_1037_ack = 'PRE_PUBLICATION_NO_ADOPTION';
+-- in the same transaction, and it refuses if any 1.0.37 adoption evidence exists
+-- (a non-NULL pos_order_items.client_line_id is written only by a 1.0.37 offline replay).
 -- ============================================================================
 
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';
+
+do $ack$
+begin
+  if coalesce(current_setting('breadee.rollback_1037_ack', true), '') <> 'PRE_PUBLICATION_NO_ADOPTION' then
+    raise exception 'ROLLBACK REFUSED: pre-publication only. After 1.0.37 publication recovery is fix-forward (runbook 5.1). Set breadee.rollback_1037_ack = PRE_PUBLICATION_NO_ADOPTION only if 1.0.37 was never published.';
+  end if;
+  if exists (select 1 from public.pos_order_items where client_line_id is not null) then
+    raise exception 'ROLLBACK REFUSED: 1.0.37 adoption evidence (client_line_id rows) exists. Fix-forward only (runbook 5.1).';
+  end if;
+end
+$ack$;
 
 create or replace function pg_temp._r1037_once(p_src text, p_anchor text, p_repl text, p_label text, p_expect int default 1)
 returns text language plpgsql as $f$
