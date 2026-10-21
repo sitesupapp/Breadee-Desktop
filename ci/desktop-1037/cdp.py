@@ -70,7 +70,8 @@ async function __qaSnap(){
     r.onsuccess = () => { const db = r.result; const q = db.transaction('m').objectStore('m').get('k'); q.onsuccess = () => { db.close(); res(q.result || null); }; q.onerror = () => { db.close(); res(null); }; };
     r.onerror = () => res(null);
   });
-  return { version, href: location.href, localStorageKeys: ls, lsMarker: localStorage.getItem('qa_1037_marker'), idbMarker: qa, idb };
+  const hosts = Array.from(new Set(performance.getEntriesByType('resource').map((e) => { try { return new URL(e.name).host; } catch (x) { return ''; } }).filter(Boolean)));
+  return { version, href: location.href, hosts, localStorageKeys: ls, lsMarker: localStorage.getItem('qa_1037_marker'), idbMarker: qa, idb };
 }
 """
 
