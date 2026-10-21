@@ -1,0 +1,117 @@
+name: desktop-1037-live-verify
+
+# POST-PUBLISH verification against the REAL production channel (no redirect, no QA manifest):
+# install the UNMODIFIED production 1.0.36 release on an ephemeral Windows runner, plant data
+# markers, let the app's OWN updater fetch the live desktop-production-channel/latest.json and the
+# live GitHub Release asset, install in place, relaunch, launch a SECOND time, and gate on version,
+# notes, data preservation, migration idempotency and production-backend use. Writes nothing.
+on:
+  push:
+    branches: [ "ci/desktop-1037-update-proof" ]
+    paths: [ ".github/workflows/desktop-1037-live-verify.yml" ]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      EXPECT_SHA256: 6cf4c7dea93590fd44240f60b18e6bd71a7b1bd894e31ff10c3a2507e3c76a97
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download production 1.0.36 + check the LIVE 1.0.37 asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ev | Out-Null
+          gh release download desktop-prod-v1.0.36 -R sitesupapp/Breadee-Desktop -p "Breadee_1.0.36_x64-setup.exe" -D v136
+          python -m pip install --quiet websocket-client
+          $m = Invoke-RestMethod https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json
+          "live channel version: $($m.version)"; $m | ConvertTo-Json -Depth 6 | Set-Content ev\live_latest.json -Encoding utf8
+          Invoke-WebRequest -UseBasicParsing $m.platforms.'windows-x86_64'.url -OutFile live_asset.exe
+          (Get-FileHash live_asset.exe -Algorithm SHA256).Hash.ToLower() | Set-Content ev\asset_sha256.txt -NoNewline
+          Get-Content ev\asset_sha256.txt
+      - name: Install UNMODIFIED production 1.0.36 + launch + plant markers
+        shell: pwsh
+        run: |
+          Start-Process (Resolve-Path v136\Breadee_1.0.36_x64-setup.exe) -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          $exe = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Depth 3 -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(Breadee|breadee)' -and $_.Name -notmatch 'setup|uninstall' } | Select-Object -First 1
+          if(-not $exe){ throw "installed exe not found" }
+          $exe.FullName | Set-Content pre_exe.txt
+          $exe.VersionInfo.FileVersion | Set-Content ev\pre_fileversion.txt -NoNewline
+          Get-Process | Where-Object { $_.Path -eq $exe.FullName } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 5
+          foreach($root in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments','HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'){
+            New-Item -Path $root -Force | Out-Null
+            New-ItemProperty -Path $root -Name 'breadee-desktop.exe' -Value '--remote-debugging-port=9222' -PropertyType String -Force | Out-Null
+          }
+          Start-Process $exe.FullName
+          Start-Sleep 10
+          python ci\desktop-1037\cdp.py seed ev\seed.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop"
+          $marker = "qa-1037-live marker $(New-Guid)"
+          $marker | Set-Content "$dd\qa-1037-marker.txt" -NoNewline
+          $marker | Set-Content ev\marker_pre.txt -NoNewline
+      - name: In-app update from the LIVE production channel
+        shell: pwsh
+        run: |
+          python ci\desktop-1037\cdp.py update ev\update.json
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $deadline = (Get-Date).AddMinutes(6)
+          do { Start-Sleep 5; $v = (Get-Item $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion; "fileversion now: $v" } while(($v -notlike '1.0.37*') -and (Get-Date) -lt $deadline)
+          Start-Sleep 20
+      - name: First 1.0.37 launch (relaunched by the installer) + snapshot
+        shell: pwsh
+        run: |
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $cdp = $false; try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json -TimeoutSec 3 | Out-Null; $cdp = $true } catch {}
+          "relaunched by installer with debug port: $cdp"
+          if(-not $cdp){ Get-Process | Where-Object { $_.Path -eq $p } | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 5; Start-Process $p; Start-Sleep 10 }
+          Start-Sleep 15
+          python ci\desktop-1037\cdp.py post ev\post.json
+      - name: SECOND launch (clean restart) + snapshot
+        shell: pwsh
+        run: |
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          Get-Process | Where-Object { $_.Path -eq $p } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 6
+          Start-Process $p
+          Start-Sleep 25
+          python ci\desktop-1037\cdp.py post ev\post2.json
+          $alive = [bool](Get-Process | Where-Object { $_.Path -eq $p })
+          "second launch alive after 25s+: $alive"
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop"
+          $exe = Get-Item $p
+          $facts = [ordered]@{
+            live = $true
+            pre_exe = $p; post_exe = $exe.FullName; post_fileversion = $exe.VersionInfo.FileVersion
+            pre_fileversion = (Get-Content ev\pre_fileversion.txt -Raw)
+            datadir = $dd; datadir_exists_post = (Test-Path $dd)
+            marker_pre = (Get-Content ev\marker_pre.txt -Raw); marker_post = (Get-Content "$dd\qa-1037-marker.txt" -Raw -ErrorAction SilentlyContinue)
+            asset_sha256 = (Get-Content ev\asset_sha256.txt -Raw); asset_sha256_ok = ((Get-Content ev\asset_sha256.txt -Raw) -eq $env:EXPECT_SHA256)
+            second_launch_alive = $alive
+          }
+          $facts | ConvertTo-Json | Set-Content ev\facts.json -Encoding utf8
+          Get-Content ev\facts.json
+      - name: GATE — live update + preservation + idempotency + production backend
+        shell: pwsh
+        run: python ci\desktop-1037\gate.py ev
+      - name: Screenshot
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size)
+          $bmp.Save("$PWD\ev\screen.png")
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-1037-live-verify-evidence
+          path: ev/**
+          if-no-files-found: ignore
