@@ -1,0 +1,177 @@
+name: desktop-1037-update-proof
+
+# Pre-publish gates for Ready Desktop 1.0.37 (no publication, no channel write):
+#  verify : the signed build-only artifact's SHA256 + minisign signature against the production
+#           pubkey baked into the INSTALLED fleet (1.0.36) and into 1.0.37.
+#  inplace: on an EPHEMERAL Windows runner, install the UNMODIFIED production 1.0.36 release,
+#           plant data markers, redirect the baked production endpoint to a local trusted-TLS
+#           server serving the signed 1.0.37 with the approved bilingual notes, run the app's OWN
+#           updater (check -> download_and_install, passive NSIS, in place), relaunch, and GATE on
+#           version + data preservation. Zero fleet exposure; the runner is destroyed after.
+on:
+  push:
+    branches: [ "ci/desktop-1037-update-proof" ]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+env:
+  RUN_ID: "39594685835"
+  ARTIFACT: breadee-desktop-1.0.37-signed-unpublished
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Download signed artifact
+        run: gh run download "$RUN_ID" -R sitesupapp/Breadee-Desktop -n "$ARTIFACT" -D art && ls -la art
+      - name: SHA256 + identity + signature (GATING)
+        run: |
+          set -e
+          cd art
+          sha256sum -c SHA256SUMS.txt
+          node -e "const m=require('./latest.preview.json');if(m.version!=='1.0.37')throw new Error('preview version '+m.version);const s=require('fs').readFileSync('Breadee_1.0.37_x64-setup.exe.sig','utf8').trim();if(m.platforms['windows-x86_64'].signature.trim()!==s)throw new Error('preview signature != .sig');console.log('preview manifest: 1.0.37, signature matches .sig')"
+          cd ..
+          for ref in c655651e4c89ccbdc1e66923c7d20ad0f6340578 911f2be6c5bc512d802f59f1b2bcd319d675a25c; do
+            git show "$ref:src-tauri/tauri.conf.json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{process.stdout.write(JSON.parse(s).plugins.updater.pubkey)})" > "pk_$ref.b64"
+          done
+          cmp pk_c655651e4c89ccbdc1e66923c7d20ad0f6340578.b64 pk_911f2be6c5bc512d802f59f1b2bcd319d675a25c.b64 && echo "PUBKEY: 1.0.36 fleet == 1.0.37 (unchanged)"
+          base64 -d pk_c655651e4c89ccbdc1e66923c7d20ad0f6340578.b64 > prod_pub.key
+          base64 -d art/Breadee_1.0.37_x64-setup.exe.sig > sig_plain.txt
+          head -c 200 sig_plain.txt; echo
+          mkdir -p verifier/src
+          printf '%s\n' '[package]' 'name = "v"' 'version = "0.0.0"' 'edition = "2021"' '[dependencies]' 'minisign-verify = "0.2"' > verifier/Cargo.toml
+          printf '%s\n' 'use minisign_verify::{PublicKey, Signature};' 'use std::fs;' 'fn main(){' '  let a:Vec<String>=std::env::args().collect();' '  let pkfile=fs::read_to_string(&a[1]).unwrap();' '  let pk=PublicKey::decode(&pkfile).or_else(|_|PublicKey::from_base64(pkfile.lines().last().unwrap().trim())).expect("pk");' '  let sig=Signature::decode(&fs::read_to_string(&a[2]).unwrap()).expect("sigdecode");' '  let d=fs::read(&a[3]).unwrap();' '  pk.verify(&d,&sig,false).expect("VERIFY FAILED");' '  println!("PROD-PUBKEY SIGNATURE: VERIFIED (minisign-verify, the Tauri updater verifier)");' '}' > verifier/src/main.rs
+          (cd verifier && cargo run --quiet --release -- ../prod_pub.key ../sig_plain.txt ../art/Breadee_1.0.37_x64-setup.exe)
+
+  inplace:
+    needs: verify
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOST: raw.githubusercontent.com
+      CHANNEL_PATH: sitesupapp/Breadee-Desktop/desktop-production-channel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download production 1.0.36 (release) + signed 1.0.37 (artifact)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "serve\$env:CHANNEL_PATH", ev | Out-Null
+          gh release download desktop-prod-v1.0.36 -R sitesupapp/Breadee-Desktop -p "Breadee_1.0.36_x64-setup.exe" -D v136
+          gh run download $env:RUN_ID -R sitesupapp/Breadee-Desktop -n $env:ARTIFACT -D v137
+          Get-ChildItem -Recurse v136, v137 | Select-Object FullName,Length | Format-Table -Auto
+          python -m pip install --quiet websocket-client
+      - name: QA manifest (approved bilingual notes) + installer under the channel path
+        shell: pwsh
+        run: |
+          Copy-Item v137\Breadee_1.0.37_x64-setup.exe "serve\$env:CHANNEL_PATH\Breadee_1.0.37_x64-setup.exe"
+          python ci\desktop-1037\manifest.py v137\Breadee_1.0.37_x64-setup.exe.sig "https://$env:HOST/$env:CHANNEL_PATH/Breadee_1.0.37_x64-setup.exe" "serve\$env:CHANNEL_PATH\latest.json"
+      - name: Trusted self-signed cert for the endpoint host
+        shell: pwsh
+        run: |
+          $c = New-SelfSignedCertificate -DnsName $env:HOST -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
+          $pwd = ConvertTo-SecureString 'qa' -AsPlainText -Force
+          Export-PfxCertificate -Cert $c -FilePath cert.pfx -Password $pwd | Out-Null
+          Export-Certificate -Cert $c -FilePath cert.cer | Out-Null
+          Import-Certificate -FilePath cert.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          & "C:\Program Files\Git\usr\bin\openssl.exe" pkcs12 -in cert.pfx -nocerts -nodes -passin pass:qa -out key.pem
+          & "C:\Program Files\Git\usr\bin\openssl.exe" pkcs12 -in cert.pfx -clcerts -nokeys -passin pass:qa -out crt.pem
+      - name: Redirect endpoint host -> local logging HTTPS server
+        shell: pwsh
+        run: |
+          Add-Content -Path "$env:windir\System32\drivers\etc\hosts" -Value "`n127.0.0.1 $env:HOST"
+          @'
+          import http.server, ssl, functools, datetime
+          class H(http.server.SimpleHTTPRequestHandler):
+              def log_message(self, fmt, *args):
+                  open("access.log","a").write(datetime.datetime.utcnow().isoformat()+" "+(fmt%args)+"\n")
+          h = functools.partial(H, directory="serve")
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("crt.pem","key.pem")
+          s = http.server.HTTPServer(("127.0.0.1",443), h); s.socket = ctx.wrap_socket(s.socket, server_side=True)
+          s.serve_forever()
+          '@ | Set-Content serve.py -Encoding utf8
+          Start-Process python -ArgumentList 'serve.py' -WindowStyle Hidden
+          Start-Sleep 4
+          (Invoke-WebRequest -UseBasicParsing "https://$env:HOST/$env:CHANNEL_PATH/latest.json").StatusCode
+      - name: Install UNMODIFIED production 1.0.36 + launch + plant markers
+        shell: pwsh
+        run: |
+          Start-Process (Resolve-Path v136\Breadee_1.0.36_x64-setup.exe) -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          $exe = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Depth 3 -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(Breadee|breadee)' -and $_.Name -notmatch 'setup|uninstall' } | Select-Object -First 1
+          if(-not $exe){ throw "installed exe not found" }
+          $exe.FullName | Set-Content pre_exe.txt
+          $exe.VersionInfo.FileVersion | Set-Content ev\pre_fileversion.txt -NoNewline
+          "installed: $($exe.FullName) fileversion=$($exe.VersionInfo.FileVersion)"
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
+          Start-Process $exe.FullName
+          python ci\desktop-1037\cdp.py seed ev\seed.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop"
+          "datadir: $dd exists=$(Test-Path $dd)"
+          New-Item -ItemType Directory -Force $dd | Out-Null
+          $marker = "qa-1037 marker $(New-Guid)"
+          $marker | Set-Content "$dd\qa-1037-marker.txt" -NoNewline
+          $marker | Set-Content ev\marker_pre.txt -NoNewline
+          Get-ChildItem $dd -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName.Substring($dd.Length))`t$($_.Length)" } | Set-Content ev\datadir_pre.txt
+      - name: In-app update via the app's own updater (check -> download_and_install)
+        shell: pwsh
+        run: |
+          python ci\desktop-1037\cdp.py update ev\update.json
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $deadline = (Get-Date).AddMinutes(6)
+          do { Start-Sleep 5; $v = (Get-Item $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion; "fileversion now: $v" } while(($v -notlike '1.0.37*') -and (Get-Date) -lt $deadline)
+          Start-Sleep 20
+      - name: Relaunch (if the installer did not) + post snapshot
+        shell: pwsh
+        run: |
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $running = Get-Process | Where-Object { $_.Path -eq $p }
+          $cdp = $false; try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json -TimeoutSec 3 | Out-Null; $cdp = $true } catch {}
+          "relaunched by installer: $([bool]$running) cdp: $cdp"
+          if(-not $cdp){ $running | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'; Start-Process $p }
+          python ci\desktop-1037\cdp.py post ev\post.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop"
+          Get-ChildItem $dd -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName.Substring($dd.Length))`t$($_.Length)" } | Set-Content ev\datadir_post.txt
+          $exe = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Depth 3 -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(Breadee|breadee)' -and $_.Name -notmatch 'setup|uninstall' } | Select-Object -First 1
+          $log = if(Test-Path access.log){ Get-Content access.log -Raw } else { '' }
+          Copy-Item access.log ev\access.log -ErrorAction SilentlyContinue
+          $mp = Get-Content "$dd\qa-1037-marker.txt" -Raw -ErrorAction SilentlyContinue
+          $facts = [ordered]@{
+            pre_exe = $p; post_exe = $exe.FullName; post_fileversion = $exe.VersionInfo.FileVersion
+            pre_fileversion = (Get-Content ev\pre_fileversion.txt -Raw -ErrorAction SilentlyContinue)
+            datadir = $dd; datadir_exists_post = (Test-Path $dd)
+            marker_pre = (Get-Content ev\marker_pre.txt -Raw -ErrorAction SilentlyContinue); marker_post = $mp
+            served_manifest = ($log -match 'GET /sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json'); served_installer = ($log -match 'GET /sitesupapp/Breadee-Desktop/desktop-production-channel/Breadee_1.0.37_x64-setup.exe')
+          }
+          $facts | ConvertTo-Json | Set-Content ev\facts.json -Encoding utf8
+          Get-Content ev\facts.json
+      - name: GATE — update-in-place + zero data loss
+        shell: pwsh
+        run: python ci\desktop-1037\gate.py ev
+      - name: Screenshot
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size)
+          $bmp.Save("$PWD\ev\screen.png")
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          (Get-Content "$env:windir\System32\drivers\etc\hosts") -notmatch 'raw.githubusercontent.com' | Set-Content "$env:windir\System32\drivers\etc\hosts"
+          Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -match 'raw.githubusercontent.com' } | Remove-Item -Force -ErrorAction SilentlyContinue
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-1037-update-proof-evidence
+          path: |
+            ev/**
+            serve/**/latest.json
+          if-no-files-found: ignore
