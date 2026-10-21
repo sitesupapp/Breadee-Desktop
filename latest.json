@@ -1,11 +1,11 @@
 {
-    "version":  "1.0.36",
-    "notes":  "Breadee Desktop 1.0.36 - Smarter table merging with partial payments, improved shift management, per-branch end-of-shift approval, direct POS access for owners, better customer accounts, and Force Transfer controls.",
-    "pub_date":  "2026-10-16T15:45:00Z",
-    "platforms":  {
-                      "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dHdMakNMOTF5NXU1V05JMG9PREcvU29CenNRN2IxZHV3WC84R3JFUlhWYWx5NnI5RStOSDVPd090YVBzMEVuTTlLS0tJcEpuRG9BYnhweWJCZm8yK1FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTM5ODY1CWZpbGU6QnJlYWRlZV8xLjAuMzZfeDY0LXNldHVwLmV4ZQp4OGpHZFlmclNacGwwM1FCQ1J3bVo5MEVCNlBBb0hOZFU3ejFnRy93TnpqM3VTTXhoOGJhOU5rN2xOU1ZCTkhySGlnenlNMnBGdEVPTVgrMEZmNzhCQT09Cg==",
-                                             "url":  "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.36/Breadee_1.0.36_x64-setup.exe"
-                                         }
-                  }
+  "version": "1.0.37",
+  "notes": "Full Offline Mode · وضع عدم الاتصال الكامل\n\nFull Offline Mode is now expanded across Ready Desktop. You can keep working during internet or backend interruptions with broader offline support for Takeaway, Dine-In and Delivery, including locally supported order editing, payments, customers, table operations, printing and automatic synchronization when the connection returns. Your existing data, orders and settings are preserved. Breadee safely reconciles offline work after reconnecting and protects against duplicate transactions. Some operations that require live server authorization remain connection-required for safety.\n\nتم توسيع وضع عدم الاتصال الكامل في Ready Desktop. يمكنك متابعة العمل عند انقطاع الإنترنت أو تعذر الوصول إلى الخادم، مع دعم أوسع للطلبات في Takeaway وDine-In وDelivery، بما في ذلك تعديل الطلبات، وعمليات الدفع المدعومة، والعملاء، والطاولات، والطباعة، والمزامنة التلقائية عند عودة الاتصال. يتم الحفاظ على بياناتك الحالية وطلباتك وإعداداتك، وتقوم Breadee بمطابقة العمليات التي تمت دون اتصال بشكل آمن بعد عودة الاتصال مع الحماية من تكرار العمليات. بعض العمليات التي تحتاج إلى تحقق مباشر من الخادم ستبقى بحاجة إلى اتصال حفاظاً على الأمان.",
+  "pub_date": "2026-10-21T14:17:43Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dHlmTjgwTVlyK05aSTA2d0VDRFpLMEhYQWFaa3MvR25sV3VyeEtCcnRxQkdLc0lKMXBFYU5kMnBRSjdVTWx3Wlhkd3FPc3djaHNXMzlEcVB1RU5KVHdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNTg1NzMzCWZpbGU6QnJlYWRlZV8xLjAuMzdfeDY0LXNldHVwLmV4ZQpEVHZjaFA5SmlHREJXQnZUMzNEeDd3elJuV1JvRmNrOE9MTGFicG10QkxWTUNISEhtc0dqN3g5UlF2NHF6cXAwd0ZwVHUvZjdJQm9iTkdJekF5RkVDUT09Cg==",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.37/Breadee_1.0.37_x64-setup.exe"
+    }
+  }
 }
