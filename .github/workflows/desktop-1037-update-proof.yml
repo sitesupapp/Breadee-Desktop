@@ -54,6 +54,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       HOST: raw.githubusercontent.com
       CHANNEL_PATH: sitesupapp/Breadee-Desktop/desktop-production-channel
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
       - name: Download production 1.0.36 (release) + signed 1.0.37 (artifact)
