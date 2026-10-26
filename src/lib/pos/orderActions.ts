@@ -16,7 +16,7 @@
 // same reason.
 
 import { voidActionFor, type VoidAction } from "@/lib/pos/deliveryOrderManagement";
-import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import { isMergedSource, mergedTargetLabel, type MergeProvenance, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 /** States from which nothing further can be done. */
 export const TERMINAL_STATUSES = ["voided", "cancelled", "refunded"] as const;
@@ -118,11 +118,21 @@ export function canPrintOrder(): boolean {
 
 // --- display helpers ---------------------------------------------------------
 
-/** The payment cell. An unpaid order shows no method, because it has none. */
-export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method">): string {
+/** The payment cell. An unpaid order shows no method, because it has none.
+ *  1.0.38 (Bug 4): a merged clean source has no balance of its own — it MOVED (never "unpaid"). */
+export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method"> & Partial<Pick<ShiftOpenOrder, "status">> & MergeProvenance): string {
+  if (order.status != null && isMergedSource({ status: order.status, merged_into_order_id: order.merged_into_order_id })) {
+    return `No balance — moved to #${mergedTargetLabel(order)}`;
+  }
   if (order.payment_status === "refunded") return "refunded";
   if (order.payment_status !== "paid") return order.payment_status || "unpaid";
   return order.payment_method ? `paid · ${order.payment_method}` : "paid";
+}
+
+/** 1.0.38 (Bug 4) — the payment badge tone, shared by every surface (a merged source is neutral, not amber). */
+export function paymentTone(order: Pick<ShiftOpenOrder, "payment_status"> & Partial<Pick<ShiftOpenOrder, "status">> & MergeProvenance): "green" | "amber" | "red" | "slate" {
+  if (order.status != null && isMergedSource({ status: order.status, merged_into_order_id: order.merged_into_order_id })) return "slate";
+  return order.payment_status === "paid" ? "green" : order.payment_status === "refunded" ? "red" : "amber";
 }
 
 /** The type cell: the route, plus the table when a dine-in order names one. */

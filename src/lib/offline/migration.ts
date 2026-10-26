@@ -79,9 +79,14 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
       client_op_id: s.client_op_id,
       local_entity_id: s.local_shift_id,
       canonical_entity_id: s.server_shift_id ?? null,
-      dependency_ids: [],
+      // 1.0.38 (Bug 3) — OPEN(N+1) captured after an offline CLOSE(N) replays strictly after that close
+      // (the existing dependency gate; a refused / cancelled close parks it as dependency_failed), and it
+      // must CREATE a shift: require_new makes the server refuse instead of adopting an open one.
+      dependency_ids: s.after_end_op_id ? [s.after_end_op_id] : [],
       depends_on_local_entities: [],
-      payload: { branchId: s.branch_id, openingCash: s.opening_cash_amount },
+      payload: s.after_end_op_id
+        ? { branchId: s.branch_id, openingCash: s.opening_cash_amount, require_new: true, after_end_op_id: s.after_end_op_id, generation: s.generation ?? null }
+        : { branchId: s.branch_id, openingCash: s.opening_cash_amount },
       status: shiftStatus(s.status),
       retry_count: s.attempts ?? 0,
       last_attempt_at: null,

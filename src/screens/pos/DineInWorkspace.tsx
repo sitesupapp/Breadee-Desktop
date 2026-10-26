@@ -136,8 +136,10 @@ import {
   tablesWithUnreflectedWork,
   structuralHoldReason,
   offlineSettleAmount,
+  offlineSettlePin,
   SETTLE_ATTENTION_HOLD_MESSAGE,
   refusedSettleNotice,
+  splitCompletesBill,
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
@@ -1212,7 +1214,7 @@ export function useDineInWorkspace(input: {
    * remaining items with Split) — the paid-item wall; the server stays the payment authority.
    */
   const offlineSettleTarget = useCallback(
-    async (table: TableSummary): Promise<
+    async (table: TableSummary, discount?: { discount_type?: string; discount_value?: number }): Promise<
       | { ok: true; sessionId: string | null; table: CanonicalTableTarget | undefined; deps: string[]; covers: { orderIds: string[]; summary: boolean }; exactAmount: number | null }
       | { ok: false; reason: string }
     > => {
@@ -1235,6 +1237,9 @@ export function useDineInWorkspace(input: {
       // Konan rc.13 — a bill known only as a map SUMMARY (its order never cached on this device) cannot
       // prove its shift either: fail closed BEFORE any capture (full payment and On Account alike).
       if (p.summaryOnly) return { ok: false, reason: SUMMARY_ONLY_SETTLE_MESSAGE };
+      // 1.0.38 G3 — the amount pin with the cashier's discount, exactly as the server computes it.
+      const pin = offlineSettlePin(amount.exactAmount, { subtotal: p.bill.subtotal, collected: p.collected }, discount);
+      if (!pin.ok) return { ok: false, reason: pin.reason };
       const canonicalIds = p.orders.filter((o) => o.orderLocal == null).map((o) => o.orderId).filter((x): x is string => typeof x === "string" && x !== "");
       const hasCanonical = p.summaryOnly || canonicalIds.length > 0;
       return {
@@ -1251,12 +1256,11 @@ export function useDineInWorkspace(input: {
         deps: p.pendingMutationOpIds,
         // EXACTLY the bill on screen — the projection closes this and nothing else.
         covers: { orderIds: canonicalIds, summary: p.summaryOnly },
-        // 1.0.38 (S5) — the amount due is known EXACTLY only for a fully-canonical bill with no local delta
-        // (no unsynced round / edit / leg / move / merge): then it is the server's own total. Otherwise the
-        // pin is omitted (a locally-priced figure is never asserted to the server).
-        // 1.0.38 (Bug 9) — it is the REMAINING obligation R = T − P (prior paid splits deducted), the amount
-        // the S4 server charges / books; equal to T for an unpaid bill (offlineSettleAmount).
-        exactAmount: amount.exactAmount,
+        // 1.0.38 (S5, G3) — the amount THIS DEVICE presents: R_local = T − P of the bill on screen (canonical
+        // and local rounds alike), always pinned, so a round another terminal appends while this device is
+        // offline makes the server REFUSE the settle (PAY_AMOUNT_CHANGED) instead of booking its new R
+        // (offlineSettleAmount), after the cashier's discount (offlineSettlePin).
+        exactAmount: pin.amount,
       };
     },
     [input.offlineScope, input.currency, tables.map],
@@ -1418,6 +1422,11 @@ export function useDineInWorkspace(input: {
             return;
           }
           const sessionDeps = draft ? [draft.open_operation_id, ...draft.rounds.map((r) => r.operation_id)] : [];
+          // 1.0.38 (G1) — a leg that pays everything still open CLOSES the bill locally (like a settle): the
+          // next customer on this table then opens a NEW session, never round N+1 of this paid order.
+          const completes = splitCompletesBill(p, po.key, allocations.map((a) => ({ order_item_id: a.order_item_id, quantity: Number(a.quantity) })))
+            ? { tableId: selected.id, sessionLocal: draft?.local_session_id ?? null, orderIds: po.orderId ? [po.orderId] : [] }
+            : null;
           const cap = await splitOperationalBillOffline({
             scope: input.offlineScope,
             orderId: po.orderId,
@@ -1430,6 +1439,7 @@ export function useDineInWorkspace(input: {
             // Replay only after the lines it pays for exist (rounds) and every earlier edit of this bill.
             // 1.0.38 — and after the offline move / merge that brought this bill here (barrier).
             dependencyIds: [...sessionDeps, ...po.bumpOps, ...creators, ...p.structuralOpIds],
+            completes,
           });
           if (!cap.ok) {
             setSplitError(cap.reason);
@@ -1834,11 +1844,6 @@ export function useDineInWorkspace(input: {
       // Phase D — OFFLINE settle: CAPTURE a pay_table op (durable, exactly-once, dependent on
       // the session's open+rounds), never a server charge. The online path below is unchanged.
       if (offlineCapture && input.offlineScope) {
-        const target = await offlineSettleTarget(table);
-        if (!target.ok) {
-          setPayError(target.reason);
-          return;
-        }
         let offlineDiscount: ReturnType<typeof validateTableDiscount>;
         try {
           offlineDiscount = validateTableDiscount({
@@ -1852,10 +1857,16 @@ export function useDineInWorkspace(input: {
           setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
           return;
         }
+        // 1.0.38 G3 — the target carries the amount collected (R_local after the discount), pinned on the op.
+        const target = await offlineSettleTarget(table, offlineDiscount.fields);
+        if (!target.ok) {
+          setPayError(target.reason);
+          return;
+        }
         // Best-effort LOCAL USD amount for the drawer projection only (server derives the real
         // charge). The provisional bill total is in the order's OWN currency.
         const billCcy: CurrencyCode = settleBill?.currency ?? input.currency;
-        const billTotal = settleBill?.total ?? 0;
+        const billTotal = target.exactAmount ?? settleBill?.total ?? 0;
         const cashAmountUsd =
           dialog.method === "cash"
             ? billCcy === "USD"
@@ -1875,7 +1886,7 @@ export function useDineInWorkspace(input: {
             cashAmountUsd,
             extraDependencyIds: target.deps,
             covers: target.covers,
-            expectedAmount: offlineDiscount.amount > 0 ? null : target.exactAmount,
+            expectedAmount: target.exactAmount,
           });
           setPayOpen(false);
           toast.push({
@@ -2024,15 +2035,15 @@ export function useDineInWorkspace(input: {
           setPayError("Choose a customer before putting a bill on account.");
           return;
         }
-        const target = await offlineSettleTarget(table);
-        if (!target.ok) {
-          setPayError(target.reason);
-          return;
-        }
         const offDiscount =
           dialog.discountType !== "none" && dialog.discountValue.trim() !== ""
             ? { discount_type: dialog.discountType, discount_value: Number(dialog.discountValue) }
             : undefined;
+        const target = await offlineSettleTarget(table, offDiscount);
+        if (!target.ok) {
+          setPayError(target.reason);
+          return;
+        }
         setPaying(true);
         setPayError(null);
         try {
@@ -2045,8 +2056,8 @@ export function useDineInWorkspace(input: {
             discount: offDiscount,
             extraDependencyIds: target.deps,
             covers: target.covers,
-            // 1.0.38 (Bug 9) — R, frozen at capture (only when exact; never with a discount).
-            expectedAmount: offDiscount ? null : target.exactAmount,
+            // 1.0.38 (Bug 9, G3) — R as presented (after the discount), frozen at capture.
+            expectedAmount: target.exactAmount,
           });
           setPayOpen(false);
           toast.push({

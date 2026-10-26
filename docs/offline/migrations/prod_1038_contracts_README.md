@@ -1,4 +1,12 @@
-# Desktop 1.0.38 — production server contracts (S1–S5, S2b)
+# Desktop 1.0.38 — production server contracts (S1–S5, S2b; S6 separate)
+
+> **S6 (Bug 3, separate migration):** `pos_open_shift_core` optional `require_new` → `SHIFT_ALREADY_OPEN`
+> instead of adopting an open shift (chained offline open N+1 after an offline close of N). Files:
+> `prod_1038_open_shift_require_new.sql` (+ `_ROLLBACK`, `_anchor_proof_READONLY`) and the staging pair.
+> PROD pre `70c310a6…` → post `5dee6e73…` (CRLF body; anchor 1, inverse 1, round-trip = pre, read-only).
+> STAGING pre `70af9174…` → post `eb54473f…`: rolled-back rehearsal of the verbatim staging forward +
+> rollback files PASS (A–G), then APPLIED to staging (ledger `20261026184030`). PROD: NOT APPLIED — needs an
+> exact GO. Without it the 1.0.38 client still fails closed (refuses `reused:true` for a chained open).
 
 Status: **written and rehearsed, NOT applied.** Production (`cltlqfqormkhppmbvyrv`) was read with SELECT only.
 Staging (`azjxprewycygsocusxjn`) was used only inside one DO block that ends in `RAISE EXCEPTION`, so it rolled back. After the run, staging was checked: the pre-images were unchanged, there were no v2/v4 functions, and no fixture rows remained.

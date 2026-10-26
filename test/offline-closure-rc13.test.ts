@@ -277,7 +277,8 @@ test("K summary-only bills fail closed for offline full payment / On Account (sh
   const body = dw.slice(i, i + 3200);
   assert.match(body, /if \(p\.summaryOnly\) return \{ ok: false, reason: SUMMARY_ONLY_SETTLE_MESSAGE \}/);
   assert.ok(body.indexOf("SUMMARY_ONLY_SETTLE_MESSAGE") < body.indexOf("ok: true,"), "refused before any capture target is built");
-  assert.ok((dw.match(/offlineSettleTarget\(table\)/g) ?? []).length >= 2, "both the Pay and the On Account paths use the guarded target");
+  // 1.0.38 G3 (updated intentionally) — the target now also takes the cashier's discount (the amount pin).
+  assert.ok((dw.match(/offlineSettleTarget\(table[,)]/g) ?? []).length >= 2, "both the Pay and the On Account paths use the guarded target");
   assert.match(dw, /if \(p\.summaryOnly\) return \{ ok: false, reason: "Part of this bill was sent before this device went offline\. Reconnect to split it\." \}/);
   assert.match(SUMMARY_ONLY_SETTLE_MESSAGE, /Reconnect to settle it/);
 });

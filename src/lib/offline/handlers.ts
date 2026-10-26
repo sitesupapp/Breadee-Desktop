@@ -134,23 +134,44 @@ export const openShiftHandler: OperationHandler = {
   type: "open_shift",
   schemaVersion: 1,
   async replay(op, ctx) {
-    const p = (op.payload ?? {}) as { branchId: string | null; openingCash: number };
+    const p = (op.payload ?? {}) as { branchId: string | null; openingCash: number; require_new?: boolean; after_end_op_id?: string | null };
+    // 1.0.38 (Bug 3) — OPEN(N+1) chained after an offline CLOSE(N). It replays only after that close synced
+    // (dependency), so the cashier has no open shift of OUR making on the server: the result must be a shift
+    // CREATED by this op. A lost-response retry returns this op's own recorded result (pos_op_replay →
+    // reused:false, idempotent:true) — our own shift. `reused:true` means the server handed back a shift
+    // this op did not create (opened on another device / online meanwhile): attaching N+1's sales to it
+    // would mix two drawers. Fail closed (CONFLICT, nothing resolved; N+1's work stays queued behind it).
+    const chained = p.require_new === true || !!p.after_end_op_id;
     try {
-      const { shiftId } = await ctx.deps.openShift({
+      const { shiftId, reused } = await ctx.deps.openShift({
         branchId: op.scope.branch_id,
         openingCash: Number(p.openingCash) || 0,
         clientOpId: op.client_op_id,
+        ...(chained ? { requireNew: true } : {}),
       });
-      return { ok: true, canonicalId: shiftId, resultMeta: { shift_id: shiftId } };
+      if (chained && reused === true) {
+        return { ok: false, retryClass: "CONFLICT", code: "shift_adopted_existing", message: FOREIGN_OPEN_SHIFT_MSG };
+      }
+      return { ok: true, canonicalId: shiftId, resultMeta: { shift_id: shiftId, ...(chained ? { chained: true } : {}) } };
     } catch (e) {
       if (ctx.deps.isTransport(e)) {
         return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "open: transport", message: errMsg(e) };
+      }
+      if (posErrorCode(e) === "SHIFT_ALREADY_OPEN") {
+        return { ok: false, retryClass: "CONFLICT", code: "shift_already_open", message: FOREIGN_OPEN_SHIFT_MSG };
+      }
+      if (chained && /waiting for manager approval/i.test(errMsg(e))) {
+        return { ok: false, retryClass: "CONFLICT", code: "shift_awaiting_approval", message: `The shift opened offline could not start: ${errMsg(e)} Its sales stay queued until a manager approves the previous shift; then retry it from the Sync Center.` };
       }
       const t = terminalClass(errMsg(e));
       return { ok: false, retryClass: t.retryClass, code: t.code, message: errMsg(e) };
     }
   },
 };
+
+/** 1.0.38 (Bug 3) — the operator-facing reason for a chained offline open that met a shift it did not create. */
+const FOREIGN_OPEN_SHIFT_MSG =
+  "Another shift is already open for this cashier on this branch (opened on another device or online after this device closed the previous shift offline). The shift opened offline was NOT attached to it. Its sales stay queued: end that other shift, then retry from the Sync Center.";
 
 type TakeawayPayload = {
   order_payload: SubmitOrderPayload;
@@ -490,8 +511,8 @@ type PayTablePayload = {
   table_name?: string | null;
   /** rc.10 — exactly the bill this settle covers (projection metadata; absent on pre-rc.10 ops). */
   covers?: { session_local?: string | null; order_ids?: string[]; summary?: boolean } | null;
-  /** 1.0.38 (S5) — the remaining amount (order currency) the device collected, recorded ONLY when it is
-   *  known exactly (a fully-canonical bill, no discount, no local delta); absent otherwise. */
+  /** 1.0.38 (S5, G3) — the remaining amount (order currency) the device collected (R_local after the
+   *  discount); absent only on ops captured before G3 or for a mixed-currency bill. */
   expected_amount?: number | null;
   /** 1.0.38 — the bill pins resolved ONCE before the first send and frozen (retries send the same). */
   resolved_pins?: { order_ids: string[] | null; amount: number | null } | null;
@@ -540,8 +561,10 @@ export const payTableHandler: OperationHandler = {
     if (!pins) {
       const r = await resolveSettlePins(p, ctx);
       if (!r.ok) return r.result;
+      // 1.0.38 G3 — the amount the device collected is pinned whenever it was recorded (also for a bill whose
+      // orders are not pinnable): the server books it only if its own R still equals it.
       const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;
-      pins = { order_ids: r.ids, amount: r.ids ? amount : null };
+      pins = { order_ids: r.ids, amount };
       await ctx.update({ payload: { ...p, resolved_pins: pins } });
     }
     try {
@@ -623,8 +646,8 @@ type OnAccountTablePayload = {
   table_name?: string | null;
   /** rc.10 — exactly the bill this on-account covers (the same shape as pay_table's). */
   covers?: PayTablePayload["covers"];
-  /** 1.0.38 (Bug 9) — R = T − P in order currency, recorded ONLY when known exactly (fully-canonical bill,
-   *  no local delta, no discount); absent otherwise. */
+  /** 1.0.38 (Bug 9, G3) — R = T − P in order currency as THIS DEVICE presented it (after the discount);
+   *  absent only on ops captured before G3 or for a mixed-currency bill. */
   expected_amount?: number | null;
   /** 1.0.38 (Bug 9) — the bill pins resolved ONCE before the first send and frozen (retries send the same). */
   resolved_pins?: { order_ids: string[] | null; amount: number | null } | null;
@@ -675,7 +698,7 @@ export const onAccountTableHandler: OperationHandler = {
       const r = await resolveSettlePins({ covers: p.covers ?? null } as PayTablePayload, ctx);
       if (!r.ok) return r.result;
       const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;
-      pins = { order_ids: r.ids, amount: r.ids ? amount : null };
+      pins = { order_ids: r.ids, amount }; // 1.0.38 G3 — see pay_table
       await ctx.update({ payload: { ...p, resolved_pins: pins } });
     }
     try {
@@ -802,7 +825,12 @@ export const endShiftHandler: OperationHandler = {
         deliveryFeeCashTreatment: p.delivery_fee_cash_treatment,
         clientOpId: op.client_op_id,
       });
-      return { ok: true, canonicalId: r.shift_id, resultMeta: { idempotent: r.idempotent } };
+      // 1.0.38 (Bug 3) — record the branch's End-Shift approval rule the server applied (server truth for a
+      // later chained offline open). Best-effort; never affects the close.
+      if (typeof r.approval_required === "boolean") {
+        await import("@/lib/offline/pendingShift").then((m) => m.cacheEndShiftApprovalRequired(op.scope.tenant_id, op.scope.branch_id, r.approval_required)).catch(() => undefined);
+      }
+      return { ok: true, canonicalId: r.shift_id, resultMeta: { idempotent: r.idempotent, ...(typeof r.approval_required === "boolean" ? { approval_required: r.approval_required } : {}) } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "end_shift: transport", message: msg };

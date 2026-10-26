@@ -28,8 +28,10 @@ import { Glyph } from "@/components/Glyph";
 import { OrderCarousel } from "@/components/pos/OrderCarousel";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { buildReceipt, type ReceiptData, type ReceiptOrderSource } from "@/lib/receipt";
-import { readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
+import { readOrderDisplayLines, readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
 import {
+  isMergedSource,
+  mergedTargetLabel,
   orderLifecycleLabel,
   orderLifecycleTone,
   orderRouteLabel,
@@ -39,6 +41,7 @@ import {
   DESTRUCTIVE_ORDER_CTA,
   canSettleOrder,
   paymentLabel,
+  paymentTone,
   reversalActionFor,
   reversalLabel,
 } from "@/lib/pos/orderActions";
@@ -83,6 +86,8 @@ export function CurrentOrderPanel(props: {
   payBusy?: boolean;
   /** Leave the saved order and go back to building a new one. */
   onNewOrder?: () => void;
+  /** 1.0.38 (Bug 4) — select another order of the shift (a merged source's destination). Selection only. */
+  onOpenOrder?: (orderId: string) => void;
 }) {
   const [preparing, setPreparing] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
@@ -115,7 +120,8 @@ export function CurrentOrderPanel(props: {
     setPreparing(true);
     setPrintError(null);
     try {
-      const lines = await readOrderReceiptLines(order.id);
+      // 1.0.38 (Bug 4) — a merged source's lines live on its destination now (read via the merge record).
+      const lines = isMergedSource(order) ? await readOrderDisplayLines(order) : await readOrderReceiptLines(order.id);
       const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
         ? order.order_type
         : "takeaway") as ReceiptOrderSource;
@@ -186,9 +192,7 @@ export function CurrentOrderPanel(props: {
             {/* The PAYMENT state on its own badge, always - it is the field
                 every action below is gated on, so it must never be something
                 the operator has to infer from the lifecycle word beside it. */}
-            <Badge tone={order.payment_status === "paid" ? "green" : order.payment_status === "refunded" ? "red" : "amber"}>
-              {paymentLabel(order)}
-            </Badge>
+            <Badge tone={paymentTone(order)}>{paymentLabel(order)}</Badge>
           </div>
           <p className="mt-1 text-[11px] text-sub">
             {order.created_at ? new Date(order.created_at).toLocaleString() : ""}
@@ -196,8 +200,19 @@ export function CurrentOrderPanel(props: {
             {order.order_type === "dine_in" && props.tableName ? ` · ${props.tableName}` : ""}
           </p>
           {order.notes && <p className="mt-1 text-[11px] italic text-sub">{order.notes}</p>}
+          {/* 1.0.38 (Bug 4) — a merged source: its items and balance moved; one press shows the destination. */}
+          {isMergedSource(order) && (
+            <div className="mt-2 rounded-lg bg-slate-100 px-2 py-1 text-[11px] text-sub">
+              This bill was merged into #{mergedTargetLabel(order)}. Its items and balance moved there; nothing was voided.
+              {props.onOpenOrder && order.merged_into_order_id && (
+                <Button variant="ghost" className="ml-1 px-2 py-0.5 text-[11px]" onClick={() => props.onOpenOrder?.(order.merged_into_order_id as string)}>
+                  Open #{mergedTargetLabel(order)}
+                </Button>
+              )}
+            </div>
+          )}
 
-          <OrderLines orderId={order.id} currency={currency} />
+          <OrderLines order={order} currency={currency} />
 
           <div className="mt-3 space-y-1 border-t border-line pt-2 text-[12px]">
             <div className="flex justify-between text-sub">
@@ -216,7 +231,7 @@ export function CurrentOrderPanel(props: {
                 (cart, orders table, shift report) renders bare formatMoney; this
                 was the only place that appended a second label. */}
             <div className="flex justify-between text-sm font-extrabold text-ink">
-              <span>Total</span>
+              <span>{isMergedSource(order) ? `Moved to #${mergedTargetLabel(order)}` : "Total"}</span>
               <span>{formatMoney(order.total_amount ?? 0, currency)}</span>
             </div>
           </div>
@@ -282,13 +297,15 @@ export function CurrentOrderPanel(props: {
   );
 }
 
-/** The selected order's lines, re-read per selection rather than cached. */
-function OrderLines(props: { orderId: string; currency: CurrencyCode }) {
-  const [lines, setLines] = useState<Awaited<ReturnType<typeof readOrderReceiptLines>> | null>(null);
+/** The selected order's lines, re-read per selection rather than cached. 1.0.38 (Bug 4): a merged source's
+ *  lines come from its merge record (they now live on the destination bill). */
+function OrderLines(props: { order: ShiftOpenOrder; currency: CurrencyCode }) {
+  const [lines, setLines] = useState<Awaited<ReturnType<typeof readOrderDisplayLines>> | null>(null);
+  const { id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number } = props.order;
   useEffect(() => {
     let live = true;
     setLines(null);
-    readOrderReceiptLines(props.orderId)
+    readOrderDisplayLines({ id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number })
       .then((l) => {
         if (live) setLines(l);
       })
@@ -298,7 +315,7 @@ function OrderLines(props: { orderId: string; currency: CurrencyCode }) {
     return () => {
       live = false;
     };
-  }, [props.orderId]);
+  }, [id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number]);
 
   if (lines === null) return <p className="mt-2 text-[11px] text-sub">Loading items...</p>;
   if (lines.length === 0) return <p className="mt-2 text-[11px] text-sub">No items readable for this order.</p>;

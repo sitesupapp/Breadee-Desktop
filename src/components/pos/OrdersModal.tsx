@@ -20,14 +20,17 @@ import { Modal } from "@/components/overlays";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { loadOrdersHistoryOfflineAware, OFFLINE_HISTORY_LIMITED_NOTE, OFFLINE_HISTORY_NOTE } from "@/lib/offline/ordersHistoryOffline";
 import {
+  isMergedSource,
+  mergedTargetLabel,
   orderLifecycleLabel,
   orderLifecycleTone,
   orderRouteLabel,
+  orderStatusKey,
   shiftDay,
   toDayKey,
   type ShiftOpenOrder,
 } from "@/lib/pos/shiftOrderSummary";
-import { canEditOrder, paymentLabel, reversalActionFor, typeLabel } from "@/lib/pos/orderActions";
+import { canEditOrder, paymentLabel, paymentTone, reversalActionFor, typeLabel } from "@/lib/pos/orderActions";
 
 /** The lifecycle values the desktop can actually be shown, plus "everything". */
 const STATUS_FILTERS = [
@@ -35,6 +38,8 @@ const STATUS_FILTERS = [
   { key: "sent_to_kitchen", label: "Sent to kitchen" },
   { key: "completed", label: "Completed" },
   { key: "voided", label: "Voided" },
+  // 1.0.38 (Bug 4) — a merged source is filed here, never under "Voided" (see orderStatusKey).
+  { key: "merged", label: "Merged" },
   { key: "cancelled", label: "Cancelled" },
   { key: "refunded", label: "Refunded" },
 ] as const;
@@ -132,7 +137,7 @@ export function OrdersModal(props: {
     () =>
       [...source]
         .filter((o) => (type === "all" ? true : o.order_type === type))
-        .filter((o) => (status === "all" ? true : o.status === status))
+        .filter((o) => (status === "all" ? true : orderStatusKey(o) === status))
         .reverse(),
     [source, type, status],
   );
@@ -240,6 +245,7 @@ export function OrdersModal(props: {
                 rows.map((o) => {
                   const reversal = reversalActionFor(o);
                   const editable = canEditOrder(o);
+                  const merged = isMergedSource(o);
                   return (
                     <tr
                       key={o.id}
@@ -251,13 +257,13 @@ export function OrdersModal(props: {
                       </td>
                       <td className="px-2 py-2">{typeLabel(o, props.tableNameFor(o.table_id))}</td>
                       <td className="px-2 py-2 text-sub">{o.staff_name ?? "—"}</td>
-                      <td className="px-2 py-2 text-right font-semibold">
+                      <td className={cn("px-2 py-2 text-right font-semibold", merged && "text-sub")}>
+                        {/* 1.0.38 (Bug 4) — a merged source's amount now lives on its destination bill. */}
+                        {merged ? `Moved to #${mergedTargetLabel(o)}: ` : ""}
                         {formatMoney(o.total_amount ?? 0, (o.currency ?? props.currency) as CurrencyCode)}
                       </td>
                       <td className="px-2 py-2">
-                        <Badge tone={o.payment_status === "paid" ? "green" : o.payment_status === "refunded" ? "red" : "amber"}>
-                          {paymentLabel(o)}
-                        </Badge>
+                        <Badge tone={paymentTone(o)}>{paymentLabel(o)}</Badge>
                       </td>
                       <td className="px-2 py-2">
                         <Badge tone={orderLifecycleTone(o)}>{orderLifecycleLabel(o)}</Badge>
@@ -275,6 +281,15 @@ export function OrdersModal(props: {
                           >
                             View
                           </Button>
+                          {merged && o.merged_into_order_id && (
+                            <Button
+                              variant="ghost"
+                              className="px-2 py-1 text-[11px]"
+                              onClick={() => props.onSelectOrder(o.merged_into_order_id as string)}
+                            >
+                              Go to #{mergedTargetLabel(o)}
+                            </Button>
+                          )}
                           {editable && props.onEditOrder && (
                             <Button variant="ghost" className="px-2 py-1 text-[11px]" onClick={() => props.onEditOrder?.(o)}>
                               Edit

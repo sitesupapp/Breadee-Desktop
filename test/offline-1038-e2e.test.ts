@@ -762,8 +762,9 @@ test("E2E (a) Dine-In: offline open → rounds → pay → local release → res
   const tg = await settleTarget(T1);
   assert.ok(tg.amount.ok);
   assert.equal(tg.p.gross, 210);
-  assert.equal(tg.amount.ok && tg.amount.exactAmount, null, "a local delta is never asserted as expected_amount");
-  const s = await settleTableOffline({ sessionId: tg.sessionId, method: "cash", covers: tg.covers, extraDependencyIds: tg.deps, expectedAmount: null });
+  // 1.0.38 G3 (updated intentionally) — the amount this device collected is ALWAYS pinned, local delta or not.
+  assert.equal(tg.amount.ok && tg.amount.exactAmount, 210, "R_local: the amount collected offline");
+  const s = await settleTableOffline({ sessionId: tg.sessionId, method: "cash", covers: tg.covers, extraDependencyIds: tg.deps, expectedAmount: tg.amount.ok ? tg.amount.exactAmount : null });
   // local release: the table is free for a new order, the floor shows it available
   assert.equal(await getDineDraftForTable(SCOPE, "T1"), null);
   const offFloor = overlayTableTotals([T1], await getOperationalTableTotals(SCOPE, [T1], undefined, MAP_AT));

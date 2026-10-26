@@ -25,6 +25,7 @@ import { computeDiscount, type DiscountType } from "@/lib/pos/discounts";
 import { OPEN_DELIVERY_STATUSES, type OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
 import type { CurrencyCode } from "@/lib/currency";
 import type { ReceiptLine, ReceiptModifier } from "@/lib/receipt";
+import { isMergedSource, mergedTargetLabel } from "@/lib/pos/shiftOrderSummary";
 import type { PaymentMethod } from "@/lib/pos/payments";
 import type { Gate } from "@/components/ui";
 
@@ -499,6 +500,110 @@ export async function readOrderReceiptLines(orderId: string): Promise<ReceiptLin
       } as ReceiptLine;
     })
     .filter((l): l is ReceiptLine => l !== null);
+}
+
+// --- 1.0.38 (Bug 4): a MERGED source's lines, from the merge record ---------------------------------
+//
+// pos_merge_tables_v3 RE-PARENTS a clean source's items to the primary bill (order_id := primary, ids
+// kept) and voids the source with merge provenance, so `order_id = source` reads nothing ("No items
+// readable"). The immutable merge row (pos_table_merges, RLS-readable by the branch) records exactly which
+// items were the source's: sources[source_order_id].items[].order_item_id + original_batch_no. Those ids
+// are read back (wherever they now live) and shown as MOVED, round by round. Reads only.
+
+export type MergeSourceItemRef = { order_item_id: string; original_batch_no: number | null; line_total: number | null };
+
+/** PURE — the source's own item refs from a pos_table_merges row (sources[] jsonb). Never guesses. */
+export function mergedSourceItemRefs(merge: unknown, sourceOrderId: string): MergeSourceItemRef[] {
+  const sources = asRecord(merge).sources;
+  if (!Array.isArray(sources)) return [];
+  const src = sources.map(asRecord).find((s) => strOrNull(s.source_order_id) === sourceOrderId);
+  if (!src || !Array.isArray(src.items)) return [];
+  return src.items
+    .map(asRecord)
+    .map((i) => ({ order_item_id: str(i.order_item_id), original_batch_no: numOrNull(i.original_batch_no), line_total: numOrNull(i.line_total) }))
+    .filter((i) => i.order_item_id !== "");
+}
+
+export type MergedLinesIo = {
+  readMerge: (mergeId: string) => Promise<unknown | null>;
+  readItems: (ids: string[]) => Promise<unknown[]>;
+  readModifiers: (itemIds: string[]) => Promise<unknown[]>;
+};
+
+const supabaseMergedLinesIo: MergedLinesIo = {
+  readMerge: async (mergeId) => {
+    const { supabase } = await import("@/lib/supabase");
+    // pos_table_merges is not in the generated (staging) types; read it untyped (RLS: pos_table_merges_select).
+    const db = supabase as unknown as { from(t: string): { select(c: string): { eq(k: string, v: string): { maybeSingle(): PromiseLike<{ data: unknown; error: { message: string } | null }> } } } };
+    const res = await db.from("pos_table_merges").select("id, primary_order_id, sources").eq("id", mergeId).maybeSingle();
+    if (res.error) throw new Error(res.error.message);
+    return res.data ?? null;
+  },
+  readItems: async (ids) => {
+    const { supabase } = await import("@/lib/supabase");
+    const res = await supabase.from("pos_order_items").select("id, name_snapshot, quantity, line_total, kitchen_note").in("id", ids);
+    if (res.error) throw new Error(res.error.message);
+    return (res.data ?? []) as unknown[];
+  },
+  readModifiers: async (itemIds) => {
+    const { supabase } = await import("@/lib/supabase");
+    const res = await supabase.from("pos_order_item_modifiers").select("order_item_id, name_snapshot, price_delta, quantity").in("order_item_id", itemIds);
+    if (res.error) throw new Error(res.error.message);
+    return (res.data ?? []) as unknown[];
+  },
+};
+
+/**
+ * The lines a merged clean source HAD, each marked as moved to the destination (with its original round).
+ * Empty when the merge record names no items for this source (never invented).
+ */
+export async function readMergedSourceLines(
+  order: { id: string; merged_into_merge_id?: string | null; merged_into_order_number?: string | null; merged_into_order_id?: string | null },
+  io: MergedLinesIo = supabaseMergedLinesIo,
+): Promise<ReceiptLine[]> {
+  if (!order.merged_into_merge_id) return [];
+  const merge = await io.readMerge(order.merged_into_merge_id);
+  const refs = merge ? mergedSourceItemRefs(merge, order.id) : [];
+  if (refs.length === 0) return [];
+  const ids = refs.map((r) => r.order_item_id);
+  const items = new Map((await io.readItems(ids)).map((raw) => [str(asRecord(raw).id), asRecord(raw)] as const));
+  const byItem = new Map<string, ReceiptModifier[]>();
+  for (const raw of await io.readModifiers(ids)) {
+    const r = asRecord(raw);
+    const id = strOrNull(r.order_item_id);
+    if (!id) continue;
+    byItem.set(id, [...(byItem.get(id) ?? []), { name: str(r.name_snapshot, "Extra"), price_delta: num(r.price_delta), quantity: num(r.quantity, 1) }]);
+  }
+  const target = mergedTargetLabel(order);
+  return refs.map((ref) => {
+    const r = items.get(ref.order_item_id);
+    const qty = r ? num(r.quantity, 1) : 1;
+    // The merge record's own line total (as of the merge) when present, else the item's stored total.
+    const lineTotal = ref.line_total ?? (r ? num(r.line_total) : 0);
+    const moved = `moved to #${target}${ref.original_batch_no != null ? ` (round ${ref.original_batch_no})` : ""}`;
+    const kitchen = r ? strOrNull(r.kitchen_note) : null;
+    return {
+      name: r ? str(r.name_snapshot, "Item") : "Item",
+      qty,
+      unitPrice: qty > 0 ? lineTotal / qty : lineTotal,
+      lineTotal,
+      modifiers: byItem.get(ref.order_item_id) ?? [],
+      note: kitchen ? `${kitchen} · ${moved}` : moved,
+    } as ReceiptLine;
+  });
+}
+
+/** 1.0.38 (Bug 4) — an order's lines for DISPLAY: a merged clean source reads its moved lines from the
+ *  merge record; every other order reads its own items (unchanged). */
+export async function readOrderDisplayLines(
+  order: { id: string; status: string; merged_into_order_id?: string | null; merged_into_merge_id?: string | null; merged_into_order_number?: string | null },
+  io?: MergedLinesIo,
+): Promise<ReceiptLine[]> {
+  if (isMergedSource(order) && order.merged_into_merge_id) {
+    const lines = await readMergedSourceLines(order, io);
+    if (lines.length > 0) return lines;
+  }
+  return readOrderReceiptLines(order.id);
 }
 
 /** The settled order, re-read authoritatively. Never the local copy. */

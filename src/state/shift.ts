@@ -19,13 +19,21 @@ import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftReport } from
 import { endShift, findOpenShift, getCashBox, openShift } from "@/lib/pos/shifts";
 import { getDeviceIdentity } from "@/lib/device";
 import { clearPosSessionSnapshot, readPosSessionSnapshot, restoreShiftFromSnapshot } from "@/lib/offline/posSession";
-import { getActivePendingShift } from "@/lib/offline/db";
-import { createLocalPendingShift, pendingShiftToActiveShift } from "@/lib/offline/pendingShift";
+import { getActivePendingShift, type PendingShift } from "@/lib/offline/db";
+import {
+  cacheEndShiftApprovalRequired,
+  chainedShiftAfter,
+  createLocalPendingShift,
+  getActiveUnendedPendingShift,
+  pendingShiftToActiveShift,
+  readCachedEndShiftApprovalRequired,
+} from "@/lib/offline/pendingShift";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { isTransportFailure } from "@/lib/offline/posTxnSync";
 import { createLatestGate } from "@/lib/offline/latestGate";
-import { captureEndShiftOffline, endShiftOpForShift, unsyncedEndShiftOp } from "@/lib/offline/endShiftOffline";
+import { captureEndShiftOffline, endShiftOpForShift, unsyncedEndShiftOp, unsyncedEndShiftOps } from "@/lib/offline/endShiftOffline";
+import { isEndShiftApprovalRequired } from "@/lib/pos/shiftApproval";
 
 /** rc.10 — the shift was ENDED on this device while offline: its canonical close (end_shift op) waits
  *  behind every op of the shift and replays LAST. Until it syncs, the shift is operationally closed. */
@@ -54,10 +62,32 @@ export function closeStateOf(op: { status: string; last_error_code: string | nul
   return "closing";
 }
 
-/** rc.12 — Open Shift refused because the previous shift's offline close has not reached the server. */
+/**
+ * 1.0.38 (Bug 3) — the LOCAL close lifecycle of one shift on this device (derived from the end_shift op;
+ * CLOSING_LOCAL is the short in-memory window while End Shift checks its preconditions and captures it):
+ *
+ *   OPEN ─End Shift offline─▶ CLOSING_LOCAL ─end_shift op durably captured─▶ CLOSED_LOCAL_PENDING_SYNC
+ *   CLOSED_LOCAL_PENDING_SYNC ─pos_end_shift ok─▶ CLOSED_CONFIRMED   (─refused─▶ CLOSE_REFUSED)
+ *
+ * From CLOSED_LOCAL_PENDING_SYNC the NEXT shift may be opened offline (chained): its identity is derived
+ * from that close op, its open replays strictly after it and must create (never adopt) a server shift,
+ * and every op captured from then on belongs to the new shift. CLOSE_REFUSED is a human gate: no chained open.
+ */
+export type LocalCloseState = "OPEN" | "CLOSING_LOCAL" | "CLOSED_LOCAL_PENDING_SYNC" | "CLOSED_CONFIRMED" | "CLOSE_REFUSED";
+
+export function localCloseStateOf(op: { status: string; last_error_code: string | null } | null | undefined, capturing = false): LocalCloseState {
+  const cs = closeStateOf(op);
+  if (cs === "closing") return "CLOSED_LOCAL_PENDING_SYNC";
+  if (cs === "closed_confirmed") return "CLOSED_CONFIRMED";
+  if (cs === "close_refused") return "CLOSE_REFUSED";
+  return capturing ? "CLOSING_LOCAL" : "OPEN";
+}
+
+/** rc.12 — Open Shift refused because the previous shift's offline close has not reached the server.
+ *  1.0.38: `tail` replaces the generic "can open as soon as it syncs" when that is not the whole story. */
 export class ShiftStillClosingError extends Error {
-  constructor(detail: string) {
-    super(`The previous shift is still closing on this device — ${detail} Open the Sync Center to see what it is waiting for; the new shift can open as soon as it syncs.`);
+  constructor(detail: string, tail?: string) {
+    super(`The previous shift is still closing on this device — ${detail} ${tail ?? "Open the Sync Center to see what it is waiting for; the new shift can open as soon as it syncs."}`);
     this.name = "ShiftStillClosingError";
   }
 }
@@ -121,6 +151,9 @@ type ShiftState = {
   endedPendingSync: EndedPendingSync | null;
   /** rc.12 — an offline End Shift the SERVER refused: the shift is open again; shown once to the operator. */
   closeRefused: CloseRefusedNotice | null;
+  /** 1.0.38 (Bug 3) — CLOSING_LOCAL: an offline End Shift is checking its preconditions / capturing its op.
+   *  A concurrent Open Shift is refused until it lands (it would otherwise race the close it must follow). */
+  closingLocal: boolean;
   error: string | null;
 
   /**
@@ -179,7 +212,43 @@ const shiftRefreshGate = createLatestGate();
 // inject deterministic fakes and drive the REAL store - its generation gate, branch
 // equality checks, cash-box guard and async ordering - without a Supabase client.
 // Production uses the shipped implementations.
-export const shiftNet = { findOpenShift, getCashBox, openShift, reachable: isBackendReachable };
+export const shiftNet = {
+  findOpenShift,
+  getCashBox,
+  openShift,
+  reachable: isBackendReachable,
+  /** 1.0.38 (Bug 3) — the branch's End-Shift approval rule, read after every live shift refresh and cached
+   *  (server truth for a chained offline open). Browser runtime only (null outside it, e.g. node tests,
+   *  which inject a fake); best-effort, never awaited by the refresh and never affects its result. */
+  endShiftApprovalRequired: (typeof window === "undefined" ? null : isEndShiftApprovalRequired) as ((branchId: string) => Promise<boolean>) | null,
+};
+
+function primeEndShiftApprovalCache(tenantId: string, branchId: string | null): void {
+  const read = shiftNet.endShiftApprovalRequired;
+  if (!read || !branchId) return;
+  void Promise.resolve()
+    .then(() => read(branchId))
+    .then((required) => cacheEndShiftApprovalRequired(tenantId, branchId, required))
+    .catch(() => undefined);
+}
+
+/** 1.0.38 (Bug 3) — the next shift opened OFFLINE right after this device closed the previous one offline
+ *  (chained, CLOSED_LOCAL_PENDING_SYNC predecessor), for the exact context, if any. */
+async function chainedNextShift(tenantId: string, userId: string, branchId: string | null, deviceId: string): Promise<PendingShift | undefined> {
+  const next = await getActiveUnendedPendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
+  return next?.after_end_op_id ? next : undefined;
+}
+
+/** 1.0.38 (Bug 3) — for a chained pending shift: its predecessor's close, while that close is still pending
+ *  sync (shown alongside the active N+1). Empty object otherwise (the store field is left untouched). */
+async function chainEndedPatch(p: PendingShift): Promise<{ endedPendingSync?: EndedPendingSync }> {
+  if (!p.after_end_op_id) return {};
+  const { getOperation } = await import("@/lib/offline/operationLog");
+  const op = await getOperation(p.after_end_op_id).catch(() => undefined);
+  if (!op || closeStateOf(op) !== "closing") return {};
+  const pl = (op.payload ?? {}) as { shift_id?: string | null; shift_local?: string | null };
+  return { endedPendingSync: { operationId: op.operation_id, shiftId: pl.shift_local ?? pl.shift_id ?? "", dependencyCount: op.dependency_ids.length } };
+}
 
 export const useShift = create<ShiftState>((set, get) => ({
   loading: true,
@@ -190,6 +259,7 @@ export const useShift = create<ShiftState>((set, get) => ({
   lastReport: null,
   endedPendingSync: null,
   closeRefused: null,
+  closingLocal: false,
   error: null,
 
   refresh: async (tenantId, userId, branchId = null, isCurrent) => {
@@ -205,6 +275,7 @@ export const useShift = create<ShiftState>((set, get) => ({
     try {
       const shift = await shiftNet.findOpenShift(tenantId, userId);
       if (superseded()) return;
+      primeEndShiftApprovalCache(tenantId, branchId);
       // rc.12 — a REFUSED offline close of a shift the server no longer has open (closed / force-ended
       // elsewhere) is moot: supersede it (kept, cancelled) so it can never block a later Open Shift.
       await supersedeMootRefusedCloses({ tenantId, branchId, cashierUserId: userId, deviceId, terminalId: getDeviceIdentity().terminal_id ?? null }, shift && (shift.branch_id ?? null) === (branchId ?? null) ? shift.id : null).catch(() => undefined);
@@ -221,8 +292,17 @@ export const useShift = create<ShiftState>((set, get) => ({
         if (superseded()) return;
         const cs = closeStateOf(ended);
         if (cs === "closing") {
-          set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, endedPendingSync: { operationId: ended!.operation_id, shiftId: shift.id, dependencyCount: ended!.dependency_ids.length } });
+          const endedInfo = { operationId: ended!.operation_id, shiftId: shift.id, dependencyCount: ended!.dependency_ids.length };
           clearPosSessionSnapshot();
+          // 1.0.38 (Bug 3) — N is CLOSED_LOCAL_PENDING_SYNC; the next shift this device opened offline after
+          // that close (chained) is the active one. Through 1.0.37 this branch returned "no shift" and hid it.
+          const next = await chainedNextShift(tenantId, userId, branchId, deviceId);
+          if (superseded()) return;
+          if (next) {
+            set({ shift: pendingShiftToActiveShift(next), cashBox: null, loading: false, offlineRestored: true, pendingLocalId: next.local_shift_id, endedPendingSync: endedInfo });
+            return;
+          }
+          set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, endedPendingSync: endedInfo });
           return;
         }
         if (cs === "close_refused" && ended) {
@@ -235,6 +315,9 @@ export const useShift = create<ShiftState>((set, get) => ({
             status: "cancelled",
             result_meta: { ...(ended.result_meta ?? {}), superseded: "close_refused_shift_still_open", superseded_at: new Date().toISOString() },
           }).catch(() => undefined);
+          // 1.0.38 (Bug 3) — a shift opened offline AFTER that close cannot start now (its open depends on the
+          // refused close → dependency_failed). Its sales are kept, never moved into this shift: say so.
+          const orphanNext = await chainedShiftAfter(ended.operation_id).catch(() => undefined);
           if (superseded()) return;
           set({
             shift,
@@ -242,7 +325,10 @@ export const useShift = create<ShiftState>((set, get) => ({
             offlineRestored: false,
             pendingLocalId: null,
             endedPendingSync: null,
-            closeRefused: { shiftId: shift.id, message: `Your offline End Shift was not accepted by the server${ended.last_error_message ? `: ${ended.last_error_message}` : ""}. This shift is still open.` },
+            closeRefused: {
+              shiftId: shift.id,
+              message: `Your offline End Shift was not accepted by the server${ended.last_error_message ? `: ${ended.last_error_message}` : ""}. This shift is still open.${orphanNext ? " The shift you opened offline after it could not start; its sales are kept for review in the Sync Center and were not added to this shift." : ""}`,
+            },
           });
           await get().refreshCashBox(superseded);
           return;
@@ -256,15 +342,20 @@ export const useShift = create<ShiftState>((set, get) => ({
       // that hasn't synced yet is NOT contradicted by this (it was never on the
       // server), so keep showing it until the reconnect reconcile opens it. Scoped to
       // THIS exact tenant+branch/OU+cashier+device; pending_sync only.
-      const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
+      // 1.0.38 (Bug 3) — the live (unended) one: a pending shift closed offline is never surfaced, a chained
+      // next shift opened after it is.
+      const pending = await getActiveUnendedPendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
       if (superseded()) return;
-      if (pending && !(await endShiftOpForShift(pending.local_shift_id).catch(() => undefined))) {
+      if (pending) {
+        const chain = await chainEndedPatch(pending);
+        if (superseded()) return;
         set({
           shift: pendingShiftToActiveShift(pending),
           cashBox: null,
           loading: false,
           offlineRestored: true,
           pendingLocalId: pending.local_shift_id,
+          ...chain,
         });
         return;
       }
@@ -311,7 +402,15 @@ export const useShift = create<ShiftState>((set, get) => ({
       if (restored && restoredEnded) {
         if (superseded()) return;
         clearPosSessionSnapshot();
-        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null, endedPendingSync: { operationId: restoredEnded.operation_id, shiftId: restored.id, dependencyCount: restoredEnded.dependency_ids.length } });
+        const endedInfo = { operationId: restoredEnded.operation_id, shiftId: restored.id, dependencyCount: restoredEnded.dependency_ids.length };
+        // 1.0.38 (Bug 3) — restart between shifts: the chained next shift opened offline is the active one.
+        const next = await chainedNextShift(tenantId, userId, branchId, deviceId);
+        if (superseded()) return;
+        if (next) {
+          set({ shift: pendingShiftToActiveShift(next), cashBox: null, loading: false, offlineRestored: true, pendingLocalId: next.local_shift_id, error: null, endedPendingSync: endedInfo });
+          return;
+        }
+        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null, endedPendingSync: endedInfo });
         return;
       }
       if (restored) {
@@ -319,16 +418,20 @@ export const useShift = create<ShiftState>((set, get) => ({
         set({ shift: restored, cashBox: null, loading: false, offlineRestored: true, pendingLocalId: null, error: null });
         return;
       }
-      // 2) a shift opened offline on this device for THIS exact context (Case 2).
-      const pending = await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
+      // 2) a shift opened offline on this device for THIS exact context (Case 2). 1.0.38 (Bug 3): the live
+      // (unended) one — a chained next shift wins over the offline-opened shift it follows.
+      const pending = await getActiveUnendedPendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
       if (superseded()) return;
-      const pendingEnded = pending ? await endShiftOpForShift(pending.local_shift_id).catch(() => undefined) : undefined;
-      if (pending && pendingEnded) {
+      const newest = pending ? undefined : await getActivePendingShift(tenantId, userId, branchId, deviceId).catch(() => undefined);
+      const pendingEnded = newest ? await endShiftOpForShift(newest.local_shift_id).catch(() => undefined) : undefined;
+      if (newest && pendingEnded) {
         if (superseded()) return;
-        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null, endedPendingSync: { operationId: pendingEnded.operation_id, shiftId: pending.local_shift_id, dependencyCount: pendingEnded.dependency_ids.length } });
+        set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null, error: null, endedPendingSync: { operationId: pendingEnded.operation_id, shiftId: newest.local_shift_id, dependencyCount: pendingEnded.dependency_ids.length } });
         return;
       }
       if (pending) {
+        const chain = await chainEndedPatch(pending);
+        if (superseded()) return;
         set({
           shift: pendingShiftToActiveShift(pending),
           cashBox: null,
@@ -336,6 +439,7 @@ export const useShift = create<ShiftState>((set, get) => ({
           offlineRestored: true,
           pendingLocalId: pending.local_shift_id,
           error: null,
+          ...chain,
         });
         return;
       }
@@ -412,14 +516,32 @@ export const useShift = create<ShiftState>((set, get) => ({
         return { continuedPrevious: now.closeRefused?.shiftId === opened };
       }
     }
-    // rc.10 — a previous shift's End Shift captured offline has not synced yet: opening another shift
-    // offline would replay pos_open_shift BEFORE that close, and the server's single-open rule would
-    // ADOPT the still-open old shift. Refuse with the reason (never a raw error).
-    const endPending = await unsyncedEndShiftOp(closeScope).catch(() => undefined);
-    if (endPending) {
-      throw closeStateOf(endPending) === "close_refused"
-        ? new Error(`The previous shift's offline End Shift was not accepted by the server${endPending.last_error_message ? ` (${endPending.last_error_message})` : ""}. Reconnect to resolve it before opening a new shift.`)
-        : new ShiftStillClosingError(await closingDetail(endPending));
+    // 1.0.38 (Bug 3) — CLOSING_LOCAL: an End Shift is still being captured; the next shift must follow it.
+    if (get().closingLocal) throw new ShiftStillClosingError("its End Shift is still being recorded.", "Try again in a moment.");
+    // rc.10 — a previous shift's End Shift captured offline has not synced yet. Through 1.0.37 opening another
+    // shift offline was refused here (an unordered open would replay BEFORE that close and the server's
+    // single-open rule would ADOPT the still-open old shift). 1.0.38 (Bug 3): CHAIN it instead — the new
+    // shift's identity derives from that close, its open replays strictly after it and must create a new
+    // server shift (never adopt), and its sales stay bound to it. Still refused: a close the server REFUSED
+    // (human gate), and a branch whose closes need manager approval (the server would refuse the open).
+    const endsPending = await unsyncedEndShiftOps(closeScope).catch(() => []);
+    let afterEndOpId: string | null = null;
+    if (endsPending.length > 0) {
+      const refused = endsPending.find((o) => closeStateOf(o) === "close_refused");
+      if (refused) {
+        throw new Error(`The previous shift's offline End Shift was not accepted by the server${refused.last_error_message ? ` (${refused.last_error_message})` : ""}. Reconnect to resolve it before opening a new shift.`);
+      }
+      const approval = await readCachedEndShiftApprovalRequired(tenantId, branchId).catch(() => null);
+      if (approval !== false) {
+        const prev = endsPending[endsPending.length - 1];
+        throw new ShiftStillClosingError(
+          await closingDetail(prev),
+          approval === true
+            ? "This branch requires manager approval to close a shift, so the next shift cannot be opened offline: reconnect, let the close sync, and have a manager approve it before opening a new shift."
+            : "This device has not yet confirmed whether this branch closes shifts directly or needs manager approval, so the next shift cannot be opened offline. Reconnect to open it.",
+        );
+      }
+      afterEndOpId = endsPending[endsPending.length - 1].operation_id;
     }
     // Offline: capture a durable pending shift and surface it as the active shift.
     const pending = await createLocalPendingShift({
@@ -428,6 +550,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       cashierUserId: userId,
       openingCashAmount: openingCash,
       currency: currency ?? "USD",
+      afterEndOpId,
     });
     set({
       shift: pendingShiftToActiveShift(pending),
@@ -459,7 +582,31 @@ export const useShift = create<ShiftState>((set, get) => ({
     return report;
   },
 
-  closeOffline: async ({ scope, actualCashCounted, notes, deliveryFeeCashTreatment }) => {
+  closeOffline: async (input) => {
+    // 1.0.38 (Bug 3) — OPEN → CLOSING_LOCAL (preconditions + capture) → CLOSED_LOCAL_PENDING_SYNC (op captured).
+    set({ closingLocal: true });
+    try {
+      return await closeOfflineCapture(input);
+    } finally {
+      set({ closingLocal: false });
+    }
+  },
+
+  clearReport: () => set({ lastReport: null }),
+  clearCloseRefused: () => set({ closeRefused: null }),
+
+  clear: () => {
+    // Invalidate any in-flight refresh FIRST: a refresh that claimed its generation
+    // before sign-out must not resolve afterwards and repopulate shift state for a
+    // session that no longer exists.
+    shiftRefreshGate.invalidate();
+    set({ loading: false, shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: null, closeRefused: null, closingLocal: false, error: null });
+  },
+}));
+
+/** rc.10 — End Shift while OFFLINE (the body of `closeOffline`, run inside its CLOSING_LOCAL window). */
+async function closeOfflineCapture({ scope, actualCashCounted, notes, deliveryFeeCashTreatment }: Parameters<ShiftState["closeOffline"]>[0]): Promise<EndedPendingSync> {
+    const { getState: get, setState: set } = useShift;
     const shift = get().shift;
     if (!shift) throw new Error("There is no open shift to end.");
     const pendingLocalId = get().pendingLocalId;
@@ -498,19 +645,7 @@ export const useShift = create<ShiftState>((set, get) => ({
     const ended: EndedPendingSync = { operationId: r.operationId, shiftId: pendingLocalId ?? shift.id, dependencyCount: r.dependencyCount };
     set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: ended, error: null });
     return ended;
-  },
-
-  clearReport: () => set({ lastReport: null }),
-  clearCloseRefused: () => set({ closeRefused: null }),
-
-  clear: () => {
-    // Invalidate any in-flight refresh FIRST: a refresh that claimed its generation
-    // before sign-out must not resolve afterwards and repopulate shift state for a
-    // session that no longer exists.
-    shiftRefreshGate.invalidate();
-    set({ loading: false, shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: null, closeRefused: null, error: null });
-  },
-}));
+}
 
 /** The one predicate the order/payment paths consult. */
 export function requireOpenShiftId(shift: ActiveShift | null): string | null {

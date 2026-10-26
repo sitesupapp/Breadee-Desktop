@@ -106,7 +106,10 @@ test("Phase D: dine-in ON-ACCOUNT is offline-capable via CAPTURE only, cached-cu
   assert.match(src, /if \(offlineCapture && input\.offlineScope\)[\s\S]{0,700}tableOnAccountOffline\(/);
   assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
   // rc.9 — the SAME projection-derived target as the settle (fail-closed with a controlled reason).
-  assert.match(src, /const target = await offlineSettleTarget\(table\);[\s\S]{0,120}setPayError\(target\.reason\)/);
+  // 1.0.38 G3 (updated intentionally) — the target carries the cashier's discount into the amount pin.
+  assert.match(src, /const target = await offlineSettleTarget\(table, offDiscount\);[\s\S]{0,120}setPayError\(target\.reason\)/);
+  assert.match(src, /const target = await offlineSettleTarget\(table, offlineDiscount\.fields\);[\s\S]{0,120}setPayError\(target\.reason\)/);
+  assert.equal((src.match(/expectedAmount: target\.exactAmount,/g) ?? []).length, 2, "Pay and On Account always pin the amount presented");
 });
 
 test("Phase D: Takeaway On-Account is offline-capable via CAPTURE (order → chained receivable)", () => {

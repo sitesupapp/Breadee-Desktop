@@ -261,7 +261,7 @@ export function posErrorCode(e: unknown): string | null {
       if (m) return m[1];
     }
   }
-  const m = /\b((?:MOVE|MERGE|PAY|ON_ACCOUNT)_[A-Z0-9_]+|VERSION_CONFLICT|ALREADY_SETTLED|ALREADY_PAID|PAYMENT_RESIDUE|SPLIT_DISCOUNT_UNSUPPORTED|IDEMPOTENCY_PAYLOAD_MISMATCH|CROSS_ACTOR_REPLAY_REJECTED|CROSS_OU_REJECTED|OU_ACCESS_DENIED|CROSS_BRANCH_REPLAY_REJECTED|UNSUPPORTED_STATE)\b/.exec(errMsg(e));
+  const m = /\b((?:MOVE|MERGE|PAY|ON_ACCOUNT)_[A-Z0-9_]+|VERSION_CONFLICT|ALREADY_SETTLED|ALREADY_PAID|PAYMENT_RESIDUE|SPLIT_DISCOUNT_UNSUPPORTED|IDEMPOTENCY_PAYLOAD_MISMATCH|CROSS_ACTOR_REPLAY_REJECTED|CROSS_OU_REJECTED|OU_ACCESS_DENIED|CROSS_BRANCH_REPLAY_REJECTED|UNSUPPORTED_STATE|SHIFT_ALREADY_OPEN)\b/.exec(errMsg(e));
   return m ? m[1] : null;
 }
 
@@ -280,7 +280,7 @@ export type PosTxnSyncDeps = {
   submit: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string }>;
   pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown> }) => Promise<unknown>;
   /** Open (or adopt) the shift for an offline-opened Case-2 shift, exactly once. */
-  openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string }) => Promise<{ shiftId: string; reused: boolean }>;
+  openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string; requireNew?: boolean }) => Promise<{ shiftId: string; reused: boolean }>;
   /** Phase-C: occupy a table / establish the session (pos_open_table, op-id + version CAS). */
   openTable: (payload: OpenTablePayload) => Promise<{ table_id: string; pos_entity_version: number | null }>;
   /** Phase-C: send a dine-in round (pos_submit_order; expected_order_id binds rounds >=2). */
@@ -357,7 +357,7 @@ export type PosTxnSyncDeps = {
     notes: string | null;
     deliveryFeeCashTreatment?: string;
     clientOpId: string;
-  }) => Promise<{ shift_id: string; idempotent: boolean }>;
+  }) => Promise<{ shift_id: string; idempotent: boolean; approval_required?: boolean | null }>;
   /** Phase-D: settle one SPLIT leg (pos_split_settle). Item-subset allocations; the server derives
    *  the amount. expectedVersion is optional (NULL offline). client_op_id → exactly-once per leg. */
   splitSettle: (args: {
@@ -549,7 +549,8 @@ export const defaultDeps: PosTxnSyncDeps = {
       },
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
-    return { shift_id: String(row.shift_id ?? args.shiftId), idempotent };
+    // 1.0.38 (Bug 3) — server truth for the branch's End-Shift approval rule (cached for a chained offline open).
+    return { shift_id: String(row.shift_id ?? args.shiftId), idempotent, approval_required: typeof row.approval_required === "boolean" ? row.approval_required : null };
   },
   splitSettle: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");

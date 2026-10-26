@@ -193,6 +193,30 @@ export function settleStillCovers(o: OfflineOperation): boolean {
   return !settleRefusedByServer(o);
 }
 
+/** 1.0.38 (G1) — a captured op that CLOSES a table's bill: a pay / on-account, or the split leg that paid
+ *  everything still open on it (captured with `covers` + `table_id`, see dineinOffline.splitOperationalBillOffline). */
+export function isTableSettleOp(o: OfflineOperation): boolean {
+  if (o.operation_type === "pay_table" || o.operation_type === "on_account_table") return true;
+  const p = rec(o.payload);
+  return o.operation_type === "split_settle" && typeof p.table_id === "string" && Object.keys(rec(p.covers)).length > 0;
+}
+
+/** 1.0.38 (G1) — a live settle captured on top of an offline move / merge the server then REFUSED, while that
+ *  op was still projected (captured before the refusing attempt): the cashier collected the bill the op had
+ *  brought over, so that bill is HELD by this settle. A settle captured after the refusal never is (the op's
+ *  bill was already back on its own table, outside what was paid). */
+export function settleHeldByRefusedStructural(settle: OfflineOperation, s: OfflineOperation): boolean {
+  if (settle.operation_type !== "pay_table" && settle.operation_type !== "on_account_table") return false;
+  if (!live(settle) || !settleStillCovers(settle) || !isStructuralOp(s) || !structuralRefusedByServer(s)) return false;
+  return settle.dependency_ids.includes(s.operation_id) && typeof s.last_attempt_at === "string" && settle.created_at <= s.last_attempt_at;
+}
+
+/** 1.0.38 (G1) — a split leg the SERVER reported as having paid its whole order (`parent_completed`). */
+export function splitCompletedOrder(o: OfflineOperation): string | null {
+  if (o.operation_type !== "split_settle" || o.status !== "synced" || o.result_meta?.parent_completed !== true) return null;
+  return typeof o.canonical_entity_id === "string" && o.canonical_entity_id !== "" ? o.canonical_entity_id : null;
+}
+
 /** 1.0.38 — a covering settle parked for the operator (not refused): the bill stays closed + HELD. */
 export function settleAwaitingRecovery(o: OfflineOperation): boolean {
   return o.status === "needs_attention" && settleStillCovers(o) && !ALREADY_CLOSED.test(o.last_error_message ?? "");
@@ -495,8 +519,25 @@ export function projectTableBill(input: {
   // session they depend on and every canonical order already in a snapshot fetched before they were
   // captured (and the summary) — exactly the bill that was on screen when they were taken.
   const tableSettles = [...input.ops]
-    .filter((o) => (o.operation_type === "pay_table" || o.operation_type === "on_account_table") && live(o) && !reflectedIn(o, fetchedAt) && rec(o.payload).table_id === tableId)
+    .filter((o) => isTableSettleOp(o) && live(o) && !reflectedIn(o, fetchedAt) && rec(o.payload).table_id === tableId)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  // 1.0.38 (G1) — a payment captured AFTER an offline move / merge that the server then REFUSED: the bill
+  // that op would have taken off this table never left it server-side, but the cashier already collected it
+  // inside that payment (parked behind the refusal, never sent). It is HELD by that payment here too — never
+  // collectible a second time (no "source collectible + destination paid" for the same value).
+  const heldSessions = new Set<string>();
+  const heldSettles: OfflineOperation[] = [];
+  for (const s of structural) {
+    if (s.status === "cancelled" || !structuralRefusedByServer(s) || !structuralTables(s).vacates.includes(tableId)) continue;
+    const sp = rec(s.payload);
+    const session = s.operation_type === "move_table" ? sp.session_local : rec(sp.session_locals)[tableId];
+    for (const o of input.ops) {
+      if (reflectedIn(o, fetchedAt) || !settleHeldByRefusedStructural(o, s)) continue;
+      if (!heldSettles.includes(o)) heldSettles.push(o);
+      if (typeof session === "string" && session !== "") heldSessions.add(session);
+      for (const r of structuralRefsLeaving(s, tableId)) if (r.order_local) heldSessions.add(r.order_local);
+    }
+  }
   // rc.13 — a settle the SERVER REFUSED never keeps the bill closed (SETTLEMENT_CONFLICT): the money was
   // not applied, so the bill is still the table's active, unpaid bill — shown with attention, never as
   // paid. (rc.12 kept a refused settle covering the bill offline; after reconnect the raw server map then
@@ -504,11 +545,29 @@ export function projectTableBill(input: {
   // 1.0.38 — a settle merely PARKED (prerequisite failed / transient fault) still covers it (BUG 1).
   // (= settlePrecedence's pending / confirmed, plus the floor-only rule: a bill proven closed elsewhere
   // stays closed on a stale map — never offered for a second payment.)
-  const settleOps = tableSettles.filter((o) => settleStillCovers(o));
+  const settleOps = [...tableSettles.filter((o) => settleStillCovers(o)), ...heldSettles.filter((o) => !tableSettles.includes(o))].sort((a, b) =>
+    a.created_at.localeCompare(b.created_at),
+  );
   const refusedSettles = tableSettles.filter((o) => !settleStillCovers(o));
   const coveredOrders = new Set<string>();
   let coveredSummary = false;
-  const coveredSessions = new Set<string>();
+  const coveredSessions = new Set<string>(heldSessions);
+  for (const s of structural) {
+    if (s.status === "cancelled" || !structuralRefusedByServer(s) || !heldSettles.some((h) => h.dependency_ids.includes(s.operation_id))) continue;
+    for (const r of structuralRefsLeaving(s, tableId)) if (r.order_id) coveredOrders.add(r.order_id);
+  }
+  // 1.0.38 (G1) — an order a split leg PAID IN FULL (server: parent_completed) is closed for good: never
+  // this table's open bill again, whatever an older snapshot / map summary still shows (closure is monotonic).
+  const completedLegs = input.ops.filter((o) => splitCompletedOrder(o) != null);
+  const completedOrders = new Set(completedLegs.map((o) => splitCompletedOrder(o) as string));
+  const completedNumbers = new Map<string, string>();
+  for (const o of input.ops) {
+    const num = o.result_meta?.order_number;
+    if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && completedOrders.has(o.canonical_entity_id) && typeof num === "string" && num !== "") {
+      completedNumbers.set(num, o.canonical_entity_id);
+    }
+  }
+  for (const id of completedOrders) coveredOrders.add(id);
   for (const s of settleOps) {
     const cv = rec(rec(s.payload).covers);
     if (Object.keys(cv).length > 0) {
@@ -535,6 +594,11 @@ export function projectTableBill(input: {
       }
     }
     for (const s of settleOps) for (const id of settleCoveredIds(s, (l) => sessionOrder.get(l))) coveredOrders.add(id);
+    // 1.0.38 (G1) — a session HELD by a payment captured after its refused move / merge: its own order too.
+    for (const sid of heldSessions) {
+      const c = sessionOrder.get(sid);
+      if (c) coveredOrders.add(c);
+    }
     // 1.0.38 (E2E-a) — the same F1 rule for a map SUMMARY (no cached bill): an online floor read after the
     // session's round synced but before its settle synced shows that ONE order as the table's open bill. When
     // the summary is exactly one order and its number is the covered session's canonical order (round 1's
@@ -549,12 +613,56 @@ export function projectTableBill(input: {
     const at = Date.parse(s.created_at);
     return !d.rounds.some((r) => Number.isFinite(at) && Date.parse(r.sent_at) > at);
   };
+  if (!coveredSummary && mapRow && mapRow.orders === 1 && typeof mapRow.order_number === "string" && completedNumbers.has(mapRow.order_number)) coveredSummary = true;
+  // 1.0.38 (G1) — a session whose order a split leg paid in full is closed too — unless it holds work still
+  // replaying after that (then it is the active bill and stays, with that work's own outcome).
+  const opById = (id: string) => input.ops.find((o) => o.operation_id === id);
+  const draftCompleted =
+    input.draft != null &&
+    completedLegs.some((l) => l.canonical_entity_id === input.draft?.canonical_order_id || rec(l.payload).order_local === input.draft?.local_session_id) &&
+    input.draft.rounds.every((r) => {
+      const o = opById(r.operation_id);
+      return !o || o.status === "synced" || o.status === "cancelled";
+    });
   const draftSettled =
     input.draft != null &&
-    (coveredSessions.has(input.draft.local_session_id) ||
+    (draftCompleted ||
+      coveredSessions.has(input.draft.local_session_id) ||
       settleOps.some((s) => Object.keys(rec(rec(s.payload).covers)).length === 0 && legacyCovers(s, input.draft as DineDraft)));
   const draft = draftSettled ? null : input.draft;
-  const lastSettleOpId = settleOps.length > 0 ? settleOps[settleOps.length - 1].operation_id : null;
+  // The op that FREED the table locally: the latest settle, or a not-yet-reflected split leg that completed the
+  // order on it (a new bill here chains after it and takes no CAS from a stale map — see openTableOffline).
+  // Was that order on THIS table? Its snapshot / session / map summary says so, or — on a stale FREE map — the
+  // table its rounds were sent to (an offline move / merge that later brought it elsewhere is honoured).
+  const orderTable = (id: string): string | null => {
+    let at: string | null = null;
+    let when = "";
+    const sessions = new Set(input.ops.filter((o) => o.operation_type === "dinein_send_round" && o.canonical_entity_id === id && o.local_entity_id).map((o) => o.local_entity_id as string));
+    for (const o of input.ops) {
+      if (o.status === "cancelled" || o.created_at < when) continue;
+      if (o.operation_type === "dinein_send_round" && o.canonical_entity_id === id) {
+        const t = rec(rec(o.payload).submit).table_id;
+        if (typeof t === "string") [at, when] = [t, o.created_at];
+      } else if (isStructuralOp(o) && o.status === "synced" && structuralAllRefs(o).some((r) => r.order_id === id || (r.order_local != null && sessions.has(r.order_local)))) {
+        const f = structuralTables(o).fills;
+        if (f) [at, when] = [f, o.created_at];
+      }
+    }
+    return at;
+  };
+  const completedHere = completedLegs.filter((l) => {
+    if (reflectedIn(l, fetchedAt)) return false;
+    const id = l.canonical_entity_id as string;
+    const num = [...completedNumbers.entries()].find(([, v]) => v === id)?.[0];
+    return (
+      (input.canonical?.bill.orders ?? []).some((o) => o.id === id) ||
+      (input.draft != null && (input.draft.canonical_order_id === id || rec(l.payload).order_local === input.draft.local_session_id)) ||
+      (mapRow != null && mapRow.orders === 1 && num != null && mapRow.order_number === num) ||
+      orderTable(id) === tableId
+    );
+  });
+  const freeing = [...settleOps, ...completedHere].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const lastSettleOpId = freeing.length > 0 ? freeing[freeing.length - 1].operation_id : null;
   // 1.0.38 — a bill moved here offline carries the server-collected amount of its source table.
   const collected = Math.max(0, Number(mapRow?.collected ?? 0) || 0) + (carriedActive ? Math.max(0, Number(input.draft?.carried_collected ?? 0) || 0) : 0);
   // 1.0.38 — after an unsynced offline move / merge the server versions of the bill's orders are not known
@@ -768,7 +876,7 @@ export function projectTableBill(input: {
   for (const b of bills) recomputeOrder(b);
   const nonEmpty = bills.filter((b) => b.lines.length > 0);
   const bill = foldBill(tableId, nonEmpty);
-  const settleAt = settleOps.length > 0 ? settleOps[settleOps.length - 1].created_at : "";
+  const settleAt = freeing.length > 0 ? freeing[freeing.length - 1].created_at : "";
   const freedByOpId = nonEmpty.length > 0 ? null : vacatedByOpId && vacatedAt >= settleAt ? vacatedByOpId : lastSettleOpId;
   const gross = bill.total;
   // The map row's server-collected amount belongs to the canonical bill; once that bill is settled
@@ -843,18 +951,107 @@ export async function scopedOperations(scope: ProjectionScope): Promise<OfflineO
   return all.filter((o) => opInScope(o, scope));
 }
 
-/** This scope's OPEN local dine-in sessions (one indexed read). */
+/** This scope's OPEN local dine-in sessions (one indexed read). 1.0.38 (G1) — NEWEST first, so a per-table
+ *  `find` always picks the table's latest session (an older one is never its bill: see sessionClosure). */
 export async function openDraftsInScope(scope: ProjectionScope): Promise<DineDraft[]> {
   if (!scope.tenantId) return [];
   const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
-  return all.filter(
-    (d) =>
-      d.status === "open" &&
-      (d.branch_id ?? null) === (scope.branchId ?? null) &&
-      d.cashier_user_id === scope.cashierUserId &&
-      d.device_id === scope.deviceId &&
-      (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
-  );
+  return all
+    .filter(
+      (d) =>
+        d.status === "open" &&
+        (d.branch_id ?? null) === (scope.branchId ?? null) &&
+        d.cashier_user_id === scope.cashierUserId &&
+        d.device_id === scope.deviceId &&
+        (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
+    )
+    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.local_session_id.localeCompare(a.local_session_id));
+}
+
+// ---------------------------------------------------------------------------
+// 1.0.38 (G1) — local SESSION LIFECYCLE TRUTH
+// ---------------------------------------------------------------------------
+
+/** Every live op that is part of a local session's bill: its open / rounds / the move-merge that placed it
+ *  (barrier, carried snapshot, merged blocks) and every leg / edit / settle / move / merge that names the
+ *  session or its canonical order. `missing` counts barrier ops no longer in the log (GC only ever removes
+ *  SYNCED ops older than its retention). */
+export function sessionWorkOps(d: DineDraft, ops: OfflineOperation[]): { work: OfflineOperation[]; missing: number } {
+  const ids = new Set<string>([
+    d.open_operation_id,
+    ...d.rounds.map((r) => r.operation_id),
+    ...(d.structural_op_id ? [d.structural_op_id] : []),
+    ...(d.carried_op_id ? [d.carried_op_id] : []),
+    ...(d.merged_blocks ?? []).map((b) => b.op_id),
+  ]);
+  const sid = d.local_session_id;
+  const canonical = d.canonical_order_id;
+  const touches = (o: OfflineOperation): boolean => {
+    const p = rec(o.payload);
+    const body = rec(p.payload);
+    if (p.order_local === sid || p.session_local === sid || rec(p.covers).session_local === sid) return true;
+    if (canonical && (p.order_id === canonical || body.order_id === canonical)) return true;
+    if (isStructuralOp(o)) return structuralAllRefs(o).some((r) => r.order_local === sid || (canonical != null && r.order_id === canonical));
+    return false;
+  };
+  const known = new Set(ops.map((o) => o.operation_id));
+  const work = ops.filter((o) => o.status !== "cancelled" && (ids.has(o.operation_id) || touches(o)));
+  return { work, missing: [...ids].filter((id) => !known.has(id)).length };
+}
+
+export type SessionClosure = { status: "settled" | "closed"; reason: "split_completed" | "canonical_closed"; evidenceOpId: string | null };
+
+/**
+ * PURE — is this OPEN local session's bill AUTHORITATIVELY closed (so it must never take new work)? A
+ * session leaves `open` through this device's own settle capture; this covers everything else:
+ *   (a) a SYNCED split leg of its order that the server reported as paying it in full (`parent_completed`);
+ *   (b) a canonical floor read that STARTED after every op of the bill had synced no longer shows its order
+ *       as the table's open bill — the table is free, its single bill is another order, or a bill read as
+ *       fresh does not list it (paid online, closed / voided / moved / merged elsewhere).
+ * Never for a session with ANY work still unsynced or parked (recoverable or not): that bill is still the
+ * table's active one and keeps its own outcome. Never without a known canonical order (nothing to prove).
+ */
+export function sessionClosure(
+  d: DineDraft,
+  ops: OfflineOperation[],
+  canon: { row: TableSummary | null; mapAt: number | null; bill?: { bill: TableBill; fetchedAt: number } | null },
+): SessionClosure | null {
+  if (d.status !== "open") return null;
+  const { work, missing } = sessionWorkOps(d, ops);
+  if (work.some((o) => o.status !== "synced")) return null;
+  const r1 = d.rounds.find((r) => r.seq === 1);
+  const r1op = r1 ? work.find((o) => o.operation_id === r1.operation_id) : undefined;
+  const canonical = d.canonical_order_id ?? r1op?.canonical_entity_id ?? null;
+  if (!canonical) return null;
+  const legs = work.filter((o) => splitCompletedOrder(o) === canonical).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (legs.length > 0) return { status: "settled", reason: "split_completed", evidenceOpId: legs[legs.length - 1].operation_id };
+  const { row, mapAt } = canon;
+  if (!row || mapAt == null || (work.length === 0 && missing === 0)) return null;
+  if (!work.every((o) => reflectedIn(o, mapAt))) return null;
+  if (missing > 0 && !(Date.parse(d.updated_at) <= mapAt)) return null;
+  const closed: SessionClosure = { status: "closed", reason: "canonical_closed", evidenceOpId: null };
+  if (Number(row.orders) === 0) return closed;
+  const num = r1op?.result_meta?.order_number;
+  if (Number(row.orders) === 1 && typeof row.order_number === "string" && row.order_number !== "" && typeof num === "string" && num !== "" && row.order_number !== num) return closed;
+  const b = canon.bill;
+  if (b && work.every((o) => reflectedIn(o, b.fetchedAt)) && !(b.bill.orders ?? []).some((o) => o.id === canonical)) return closed;
+  return null;
+}
+
+/** PURE — does this split leg pay EVERYTHING still open on the table's (single) bill? Then it closes the bill
+ *  locally exactly like a settle (the table becomes reusable; a new customer opens a NEW session). Only for a
+ *  bill fully known on this device (no summary, no server-held part-payment, every line splittable). */
+export function splitCompletesBill(p: OperationalTableBill, orderKey: string, allocations: { order_item_id: string; quantity: number }[]): boolean {
+  if (p.summaryOnly || p.collected > 0 || p.orders.length !== 1 || p.bill.orders.length !== 1) return false;
+  const order = p.bill.orders[0];
+  if (order.id !== orderKey || p.orders[0].key !== orderKey || order.lines.length === 0) return false;
+  const alloc = new Map<string, number>();
+  for (const a of allocations) alloc.set(a.order_item_id, (alloc.get(a.order_item_id) ?? 0) + (Number(a.quantity) || 0));
+  return order.lines.every((l) => {
+    const m = p.meta.get(l.id);
+    if (!m || (m.ref.kind !== "canonical" && m.ref.kind !== "local")) return false;
+    return l.quantity - m.paidQty - (alloc.get(l.id) ?? 0) <= 0;
+  });
 }
 
 async function openDraftForTable(scope: ProjectionScope, tableId: string): Promise<DineDraft | null> {
@@ -898,6 +1095,8 @@ export function tablesOfOp(o: OfflineOperation): string[] {
   if (o.operation_type === "dinein_open_table") return one(o.local_entity_id);
   if (o.operation_type === "dinein_send_round") return one(rec(p.submit).table_id);
   if (o.operation_type === "pay_table" || o.operation_type === "on_account_table") return one(p.table_id);
+  // 1.0.38 (G1) — only a split leg that CLOSES the bill records its table (isTableSettleOp).
+  if (o.operation_type === "split_settle") return one(p.table_id);
   if (isStructuralOp(o)) {
     const t = structuralTables(o);
     return [...t.vacates, ...one(t.fills)];
@@ -935,7 +1134,7 @@ export async function tablesWithUnreflectedWork(
     if (!reflectedIn(o, mapLoadedAt)) for (const x of ts) touched.add(x);
     if (!reflectedIn(o, mapLoadedAt) && workStillReplays(o)) for (const x of ts) structuralHold.add(x);
     const t = ts[0];
-    const settle = o.operation_type === "pay_table" || o.operation_type === "on_account_table";
+    const settle = isTableSettleOp(o);
     if (!settle) continue;
     if (settleRefusedByServer(o)) {
       refusedSettle.set(t, o.last_error_message ?? "refused by the server");
@@ -980,14 +1179,67 @@ export const PART_PAID_OFFLINE_SETTLE_MESSAGE = "Part of this bill is already pa
  * 1.0.38 (Bug 9) — PURE, the ONE offline full-settle / on-account amount rule for a table bill (Pay and On
  * Account alike). A locally captured, unsynced split leg (paidPending) → refused (R is not known here). A
  * SERVER-held part-payment (collected = P) → refused unless the server deducts prior payments
- * (`serverDeductsPrior`, see lib/pos/tablePayment serverDeductsPriorPayments). `exactAmount` = the remaining
- * obligation R = T − P, ONLY for a fully-canonical bill with no local delta (no unsynced round / edit / leg /
- * move / merge), no summary and one currency — else null (a locally-priced figure is never asserted).
+ * (`serverDeductsPrior`, see lib/pos/tablePayment serverDeductsPriorPayments).
+ * 1.0.38 G3 (amount pin) — `exactAmount` = the amount THIS DEVICE PRESENTED / COLLECTED: R_local = gross − P in
+ * the order currency, computed like the server computes R (Σ order totals − Σ paid split settlements, numeric
+ * rounding — `roundNumeric`). It is ALWAYS recorded (canonical bill or local rounds / edits / move / merge
+ * alike) and replayed as `expected_amount`: when another terminal appended a round meanwhile, the server's R
+ * differs and the settle is REFUSED (PAY_AMOUNT_CHANGED / ON_ACCOUNT_AMOUNT_CHANGED → conflict), never booked
+ * at a figure the cashier never collected. Null only when no single figure exists (mixed currencies).
  */
 export function offlineSettleAmount(p: OperationalTableBill, serverDeductsPrior: boolean): { ok: false; reason: string } | { ok: true; exactAmount: number | null } {
   if (p.paidPending > 0 || (p.collected > 0 && !serverDeductsPrior)) return { ok: false, reason: PART_PAID_OFFLINE_SETTLE_MESSAGE };
-  const exact = p.mutationOpIds.length === 0 && !p.summaryOnly && !p.bill.mixedCurrency && p.orders.every((o) => o.orderId && !o.orderLocal) && p.gross != null;
-  return { ok: true, exactAmount: exact ? Math.max(0, Math.round(((p.gross as number) - p.collected) * 100) / 100) : null };
+  if (p.bill.mixedCurrency || p.gross == null) return { ok: true, exactAmount: null };
+  return { ok: true, exactAmount: Math.max(0, roundNumeric(p.gross - p.collected, 2)) };
+}
+
+/** 1.0.38 — an offline discount on a bill the server already holds part-payment for (SPLIT_DISCOUNT_UNSUPPORTED). */
+export const PART_PAID_DISCOUNT_MESSAGE = "A discount cannot be applied to a bill that is already part-paid.";
+
+/**
+ * PURE — Postgres `round(numeric, d)` (half away from zero) of a JS float, without binary noise: the float sum
+ * 1.1 + 2.2 rounds like the numeric 3.3 and 4.995 rounds to 5.00 (Math.round(4.995 * 100) gives 4.99).
+ */
+export function roundNumeric(x: number, d: number): number {
+  if (!Number.isFinite(x)) return x;
+  const s = Math.abs(x).toPrecision(15);
+  const r = s.includes("e") ? Math.round(Math.abs(x) * 10 ** d) / 10 ** d : Number(`${Math.round(Number(`${s}e${d}`))}e-${d}`);
+  return x < 0 ? -r : r;
+}
+
+/** An exact decimal (as the server's numeric reads the JSON number) → integer n with v = n / scale. */
+function decimalOf(v: number): { n: bigint; scale: bigint } {
+  const s = Math.abs(v).toPrecision(15).includes("e") ? Math.abs(v).toFixed(10) : String(Math.abs(v));
+  const [i, f = ""] = s.split(".");
+  return { n: BigInt(`${i}${f}`), scale: 10n ** BigInt(f.length) };
+}
+
+/**
+ * 1.0.38 G3 — PURE, the amount pin of an offline settle / on-account WITH the cashier's bill discount, exactly as
+ * `pos_pay_table_core` / `pos_complete_table_on_account_core` compute it: bill_sub = Σ order subtotals,
+ * discount = round(bill_sub × pct / 100, 2) (percent) or round(value, 2) (amount) — 2 dp in every currency —
+ * allocated across the orders (Σ = discount), so the charged R = bill_sub − discount. No discount → `amount`
+ * (R_local from offlineSettleAmount) unchanged. A discount on a bill with server-held part-payment is refused
+ * here (the server refuses it: SPLIT_DISCOUNT_UNSUPPORTED) — never captured.
+ */
+export function offlineSettlePin(
+  amount: number | null,
+  bill: { subtotal: number | null; collected: number },
+  discount: { discount_type?: string; discount_value?: number } | null | undefined,
+): { ok: true; amount: number | null } | { ok: false; reason: string } {
+  const type = discount?.discount_type;
+  const value = Number(discount?.discount_value);
+  if ((type !== "percent" && type !== "amount") || !(value > 0)) return { ok: true, amount };
+  if (bill.collected > 0) return { ok: false, reason: PART_PAID_DISCOUNT_MESSAGE };
+  if (amount == null || bill.subtotal == null) return { ok: true, amount: null };
+  const subCents = BigInt(Math.round(roundNumeric(bill.subtotal, 2) * 100));
+  const v = decimalOf(value);
+  const discCents =
+    type === "percent"
+      ? (2n * subCents * v.n + 100n * v.scale) / (2n * 100n * v.scale) // round(sub × v / 100, 2), half away from zero
+      : BigInt(Math.round(roundNumeric(value, 2) * 100));
+  const r = subCents - discCents;
+  return { ok: true, amount: r > 0n ? Number(r) / 100 : 0 };
 }
 
 /** 1.0.38 — the parked-settle hold text (the payment was taken; the settle needs the operator). */

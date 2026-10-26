@@ -21,7 +21,7 @@
 
 import { localdb, readCachedBill, readCachedTableMap, type DineDraft } from "@/lib/offline/db";
 import { type OfflineOperation, type OperationScope, getOperation } from "@/lib/offline/operationLog";
-import { deterministicUuid, sessionBarrier } from "@/lib/offline/dineinOffline";
+import { deterministicUuid, retireClosedSessions, sessionBarrier } from "@/lib/offline/dineinOffline";
 import { canonicalIdForInScope } from "@/lib/offline/entityMap";
 import {
   type BillRef,
@@ -210,6 +210,9 @@ function newCarrierDraft(scope: TableOpScope, args: { tableId: string; tableName
 
 async function loadContext(scope: TableOpScope, mapLoadedAt: number | null | undefined) {
   const ps = projScope(scope);
+  // 1.0.38 (G1) — a session whose bill closed elsewhere is retired first: it is never the bill moved / merged
+  // (its pins would name a closed order) and never makes a free destination look occupied.
+  await retireClosedSessions({ tenantId: scope.tenantId, branchId: scope.branchId });
   const [ops, drafts, mapAt] = await Promise.all([
     scopedOperations(ps),
     openDraftsInScope(ps),

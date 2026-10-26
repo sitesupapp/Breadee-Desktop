@@ -25,6 +25,7 @@ export type ForensicCategory =
   | "RC13_SHIFT_MAPPING" // rc.13-CAPTURED sale that sent a raw LOCAL shift id — refused before any write; recovered once (rc.14)
   | "SHIFT_MAPPING_MISSING" // a sale whose offline-opened shift has no known canonical id — parked, nothing sent (manual review)
   | "SERVER_COORDINATION_REQUIRED" // pre-rc.12 offline table move/merge (now online-only)
+  | "STALE_BILL_ROUND" // 1.0.38 (G1) — a round captured on a bill already closed elsewhere (EXPECTED_ORDER_MISMATCH)
   | "HISTORICAL_DEPENDENT" // parked only because a prerequisite failed
   | "EXPECTED_CONFLICT" // the server state changed elsewhere (version / settled / identity …)
   | "AUTHORITY_REFUSED" // permission refusal at replay
@@ -68,12 +69,22 @@ const CONFLICT_CODES = new Set([
   "shift_conflict", "shift_closed", "delivery_ops_conflict", "edit_order_conflict", "payout_source_drift", "receivable_conflict",
 ]);
 
+/** 1.0.38 (G1) — the operator wording for a round the server refused because its bill was already closed. */
+export const STALE_BILL_ROUND_REASON = "Round captured on a bill that was already closed — needs manager review";
+const STALE_ROUND = /expected_order_mismatch|bill changed|changed since it was opened offline/i;
+
 /** PURE — classify one operation. */
 export function classifyOperation(op: OfflineOperation): { category: ForensicCategory; reason: string } {
   if (op.status === "synced") return { category: "SYNCED", reason: "synced" };
   if (op.status !== "needs_attention") return { category: "WAITING", reason: op.status };
   const code = op.last_error_code ?? "";
   const msg = op.last_error_message ?? "";
+  // 1.0.38 (G1) — the server refused this round because the bill it was captured on (pos_save_order
+  // expected_order_id) is no longer the table's open bill: it was paid / closed / moved elsewhere. Never
+  // auto-retried (the refusal is deterministic) and never auto re-targeted: a manager reviews it.
+  if (op.operation_type === "dinein_send_round" && (code === "expected_order_mismatch" || STALE_ROUND.test(msg))) {
+    return { category: "STALE_BILL_ROUND", reason: STALE_BILL_ROUND_REASON };
+  }
   if (op.operation_type === "dinein_send_round" && LINE_ID_BUG.test(msg)) {
     return { category: "HISTORICAL_LINE_ID_BUG", reason: "pre-rc.10 round sent a non-uuid line id (22P02); nothing applied server-side" };
   }
@@ -129,7 +140,123 @@ export type DiagnosticRow = {
   depends_on: { op: string; type: string; status: string }[];
   /** rc.12 — why it is not done, in one line (null when synced). */
   blocking: string | null;
+  /** 1.0.38 (G1, F4) — the bill identity this op was captured against + how it resolves (ids only, no PII). */
+  pins: DiagnosticPins;
 };
+
+/** 1.0.38 (G1, F4) — per-op identity pins for the diagnostic: what a reviewer needs to prove WHICH bill a
+ *  dine-in op targeted without DevTools. Ids / versions / statuses only — never names, items or amounts. */
+export type DiagnosticPins = {
+  table_id: string | null;
+  /** Every table a move / merge involves (from, to / primary, sources). */
+  tables: string[];
+  local_session_id: string | null;
+  /** Canonical order ids frozen at capture (bound round 1, bill refs, settle covers). */
+  captured_order_ids: string[];
+  /** Local ids the op resolves at replay through its predecessors' results (session / order_local refs). */
+  captured_local_ids: string[];
+  /** A round's expected_order_id: captured (bound round 1), else resolved from its session's round 1 result. */
+  expected_order_id: string | null;
+  /** The frozen request's order pins (pay / on-account / move / merge), once resolved before the first send. */
+  resolved_order_ids: string[] | null;
+  /** Expected table / order versions known to the op (captured or frozen), by table id or "order". */
+  expected_versions: Record<string, number> | null;
+  dependency_ids: string[];
+  status: string;
+  error_code: string | null;
+};
+
+function pinsOf(o: OfflineOperation, resolve: (localId: string) => string | null): DiagnosticPins {
+  const p = (o.payload ?? {}) as Record<string, unknown>;
+  const rec = (v: unknown) => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+  const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
+  const ids = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === "string" && x !== "") : []);
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const out: DiagnosticPins = {
+    table_id: null,
+    tables: [],
+    local_session_id: null,
+    captured_order_ids: [],
+    captured_local_ids: [],
+    expected_order_id: null,
+    resolved_order_ids: null,
+    expected_versions: null,
+    dependency_ids: [...o.dependency_ids],
+    status: o.status,
+    error_code: o.last_error_code,
+  };
+  const refs = (list: unknown[]) => {
+    for (const r of list) {
+      const rr = rec(r);
+      if (str(rr.order_id)) out.captured_order_ids.push(rr.order_id as string);
+      else if (str(rr.order_local)) out.captured_local_ids.push(rr.order_local as string);
+    }
+  };
+  switch (String(o.operation_type)) {
+    case "dinein_open_table": {
+      out.table_id = o.local_entity_id;
+      const v = num(p.expected_version);
+      if (v != null) out.expected_versions = { [String(o.local_entity_id)]: v };
+      break;
+    }
+    case "dinein_send_round": {
+      const sub = rec(p.submit);
+      out.table_id = str(sub.table_id);
+      out.local_session_id = str(p.session_local) ?? o.local_entity_id;
+      const bound = str(sub.expected_order_id);
+      if (bound) out.captured_order_ids.push(bound);
+      if (str(p.session_local)) out.captured_local_ids.push(p.session_local as string);
+      out.expected_order_id = bound ?? (str(p.session_local) ? resolve(p.session_local as string) : null);
+      break;
+    }
+    case "pay_table":
+    case "on_account_table": {
+      const cv = rec(p.covers);
+      out.table_id = str(p.table_id);
+      out.local_session_id = str(cv.session_local);
+      out.captured_order_ids.push(...ids(cv.order_ids));
+      if (out.local_session_id) out.captured_local_ids.push(out.local_session_id);
+      const rp = rec(p.resolved_pins);
+      if (Array.isArray(rp.order_ids)) out.resolved_order_ids = ids(rp.order_ids);
+      break;
+    }
+    case "split_settle": {
+      out.table_id = str(p.table_id);
+      out.local_session_id = str(p.order_local) ?? str(rec(p.covers).session_local);
+      if (str(p.order_id)) out.captured_order_ids.push(p.order_id as string);
+      if (str(p.order_local)) out.captured_local_ids.push(p.order_local as string);
+      break;
+    }
+    case "move_table": {
+      out.table_id = str(p.from_table_id);
+      out.tables = [str(p.from_table_id), str(p.to_table_id)].filter((x): x is string => !!x);
+      out.local_session_id = str(p.session_local);
+      refs((rec(p.bill).orders as unknown[]) ?? []);
+      const rq = rec(p.resolved);
+      if (Array.isArray(rq.expected_order_ids)) out.resolved_order_ids = ids(rq.expected_order_ids);
+      const vs: Record<string, number> = {};
+      if (num(rq.expected_from_version) != null && out.tables[0]) vs[out.tables[0]] = rq.expected_from_version as number;
+      if (num(rq.expected_to_version) != null && out.tables[1]) vs[out.tables[1]] = rq.expected_to_version as number;
+      if (Object.keys(vs).length > 0) out.expected_versions = vs;
+      break;
+    }
+    case "merge_tables": {
+      out.table_id = str(p.primary_table_id);
+      out.tables = [str(p.primary_table_id), ...ids(p.source_table_ids)].filter((x): x is string => !!x);
+      out.local_session_id = str(rec(p.session_locals)[out.table_id ?? ""]);
+      refs(Object.values(rec(p.orders)));
+      const rq = rec(p.resolved);
+      const eo = rec(rq.expected_orders);
+      if (Object.keys(eo).length > 0) out.resolved_order_ids = Object.values(eo).filter((x): x is string => typeof x === "string");
+      const ev = rec(rq.expected_versions);
+      if (Object.keys(ev).length > 0) out.expected_versions = Object.fromEntries(Object.entries(ev).filter(([, v]) => num(v) != null)) as Record<string, number>;
+      break;
+    }
+    default:
+      break;
+  }
+  return out;
+}
 
 /** rc.12 — the shift an op names (end_shift / sale / round payloads), canonical or offline-local. */
 export function shiftOf(o: OfflineOperation): string | null {
@@ -156,6 +283,7 @@ export function dispositionOf(o: OfflineOperation, category: ForensicCategory, c
       return "EXPECTED_CONFLICT";
     case "HISTORICAL_SHIFTLESS_DINEIN":
     case "SERVER_COORDINATION_REQUIRED":
+    case "STALE_BILL_ROUND":
     case "HISTORICAL_DEPENDENT":
     case "SHIFT_MAPPING_MISSING":
       return "MANUAL_REVIEW";
@@ -164,8 +292,64 @@ export function dispositionOf(o: OfflineOperation, category: ForensicCategory, c
   }
 }
 
+const TYPE_LABEL: Record<string, string> = {
+  dinein_open_table: "Open table",
+  dinein_send_round: "Send round",
+  pay_table: "Pay table",
+  on_account_table: "Table on account",
+  split_settle: "Split bill",
+  move_table: "Move table",
+  merge_tables: "Merge tables",
+  end_shift: "End shift",
+  open_shift: "Open shift",
+};
+
+/** 1.0.38 (G1) — a short operator label for an op (type + its table / tables; never customer data). */
+export function opLabel(o: OfflineOperation): string {
+  const p = (o.payload ?? {}) as Record<string, unknown>;
+  const base = TYPE_LABEL[String(o.operation_type)] ?? String(o.operation_type).replace(/_/g, " ");
+  const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
+  if (o.operation_type === "dinein_send_round") {
+    const seq = typeof p.round_seq === "number" ? ` ${p.round_seq}` : "";
+    const t = str(p.table_name);
+    return `${base}${seq}${t ? ` · ${t}` : ""}`;
+  }
+  if (o.operation_type === "move_table") {
+    const a = str(p.from_table_name) ?? str(p.from_table_id);
+    const b = str(p.to_table_name) ?? str(p.to_table_id);
+    return a && b ? `${base} · ${a} → ${b}` : base;
+  }
+  if (o.operation_type === "merge_tables") {
+    const names = (p.source_table_names ?? {}) as Record<string, unknown>;
+    const src = (Array.isArray(p.source_table_ids) ? (p.source_table_ids as string[]) : []).map((id) => str(names[id]) ?? id);
+    const prim = str(p.primary_table_name) ?? str(p.primary_table_id);
+    return prim ? `${base} · ${src.join(", ")} → ${prim}` : base;
+  }
+  const t = str(p.table_name) ?? (o.operation_type === "dinein_open_table" ? str(p.name) : null);
+  return t ? `${base} · ${t}` : base;
+}
+
+/** 1.0.38 (G1) — the REAL predecessor that blocks a dependency_failed op: its failed prerequisite(s), each
+ *  followed down to the refused root (a chain round → merge → pay names the round, not "waiting"). */
+function blockedBy(o: OfflineOperation, byId: Map<string, OfflineOperation>): string {
+  const listed = (o.last_error_message ?? "").split(",").map((s) => s.trim()).filter((id) => byId.has(id));
+  const failed = (listed.length > 0 ? listed : o.dependency_ids).map((id) => byId.get(id)).filter((d): d is OfflineOperation => d != null && d.status === "needs_attention");
+  if (failed.length === 0) return "Blocked by an earlier step that could not complete";
+  const describe = (d: OfflineOperation, depth: number): string => {
+    if (d.last_error_code === "dependency_failed" && depth < 8) {
+      const next = (d.last_error_message ?? "").split(",").map((s) => s.trim()).map((id) => byId.get(id)).find((x): x is OfflineOperation => x != null && x.status === "needs_attention");
+      if (next) return `${opLabel(d)}, itself blocked by ${describe(next, depth + 1)}`;
+    }
+    const why = classifyOperation(d).category === "STALE_BILL_ROUND" ? STALE_BILL_ROUND_REASON : (d.last_error_message ?? d.last_error_code ?? "refused").slice(0, 100);
+    return `${opLabel(d)} (${why})`;
+  };
+  return `Blocked by ${failed.map((d) => describe(d, 0)).join("; ")}`;
+}
+
 function blockingOf(o: OfflineOperation, byId: Map<string, OfflineOperation>): string | null {
   if (o.status === "synced" || o.status === "cancelled") return null;
+  // 1.0.38 (G1) — a prerequisite was REFUSED: this op is blocked (never replayed until it recovers), not waiting.
+  if (o.status === "needs_attention" && o.last_error_code === "dependency_failed") return blockedBy(o, byId);
   if (o.status === "blocked_dependency" || o.last_error_code === "dependency_failed" || o.last_error_code === "awaiting_parked_prerequisite") {
     // An End Shift is gated by its CLOSE-RELEVANT prerequisites only (rc.12 barrier) — report exactly those.
     const gating = o.operation_type === "end_shift" ? closeEffectiveDependencies(o, byId) : o.dependency_ids;
@@ -190,6 +374,12 @@ export function buildDiagnostic(
   opts: { currentShiftId?: string | null; allOps?: OfflineOperation[] } = {},
 ): DiagnosticRow[] {
   const byId = new Map((opts.allOps ?? ops).map((o) => [o.operation_id, o]));
+  // A local entity → the canonical id its creating op's RESULT produced (same rule as the replay's entityMap).
+  const produced = new Map<string, string>();
+  for (const o of byId.values()) {
+    if (o.status === "synced" && o.local_entity_id && o.canonical_entity_id && o.operation_type !== "dinein_open_table") produced.set(o.local_entity_id, o.canonical_entity_id);
+  }
+  const resolve = (localId: string) => produced.get(localId) ?? null;
   return [...ops]
     .sort((a, b) => a.created_at.localeCompare(b.created_at))
     .map((o) => {
@@ -219,6 +409,7 @@ export function buildDiagnostic(
           return { op: id.slice(0, 18), type: d ? String(d.operation_type) : "unknown", status: d ? d.status : "gone (synced + cleaned up)" };
         }),
         blocking: blockingOf(o, byId),
+        pins: pinsOf(o, resolve),
       };
     });
 }

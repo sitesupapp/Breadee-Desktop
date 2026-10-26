@@ -158,6 +158,12 @@ export interface PendingShift {
   last_error?: string | null;
   /** Why the open needs a human (permission, prior shift awaiting approval, branch access...). */
   review_reason?: string | null;
+  /** 1.0.38 (Bug 3, additive, not indexed) — set ONLY on a shift opened offline right after this device
+   *  closed the previous one offline: the previous shift's captured end_shift op id. The open replays
+   *  strictly after that close and never adopts another open shift (see migration.ts / openShiftHandler). */
+  after_end_op_id?: string | null;
+  /** 1.0.38 (Bug 3) — position in the offline close→open chain (N+1 = previous + 1); display/diagnostics only. */
+  generation?: number;
 }
 
 /**
@@ -299,6 +305,14 @@ export interface DineDraft {
   merged_into_table?: string | null;
   merged_op_id?: string | null;
   carrier?: boolean;
+  /** 1.0.38 (G1) — why a session left `open` other than by this device's own settle: its bill was closed
+   *  AUTHORITATIVELY elsewhere ("canonical_closed": a canonical floor read taken after all of its work
+   *  synced no longer shows its order; "split_completed": a split leg paid the whole bill;
+   *  "held_by_payment": a refused move / merge whose captured payment already covers it). Additive; the
+   *  op that proves it is `closed_evidence_op_id` (null when the proof is the floor read itself). */
+  closed_reason?: "canonical_closed" | "split_completed" | "held_by_payment" | null;
+  closed_evidence_op_id?: string | null;
+  closed_at?: string | null;
   lines: DineDraftLine[];
   rounds: DineDraftRound[];
   /** Monotonic; bumped on every mutation. A deterministic client_op_id input for a send. */

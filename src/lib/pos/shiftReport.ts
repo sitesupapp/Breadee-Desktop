@@ -20,7 +20,7 @@
 // because a voided item was never sold.
 
 import { CASH_CONTRACT_CURRENCY, type CurrencyCode } from "@/lib/currency";
-import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import { isMergedSource, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 /** Statuses whose money never counted as a sale. */
 const REVERSED = ["voided", "cancelled", "refunded"] as const;
@@ -125,6 +125,9 @@ export function reversalTotals(orders: ShiftOpenOrder[]): ReversalTotals {
   const out: ReversalTotals = { voided: 0, cancelled: 0, refunded: 0, amount: 0 };
   for (const o of orders) {
     if (!isReversed(o)) continue;
+    // 1.0.38 (Bug 4) — a merged clean source is stored voided but nothing was reversed: its bill moved to
+    // the primary (whose total carries it). The server's close counts voids with merged_into_order_id null.
+    if (isMergedSource(o)) continue;
     if (o.status === "voided") out.voided += 1;
     else if (o.status === "cancelled") out.cancelled += 1;
     else if (o.status === "refunded") out.refunded += 1;

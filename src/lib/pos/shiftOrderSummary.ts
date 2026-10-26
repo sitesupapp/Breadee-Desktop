@@ -46,7 +46,10 @@ export function isOpenOrder(order: Pick<ShiftOpenOrder, "status" | "payment_stat
  * and an unrecognised status falls through to itself rather than being coerced
  * into a label that would be a guess.
  */
-export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "payment_status">): string {
+export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "payment_status"> & MergeProvenance): string {
+  // 1.0.38 (Bug 4) — a clean source a merge folded into another bill is stored `voided` (with merge
+  // provenance), but nothing was voided: its items and balance MOVED. Say where; never "Voided".
+  if (isMergedSource(order)) return `Merged into #${mergedTargetLabel(order)}`;
   switch (order.status) {
     case "voided":
       return "Voided";
@@ -64,7 +67,8 @@ export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "paym
 }
 
 /** Badge tone per lifecycle: money in green, reversal in red, work in amber. */
-export function orderLifecycleTone(order: Pick<ShiftOpenOrder, "status" | "payment_status">): "green" | "amber" | "red" | "slate" {
+export function orderLifecycleTone(order: Pick<ShiftOpenOrder, "status" | "payment_status"> & MergeProvenance): "green" | "amber" | "red" | "slate" {
+  if (isMergedSource(order)) return "slate";
   if (order.status === "voided" || order.status === "cancelled" || order.status === "refunded") return "red";
   if (order.payment_status === "paid") return "green";
   if (order.status === OPEN_ORDER_STATUS) return "amber";
@@ -97,7 +101,39 @@ export type ShiftOpenOrder = {
   /** rc.14 — offline only: this row (or its payment) exists on this device and is not yet confirmed by
    *  the server. Absent on every server-read row. */
   local_pending?: boolean;
+} & MergeProvenance;
+
+/**
+ * 1.0.38 (Bug 4) — merge provenance the server writes on a source bill folded into another table's bill
+ * (pos_merge_tables_v3): `merged_into_order_id` / `merged_into_merge_id` (immutable, guarded by
+ * trg_pos_orders_merge_provenance). A CLEAN source is stored `voided` with its items RE-PARENTED to the
+ * primary (ids kept) and recorded in pos_table_merges.sources[].items[]; nothing was voided and no
+ * accounting reversed. `merged_into_order_number` is resolved for display only.
+ */
+export type MergeProvenance = {
+  merged_into_order_id?: string | null;
+  merged_into_merge_id?: string | null;
+  merged_into_order_number?: string | null;
 };
+
+/** A clean merge source: its bill MOVED into another order (stored voided + provenance). A part-paid
+ *  source the merge completed keeps its own (paid) lifecycle, and a real void has no provenance. */
+export function isMergedSource(order: Pick<ShiftOpenOrder, "status"> & MergeProvenance): boolean {
+  return !!order.merged_into_order_id && (order.status === "voided" || order.status === "cancelled");
+}
+
+/** The destination's number for display (falls back to a short id). */
+export function mergedTargetLabel(order: MergeProvenance): string {
+  return order.merged_into_order_number ?? (order.merged_into_order_id ? order.merged_into_order_id.slice(0, 8) : "?");
+}
+
+/** The status-filter key of an order: a merged source files under "merged", never under "voided". */
+export function orderStatusKey(order: Pick<ShiftOpenOrder, "status"> & MergeProvenance): string {
+  return isMergedSource(order) ? "merged" : order.status;
+}
+
+const ORDER_COLUMNS =
+  "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at, merged_into_order_id, merged_into_merge_id";
 
 /** Operator wording for a route. Matches the receipts and the routing screen. */
 export function orderRouteLabel(orderType: string): string {
@@ -138,9 +174,7 @@ export async function loadShiftOrders(input: {
   const { supabase } = await import("@/lib/supabase");
   const { data, error } = await supabase
     .from("pos_orders")
-    .select(
-      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at",
-    )
+    .select(ORDER_COLUMNS)
     .eq("tenant_id", input.tenantId)
     .eq("shift_id", input.shiftId)
     .order("created_at", { ascending: true })
@@ -150,7 +184,7 @@ export async function loadShiftOrders(input: {
 }
 
 /** One row of `pos_orders`, defensively. A malformed row is dropped, not guessed. */
-function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
+export function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
   const r = asRecord(raw);
   const id = strOrNull(r.id);
   if (!id) return null;
@@ -174,7 +208,50 @@ function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
     staff_name: null,
     notes: strOrNull(r.notes),
     created_at: strOrNull(r.created_at),
+    merged_into_order_id: strOrNull(r.merged_into_order_id),
+    merged_into_merge_id: strOrNull(r.merged_into_merge_id),
+    merged_into_order_number: null,
   };
+}
+
+/**
+ * 1.0.38 (Bug 4) — the destination number of every merged source: from the same page when the primary is
+ * in it (the merge is same-shift), else one read of those orders. Best-effort: unresolved stays null and
+ * the label falls back to a short id — never a wrong number.
+ */
+export async function resolveMergeTargets(
+  orders: ShiftOpenOrder[],
+  read?: (ids: string[]) => Promise<{ id: string; order_number: string | null }[]>,
+): Promise<ShiftOpenOrder[]> {
+  const byId = new Map(orders.map((o) => [o.id, o] as const));
+  const missing = new Set<string>();
+  for (const o of orders) {
+    if (!o.merged_into_order_id) continue;
+    const target = byId.get(o.merged_into_order_id);
+    if (target) o.merged_into_order_number = target.order_number;
+    else missing.add(o.merged_into_order_id);
+  }
+  if (missing.size === 0) return orders;
+  try {
+    const reader =
+      read ??
+      (async (ids: string[]) => {
+        const { supabase } = await import("@/lib/supabase");
+        const res = await supabase.from("pos_orders").select("id, order_number").in("id", ids);
+        if (res.error) return [];
+        return ((res.data ?? []) as unknown[]).map((raw) => {
+          const r = asRecord(raw);
+          return { id: str(r.id), order_number: strOrNull(r.order_number) };
+        });
+      });
+    const found = new Map((await reader([...missing])).map((r) => [r.id, r.order_number] as const));
+    for (const o of orders) {
+      if (o.merged_into_order_id && o.merged_into_order_number == null) o.merged_into_order_number = found.get(o.merged_into_order_id) ?? null;
+    }
+  } catch {
+    /* a missing destination number is a short id, never a wrong one */
+  }
+  return orders;
 }
 
 /**
@@ -187,6 +264,7 @@ function parseOrderRow(raw: unknown): ShiftOpenOrder | null {
  */
 async function hydrate(orders: ShiftOpenOrder[]): Promise<ShiftOpenOrder[]> {
   if (orders.length === 0) return orders;
+  await resolveMergeTargets(orders);
   const { supabase } = await import("@/lib/supabase");
 
   const customerIds = [...new Set(orders.map((o) => o.customer_id).filter((c): c is string => !!c))];
@@ -283,9 +361,7 @@ export async function loadOrdersForDay(input: {
   const { supabase } = await import("@/lib/supabase");
   let query = supabase
     .from("pos_orders")
-    .select(
-      "id, order_number, order_type, status, payment_status, payment_method, subtotal, discount_amount, total_amount, primary_currency_snapshot, table_id, customer_id, cashier_user_id, notes, created_at",
-    )
+    .select(ORDER_COLUMNS)
     .eq("tenant_id", input.tenantId)
     .gte("created_at", from.toISOString())
     .lt("created_at", to.toISOString())

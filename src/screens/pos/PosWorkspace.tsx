@@ -3031,6 +3031,7 @@ function PosWorkspaceInner() {
                   payBusy={busy}
                   onNewOrder={showDraft}
                   onReverse={startReverse}
+                  onOpenOrder={showSavedOrder}
                 />
               </section>
             ) : (
@@ -3144,6 +3145,7 @@ function PosWorkspaceInner() {
                presentReceipt, so reviewing an order can never auto-print. */
             onPresentReceipt={(receipt) => receiptStore.present(receipt)}
             onReverse={startReverse}
+            onOpenOrder={showSavedOrder}
           />
         }
       />

@@ -12,7 +12,7 @@
 // send round -> pos_submit_order (dinein_send_round), with rounds >= 2 pinning
 // expected_order_id to the session's canonical order (EXPECTED_ORDER_MISMATCH guard).
 
-import { localdb, type DineDraft, type DineDraftLine, type DineRoundPrintState } from "@/lib/offline/db";
+import { localdb, readCachedBill, readCachedTableMap, type DineDraft, type DineDraftLine, type DineRoundPrintState } from "@/lib/offline/db";
 import {
   type OfflineOperation,
   OPERATION_SCHEMA_VERSION,
@@ -20,12 +20,12 @@ import {
   normalizeCustomerRef,
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
-import { settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
+import { opInScope, sessionClosure, settleHeldByRefusedStructural, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
 import type { CartLine, SelectedModifier } from "@/types/pos";
 import type { CurrencyCode } from "@/lib/currency";
-import { type TableBill, type BillLine, type BillOrder } from "@/types/tables";
+import { type TableBill, type BillLine, type BillOrder, type TableSummary } from "@/types/tables";
 
 const nid = () => crypto.randomUUID();
 
@@ -292,6 +292,10 @@ const sendingSessions = new Set<string>();
 export const SHIFT_MISSING_MESSAGE =
   "This table's bill was started by an earlier build without a shift, so it cannot be sent offline safely. Reconnect and send it online, or open the table again on this shift.";
 
+/** 1.0.38 (G1) — a round may never join a bill that is closed (settled here, or closed elsewhere: paid online,
+ *  fully split, closed remotely). The caller opens a NEW session for the table instead (getDineDraftForTable). */
+export const SESSION_CLOSED_MESSAGE = "This table's previous bill is already closed. Send the round again to start a new bill.";
+
 export async function sendRoundOffline(
   sessionId: string,
   /** rc.12 — the cashier's CURRENT shift. A pre-rc.12 session (no shift reference) is attached to it only
@@ -306,7 +310,12 @@ export async function sendRoundOffline(
   try {
     // Upgrade backfill (resolved OUTSIDE the transaction: it reads pendingShifts).
     let backfill: { shift_id: string | null; shift_local: string | null } | null = null;
-    const pre = await localdb.dineDrafts.get(sessionId);
+    let pre = await localdb.dineDrafts.get(sessionId);
+    // 1.0.38 (G1) — first retire the session if its bill is authoritatively closed (never a round N+1 of it).
+    if (pre && pre.status === "open") {
+      await retireClosedSessions({ tenantId: pre.tenant_id, branchId: pre.branch_id, tableId: pre.table_id });
+      pre = await localdb.dineDrafts.get(sessionId);
+    }
     const cur = opts.currentShift ?? null;
     if (pre && !pre.shift_id && !pre.shift_local && cur?.id && cur.openedAt) {
       const created = Date.parse(pre.created_at);
@@ -318,6 +327,7 @@ export async function sendRoundOffline(
       if (!d) throw new Error("dine session not found");
       const unsent = d.lines.filter((l) => l.sent_round === null);
       if (unsent.length === 0) return d; // nothing to send
+      if (d.status !== "open") throw new Error(SESSION_CLOSED_MESSAGE);
       if (!d.shift_id && !d.shift_local && backfill) Object.assign(d, backfill);
       // FAIL CLOSED: a round that would CREATE a new server order (round 1 of an unbound session) is
       // never sent without a shift — that is exactly the rc.4–rc.11 shift-less order the server can then
@@ -466,8 +476,9 @@ export async function settleTableOffline(input: {
    *  canonical SUMMARY (no cached lines) is part of it. Recorded on the op so the operational projection
    *  can close exactly that bill locally (the table becomes reusable) without guessing. */
   covers?: { orderIds: string[]; summary: boolean };
-  /** 1.0.38 (S5) — the amount due in ORDER currency, only when it is known EXACTLY (a fully-canonical bill
-   *  with no local delta and no discount). Replayed as pos_pay_table expected_amount; omitted otherwise. */
+  /** 1.0.38 (S5, G3) — the amount THIS DEVICE collected, in ORDER currency (R_local after the discount, see
+   *  offlineSettleAmount / offlineSettlePin). Always recorded when known; replayed as pos_pay_table
+   *  expected_amount, so a bill another terminal changed meanwhile is refused (PAY_AMOUNT_CHANGED). */
   expectedAmount?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
@@ -521,7 +532,7 @@ export async function settleTableOffline(input: {
         table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
         ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
-        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) && !input.discount?.discount_type ? { expected_amount: input.expectedAmount } : {}),
+        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) ? { expected_amount: input.expectedAmount } : {}),
         // What this settle covers: projection metadata, AND (1.0.38 S5) the bill pins the handler resolves
         // to expected_order_ids at replay — a re-opened settle can never pay a newer bill on the table.
         covers: settleCovers(d, input.covers, input.table),
@@ -585,8 +596,9 @@ export async function tableOnAccountOffline(input: {
   extraDependencyIds?: string[];
   /** rc.10 — the exact bill this on-account closes (see settleTableOffline). */
   covers?: { orderIds: string[]; summary: boolean };
-  /** 1.0.38 (Bug 9) — the remaining obligation R = T − P (order currency), only when it is known EXACTLY (a
-   *  fully-canonical bill with no local delta and no discount). Replayed as expected_amount; omitted otherwise. */
+  /** 1.0.38 (Bug 9, G3) — the remaining obligation R = T − P (order currency) THIS DEVICE presented (after the
+   *  discount, see offlineSettlePin). Always recorded when known; replayed as expected_amount
+   *  (ON_ACCOUNT_AMOUNT_CHANGED when the server's R differs). */
   expectedAmount?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   // rc.10 — an offline-created customer travels as customer_local (waits for + remaps to canonical).
@@ -635,7 +647,7 @@ export async function tableOnAccountOffline(input: {
         method: input.method,
         table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
-        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) && !input.discount?.discount_type ? { expected_amount: input.expectedAmount } : {}),
+        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) ? { expected_amount: input.expectedAmount } : {}),
         // Projection metadata AND (1.0.38, Bug 9) the bill pins the handler resolves to expected_order_ids.
         covers: settleCovers(d, input.covers, input.table),
       },
@@ -781,6 +793,11 @@ export async function splitOperationalBillOffline(input: {
   tableName: string;
   orderNumber?: string | null;
   dependencyIds: string[];
+  /** 1.0.38 (G1) — this leg pays EVERYTHING still open on the table's bill (operationalProjection
+   *  .splitCompletesBill): it then CLOSES the bill locally like a settle — the leg records the table + exactly
+   *  what it covers, and the session is settled atomically with it — so the next customer on the table opens
+   *  a NEW session (never round N+1 of this paid order). Omitted → a partial leg (unchanged). */
+  completes?: { tableId: string; sessionLocal: string | null; orderIds: string[] } | null;
 }): Promise<DineSplitCaptureResult> {
   const allocs = input.allocations.filter((a) => Number(a.quantity) > 0 && (a.order_item_id || a.line_local));
   if (allocs.length === 0) return { ok: false, reason: "Select at least one item to split." };
@@ -792,7 +809,8 @@ export async function splitOperationalBillOffline(input: {
   const s = input.scope;
   const clientOpId = deterministicUuid([s.tenantId, s.branchId ?? "", s.cashierUserId, s.deviceId, s.terminalId ?? "", "split_settle", orderRef, input.method, allocKey]);
   const operationId = SPLIT_OP_PREFIX + clientOpId;
-  return localdb.transaction("rw", localdb.operations, async () => {
+  const completes = input.completes ?? null;
+  return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const existing = await getOperation(operationId);
     if (existing) return { ok: true, operationId, clientOpId, alreadyCaptured: true };
     const rows = await localdb.operations.where("operation_type").equals("split_settle").toArray();
@@ -829,6 +847,13 @@ export async function splitOperationalBillOffline(input: {
         split_seq: legs.length + 1,
         table_name: input.tableName,
         order_number: input.orderNumber ?? null,
+        // 1.0.38 (G1) — projection-only (never sent): the bill this completing leg closes (isTableSettleOp).
+        ...(completes
+          ? {
+              table_id: completes.tableId,
+              covers: { session_local: completes.sessionLocal, order_ids: Array.from(new Set(completes.orderIds.filter((x) => typeof x === "string" && x !== ""))), summary: false },
+            }
+          : {}),
       },
       status: "pending",
       retry_count: 0,
@@ -839,6 +864,13 @@ export async function splitOperationalBillOffline(input: {
       synced_at: null,
     };
     await localdb.operations.add(op);
+    if (completes?.sessionLocal) {
+      const d = await localdb.dineDrafts.get(completes.sessionLocal);
+      if (d && d.status === "open") {
+        await markDraftSettled(d, operationId);
+        await localdb.dineDrafts.update(d.local_session_id, { closed_reason: "split_completed", closed_evidence_op_id: operationId });
+      }
+    }
     return { ok: true, operationId, clientOpId, alreadyCaptured: false };
   });
 }
@@ -891,6 +923,20 @@ export async function reconcileStructuralDrafts(): Promise<void> {
       // A merged-away SOURCE session.
       if (d.merged_op_id && (d.status === "merged" || d.status === "open")) {
         const m = await localdb.operations.get(d.merged_op_id);
+        // 1.0.38 (G1) — the server REFUSED the merge but a payment captured after it (on the primary) already
+        // collected this bill too: it is HELD by that payment (settled, awaiting the operator) — never the
+        // table's collectible bill again while that payment stands (no double collection of the same value).
+        if (m && structuralRefusedByServer(m)) {
+          const held = await localdb.operations
+            .where("operation_type")
+            .anyOf("pay_table", "on_account_table")
+            .filter((o) => settleHeldByRefusedStructural(o, m))
+            .first();
+          if (held) {
+            await localdb.dineDrafts.update(d.local_session_id, { status: "settled", settled_operation_id: held.operation_id, settled_at: now, closed_reason: "held_by_payment", closed_evidence_op_id: m.operation_id, closed_at: now, updated_at: now });
+            continue;
+          }
+        }
         const want = undone(m) ? "open" : "merged";
         if (want !== d.status && (want === "merged" || (await openOn(d, d.table_id)) === 0)) {
           await localdb.dineDrafts.update(d.local_session_id, { status: want, updated_at: now });
@@ -952,6 +998,57 @@ export async function reconcileDineDraftsFromOperations(): Promise<void> {
       await localdb.dineDrafts.update(d.local_session_id, { canonical_order_id: op.canonical_entity_id, updated_at: new Date().toISOString() });
     }
   }
+  // 1.0.38 (G1) — sessions whose bill closed elsewhere (a completing split leg, paid online, closed remotely).
+  await retireClosedSessions();
+}
+
+/**
+ * 1.0.38 (G1) — SESSION LIFECYCLE TRUTH. Retire every OPEN local session whose bill is authoritatively closed
+ * (operationalProjection.sessionClosure) from what this device durably knows: the op log, the last canonical
+ * floor read and the cached bill. A completing split leg → `settled` (its leg is the evidence; a later server
+ * refusal of that leg re-opens it, rc.13); closed elsewhere → `closed` / canonical_closed. Retiring is not a
+ * delete: lines, rounds and ops stay for history / receipts / audit. A session with any unsynced or parked
+ * work is never retired. ONE Dexie transaction (evaluate + write; a concurrent capture is never interleaved).
+ * Called after every drain, before a capture reuses a table's session, and before an offline move / merge.
+ */
+export async function retireClosedSessions(only?: { tenantId: string | null; branchId: string | null; tableId?: string | null }): Promise<string[]> {
+  if (only && !only.tenantId) return [];
+  return localdb.transaction("rw", localdb.dineDrafts, localdb.operations, localdb.snapshots, async () => {
+    const drafts = (await localdb.dineDrafts.where("status").equals("open").toArray()).filter(
+      (d) => !only || (d.tenant_id === only.tenantId && (d.branch_id ?? null) === (only.branchId ?? null) && (!only.tableId || d.table_id === only.tableId)),
+    );
+    if (drafts.length === 0) return [];
+    const all = await localdb.operations.toArray();
+    const maps = new Map<string, { rows: TableSummary[]; at: number } | null>();
+    const retired: string[] = [];
+    for (const d of drafts) {
+      const key = `${d.tenant_id}\u0001${d.branch_id ?? ""}`;
+      if (!maps.has(key)) {
+        const m = await readCachedTableMap(d.tenant_id, d.branch_id).catch(() => null);
+        maps.set(key, m ? { rows: (m.map as { tables?: TableSummary[] } | null)?.tables ?? [], at: m.cachedAt } : null);
+      }
+      const map = maps.get(key) ?? null;
+      const cached = await readCachedBill(d.table_id, d.tenant_id, d.branch_id).catch(() => null);
+      const ops = all.filter((o) => opInScope(o, { tenantId: d.tenant_id, branchId: d.branch_id, cashierUserId: d.cashier_user_id, deviceId: d.device_id, terminalId: d.terminal_id }));
+      const c = sessionClosure(d, ops, {
+        row: map?.rows.find((t) => t.id === d.table_id) ?? null,
+        mapAt: map?.at ?? null,
+        bill: cached ? { bill: cached.bill as TableBill, fetchedAt: cached.cachedAt } : null,
+      });
+      if (!c) continue;
+      const now = new Date().toISOString();
+      await localdb.dineDrafts.update(d.local_session_id, {
+        status: c.status,
+        closed_reason: c.reason,
+        closed_evidence_op_id: c.evidenceOpId,
+        closed_at: now,
+        updated_at: now,
+        ...(c.status === "settled" ? { settled_operation_id: c.evidenceOpId, settled_at: now } : {}),
+      });
+      retired.push(d.local_session_id);
+    }
+    return retired;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1146,9 @@ export async function getDineDraftForTable(scope: {
   terminalId?: string | null;
 }, tableId: string): Promise<DineDraft | null> {
   if (!scope.tenantId || !tableId) return null;
+  // 1.0.38 (G1) — a session whose bill closed elsewhere is never returned as the table's active session: the
+  // caller then opens a NEW one (round 1, no expected_order_id) instead of a round N+1 of the closed order.
+  await retireClosedSessions({ tenantId: scope.tenantId, branchId: scope.branchId, tableId });
   const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
   const open = all.filter(
     (d) =>
@@ -1059,6 +1159,8 @@ export async function getDineDraftForTable(scope: {
       d.device_id === scope.deviceId &&
       (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
   );
+  // Newest first (the same rule as operationalProjection.openDraftsInScope).
+  open.sort((a, b) => b.created_at.localeCompare(a.created_at) || b.local_session_id.localeCompare(a.local_session_id));
   for (const d of open) {
     // rc.10 repair: a pre-rc.10 session that a captured settle / on-account already covers is a
     // SETTLED bill, never the table's active one (rc.9 left it "open" → the table could not be reused

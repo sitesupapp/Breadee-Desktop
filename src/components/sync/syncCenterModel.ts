@@ -89,6 +89,35 @@ export function isLegacyQuarantine(operationType: string | null | undefined): bo
   return String(operationType ?? "").startsWith("legacy_outbox:");
 }
 
+/** 1.0.38 (G1) — the handlers' structured server-CONFLICT codes (the server state changed elsewhere: a bill
+ *  closed / changed / moved, a version drift). Through 1.0.38-dev only the literal class "CONFLICT" mapped
+ *  here, so a real refusal (e.g. a round on an already-closed bill) never showed as a Conflict anywhere. */
+const CONFLICT_ERROR_CODES = new Set([
+  "CONFLICT",
+  "expected_order_mismatch",
+  "version_conflict",
+  "settle_conflict",
+  "split_conflict",
+  "already_settled",
+  "already_paid",
+  "pay_bill_changed",
+  "pay_amount_changed",
+  "payment_residue",
+  "on_account_bill_changed",
+  "on_account_amount_changed",
+  "move_source_changed",
+  "move_source_empty",
+  "move_payment_state_changed",
+  "move_dest_occupied",
+  "merge_bill_changed",
+  "merge_payment_state_changed",
+  "merge_primary_empty",
+  "merge_source_empty",
+  "merge_expected_mismatch",
+  "move_table_conflict",
+  "merge_tables_conflict",
+]);
+
 /**
  * Map a raw operation status (+ its error class and type) to the operator-facing state. A parked
  * op is split three ways so the operator knows what kind of review it needs: a server CONFLICT,
@@ -105,7 +134,7 @@ export function displayStateOf(status: string, errorCode?: string | null, operat
       return status;
     case "needs_attention":
       if (isLegacyQuarantine(operationType)) return "manager_review";
-      if (errorCode === "CONFLICT") return "conflict";
+      if (errorCode && CONFLICT_ERROR_CODES.has(errorCode)) return "conflict";
       return "needs_attention";
     default:
       // An unknown future status is never shown as synced.
