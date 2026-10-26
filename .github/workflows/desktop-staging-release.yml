@@ -1,0 +1,399 @@
+# ---------------------------------------------------------------------------
+# Breadee Desktop — STAGING updater pipeline (isolated from production)
+#
+# Mirrors the production release workflow's safety model, but every axis is the
+# STAGING one, and it can NEVER touch the production channel, the Production
+# environment, or the production signing key.
+#
+#   * BOOTSTRAP  — a push to `desktop-staging-updater` builds the staging
+#     installer as a downloadable ARTIFACT only (no GitHub release, no channel
+#     write). This seeds a staging-identity client on a test machine ONE time.
+#   * UPDATE     — a `desktop-staging-v*` tag builds, signs, publishes a release,
+#     and advances ONLY `desktop-staging-channel/latest.json`.
+#   * BUILD-ONLY — a workflow_dispatch on a BRANCH builds + signs the installer
+#     as an artifact and runs every guard, but writes NO release and NO channel
+#     (the publish steps are gated on a tag ref). Use it to validate an exact SHA.
+#
+# ISOLATION GUARANTEES:
+#   * environment: Staging  — staging Supabase URL/key + the staging updater
+#     signing key. It has NO access to the Production environment's secrets.
+#   * VITE_APP_ENV=staging; identity app.breadee.desktop.staging and the staging
+#     updater endpoint/pubkey come from src-tauri/tauri.staging.conf.json.
+#   * FAIL CLOSED — the staging identity/endpoint/public key are asserted, and the
+#     built bundle must reference the STAGING project and must NOT reference the
+#     production project, or the job stops before publishing.
+#   * It never creates a desktop-prod-v* tag and never writes
+#     desktop-production-channel.
+#
+# SINCE 1.0.37 (PO decision 2026-10-27, staging parity): the app's updater gate
+# allows staging builds, so a Breadee Staging install now updates IN-APP from the
+# staging channel. The channel is advanced by a normal (non-force) commit on top
+# of the existing branch, so checkpoint manifests (latest-<prev>.json) survive and
+# the channel history is the rollback record; an older-or-equal version is refused.
+# Release notes = the bilingual What's New of the build (src/lib/whatsNew.ts),
+# which must describe exactly this version.
+# ---------------------------------------------------------------------------
+
+name: Desktop Staging Release
+
+on:
+  push:
+    branches: [desktop-staging-updater]
+    tags: ['desktop-staging-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # release assets + the staging channel manifest (staging branch only)
+
+concurrency:
+  group: desktop-staging-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CHANNEL_BRANCH: desktop-staging-channel
+  STAGING_REF: azjxprewycygsocusxjn
+  PRODUCTION_REF: cltlqfqormkhppmbvyrv
+  STAGING_IDENTIFIER: app.breadee.desktop.staging
+  STAGING_PUBKEY_ID: E6DC29B33D806B46
+  PRODUCTION_PUBKEY_ID: B77999D821F82FD7
+
+jobs:
+  staging-release:
+    name: Build, sign and publish (staging)
+    runs-on: windows-latest
+    # The Staging environment carries the staging Supabase creds AND the staging
+    # updater signing key. It is NOT the Production environment and cannot read
+    # production secrets.
+    environment: Staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Every run (not only tags) proves the three manifests agree on one plain
+      # SemVer, so a build-only artifact is exactly what the tag would publish.
+      - name: Derive version and prove manifest agreement
+        shell: bash
+        run: |
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "tauri.conf.json=$conf package.json=$pkg Cargo.toml=$cargo"
+          if ! printf '%s' "$conf" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$conf' is not a plain SemVer MAJOR.MINOR.PATCH."; exit 1
+          fi
+          for got in "$pkg" "$cargo"; do
+            if [ "$got" != "$conf" ]; then
+              echo "::error::Version mismatch: tauri.conf.json says $conf but a manifest says $got."; exit 1
+            fi
+          done
+          echo "VERSION=$conf" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      # Prove the Staging environment is real staging BEFORE the long build.
+      - name: Verify STAGING environment is configured
+        shell: bash
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::The Staging environment has no Supabase URL/key. Refusing to build."; exit 1
+          fi
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::No staging updater signing key in the Staging environment. Refusing to build."; exit 1
+          fi
+          case "$VITE_SUPABASE_ANON_KEY" in
+            *service_role*) echo "::error::A service_role key must never be used in the desktop app."; exit 1 ;;
+          esac
+          case "$VITE_SUPABASE_URL" in
+            *"$PRODUCTION_REF"*) echo "::error::The Staging environment points at the PRODUCTION project. Refusing."; exit 1 ;;
+          esac
+          case "$VITE_SUPABASE_URL" in
+            *"$STAGING_REF"*) : ;;
+            *) echo "::error::The Staging environment does not point at the staging project. Refusing."; exit 1 ;;
+          esac
+          host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
+          echo "Staging backend host: $host"
+
+      # Fail closed on identity/endpoint/key: the staging build MUST carry the
+      # staging app identity, the staging updater channel and the STAGING public
+      # key, and must never carry the production identity, channel or key.
+      # Asserted on the config that `--config` applies (override wins in Tauri's
+      # deep merge), so a regression here stops the build BEFORE signing.
+      - name: Verify staging identity, updater endpoint and public key (fail closed)
+        shell: bash
+        run: |
+          conf=src-tauri/tauri.staging.conf.json
+          if [ ! -f "$conf" ]; then
+            echo "::error::$conf is missing. The staging build has no isolated identity/endpoint. Refusing."; exit 1
+          fi
+          id=$(node -p "require('./$conf').identifier")
+          ep=$(node -p "require('./$conf').plugins.updater.endpoints[0]")
+          n=$(node -p "require('./$conf').plugins.updater.endpoints.length")
+          pkid=$(node -p "Buffer.from(require('./$conf').plugins.updater.pubkey,'base64').toString('utf8').match(/public key: ([0-9A-F]+)/)?.[1] ?? ''")
+          basepkid=$(node -p "Buffer.from(require('./src-tauri/tauri.conf.json').plugins.updater.pubkey,'base64').toString('utf8').match(/public key: ([0-9A-F]+)/)?.[1] ?? ''")
+          bin=$(node -p "require('./$conf').mainBinaryName ?? ''")
+          echo "staging identifier: $id"
+          echo "staging endpoint:   $ep ($n endpoint(s))"
+          echo "staging pubkey id:  $pkid (base config: $basepkid)"
+          if [ "$id" != "$STAGING_IDENTIFIER" ]; then
+            echo "::error::Staging identity is not $STAGING_IDENTIFIER (got '$id'). Refusing."; exit 1
+          fi
+          if [ "$n" != "1" ]; then
+            echo "::error::The staging overlay must define exactly one updater endpoint. Refusing."; exit 1
+          fi
+          case "$ep" in
+            *desktop-production-channel*) echo "::error::Staging updater endpoint points at the PRODUCTION channel. Refusing."; exit 1 ;;
+          esac
+          case "$ep" in
+            "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-staging-channel/latest.json") : ;;
+            *) echo "::error::Staging updater endpoint is not the staging channel. Refusing."; exit 1 ;;
+          esac
+          if [ "$pkid" != "$STAGING_PUBKEY_ID" ] || [ "$pkid" = "$PRODUCTION_PUBKEY_ID" ] || [ "$pkid" = "$basepkid" ]; then
+            echo "::error::The staging overlay does not carry the STAGING updater public key. Refusing."; exit 1
+          fi
+          # Same executable name as every earlier Breadee Staging build, so the NSIS
+          # in-place upgrade replaces the installed exe instead of adding a second one.
+          if [ -n "$bin" ]; then
+            echo "::error::The staging overlay renames the main binary ('$bin'); in-place upgrades from Breadee Staging would break. Refusing."; exit 1
+          fi
+
+      - name: Build frontend (staging)
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
+
+      # Vite inlines the URL into the bundle - read what was actually compiled.
+      - name: Verify built bundle targets staging (not production)
+        shell: bash
+        run: |
+          if grep -rl "$PRODUCTION_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle references the PRODUCTION project. Refusing to package."; exit 1
+          fi
+          if ! grep -rl "$STAGING_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The built bundle does not reference the staging project. Refusing to package."; exit 1
+          fi
+          echo "Bundle backend target verified: staging."
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The Rust cache restores the previously-compiled app crate, and Tauri
+      # embeds the frontend INTO that crate at compile time. Cargo's fingerprint
+      # does not invalidate when only dist/ changes, so the cached crate would
+      # keep its OLD embedded frontend and ship a stale in-app version. Clean just
+      # the app crate so the next build re-runs its build script and re-embeds the
+      # fresh dist; dependency caching is untouched. Mirrors the production release
+      # workflow, which learned this the hard way.
+      - name: Force fresh frontend embed (bust stale app-crate cache)
+        run: cargo clean -p breadee-desktop --manifest-path src-tauri/Cargo.toml
+
+      # Build + sign with the STAGING config: identity app.breadee.desktop.staging,
+      # updater endpoint = desktop-staging-channel, staging pubkey, updater
+      # artifacts ON. Signed with the STAGING key from the Staging environment.
+      - name: Build and sign the staging app
+        run: npm run tauri:build -- --config src-tauri/tauri.staging.conf.json
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_ENV: staging
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+
+      # tauri:build re-ran the frontend build (beforeBuildCommand): re-check the
+      # bundle that was actually embedded.
+      - name: Re-verify the embedded bundle targets staging
+        shell: bash
+        run: |
+          if grep -rl "$PRODUCTION_REF" dist/assets >/dev/null 2>&1; then
+            echo "::error::The embedded bundle references the PRODUCTION project. Refusing."; exit 1
+          fi
+          grep -rl "$STAGING_REF" dist/assets >/dev/null 2>&1 || { echo "::error::The embedded bundle is not STAGING. Refusing."; exit 1; }
+          echo "main binaries:"; ls -la src-tauri/target/release/*.exe
+
+      - name: Collect installer and prove the signature exists
+        shell: bash
+        run: |
+          nsis_dir=src-tauri/target/release/bundle/nsis
+          installer=$(ls "$nsis_dir"/*-setup.exe | head -n 1)
+          sig=$(ls "$nsis_dir"/*-setup.exe.sig 2>/dev/null | head -n 1 || true)
+          if [ -z "$sig" ] || [ ! -s "$sig" ]; then
+            echo "::error::No updater signature was produced. Refusing to continue."; exit 1
+          fi
+          case "$(basename "$installer")" in
+            "Breadee Staging_${VERSION}_"*) : ;;
+            *) echo "::error::Unexpected installer $(basename "$installer") (expected Breadee Staging ${VERSION}). Refusing."; exit 1 ;;
+          esac
+          mkdir -p out
+          cp "$installer" "out/Breadee_Staging_${VERSION}_x64-setup.exe"
+          cp "$sig"       "out/Breadee_Staging_${VERSION}_x64-setup.exe.sig"
+          ( cd out && sha256sum "Breadee_Staging_${VERSION}_x64-setup.exe" | tee SHA256SUMS.txt )
+          echo "SIGNATURE=$(cat "out/Breadee_Staging_${VERSION}_x64-setup.exe.sig")" >> "$GITHUB_ENV"
+
+      # Bilingual release notes, single-sourced from the build's own What's New.
+      # Fails closed if What's New describes a different version than this build.
+      - name: Release notes from What's New (fail closed on version drift)
+        shell: bash
+        run: |
+          node - <<'JS'
+          const fs = require("fs");
+          const src = fs.readFileSync("src/lib/whatsNew.ts", "utf8");
+          const version = process.env.VERSION;
+          const v = /export const WHATS_NEW_VERSION = "([^"]+)";/.exec(src);
+          if (!v || v[1] !== version) {
+            console.log(`::error::What's New describes ${v ? v[1] : "nothing"} but this build is ${version}. Refusing.`);
+            process.exit(1);
+          }
+          const pick = (key) => {
+            const m = new RegExp("\\b" + key + ':\\s*("(?:[^"\\\\]|\\\\.)*")').exec(src);
+            if (!m) { console.log(`::error::What's New has no ${key}. Refusing.`); process.exit(1); }
+            return JSON.parse(m[1]).trim();
+          };
+          const notes = `${pick("title")} · ${pick("titleAr")}\n\n${pick("body")}\n\n${pick("bodyAr")}`;
+          fs.writeFileSync("out/notes.txt", notes + "\n", "utf8");
+          console.log(notes);
+          JS
+
+      # The manifest a tag WOULD publish (the publish step only refreshes pub_date).
+      # In a build-only run it is an artifact for inspection and the in-place proof.
+      - name: Generate the staging update manifest (artifact)
+        shell: bash
+        run: |
+          node - <<'JS'
+          const fs = require("fs");
+          const { VERSION, SIGNATURE, GITHUB_REPOSITORY } = process.env;
+          const m = {
+            version: VERSION,
+            notes: fs.readFileSync("out/notes.txt", "utf8").trim(),
+            pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+            platforms: {
+              "windows-x86_64": {
+                signature: SIGNATURE.trim(),
+                url: `https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-staging-v${VERSION}/Breadee_Staging_${VERSION}_x64-setup.exe`,
+              },
+            },
+          };
+          fs.writeFileSync("out/latest.preview.json", JSON.stringify(m, null, 2) + "\n", "utf8");
+          console.log(JSON.stringify(m, null, 2));
+          JS
+
+      - name: Upload staging installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: breadee-desktop-staging-installer
+          path: |
+            out/Breadee_Staging_${{ env.VERSION }}_x64-setup.exe
+            out/Breadee_Staging_${{ env.VERSION }}_x64-setup.exe.sig
+            out/SHA256SUMS.txt
+            out/notes.txt
+            out/latest.preview.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # ------- the steps below run ONLY for a desktop-staging-v* tag -------
+
+      - name: Validate tag/version agreement (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#desktop-staging-v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$version' is not a plain SemVer MAJOR.MINOR.PATCH."; exit 1
+          fi
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          for got in "$conf" "$pkg" "$cargo"; do
+            if [ "$got" != "$version" ]; then
+              echo "::error::Version mismatch: tag says $version but a manifest says $got."; exit 1
+            fi
+          done
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Compose the release body (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          {
+            cat out/notes.txt
+            echo
+            echo "---"
+            echo "Breadee STAGING desktop update ${VERSION}. Staging Supabase; identity ${STAGING_IDENTIFIER}."
+            echo "NOT a production release - delivered only through the staging updater channel and"
+            echo "installed side-by-side with production Breadee."
+          } > out/release-body.md
+
+      - name: Publish the staging GitHub release (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Breadee Staging ${{ env.VERSION }}
+          body_path: out/release-body.md
+          files: |
+            out/Breadee_Staging_${{ env.VERSION }}_x64-setup.exe
+            out/Breadee_Staging_${{ env.VERSION }}_x64-setup.exe.sig
+            out/SHA256SUMS.txt
+          draft: false
+          prerelease: false
+
+      # Advances ONLY the staging channel, on top of its existing history (no
+      # orphan force-push), so checkpoint manifests such as latest-1.0.35.json are
+      # preserved. Refuses a version that is not strictly newer than the channel's.
+      - name: Advance the STAGING channel (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          case "$CHANNEL_BRANCH" in
+            desktop-staging-channel) : ;;
+            *) echo "::error::Refusing to write any channel but desktop-staging-channel."; exit 1 ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin "+refs/heads/${CHANNEL_BRANCH}:refs/remotes/origin/${CHANNEL_BRANCH}"
+          git worktree add --detach channel-wt "origin/${CHANNEL_BRANCH}"
+          current=$(node -p "require('./channel-wt/latest.json').version")
+          echo "staging channel currently advertises: $current"
+          node -e "
+            const p = (s) => s.split('.').map(Number);
+            const [a, b] = [p(process.argv[1]), p(process.argv[2])];
+            for (let i = 0; i < 3; i++) if (a[i] !== b[i]) process.exit(a[i] > b[i] ? 0 : 1);
+            process.exit(1);
+          " "$VERSION" "$current" || { echo "::error::$VERSION is not newer than the channel's $current. Refusing."; exit 1; }
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('out/latest.preview.json', 'utf8'));
+            m.pub_date = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+            if (m.version !== process.env.VERSION) process.exit(1);
+            if (!m.platforms['windows-x86_64'].url.includes('/releases/download/desktop-staging-v')) process.exit(1);
+            fs.writeFileSync('channel-wt/latest.json', JSON.stringify(m, null, 2) + '\n', 'utf8');
+          "
+          cat channel-wt/latest.json
+          cd channel-wt
+          git add latest.json
+          git commit -m "Staging channel -> ${VERSION}"
+          git push origin "HEAD:refs/heads/${CHANNEL_BRANCH}"
+          echo "Staging channel now advertises ${VERSION}."
