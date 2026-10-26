@@ -51,7 +51,8 @@ test("offlineCapture is exactly backend-unreachable AND ready AND scope present"
 // still gets an explicit, VISIBLE reason — never a silent no-op.
 test("1.0.38: Move/Merge capture offline when ready; Close/Clear stay online-only; a not-ready device sees a reason", () => {
   const src = ts(DW);
-  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: offlineProjOn \};/);
+  // Offline capture also requires the 1.0.38 server contracts on the target backend (build flag / capability).
+  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: offlineProjOn && server1038ContractsLive\(\) \};/);
   assert.match(src, /needs a connection on this device/);
   // rc.14 — wrapped (online) in the historical shift-less refusal; 1.0.38 (WS-F) — and in the unsynced-work hold.
   assert.match(src, /move: (unsynced\()?(historical\()?offlineAware\(canMoveTable\(pos\.access\), "move"/);

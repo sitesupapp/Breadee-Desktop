@@ -91,6 +91,7 @@ import {
   payTable,
   payTableGate,
   performTablePayment,
+  server1038ContractsLive,
   serverDeductsPriorPayments,
   settleAmountDue,
   validateTableDiscount,
@@ -520,7 +521,8 @@ export function useDineInWorkspace(input: {
     // pos_move_table_v2 / pos_merge_tables_v4. Every unsafe case (summary-only / shift-less / cross-shift /
     // cross-currency / adjusted / partly-paid line / part-paid online) is refused AT CAPTURE with a reason.
     // Close/Clear stay online-only (offlineCapable applies to move/merge only — tableOpGate).
-    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: offlineProjOn };
+    // Offline capture also needs the 1.0.38 server contracts on this backend (see server1038ContractsLive).
+    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: offlineProjOn && server1038ContractsLive() };
     // Permission first (an unpermitted operator is told that, online or not), then connectivity.
     const offlineAware = (permitted: Gate, kind: "move" | "merge"): Gate =>
       permitted.allowed && !input.online && !offlineProjOn

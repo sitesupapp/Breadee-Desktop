@@ -104,14 +104,18 @@ export function billIsPartPaid(table: TableSummary | null, bill: TableBill | nul
  * FALSE by default, so 1.0.38 stays safe against the CURRENT production server (which charges T): the F1
  * guard (`billIsPartPaid` → PART_PAID_FULL_PAY_MESSAGE) keeps refusing a full Pay / On Account of a
  * part-paid bill. How it flips (no other code changes):
- *   1. release constant — set `SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE = true` in the build that ships after
- *      both server migrations are applied in production; or
+ *   1. build flag — `VITE_SERVER_1038_CONTRACTS=1` in the build that ships after the 1.0.38 server
+ *      migration (prod_1038_offline_contracts) is applied to the backend that build targets (staging test
+ *      builds may set it now: the contracts are live on staging); or
  *   2. server capability — call `setServerDeductsPriorPayments(true)` from the session bootstrap when the
  *      server reports the capability (e.g. a `pos_capabilities` read returning `deducts_prior_payments:
  *      true`); `null` returns to the release default. A capability can only WIDEN behaviour the server
  *      actually guarantees — never read it from local/offline state.
+ * The same switch gates OFFLINE Move/Merge capture (`server1038ContractsLive`), whose replay needs
+ * pos_move_table_v2 / pos_merge_tables_v4: without the contracts a build behaves like 1.0.37 there.
  */
-export const SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE = false;
+export const SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE =
+  ((import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_SERVER_1038_CONTRACTS ?? "").trim() === "1";
 let serverPriorPaymentsCapability: boolean | null = null;
 export function serverDeductsPriorPayments(): boolean {
   return serverPriorPaymentsCapability ?? SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE;
@@ -119,6 +123,8 @@ export function serverDeductsPriorPayments(): boolean {
 export function setServerDeductsPriorPayments(capability: boolean | null): void {
   serverPriorPaymentsCapability = capability;
 }
+/** The 1.0.38 server contracts (R = T − P cores, move_v2, merge_v4, bill pins) are live on this backend. */
+export const server1038ContractsLive = serverDeductsPriorPayments;
 
 /** 1.0.38 (Bug 9) — the amount a settle / on-account of this bill is FOR, in the bill's own currency: the
  *  remaining obligation R = T − P when the server deducts prior payments, else the whole bill T (the F1 guard
