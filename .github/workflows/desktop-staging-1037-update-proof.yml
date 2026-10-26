@@ -1,0 +1,207 @@
+name: desktop-staging-1037-update-proof
+
+# Pre-publish gates for Breadee STAGING 1.0.37 (no publication, no channel write):
+#  verify : the signed build-only artifact's SHA256 + minisign signature against the STAGING pubkey
+#           baked into the installed staging fleet (1.0.35) and into Staging 1.0.37; and proof that the
+#           PRODUCTION pubkey REFUSES it (cross-environment isolation).
+#  inplace: on an EPHEMERAL Windows runner, install the UNMODIFIED published Breadee Staging 1.0.35,
+#           plant data markers, redirect the baked STAGING endpoint host to a local trusted-TLS server
+#           serving the signed Staging 1.0.37 with its bilingual notes, run the installed app's OWN
+#           updater plugin (check -> download_and_install; passive NSIS /P /R /UPDATE /ARGS, in place),
+#           relaunch, and GATE on identity + version + data preservation; then re-check from 1.0.37.
+#           Zero fleet exposure; the runner is destroyed after. Production channel/key/env untouched.
+on:
+  push:
+    branches: [ "ci/desktop-staging-1037-update-proof" ]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+env:
+  RUN_ID: "40414454650"
+  BUILD_SHA: "fd86278d8c6cc3a57c888f1d465ec1c0ec2d67b7"
+  ARTIFACT: breadee-desktop-staging-installer
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Download signed artifact
+        run: gh run download "$RUN_ID" -R sitesupapp/Breadee-Desktop -n "$ARTIFACT" -D art && ls -la art
+      - name: SHA256 + manifest + staging-key signature; production key must refuse (GATING)
+        run: |
+          set -e
+          git fetch origin "+refs/tags/desktop-staging-v1.0.35:refs/tags/desktop-staging-v1.0.35" "$BUILD_SHA" || true
+          cd art
+          sha256sum -c SHA256SUMS.txt
+          node -e "const m=require('./latest.preview.json');if(m.version!=='1.0.37')throw new Error('preview version '+m.version);const s=require('fs').readFileSync('Breadee_Staging_1.0.37_x64-setup.exe.sig','utf8').trim();if(m.platforms['windows-x86_64'].signature.trim()!==s)throw new Error('preview signature != .sig');if(!m.platforms['windows-x86_64'].url.endsWith('/releases/download/desktop-staging-v1.0.37/Breadee_Staging_1.0.37_x64-setup.exe'))throw new Error('url '+m.platforms['windows-x86_64'].url);console.log('preview manifest: 1.0.37, signature matches .sig, staging release URL')"
+          cd ..
+          git show "desktop-staging-v1.0.35:src-tauri/tauri.staging.conf.json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{process.stdout.write(JSON.parse(s).plugins.updater.pubkey)})" > pk_stg_1035.b64
+          git show "$BUILD_SHA:src-tauri/tauri.staging.conf.json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const c=JSON.parse(s);if(c.identifier!=='app.breadee.desktop.staging')throw new Error('identifier '+c.identifier);process.stdout.write(c.plugins.updater.pubkey)})" > pk_stg_1037.b64
+          git show "$BUILD_SHA:src-tauri/tauri.conf.json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{process.stdout.write(JSON.parse(s).plugins.updater.pubkey)})" > pk_prod.b64
+          cmp pk_stg_1035.b64 pk_stg_1037.b64 && echo "STAGING PUBKEY: installed 1.0.35 fleet == Staging 1.0.37 (unchanged)"
+          if cmp -s pk_stg_1037.b64 pk_prod.b64; then echo "::error::staging and production pubkeys are identical"; exit 1; fi
+          base64 -d pk_stg_1035.b64 > stg_pub.key; base64 -d pk_prod.b64 > prod_pub.key
+          head -n1 stg_pub.key; head -n1 prod_pub.key
+          base64 -d art/Breadee_Staging_1.0.37_x64-setup.exe.sig > sig_plain.txt
+          head -c 200 sig_plain.txt; echo
+          mkdir -p verifier/src
+          printf '%s\n' '[package]' 'name = "v"' 'version = "0.0.0"' 'edition = "2021"' '[dependencies]' 'minisign-verify = "0.2"' > verifier/Cargo.toml
+          printf '%s\n' 'use minisign_verify::{PublicKey, Signature};' 'use std::fs;' 'fn main(){' '  let a:Vec<String>=std::env::args().collect();' '  let pkfile=fs::read_to_string(&a[1]).unwrap();' '  let pk=PublicKey::decode(&pkfile).or_else(|_|PublicKey::from_base64(pkfile.lines().last().unwrap().trim())).expect("pk");' '  let sig=Signature::decode(&fs::read_to_string(&a[2]).unwrap()).expect("sigdecode");' '  let d=fs::read(&a[3]).unwrap();' '  match pk.verify(&d,&sig,true) { Ok(_) => println!("VERIFIED with {}", a[1]), Err(e) => { println!("REFUSED by {}: {}", a[1], e); std::process::exit(3) } }' '}' > verifier/src/main.rs
+          (cd verifier && cargo build --quiet --release)
+          ./verifier/target/release/v stg_pub.key sig_plain.txt art/Breadee_Staging_1.0.37_x64-setup.exe
+          echo "STAGING-PUBKEY SIGNATURE: VERIFIED (minisign-verify, the Tauri updater verifier)"
+          if ./verifier/target/release/v prod_pub.key sig_plain.txt art/Breadee_Staging_1.0.37_x64-setup.exe; then
+            echo "::error::the PRODUCTION key verified a staging artifact"; exit 1
+          fi
+          echo "PRODUCTION-PUBKEY: REFUSES the staging artifact (isolation proven)"
+
+  inplace:
+    needs: verify
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOST: raw.githubusercontent.com
+      CHANNEL_PATH: sitesupapp/Breadee-Desktop/desktop-staging-channel
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download published Staging 1.0.35 (release) + signed Staging 1.0.37 (artifact)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "serve\$env:CHANNEL_PATH", ev | Out-Null
+          gh release download desktop-staging-v1.0.35 -R sitesupapp/Breadee-Desktop -p "Breadee_Staging_1.0.35_x64-setup.exe" -D v135
+          gh run download $env:RUN_ID -R sitesupapp/Breadee-Desktop -n $env:ARTIFACT -D v137
+          Get-ChildItem -Recurse v135, v137 | Select-Object FullName,Length | Format-Table -Auto
+          python -m pip install --quiet websocket-client
+      - name: QA staging manifest (artifact's own manifest + notes) + installer under the STAGING channel path
+        shell: pwsh
+        run: |
+          Copy-Item v137\Breadee_Staging_1.0.37_x64-setup.exe "serve\$env:CHANNEL_PATH\Breadee_Staging_1.0.37_x64-setup.exe"
+          python ci\desktop-staging-1037\manifest.py v137 "https://$env:HOST/$env:CHANNEL_PATH/Breadee_Staging_1.0.37_x64-setup.exe" "serve\$env:CHANNEL_PATH\latest.json"
+      - name: Trusted self-signed cert for the endpoint host
+        shell: pwsh
+        run: |
+          $c = New-SelfSignedCertificate -DnsName $env:HOST -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
+          $pwd = ConvertTo-SecureString 'qa' -AsPlainText -Force
+          Export-PfxCertificate -Cert $c -FilePath cert.pfx -Password $pwd | Out-Null
+          Export-Certificate -Cert $c -FilePath cert.cer | Out-Null
+          Import-Certificate -FilePath cert.cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          & "C:\Program Files\Git\usr\bin\openssl.exe" pkcs12 -in cert.pfx -nocerts -nodes -passin pass:qa -out key.pem
+          & "C:\Program Files\Git\usr\bin\openssl.exe" pkcs12 -in cert.pfx -clcerts -nokeys -passin pass:qa -out crt.pem
+      - name: Redirect endpoint host -> local logging HTTPS server
+        shell: pwsh
+        run: |
+          Add-Content -Path "$env:windir\System32\drivers\etc\hosts" -Value "`n127.0.0.1 $env:HOST"
+          @'
+          import http.server, ssl, functools, datetime
+          class H(http.server.SimpleHTTPRequestHandler):
+              def log_message(self, fmt, *args):
+                  open("access.log","a").write(datetime.datetime.utcnow().isoformat()+" "+(fmt%args)+"\n")
+          h = functools.partial(H, directory="serve")
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("crt.pem","key.pem")
+          s = http.server.HTTPServer(("127.0.0.1",443), h); s.socket = ctx.wrap_socket(s.socket, server_side=True)
+          s.serve_forever()
+          '@ | Set-Content serve.py -Encoding utf8
+          Start-Process python -ArgumentList 'serve.py' -WindowStyle Hidden
+          Start-Sleep 4
+          (Invoke-WebRequest -UseBasicParsing "https://$env:HOST/$env:CHANNEL_PATH/latest.json").StatusCode
+      - name: Install UNMODIFIED Breadee Staging 1.0.35 + launch + plant markers
+        shell: pwsh
+        run: |
+          Start-Process (Resolve-Path v135\Breadee_Staging_1.0.35_x64-setup.exe) -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Breadee Staging" -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'setup|uninstall' } | Select-Object -First 1
+          if(-not $exe){ Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Depth 2 -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -Auto | Out-String; throw "installed staging exe not found" }
+          $exe.FullName | Set-Content pre_exe.txt
+          $exe.VersionInfo.FileVersion | Set-Content ev\pre_fileversion.txt -NoNewline
+          "installed: $($exe.FullName) fileversion=$($exe.VersionInfo.FileVersion)"
+          "running before launch:"; Get-Process | Where-Object { $_.Name -match 'breadee|msedgewebview2' } | Select-Object Name,Id,Path | Format-Table -Auto | Out-String
+          Get-Process | Where-Object { $_.Path -eq $exe.FullName } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 5
+          # The app passes its own AdditionalBrowserArguments, which masks the env var; the WebView2
+          # loader's policy key (per exe name) overrides app-supplied arguments. Ephemeral runner only.
+          foreach($root in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments','HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'){
+            New-Item -Path $root -Force | Out-Null
+            New-ItemProperty -Path $root -Name $exe.Name -Value '--remote-debugging-port=9222' -PropertyType String -Force | Out-Null
+          }
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
+          Start-Process $exe.FullName
+          Start-Sleep 10
+          "running after launch:"; Get-Process | Where-Object { $_.Name -match 'breadee|msedgewebview2' } | Select-Object Name,Id | Format-Table -Auto | Out-String
+          python ci\desktop-staging-1037\cdp.py seed ev\seed.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop.staging"
+          "datadir: $dd exists=$(Test-Path $dd)"
+          New-Item -ItemType Directory -Force $dd | Out-Null
+          $marker = "qa-staging-1037 marker $(New-Guid)"
+          $marker | Set-Content "$dd\qa-staging-marker.txt" -NoNewline
+          $marker | Set-Content ev\marker_pre.txt -NoNewline
+          Get-ChildItem $dd -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName.Substring($dd.Length))`t$($_.Length)" } | Set-Content ev\datadir_pre.txt
+      - name: In-app update via the installed app's own updater plugin (check -> download_and_install)
+        shell: pwsh
+        run: |
+          python ci\desktop-staging-1037\cdp.py update ev\update.json
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $deadline = (Get-Date).AddMinutes(6)
+          do { Start-Sleep 5; $v = (Get-Item $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion; "fileversion now: $v" } while(($v -notlike '1.0.37*') -and (Get-Date) -lt $deadline)
+          Start-Sleep 20
+      - name: Relaunch (if the installer did not) + post snapshot + recheck
+        shell: pwsh
+        run: |
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $running = Get-Process | Where-Object { $_.Path -eq $p }
+          $cdp = $false; try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json -TimeoutSec 3 | Out-Null; $cdp = $true } catch {}
+          "relaunched by installer: $([bool]$running) cdp: $cdp"
+          if(-not $cdp){ $running | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 5; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'; Start-Process $p; Start-Sleep 10 }
+          python ci\desktop-staging-1037\cdp.py post ev\post.json
+          python ci\desktop-staging-1037\cdp.py recheck ev\recheck.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop.staging"
+          Get-ChildItem $dd -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName.Substring($dd.Length))`t$($_.Length)" } | Set-Content ev\datadir_post.txt
+          $exes = @(Get-ChildItem "$env:LOCALAPPDATA\Breadee Staging" -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'setup|uninstall' })
+          $exe = $exes | Select-Object -First 1
+          $log = if(Test-Path access.log){ Get-Content access.log -Raw } else { '' }
+          Copy-Item access.log ev\access.log -ErrorAction SilentlyContinue
+          $mp = Get-Content "$dd\qa-staging-marker.txt" -Raw -ErrorAction SilentlyContinue
+          $facts = [ordered]@{
+            pre_exe = $p; post_exe = $exe.FullName; post_fileversion = $exe.VersionInfo.FileVersion; staging_exe_count = $exes.Count
+            pre_fileversion = (Get-Content ev\pre_fileversion.txt -Raw -ErrorAction SilentlyContinue)
+            prod_install_present = (Test-Path "$env:LOCALAPPDATA\Breadee") -or (Test-Path "$env:LOCALAPPDATA\app.breadee.desktop")
+            datadir = $dd; datadir_exists_post = (Test-Path $dd)
+            marker_pre = (Get-Content ev\marker_pre.txt -Raw -ErrorAction SilentlyContinue); marker_post = $mp
+            served_manifest = ($log -match 'GET /sitesupapp/Breadee-Desktop/desktop-staging-channel/latest.json'); served_installer = ($log -match 'GET /sitesupapp/Breadee-Desktop/desktop-staging-channel/Breadee_Staging_1.0.37_x64-setup.exe')
+            manifest_requests = ([regex]::Matches($log, 'GET /sitesupapp/Breadee-Desktop/desktop-staging-channel/latest.json')).Count
+            prod_channel_requested = ($log -match 'desktop-production-channel')
+          }
+          $facts | ConvertTo-Json | Set-Content ev\facts.json -Encoding utf8
+          Get-Content ev\facts.json
+      - name: GATE — update-in-place + zero data loss + staging identity
+        shell: pwsh
+        run: python ci\desktop-staging-1037\gate.py ev v137\notes.txt
+      - name: Screenshot
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size)
+          $bmp.Save("$PWD\ev\screen.png")
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        run: |
+          (Get-Content "$env:windir\System32\drivers\etc\hosts") -notmatch 'raw.githubusercontent.com' | Set-Content "$env:windir\System32\drivers\etc\hosts"
+          Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -match 'raw.githubusercontent.com' } | Remove-Item -Force -ErrorAction SilentlyContinue
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-staging-1037-update-proof-evidence
+          path: |
+            ev/**
+            serve/**/latest.json
+          if-no-files-found: ignore
