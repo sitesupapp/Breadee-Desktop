@@ -226,6 +226,8 @@ function labelFor(op: OfflineOperation): string {
     const p = (op.payload as { order_number?: string } | null) ?? {};
     return p.order_number ? `On account — order #${p.order_number}` : "On account — order";
   }
+  if (op.operation_type === "move_table") return "Move table";
+  if (op.operation_type === "merge_tables") return "Merge tables";
   if (op.operation_type === "payout") return "Cash payout";
   if (op.operation_type === "end_shift") return "End shift";
   if (op.operation_type === "split_settle") {

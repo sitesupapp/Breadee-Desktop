@@ -290,7 +290,8 @@ test("T2 Move/Merge read the ACTIVE bill: a locally-settled table is never offer
   const sources = mergeableSources(shown, shown.find((t) => t.id === "TBL-P")!);
   assert.deepEqual(sources.map((t) => t.id), ["TBL-2"]);
   const dw = src("src/screens/pos/DineInWorkspace.tsx");
-  assert.match(dw, /sources=\{mergeableSources\(displayMap\.tables, selected\)\}/);
+  // 1.0.38 (WS-F) — the same projected rows, minus (online) tables held for unsynced offline work.
+  assert.match(dw, /sources=\{mergeableSources\(displayMap\.tables, selected\)(\.filter\(\(t\) => !input\.online \|\| !structuralHold\.has\(t\.id\)\))?\}/);
   assert.match(dw, /<MoveTableDialog[\s\S]*?tables=\{displayMap\.tables\}/);
 });
 
@@ -407,10 +408,10 @@ test("C5 Sync Center diagnostic classifies historical vs current vs conflicts (r
   assert.doesNotMatch(JSON.stringify(diag), /SECRET NAME/, "no payload / customer data in the export");
 });
 
-test("C6 release identity: 1.0.37 is the PRODUCTION bundle (no RC suffix, the fleet's identifier)", () => {
+test("C6 release identity: 1.0.38 is the PRODUCTION bundle (no RC suffix, the fleet's identifier)", () => {
   const conf = JSON.parse(src("src-tauri/tauri.conf.json")) as { version: string; identifier: string };
   // The RC stage (1.0.37-rc.N / app.breadee.desktop.offlinerc) ended at rc.14; the production release ships
   // under the installed fleet's identity so the in-app update replaces it in place (offline-rc-diagnostics pins the rest).
-  assert.equal(conf.version, "1.0.37");
+  assert.equal(conf.version, "1.0.38");
   assert.equal(conf.identifier, "app.breadee.desktop");
 });

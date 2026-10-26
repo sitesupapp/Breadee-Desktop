@@ -45,14 +45,19 @@ test("offlineCapture is exactly backend-unreachable AND ready AND scope present"
 // offline capture showed nothing on the floor and was refused at replay (shift-less orders, a non-uuid
 // merge client_op_id, destinations still occupied server-side), so offline the gate now refuses them with
 // an explicit, VISIBLE reason — like Close/Clear. No offline capture branch remains for any table op.
-test("rc.12: Move/Merge (like Close/Clear) are online-only with an explicit offline reason — never a silent no-op", () => {
+// 1.0.38 (Bugs 5/6) — CONTRACT CHANGE (supersedes the rc.12 one above, documented): Move and Merge are
+// CAPTURED offline on an offline-ready device (schema-2 ops: bill pins, barriers, atomic projection, close
+// barrier — test/offline-1038-movemerge.test.ts). Close/Clear stay online-only. A device that is NOT ready
+// still gets an explicit, VISIBLE reason — never a silent no-op.
+test("1.0.38: Move/Merge capture offline when ready; Close/Clear stay online-only; a not-ready device sees a reason", () => {
   const src = ts(DW);
-  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: false \};/);
-  assert.match(src, /needs a connection — the server moves the whole bill \(rounds, payments, balance\) in one step/);
-  // rc.14 — wrapped (online) in the historical shift-less refusal; the online-only gate itself is unchanged.
-  assert.match(src, /move: (historical\()?serverCoordinated\(canMoveTable\(pos\.access\), "move"/);
-  assert.match(src, /merge: (historical\()?serverCoordinated\(canMergeTables\(pos\.access\), "merge"/);
-  assert.ok(!/captureMoveTableOffline\(|captureMergeTablesOffline\(|captureCloseTableOffline|captureClearTableOffline/.test(src), "no table op is captured offline");
+  assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: offlineProjOn \};/);
+  assert.match(src, /needs a connection on this device/);
+  // rc.14 — wrapped (online) in the historical shift-less refusal; 1.0.38 (WS-F) — and in the unsynced-work hold.
+  assert.match(src, /move: (unsynced\()?(historical\()?offlineAware\(canMoveTable\(pos\.access\), "move"/);
+  assert.match(src, /merge: (unsynced\()?(historical\()?offlineAware\(canMergeTables\(pos\.access\), "merge"/);
+  assert.ok(/captureMoveTableOffline\(/.test(src) && /captureMergeTablesOffline\(/.test(src), "move / merge are captured offline");
+  assert.ok(!/captureCloseTableOffline|captureClearTableOffline/.test(src), "close / clear are never captured offline");
   // The reason is SHOWN on the bill panel (a disabled button with only a hover title read as "does nothing").
   const panel = ts("src/components/pos/TableBillPanel.tsx");
   assert.match(panel, /includes\("needs a connection"\)/);
@@ -76,7 +81,10 @@ test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a serve
   // of it is impossible by construction; the settle records exactly what it covers.
   assert.match(src, /covers: \{ orderIds: canonicalIds, summary: p\.summaryOnly \}/);
   assert.match(src, /covers: target\.covers/);
-  assert.match(src, /if \(p\.paidPending > 0 \|\| p\.collected > 0\)/);
+  // 1.0.38 (WS-F, Bug 9) — the part-paid refusal is the ONE pure rule offlineSettleAmount (paidPending > 0, or
+  // a server-held collected while serverDeductsPriorPayments() is false — its release default).
+  assert.match(src, /const amount = offlineSettleAmount\(p, serverDeductsPriorPayments\(\)\);\s*if \(!amount\.ok\) return \{ ok: false, reason: amount\.reason \};/);
+  assert.match(ts("src/lib/offline/operationalProjection.ts"), /if \(p\.paidPending > 0 \|\| \(p\.collected > 0 && !serverDeductsPrior\)\)/);
   assert.match(src, /extraDependencyIds: target\.deps/, "settle replays after every pending edit/leg");
 });
 

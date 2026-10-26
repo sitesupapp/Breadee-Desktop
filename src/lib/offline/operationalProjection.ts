@@ -38,8 +38,76 @@ export type ProjectionScope = {
 };
 
 /** How a projected line maps back to the server for an edit/split. "summary" / "legacy" lines are
- *  display-only (their server ids are not known on this device). */
-export type LineRef = EditTargetRef | { kind: "summary" } | { kind: "legacy" };
+ *  display-only (their server ids are not known on this device). 1.0.38 — "merged" lines were folded in
+ *  by an offline merge that has not synced yet: display-only until it does (their order changes). */
+export type LineRef = EditTargetRef | { kind: "summary" } | { kind: "legacy" } | { kind: "merged"; op_id: string };
+
+// ---------------------------------------------------------------------------
+// 1.0.38 (Bugs 5/6) — offline Move / Merge (schema 2 structural ops)
+// ---------------------------------------------------------------------------
+
+/** The op schema version of the offline-safe move_table / merge_tables (pos_move_table_v2 /
+ *  pos_merge_tables_v4). Schema 1 (rc.4–rc.11) ops stay quarantined: no handler, never replayed. */
+export const TABLE_OP_SCHEMA_VERSION = 2;
+
+/** A bill identity reference: a canonical order id, or the local session that creates it. */
+export type BillRef = { order_id: string | null; order_local: string | null };
+export const billRefKey = (r: BillRef): string => (r.order_id ? r.order_id : `L:${r.order_local ?? ""}`);
+
+/** 1.0.38 — a line folded in by an offline merge that has not synced yet. */
+export const MERGED_LINE_LOCKED_MESSAGE = "This item was merged in offline. Wait for the merge to sync before changing or splitting it.";
+
+/** True for a schema-2 (offline-safe) move_table / merge_tables op. */
+export function isStructuralOp(o: OfflineOperation): boolean {
+  return (o.operation_type === "move_table" || o.operation_type === "merge_tables") && o.schema_version === TABLE_OP_SCHEMA_VERSION;
+}
+
+/** The tables a structural op VACATES (move: from; merge: the sources) and the one it FILLS (move: to;
+ *  merge: the primary). */
+export function structuralTables(o: OfflineOperation): { vacates: string[]; fills: string | null } {
+  const p = rec(o.payload);
+  if (o.operation_type === "move_table") {
+    return { vacates: typeof p.from_table_id === "string" ? [p.from_table_id] : [], fills: typeof p.to_table_id === "string" ? p.to_table_id : null };
+  }
+  const sources = Array.isArray(p.source_table_ids) ? (p.source_table_ids as unknown[]).filter((x): x is string => typeof x === "string") : [];
+  return { vacates: sources, fills: typeof p.primary_table_id === "string" ? p.primary_table_id : null };
+}
+
+/** The bill refs a structural op takes OFF `tableId` (empty when it does not vacate that table). */
+export function structuralRefsLeaving(o: OfflineOperation, tableId: string): BillRef[] {
+  const p = rec(o.payload);
+  if (o.operation_type === "move_table") {
+    if (p.from_table_id !== tableId) return [];
+    return ((rec(p.bill).orders as BillRef[] | undefined) ?? []).filter((r) => r && (r.order_id || r.order_local));
+  }
+  const sources = (p.source_table_ids as string[] | undefined) ?? [];
+  if (!sources.includes(tableId)) return [];
+  const r = rec(p.orders)[tableId] as BillRef | undefined;
+  return r && (r.order_id || r.order_local) ? [r] : [];
+}
+
+/** Every bill ref a structural op involves (move: the moved bill; merge: every table's bill). */
+export function structuralAllRefs(o: OfflineOperation): BillRef[] {
+  const p = rec(o.payload);
+  if (o.operation_type === "move_table") return ((rec(p.bill).orders as BillRef[] | undefined) ?? []).filter((r) => r && (r.order_id || r.order_local));
+  return Object.values(rec(p.orders)).filter((r): r is BillRef => !!r && typeof r === "object" && (!!(r as BillRef).order_id || !!(r as BillRef).order_local));
+}
+
+/** 1.0.38 — was this offline move / merge AUTHORITATIVELY refused by the server (its own RPC said no)? A
+ *  move parked behind a failed prerequisite / an engine fault / exhausted transient retries was never seen
+ *  by the server: it is awaiting recovery (still projected, with attention), not refused. */
+export function structuralRefusedByServer(o: OfflineOperation): boolean {
+  if (o.status !== "needs_attention") return false;
+  if (NOT_A_SERVER_REFUSAL.has(o.last_error_code ?? "") || o.last_error_code === "retry_exhausted") return false;
+  return !TRANSIENT_FAULT.test(o.last_error_message ?? "");
+}
+
+/** A structural op still projected locally: live, not refused by the server (a refused move moved
+ *  nothing — the bill shows on its original table, with attention), and not yet inside the map read at
+ *  `mapAt`. A cancelled op never projects. */
+export function structuralProjected(o: OfflineOperation, mapAt: number | null): boolean {
+  return isStructuralOp(o) && o.status !== "cancelled" && !structuralRefusedByServer(o) && !reflectedIn(o, mapAt);
+}
 
 export type LineMeta = {
   ref: LineRef;
@@ -86,6 +154,9 @@ function live(op: OfflineOperation): boolean {
 /** rc.13 — a refusal whose text proves the bill is ALREADY closed on the server (paid / settled elsewhere). */
 const ALREADY_CLOSED = /already paid|already settled|no open order/i;
 
+/** 1.0.38 (S5 / Bug 9) — the settle handlers' structured bill-binding refusal codes (pay_table / on-account). */
+const BILL_BINDING_REFUSALS = new Set(["pay_bill_changed", "pay_amount_changed", "on_account_bill_changed", "on_account_amount_changed", "payment_residue"]);
+
 /** 1.0.38 — needs_attention codes written by the ORCHESTRATOR (never by the settle's own RPC): the server
  *  never saw this settle, so it was not refused — it is parked behind a prerequisite / an engine fault. */
 const NOT_A_SERVER_REFUSAL = new Set(["dependency_failed", "missing_dependency", "circular_dependency", "unknown_handler", "engine_error", "awaiting_parked_prerequisite"]);
@@ -100,6 +171,9 @@ const TRANSIENT_FAULT =
 export function settleRefusedByServer(o: OfflineOperation): boolean {
   if (o.status !== "needs_attention") return false;
   const msg = o.last_error_message ?? "";
+  // 1.0.38 (Bug 9) — a structured bill/amount refusal is a refusal whatever its wording (a server message
+  // such as "part of this bill was already paid" must never read as "closed elsewhere" → fake settled).
+  if (BILL_BINDING_REFUSALS.has(o.last_error_code ?? "")) return true;
   if (ALREADY_CLOSED.test(msg)) return false;
   if (NOT_A_SERVER_REFUSAL.has(o.last_error_code ?? "")) return false;
   return !TRANSIENT_FAULT.test(msg);
@@ -327,6 +401,17 @@ export type OperationalTableBill = {
   summaryOnly: boolean;
   /** The local session, when one exists. */
   sessionId: string | null;
+  /** 1.0.38 (Bugs 5/6) — the unsynced offline move / merge ops that brought this bill (or part of it) to
+   *  this table: every later round / settle / split / edit of it must replay AFTER them (barrier). */
+  structuralOpIds: string[];
+  /** 1.0.38 — the latest unsynced offline move / merge that took this table's bill AWAY (the table is
+   *  free locally); a new bill opened here replays after it. */
+  vacatedByOpId: string | null;
+  /** 1.0.38 — nothing is open here because an offline move / merge took the bill away: AVAILABLE. */
+  vacatedLocally: boolean;
+  /** 1.0.38 — the op that freed this table locally (the later of the settle / the vacating move-merge),
+   *  or null. A new bill on the table (or a bill moved onto it) replays after it. */
+  freedByOpId: string | null;
 };
 
 function draftLineToBill(l: DineDraftLine, batch: number): BillLine {
@@ -361,13 +446,47 @@ export function projectTableBill(input: {
    *  synced op at or before it is already inside that (closed) server state — never re-added as a ghost
    *  unpaid balance on a table the server shows free. */
   freeMapAt?: number | null;
+  /** 1.0.38 — when the map holding this table was read (read START): an offline move / merge synced at or
+   *  before it is inside the canonical floor and is no longer projected. Defaults to the snapshot time. */
+  mapAt?: number | null;
 }): OperationalTableBill {
   const { tableId, mapRow } = input;
   const fetchedAt = input.canonical?.fetchedAt ?? input.freeMapAt ?? null;
+  const structAt = input.mapAt !== undefined ? input.mapAt : fetchedAt;
   const meta = new Map<string, LineMeta>();
   const porders: ProjectedOrder[] = [];
   const bills: BillOrder[] = [];
   let summaryOnly = false;
+
+  // 0b — 1.0.38 OFFLINE MOVE / MERGE that took (part of) this table's bill AWAY: those canonical orders
+  // leave this table's active bill (the table is free locally). A REFUSED / parked one moved nothing —
+  // the bill stays here, with an attention badge (never silently re-applied).
+  const structural = [...input.ops].filter(isStructuralOp).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const vacatedOrders = new Set<string>();
+  let vacatedByOpId: string | null = null;
+  let vacatedAt = "";
+  const parkedStructural: string[] = [];
+  for (const s of structural) {
+    const t = structuralTables(s);
+    const involved = t.vacates.includes(tableId) || t.fills === tableId;
+    if (!involved || s.status === "cancelled") continue;
+    if (s.status === "needs_attention") parkedStructural.push(s.operation_id);
+    if (!structuralProjected(s, structAt)) continue;
+    if (t.fills === tableId) {
+      // A LATER move brought (some of) them back here (A→B, then B→A): they are this table's again.
+      for (const r of structuralAllRefs(s)) if (r.order_id) vacatedOrders.delete(r.order_id);
+      continue;
+    }
+    for (const r of structuralRefsLeaving(s, tableId)) if (r.order_id) vacatedOrders.add(r.order_id);
+    vacatedByOpId = s.operation_id;
+    vacatedAt = s.created_at;
+  }
+  // A move/merge that brought this session's bill HERE and is still unsynced: the bill's barrier.
+  const carrier = input.draft?.carried_op_id ? input.ops.find((o) => o.operation_id === input.draft?.carried_op_id) : undefined;
+  const carriedActive = !!carrier && structuralProjected(carrier, structAt) && Array.isArray(input.draft?.carried_orders) && structuralTables(carrier).fills === tableId;
+  const structuralOpIds = structural
+    .filter((s) => structuralProjected(s, structAt) && structuralTables(s).fills === tableId)
+    .map((s) => s.operation_id);
 
   // 0 — LOCAL SETTLEMENT (rc.10). A captured, not-yet-reflected settle / on-account of this table
   // closes EXACTLY the bill it recorded (`covers`): those canonical orders, that local session, the
@@ -407,10 +526,20 @@ export function projectTableBill(input: {
   // the round synced but before the settle synced showed that order UNPAID again — the F1 resurrection.
   if (coveredSessions.size > 0) {
     const sessionOrder = new Map<string, string>();
+    const coveredNumbers = new Set<string>();
     for (const o of input.ops) {
-      if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && o.local_entity_id && coveredSessions.has(o.local_entity_id)) sessionOrder.set(o.local_entity_id, o.canonical_entity_id);
+      if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && o.local_entity_id && coveredSessions.has(o.local_entity_id)) {
+        sessionOrder.set(o.local_entity_id, o.canonical_entity_id);
+        const num = o.result_meta?.order_number;
+        if (typeof num === "string" && num !== "") coveredNumbers.add(num);
+      }
     }
     for (const s of settleOps) for (const id of settleCoveredIds(s, (l) => sessionOrder.get(l))) coveredOrders.add(id);
+    // 1.0.38 (E2E-a) — the same F1 rule for a map SUMMARY (no cached bill): an online floor read after the
+    // session's round synced but before its settle synced shows that ONE order as the table's open bill. When
+    // the summary is exactly one order and its number is the covered session's canonical order (round 1's
+    // server-returned order_number), it is closed too — through 1.0.38-dev it reappeared as an unpaid bill.
+    if (!coveredSummary && mapRow && mapRow.orders === 1 && typeof mapRow.order_number === "string" && coveredNumbers.has(mapRow.order_number)) coveredSummary = true;
   }
   // rc.11 — the LEGACY rule (a pre-rc.10 settle with no `covers`, matched only by its dependency on the
   // session's open) closes the session ONLY when no round was sent AFTER that settle: a later round is
@@ -426,19 +555,28 @@ export function projectTableBill(input: {
       settleOps.some((s) => Object.keys(rec(rec(s.payload).covers)).length === 0 && legacyCovers(s, input.draft as DineDraft)));
   const draft = draftSettled ? null : input.draft;
   const lastSettleOpId = settleOps.length > 0 ? settleOps[settleOps.length - 1].operation_id : null;
-  const collected = Math.max(0, Number(mapRow?.collected ?? 0) || 0);
+  // 1.0.38 — a bill moved here offline carries the server-collected amount of its source table.
+  const collected = Math.max(0, Number(mapRow?.collected ?? 0) || 0) + (carriedActive ? Math.max(0, Number(input.draft?.carried_collected ?? 0) || 0) : 0);
+  // 1.0.38 — after an unsynced offline move / merge the server versions of the bill's orders are not known
+  // on this device: line edits wait for the sync (never a guessed CAS). Rounds / splits / settles chain.
+  const versionKnown = structuralOpIds.length === 0;
 
-  // 1 — canonical snapshot (cached bill), else the canonical SUMMARY from the cached map row.
-  const canonOrders = (input.canonical?.bill.orders ?? []).filter((o) => !coveredOrders.has(o.id));
-  const canonCoveredAll = (input.canonical?.bill.orders ?? []).length > 0 && canonOrders.length === 0;
+  // 1 — canonical snapshot (cached bill), else the canonical SUMMARY from the cached map row. 1.0.38 — plus
+  // the canonical orders a still-unsynced offline move CARRIED here; minus the ones it moved away.
+  const canonAll: BillOrder[] = [];
+  for (const o of [...(input.canonical?.bill.orders ?? []), ...(carriedActive ? (input.draft?.carried_orders ?? []) : [])]) {
+    if (!canonAll.some((x) => x.id === o.id)) canonAll.push(o); // one order once (a bill moved back here)
+  }
+  const canonOrders = canonAll.filter((o) => !coveredOrders.has(o.id) && !vacatedOrders.has(o.id));
+  const canonCoveredAll = canonAll.length > 0 && canonOrders.length === 0;
   if (canonOrders.length > 0) {
     for (const o of canonOrders) {
       const copy: BillOrder = { ...o, lines: o.lines.map((l) => ({ ...l, modifiers: [...l.modifiers] })) };
       bills.push(copy);
-      porders.push({ key: o.id, orderId: o.id, orderLocal: null, baseVersion: o.pos_entity_version, bumpOps: [], partiallyPaid: o.payment_status !== "unpaid" || collected > 0, pendingSplitOps: [] });
+      porders.push({ key: o.id, orderId: o.id, orderLocal: null, baseVersion: versionKnown ? o.pos_entity_version : null, bumpOps: [], partiallyPaid: o.payment_status !== "unpaid" || collected > 0, pendingSplitOps: [] });
       for (const l of copy.lines) meta.set(l.id, { ref: { kind: "canonical", order_item_id: l.id }, orderKey: o.id, creatorOpId: null, paidQty: 0 });
     }
-  } else if (!canonCoveredAll && !coveredSummary && mapRow && mapRow.orders > 0 && mapRow.total != null) {
+  } else if (!canonCoveredAll && !coveredSummary && vacatedByOpId == null && mapRow && mapRow.orders > 0 && mapRow.total != null) {
     summaryOnly = true;
     const key = `summary:${tableId}`;
     const total = Number(mapRow.total);
@@ -518,7 +656,7 @@ export function projectTableBill(input: {
         key: draft.local_session_id,
         orderId: draft.canonical_order_id,
         orderLocal: draft.canonical_order_id ? null : draft.local_session_id,
-        baseVersion: hadCanonical ? null : 0,
+        baseVersion: hadCanonical || !versionKnown ? null : 0,
         bumpOps: [],
         partiallyPaid: false,
         pendingSplitOps: [],
@@ -542,6 +680,21 @@ export function projectTableBill(input: {
         meta.set(l.line_id, { ref: { kind: "local", line_local: l.line_id, batch_no: null }, orderKey: target.id, creatorOpId: r.operation_id, paidQty: 0 });
       }
       if (rop) note(rop);
+    }
+    // 1.0.38 — the UNPAID lines an unsynced offline MERGE folded into this (primary) bill. Paid lines of a
+    // part-paid source never come here (they stay on the source with its payments). Display-only until the
+    // merge syncs (their server order changes); a refused merge folds nothing.
+    for (const blk of draft.merged_blocks ?? []) {
+      const mop = opsById.get(blk.op_id);
+      if (!mop || !structuralProjected(mop, structAt) || blk.lines.length === 0) continue;
+      const idx = boundIdx >= 0 ? boundIdx : ensureLocal();
+      const target = bills[idx];
+      const batch = target.lines.reduce((m, l) => Math.max(m, l.batch_no), 0) + 1;
+      for (const l of blk.lines) {
+        if (meta.has(l.id)) continue;
+        target.lines.push({ ...l, modifiers: [...l.modifiers], batch_no: batch });
+        meta.set(l.id, { ref: { kind: "merged", op_id: blk.op_id }, orderKey: target.id, creatorOpId: blk.op_id, paidQty: 0 });
+      }
     }
   }
 
@@ -601,10 +754,22 @@ export function projectTableBill(input: {
   // 5 — captured settles / on-accounts of this table (the closed bills are already excluded above).
   for (const s of settleOps) if (s.status === "needs_attention") attention += 1;
   attention += refusedSettles.length;
+  // 1.0.38 — an offline move / merge that brought the bill here is part of its unsynced delta (and the
+  // barrier every later capture of it depends on); a parked one is an attention item on its tables.
+  for (const id of structuralOpIds) {
+    if (!mutationOpIds.includes(id)) mutationOpIds.push(id);
+    if (!pendingMutationOpIds.includes(id)) pendingMutationOpIds.push(id);
+  }
+  for (const id of parkedStructural) {
+    attention += 1;
+    attentionOpIds.push(id);
+  }
 
   for (const b of bills) recomputeOrder(b);
   const nonEmpty = bills.filter((b) => b.lines.length > 0);
   const bill = foldBill(tableId, nonEmpty);
+  const settleAt = settleOps.length > 0 ? settleOps[settleOps.length - 1].created_at : "";
+  const freedByOpId = nonEmpty.length > 0 ? null : vacatedByOpId && vacatedAt >= settleAt ? vacatedByOpId : lastSettleOpId;
   const gross = bill.total;
   // The map row's server-collected amount belongs to the canonical bill; once that bill is settled
   // locally it no longer reduces the (new) active bill.
@@ -630,6 +795,10 @@ export function projectTableBill(input: {
     settlementConflict: refusedSettles.length > 0 && nonEmpty.length > 0,
     summaryOnly,
     sessionId: draft?.local_session_id ?? null,
+    structuralOpIds,
+    vacatedByOpId,
+    vacatedLocally: vacatedByOpId != null && nonEmpty.length === 0,
+    freedByOpId,
   };
 }
 
@@ -675,7 +844,7 @@ export async function scopedOperations(scope: ProjectionScope): Promise<OfflineO
 }
 
 /** This scope's OPEN local dine-in sessions (one indexed read). */
-async function openDraftsInScope(scope: ProjectionScope): Promise<DineDraft[]> {
+export async function openDraftsInScope(scope: ProjectionScope): Promise<DineDraft[]> {
   if (!scope.tenantId) return [];
   const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
   return all.filter(
@@ -707,7 +876,7 @@ export async function getOperationalTableBill(
     readCachedBill(table.id, scope.tenantId, scope.branchId).catch(() => null),
     preloadedDrafts ? Promise.resolve(preloadedDrafts.find((d) => d.table_id === table.id) ?? null) : openDraftForTable(scope, table.id),
     preloadedOps ? Promise.resolve(preloadedOps) : scopedOperations(scope),
-    !free || mapLoadedAt !== undefined
+    mapLoadedAt !== undefined
       ? Promise.resolve(mapLoadedAt ?? null)
       : readCachedTableMap(scope.tenantId, scope.branchId).then((m) => m?.cachedAt ?? null).catch(() => null),
   ]);
@@ -716,16 +885,24 @@ export async function getOperationalTableBill(
   const fresh = canonical && !free ? canonical : null;
   // 1.0.38 (BUG 1 ghost balance) — the FREE map is itself a canonical statement: work synced before it was
   // read is inside that closed server state, never re-added as an unpaid balance.
-  return projectTableBill({ tableId: table.id, mapRow: table, canonical: fresh, draft, ops, freeMapAt: free ? mapAt : null });
+  // 1.0.38 (Bugs 5/6) — an offline move / merge is projected until the MAP (read at mapAt) reflects it.
+  return projectTableBill({ tableId: table.id, mapRow: table, canonical: fresh, draft, ops, freeMapAt: free ? mapAt : null, mapAt });
 }
 
-/** rc.13 — the table a dine-in op acts on (open: its entity; round: its submit; settle: its payload). */
-function tableOfOp(o: OfflineOperation): string | null {
+/** rc.13 — the tables a dine-in op acts on (open: its entity; round: its submit; settle: its payload).
+ *  1.0.38 — an offline move / merge acts on EVERY table it involves (from + to; primary + sources), so the
+ *  online floor keeps projecting all of them until the canonical map reflects it. */
+export function tablesOfOp(o: OfflineOperation): string[] {
   const p = rec(o.payload);
-  if (o.operation_type === "dinein_open_table") return o.local_entity_id;
-  if (o.operation_type === "dinein_send_round") return (rec(p.submit).table_id as string | undefined) ?? null;
-  if (o.operation_type === "pay_table" || o.operation_type === "on_account_table") return (p.table_id as string | undefined) ?? null;
-  return null;
+  const one = (v: unknown) => (typeof v === "string" && v !== "" ? [v] : []);
+  if (o.operation_type === "dinein_open_table") return one(o.local_entity_id);
+  if (o.operation_type === "dinein_send_round") return one(rec(p.submit).table_id);
+  if (o.operation_type === "pay_table" || o.operation_type === "on_account_table") return one(p.table_id);
+  if (isStructuralOp(o)) {
+    const t = structuralTables(o);
+    return [...t.vacates, ...one(t.fills)];
+  }
+  return [];
 }
 
 /**
@@ -744,17 +921,20 @@ function tableOfOp(o: OfflineOperation): string | null {
 export async function tablesWithUnreflectedWork(
   scope: ProjectionScope,
   mapLoadedAt: number | null,
-): Promise<{ touched: Set<string>; syncingSettle: Set<string>; attentionSettle: Set<string>; refusedSettle: Map<string, string> }> {
+): Promise<{ touched: Set<string>; syncingSettle: Set<string>; attentionSettle: Set<string>; refusedSettle: Map<string, string>; structuralHold: Set<string> }> {
   const touched = new Set<string>();
   const syncingSettle = new Set<string>();
   const attentionSettle = new Set<string>();
   const refusedSettle = new Map<string, string>();
+  const structuralHold = new Set<string>();
   const ops = (await scopedOperations(scope)).sort((a, b) => a.created_at.localeCompare(b.created_at));
   for (const o of ops) {
     if (o.status === "cancelled") continue;
-    const t = tableOfOp(o);
-    if (!t) continue;
-    if (!reflectedIn(o, mapLoadedAt)) touched.add(t);
+    const ts = tablesOfOp(o);
+    if (ts.length === 0) continue;
+    if (!reflectedIn(o, mapLoadedAt)) for (const x of ts) touched.add(x);
+    if (!reflectedIn(o, mapLoadedAt) && workStillReplays(o)) for (const x of ts) structuralHold.add(x);
+    const t = ts[0];
     const settle = o.operation_type === "pay_table" || o.operation_type === "on_account_table";
     if (!settle) continue;
     if (settleRefusedByServer(o)) {
@@ -768,7 +948,46 @@ export async function tablesWithUnreflectedWork(
       if (o.status === "needs_attention") attentionSettle.add(t);
     }
   }
-  return { touched, syncingSettle, attentionSettle, refusedSettle };
+  return { touched, syncingSettle, attentionSettle, refusedSettle, structuralHold };
+}
+
+/** 1.0.38 — local work that WILL still reach the server (or already did, after the map was read): live,
+ *  or parked only behind a prerequisite / an engine or transient fault (it re-opens / is retried). Work the
+ *  server authoritatively refused, or a settle proven closed elsewhere, replays nothing more. */
+function workStillReplays(o: OfflineOperation): boolean {
+  if (o.status !== "needs_attention") return true;
+  const code = o.last_error_code ?? "";
+  if (NOT_A_SERVER_REFUSAL.has(code) || code === "retry_exhausted") return true;
+  if (ALREADY_CLOSED.test(o.last_error_message ?? "") || BILL_BINDING_REFUSALS.has(code)) return false;
+  return TRANSIENT_FAULT.test(o.last_error_message ?? "");
+}
+
+/** 1.0.38 — the ONLINE Move / Merge hold: a table whose offline work has not reached (or is not yet
+ *  reflected in) the canonical map. An online move / merge of it now would race the offline replay (the
+ *  replay's bill pins would then refuse, or a round would land on a table the bill already left). */
+export const STRUCTURAL_UNSYNCED_HOLD_MESSAGE =
+  "This table has offline work that hasn't synced yet. Move and Merge wait until it reaches the server — check the Sync Center if it doesn't clear.";
+
+/** Pure — the hold reason for an online Move / Merge involving `tableIds`, or null. */
+export function structuralHoldReason(tableIds: readonly (string | null | undefined)[], held: ReadonlySet<string>): string | null {
+  return tableIds.some((t) => typeof t === "string" && held.has(t)) ? STRUCTURAL_UNSYNCED_HOLD_MESSAGE : null;
+}
+
+/** 1.0.38 — an offline full settle / on-account of a bill with a part-payment that cannot be deducted. */
+export const PART_PAID_OFFLINE_SETTLE_MESSAGE = "Part of this bill is already paid. Settle the remaining items with Split, or reconnect.";
+
+/**
+ * 1.0.38 (Bug 9) — PURE, the ONE offline full-settle / on-account amount rule for a table bill (Pay and On
+ * Account alike). A locally captured, unsynced split leg (paidPending) → refused (R is not known here). A
+ * SERVER-held part-payment (collected = P) → refused unless the server deducts prior payments
+ * (`serverDeductsPrior`, see lib/pos/tablePayment serverDeductsPriorPayments). `exactAmount` = the remaining
+ * obligation R = T − P, ONLY for a fully-canonical bill with no local delta (no unsynced round / edit / leg /
+ * move / merge), no summary and one currency — else null (a locally-priced figure is never asserted).
+ */
+export function offlineSettleAmount(p: OperationalTableBill, serverDeductsPrior: boolean): { ok: false; reason: string } | { ok: true; exactAmount: number | null } {
+  if (p.paidPending > 0 || (p.collected > 0 && !serverDeductsPrior)) return { ok: false, reason: PART_PAID_OFFLINE_SETTLE_MESSAGE };
+  const exact = p.mutationOpIds.length === 0 && !p.summaryOnly && !p.bill.mixedCurrency && p.orders.every((o) => o.orderId && !o.orderLocal) && p.gross != null;
+  return { ok: true, exactAmount: exact ? Math.max(0, Math.round(((p.gross as number) - p.collected) * 100) / 100) : null };
 }
 
 /** 1.0.38 — the parked-settle hold text (the payment was taken; the settle needs the operator). */
@@ -807,7 +1026,8 @@ export async function getOperationalTableTotals(
     if (p.bill.orders.length === 0 && t.orders === 0) continue;
     if (p.bill.orders.length === 0) {
       // rc.10 — the canonical bill the map still shows was SETTLED locally: the table is available.
-      if (p.settledLocally) out.set(t.id, { total: null, currency: t.currency, orders: 0, pending: true });
+      // 1.0.38 — likewise when an unsynced offline move / merge took the bill to another table.
+      if (p.settledLocally || p.vacatedLocally) out.set(t.id, { total: null, currency: t.currency, orders: 0, pending: true });
       continue;
     }
     out.set(t.id, { total: p.gross, currency: p.currency, orders: Math.max(t.orders, 1), pending: p.mutationOpIds.length > 0 });
@@ -828,7 +1048,9 @@ export function overlayTableTotals(
     if (o.orders === 0) {
       return { ...t, total: null, collected: null, outstanding: null, orders: 0, order_number: null, opened_at: null, status: "available", occupied: false, mixed_currency: false };
     }
-    return { ...t, total: o.total, currency: o.currency ?? t.currency, orders: o.orders, occupied: true };
+    // 1.0.38 — a table whose bill exists only on this device (opened / moved / merged offline) is OCCUPIED on
+    // the projected floor, so the Merge picker (mergeableSources) offers it and Move never targets it.
+    return { ...t, total: o.total, currency: o.currency ?? t.currency, orders: o.orders, occupied: true, ...(t.status === "available" ? { status: "occupied" as const } : {}) };
   });
 }
 
@@ -856,6 +1078,7 @@ export function editTargetFor(
 ): EditTargetResult {
   const m = proj.meta.get(lineId);
   if (!m) return { ok: false, reason: "This item isn't available offline. Reconnect to change it." };
+  if (m.ref.kind === "merged") return { ok: false, reason: MERGED_LINE_LOCKED_MESSAGE };
   if (m.ref.kind === "summary" || m.ref.kind === "legacy") {
     return { ok: false, reason: "This item was sent before this device went offline. Reconnect to change it." };
   }
@@ -878,6 +1101,7 @@ function chainFor(po: ProjectedOrder, ref: EditTargetRef | null, creatorOpId: st
   if (po.baseVersion == null) {
     return { ok: false, reason: "This bill's latest version isn't known on this device. Reconnect to change its items." };
   }
+  // (1.0.38 — a bill moved / merged offline has baseVersion null until that op syncs: edits wait for it.)
   const last = po.bumpOps.length > 0 ? po.bumpOps[po.bumpOps.length - 1] : null;
   const deps = [last, creatorOpId].filter((x): x is string => typeof x === "string" && x !== "");
   return {

@@ -54,6 +54,10 @@ export type PosRpcName =
   // MERGE_CROSS_CURRENCY / MERGE_AMBIGUOUS_BILL / MERGE_PRIMARY_EMPTY /
   // MERGE_SOURCE_EMPTY - all mapped to cashier guidance in lib/pos/errors.ts.
   | "pos_merge_tables_v3"
+  // 1.0.38 - offline-replay contracts (prod_1038_offline_contracts): exactly-once move with locks, bill
+  // and paid-settlement pins, and a v4 merge wrapper over v3 that adds the same pins + table versions.
+  | "pos_move_table_v2"
+  | "pos_merge_tables_v4"
   | "pos_deletion_reason_report"
   | "pos_close_table"
   | "pos_clear_table"

@@ -1,7 +1,7 @@
 -- ============================================================================
--- Desktop 1.0.38 Offline — PRODUCTION server contracts (additive).
+-- Desktop 1.0.38 Offline â€” PRODUCTION server contracts (additive).
 -- Target: PRODUCTION cltlqfqormkhppmbvyrv. Apply ONCE via apply_migration
--- name = desktop_1038_offline_contracts (single transaction). NOT APPLIED — needs an exact GO.
+-- name = desktop_1038_offline_contracts (single transaction). NOT APPLIED â€” needs an exact GO.
 -- GENERATED from a single delta definition (scratchpad gen1038/deltas.py); do not hand-edit anchors.
 --
 --   S4  pos_pay_order_core / pos_pay_table_core: charge only the remaining obligation
@@ -17,6 +17,15 @@
 --   S2  NEW pos_move_table_v2(jsonb): exactly-once, locked, pinned Move Table wrapper over the core.
 --   S3  NEW pos_merge_tables_v4(jsonb): pinned / partial-version wrapper over pos_merge_tables_v3
 --       (v3 unchanged; already-recorded ops delegate to v3).
+--   S2b pos_complete_on_account_core / pos_complete_table_on_account_core (Bug 9): a part-paid bill
+--       put On Account leaves only the remainder R = T - P as receivable, where P = every pos_payments
+--       row already on the order (paid split settlements at amount_order_ccy, earlier tenders), read
+--       under the existing order row lock(s). The amount paid now is capped at R (was: T) and, for a
+--       table, allocated by R_i (was: by T_i); reported outstanding = R - paid now. R <= 0.005 USD ->
+--       ALREADY_PAID; discount on a part-paid bill -> SPLIT_DISCOUNT_UNSUPPORTED; paid now > R ->
+--       ON_ACCOUNT_AMOUNT_EXCEEDS_REMAINING. OPTIONAL pins: expected_amount (both; ON_ACCOUNT_AMOUNT_CHANGED)
+--       and expected_order_ids (table; ON_ACCOUNT_BILL_CHANGED / ALREADY_SETTLED). Orders with no prior
+--       payment rows and no pins: byte-for-byte the same behaviour and result JSON.
 --
 -- METHOD: each changed function is rebuilt from its LIVE production definition + exact anchored
 -- replace() asserted exactly-once; the rebuilt text must hash to the post-image computed read-only
@@ -40,6 +49,10 @@ begin
   if m <> '7b6ea08ffcbeca5f56d78d33c7cd1198' then raise exception 'PRE: public.pos_pay_table_core(jsonb) drifted (md5 %)', m; end if;
   m := md5(pg_get_functiondef('public.pos_move_table_core(uuid,uuid,integer)'::regprocedure));
   if m <> 'ecb0e6f3f47d37dc2837ac44985e2e56' then raise exception 'PRE: public.pos_move_table_core(uuid,uuid,integer) drifted (md5 %)', m; end if;
+  m := md5(pg_get_functiondef('public.pos_complete_on_account_core(jsonb)'::regprocedure));
+  if m <> '0655ed697c7b94f2f50573ed10f321f7' then raise exception 'PRE: public.pos_complete_on_account_core(jsonb) drifted (md5 %)', m; end if;
+  m := md5(pg_get_functiondef('public.pos_complete_table_on_account_core(jsonb)'::regprocedure));
+  if m <> 'fd0f3b5bd53504352080fb88bd670bdd' then raise exception 'PRE: public.pos_complete_table_on_account_core(jsonb) drifted (md5 %)', m; end if;
   m := md5(pg_get_functiondef('public.pos_pay_order(jsonb)'::regprocedure));
   if m <> '70a7ccc17e6df5200b9e00610bda4192' then raise exception 'PRE: public.pos_pay_order(jsonb) drifted (md5 %)', m; end if;
   m := md5(pg_get_functiondef('public.pos_pay_table(jsonb)'::regprocedure));
@@ -58,11 +71,23 @@ begin
   if m <> 'c8991f7c7452b82e9a43465e1d462816' then raise exception 'PRE: public.pos_op_branch_of(text,text) drifted (md5 %)', m; end if;
   m := md5(pg_get_functiondef('public.pos_split_settle_core(jsonb)'::regprocedure));
   if m <> '66c8b850bbd5901faefc05559eb97d0b' then raise exception 'PRE: public.pos_split_settle_core(jsonb) drifted (md5 %)', m; end if;
+  m := md5(pg_get_functiondef('public.pos_complete_on_account(jsonb)'::regprocedure));
+  if m <> 'aff7ce602c0843598c5d50ef6eb94dbb' then raise exception 'PRE: public.pos_complete_on_account(jsonb) drifted (md5 %)', m; end if;
+  m := md5(pg_get_functiondef('public.pos_complete_table_on_account(jsonb)'::regprocedure));
+  if m <> '0739f9941891fa9cde520de41d164c18' then raise exception 'PRE: public.pos_complete_table_on_account(jsonb) drifted (md5 %)', m; end if;
+  m := md5(pg_get_functiondef('public._pos_recompute_order_payment(uuid)'::regprocedure));
+  if m <> '3bfe2160b6bd9bfc34ebfaf499ab8e9f' then raise exception 'PRE: public._pos_recompute_order_payment(uuid) drifted (md5 %)', m; end if;
+  m := md5(pg_get_functiondef('public.pos_receivables_customer(uuid)'::regprocedure));
+  if m <> '2ffeed202200f3e28c1ee6d3c96de6a0' then raise exception 'PRE: public.pos_receivables_customer(uuid) drifted (md5 %)', m; end if;
   if to_regprocedure('public.pos_move_table_v2(jsonb)') is not null then raise exception 'PRE: pos_move_table_v2 already exists'; end if;
   if to_regprocedure('public.pos_merge_tables_v4(jsonb)') is not null then raise exception 'PRE: pos_merge_tables_v4 already exists'; end if;
   if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
       and p.proname in ('pos_pay_order_core','pos_pay_table_core','pos_move_table_core','pos_move_table_v2','pos_merge_tables_v4')) <> 3 then
     raise exception 'PRE: unexpected overloads';
+  end if;
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
+      and p.proname in ('pos_complete_on_account_core','pos_complete_table_on_account_core')) <> 2 then
+    raise exception 'PRE: unexpected on-account core overloads';
   end if;
 end
 $pre$;
@@ -231,6 +256,180 @@ begin
     || E'  end if;\n',
     'move_core.ou');
   if md5(d) <> '6195b2add5797e20e40c2d59b913b557' then raise exception 'BUILD: % post-image md5 % (expected 6195b2add5797e20e40c2d59b913b557)', 'public.pos_move_table_core(uuid,uuid,integer)', md5(d); end if;
+  execute d;
+
+  -- public.pos_complete_on_account_core(jsonb)
+  d := pg_get_functiondef('public.pos_complete_on_account_core(jsonb)'::regprocedure);
+  d := pg_temp._d1038_once(d,
+    E'  v_new_ver int;\n'
+    || E'begin\n',
+    E'  v_new_ver int;\n'
+    || E'  -- Desktop 1.0.38 S2b: remaining-obligation On Account (R = T - P) + optional expected_amount pin\n'
+    || E'  v_prior_n int := 0; v_prior_usd numeric := 0; v_prior_primary numeric := 0;\n'
+    || E'  v_exp_amount numeric := nullif(p_payload->>''expected_amount'','''')::numeric;\n'
+    || E'begin\n',
+    'oa_order.declare');
+  d := pg_temp._d1038_once(d,
+    E'    v_apply := true;\n'
+    || E'  end if;\n'
+    || E'  if v_apply then\n',
+    E'    v_apply := true;\n'
+    || E'  end if;\n'
+    || E'  -- Desktop 1.0.38 S2b: every payment row already on this order (paid split settlements, earlier\n'
+    || E'  -- tenders) is part of this bill''s payment. Read under this order''s row lock (split settle and the\n'
+    || E'  -- pay cores take the same lock), so P is authoritative here.\n'
+    || E'  select count(*), coalesce(sum(p.amount_usd), 0),\n'
+    || E'         coalesce(sum(coalesce((select s.amount_order_ccy from public.pos_split_settlements s where s.payment_id = p.id and s.status = ''paid'' limit 1),\n'
+    || E'             case when p.currency_code = v_ccy then p.original_amount\n'
+    || E'                  when v_ccy = ''LBP'' then round(p.amount_usd * coalesce(v_order.usd_to_lbp_rate_snapshot, 1), 0)\n'
+    || E'                  else round(p.amount_usd, 2) end)), 0)\n'
+    || E'    into v_prior_n, v_prior_usd, v_prior_primary\n'
+    || E'    from public.pos_payments p where p.order_id = v_order.id;\n'
+    || E'  if v_apply and v_prior_n > 0 then\n'
+    || E'    perform public.pos_op_error(''SPLIT_DISCOUNT_UNSUPPORTED'', ''A discount cannot be applied to a bill that is already part-paid.'');\n'
+    || E'  end if;\n'
+    || E'  if v_apply then\n',
+    'oa_order.prior');
+  d := pg_temp._d1038_once(d,
+    E'  v_total_usd := public._pos_amount_usd(v_total_primary, v_ccy, v_order.usd_to_lbp_rate_snapshot);\n',
+    E'  v_total_usd := public._pos_amount_usd(v_total_primary, v_ccy, v_order.usd_to_lbp_rate_snapshot);\n'
+    || E'  -- Desktop 1.0.38 S2b: the receivable is only R = T - P. R <= 0 -> ALREADY_PAID (as the pay cores);\n'
+    || E'  -- the optional expected_amount (order currency, = R the device showed) refuses a changed bill.\n'
+    || E'  if v_prior_n > 0 and v_total_usd - v_prior_usd <= 0.005 then\n'
+    || E'    perform public.pos_op_error(''ALREADY_PAID'', ''This bill is already fully paid.'');\n'
+    || E'  end if;\n'
+    || E'  if v_exp_amount is not null and abs(greatest(v_total_primary - v_prior_primary, 0) - v_exp_amount) >= 0.005 then\n'
+    || E'    perform public.pos_op_error(''ON_ACCOUNT_AMOUNT_CHANGED'', ''The amount due on this bill changed since On Account was captured. Reconnect and review before settling.'');\n'
+    || E'  end if;\n',
+    'oa_order.remaining');
+  d := pg_temp._d1038_once(d,
+    E'    if v_usd > v_total_usd + 0.005 then raise exception ''Amount paid cannot exceed the order total''; end if;\n',
+    E'    if v_prior_n > 0 and v_usd > v_total_usd - v_prior_usd + 0.005 then\n'
+    || E'      perform public.pos_op_error(''ON_ACCOUNT_AMOUNT_EXCEEDS_REMAINING'', ''The amount paid now cannot exceed the remaining balance of this bill.'');\n'
+    || E'    end if;\n'
+    || E'    if v_usd > v_total_usd + 0.005 then raise exception ''Amount paid cannot exceed the order total''; end if;\n',
+    'oa_order.cap');
+  d := pg_temp._d1038_once(d,
+    E'    ''pos_entity_version'', v_new_ver);\n'
+    || E'end; $function$',
+    E'    ''pos_entity_version'', v_new_ver)\n'
+    || E'    || case when v_prior_n > 0 then jsonb_build_object(\n'
+    || E'         ''outstanding_usd'', round(v_total_usd - v_prior_usd - coalesce(v_usd,0), 2),\n'
+    || E'         ''outstanding'', greatest(v_total_primary - v_prior_primary - coalesce(v_pay_primary, 0), 0),\n'
+    || E'         ''remaining'', greatest(v_total_primary - v_prior_primary, 0),\n'
+    || E'         ''prior_paid'', v_prior_primary, ''prior_paid_usd'', round(v_prior_usd, 4), ''prior_payments'', v_prior_n)\n'
+    || E'       else ''{}''::jsonb end;\n'
+    || E'end; $function$',
+    'oa_order.return');
+  if md5(d) <> '01e57c4af3d5df7932020eaae7949b50' then raise exception 'BUILD: % post-image md5 % (expected 01e57c4af3d5df7932020eaae7949b50)', 'public.pos_complete_on_account_core(jsonb)', md5(d); end if;
+  execute d;
+
+  -- public.pos_complete_table_on_account_core(jsonb)
+  d := pg_get_functiondef('public.pos_complete_table_on_account_core(jsonb)'::regprocedure);
+  d := pg_temp._d1038_once(d,
+    E'  v_new_ver int;\n'
+    || E'begin\n',
+    E'  v_new_ver int;\n'
+    || E'  -- Desktop 1.0.38 S2b: remaining-obligation On Account (R = T - P) + optional bill / amount pins\n'
+    || E'  v_locked uuid[] := ''{}''; v_pin uuid[]; v_exp_amount numeric := nullif(p_payload->>''expected_amount'','''')::numeric;\n'
+    || E'  v_prior numeric; v_prior_n int; v_rems numeric[] := ''{}''; v_rem_total numeric := 0;\n'
+    || E'  v_prior_total numeric := 0; v_prior_cnt int := 0;\n'
+    || E'begin\n',
+    'oa_table.declare');
+  d := pg_temp._d1038_once(d,
+    E'    v_lock_n := v_lock_n + 1;\n'
+    || E'  end loop;\n',
+    E'    v_lock_n := v_lock_n + 1;\n'
+    || E'    v_locked := v_locked || r.id;\n'
+    || E'  end loop;\n'
+    || E'  -- Desktop 1.0.38 S2b: a caller that pins expected_order_ids (an offline On Account replay) may only\n'
+    || E'  -- place exactly that bill on account. A newer bill on the same table is never charged.\n'
+    || E'  if jsonb_typeof(p_payload->''expected_order_ids'') = ''array'' and jsonb_array_length(p_payload->''expected_order_ids'') > 0 then\n'
+    || E'    v_pin := array(select distinct e::uuid from jsonb_array_elements_text(p_payload->''expected_order_ids'') e order by 1);\n'
+    || E'    if v_lock_n = 0 then\n'
+    || E'      if not exists (select 1 from unnest(v_pin) x where not exists (\n'
+    || E'            select 1 from public.pos_orders o where o.id = x and o.tenant_id = v_tbl.tenant_id and o.status = ''completed''\n'
+    || E'              and (o.payment_status = ''paid'' or o.settlement_mode = ''on_account''))) then\n'
+    || E'        perform public.pos_op_error(''ALREADY_SETTLED'', ''This bill was already settled.'');\n'
+    || E'      end if;\n'
+    || E'      perform public.pos_op_error(''ON_ACCOUNT_BILL_CHANGED'', ''The bill on this table changed since On Account was captured. Reconnect and review before settling.'');\n'
+    || E'    end if;\n'
+    || E'    if v_pin is distinct from array(select x from unnest(v_locked) x order by 1) then\n'
+    || E'      perform public.pos_op_error(''ON_ACCOUNT_BILL_CHANGED'', ''The bill on this table changed since On Account was captured. Reconnect and review before settling.'');\n'
+    || E'    end if;\n'
+    || E'  end if;\n',
+    'oa_table.pin');
+  d := pg_temp._d1038_once(d,
+    E'  v_rem := v_bill_disc;\n',
+    E'  -- Desktop 1.0.38 S2b: payments already on each order (paid split settlements, earlier tenders) are\n'
+    || E'  -- part of this bill''s payment (read under the order row locks taken above). Refuse a discount on a\n'
+    || E'  -- part-paid bill and an order whose total is already covered, before anything is written.\n'
+    || E'  for r in select o.id, o.total_amount, o.primary_currency_snapshot, o.usd_to_lbp_rate_snapshot\n'
+    || E'             from public.pos_orders o where o.id = any(v_locked) order by o.id loop\n'
+    || E'    select count(*), coalesce(sum(p.amount_usd), 0) into v_prior_n, v_prior\n'
+    || E'      from public.pos_payments p where p.order_id = r.id;\n'
+    || E'    if v_prior_n > 0 then\n'
+    || E'      if v_apply then\n'
+    || E'        perform public.pos_op_error(''SPLIT_DISCOUNT_UNSUPPORTED'', ''A discount cannot be applied to a bill that is already part-paid.'');\n'
+    || E'      end if;\n'
+    || E'      if public._pos_amount_usd(r.total_amount, coalesce(r.primary_currency_snapshot,''USD''), r.usd_to_lbp_rate_snapshot) - v_prior <= 0.005 then\n'
+    || E'        perform public.pos_op_error(''ALREADY_PAID'', ''This bill is already fully paid.'');\n'
+    || E'      end if;\n'
+    || E'    end if;\n'
+    || E'  end loop;\n'
+    || E'  v_rem := v_bill_disc;\n',
+    'oa_table.prior_check');
+  d := pg_temp._d1038_once(d,
+    E'    v_finals := array_append(v_finals, v_ofinal);\n',
+    E'    v_finals := array_append(v_finals, v_ofinal);\n'
+    || E'    -- Desktop 1.0.38 S2b: R_i = T_i - P_i (order currency).\n'
+    || E'    select count(*), coalesce(sum(coalesce((select s.amount_order_ccy from public.pos_split_settlements s where s.payment_id = p.id and s.status = ''paid'' limit 1),\n'
+    || E'             case when p.currency_code = v_ccy then p.original_amount\n'
+    || E'                  when v_ccy = ''LBP'' then round(p.amount_usd * coalesce(r.usd_to_lbp_rate_snapshot, 1), 0)\n'
+    || E'                  else round(p.amount_usd, 2) end)), 0)\n'
+    || E'      into v_prior_n, v_prior from public.pos_payments p where p.order_id = r.id;\n'
+    || E'    if v_prior_n > 0 then\n'
+    || E'      v_rems := array_append(v_rems, greatest(v_ofinal - v_prior, 0));\n'
+    || E'      v_rem_total := v_rem_total + greatest(v_ofinal - v_prior, 0);\n'
+    || E'      v_prior_total := v_prior_total + v_prior; v_prior_cnt := v_prior_cnt + v_prior_n;\n'
+    || E'    else\n'
+    || E'      v_rems := array_append(v_rems, v_ofinal);\n'
+    || E'      v_rem_total := v_rem_total + v_ofinal;\n'
+    || E'    end if;\n',
+    'oa_table.remaining');
+  d := pg_temp._d1038_once(d,
+    E'  if v_pay_primary > 0 then\n'
+    || E'    v_pay_primary := round(v_pay_primary, case when v_ccy = ''LBP'' then 0 else 2 end);\n'
+    || E'    if v_pay_primary > v_bill_total + 0.005 then raise exception ''Amount paid cannot exceed the table total''; end if;\n',
+    E'  -- Desktop 1.0.38 S2b: optional expected_amount (order currency, = the remaining R the device showed,\n'
+    || E'  -- before the amount paid now). The upfront amount is capped at R and allocated by R_i.\n'
+    || E'  if v_exp_amount is not null and abs(v_rem_total - v_exp_amount) >= 0.005 then\n'
+    || E'    perform public.pos_op_error(''ON_ACCOUNT_AMOUNT_CHANGED'', ''The amount due on this bill changed since On Account was captured. Reconnect and review before settling.'');\n'
+    || E'  end if;\n'
+    || E'  if v_pay_primary > 0 then\n'
+    || E'    v_pay_primary := round(v_pay_primary, case when v_ccy = ''LBP'' then 0 else 2 end);\n'
+    || E'    if v_prior_cnt > 0 and v_pay_primary > v_rem_total + 0.005 then\n'
+    || E'      perform public.pos_op_error(''ON_ACCOUNT_AMOUNT_EXCEEDS_REMAINING'', ''The amount paid now cannot exceed the remaining balance of this bill.'');\n'
+    || E'    end if;\n'
+    || E'    if v_pay_primary > v_bill_total + 0.005 then raise exception ''Amount paid cannot exceed the table total''; end if;\n',
+    'oa_table.cap');
+  d := pg_temp._d1038_once(d,
+    E'      if v_idx < array_length(v_ids, 1) and v_bill_total > 0 then\n'
+    || E'        v_alloc := round(v_pay_primary * v_finals[v_idx] / v_bill_total, case when v_ccy = ''LBP'' then 0 else 2 end);\n',
+    E'      if v_idx < array_length(v_ids, 1) and v_rem_total > 0 then\n'
+    || E'        v_alloc := round(v_pay_primary * v_rems[v_idx] / v_rem_total, case when v_ccy = ''LBP'' then 0 else 2 end);  -- 1.0.38 S2b: by R_i\n',
+    'oa_table.alloc');
+  d := pg_temp._d1038_once(d,
+    E'    ''paid_usd'', round(v_paid_total_usd,2), ''outstanding_primary'', round(v_bill_total - coalesce(v_pay_primary,0), 2), ''currency_code'', v_ccy,\n'
+    || E'    ''pos_entity_version'', v_new_ver);\n'
+    || E'end; $function$',
+    E'    ''paid_usd'', round(v_paid_total_usd,2), ''outstanding_primary'', round(v_rem_total - coalesce(v_pay_primary,0), 2), ''currency_code'', v_ccy,\n'
+    || E'    ''pos_entity_version'', v_new_ver)\n'
+    || E'    || case when v_prior_cnt > 0 then jsonb_build_object(''remaining_total'', v_rem_total, ''prior_paid'', v_prior_total, ''prior_payments'', v_prior_cnt)\n'
+    || E'       else ''{}''::jsonb end;  -- Desktop 1.0.38 S2b\n'
+    || E'end; $function$',
+    'oa_table.return');
+  if md5(d) <> 'c0e34235829d65d633287b5289a54928' then raise exception 'BUILD: % post-image md5 % (expected c0e34235829d65d633287b5289a54928)', 'public.pos_complete_table_on_account_core(jsonb)', md5(d); end if;
   execute d;
 end
 $apply$;
@@ -523,13 +722,17 @@ begin
   if md5(pg_get_functiondef('public.pos_pay_order_core(jsonb)'::regprocedure)) <> '95f3b2a43abb9b5eb60b0965c2735ba8' then raise exception 'POST: public.pos_pay_order_core(jsonb) md5 % (expected 95f3b2a43abb9b5eb60b0965c2735ba8)', md5(pg_get_functiondef('public.pos_pay_order_core(jsonb)'::regprocedure)); end if;
   if md5(pg_get_functiondef('public.pos_pay_table_core(jsonb)'::regprocedure)) <> 'c0682f5d0edf0d0e6bda0db0b916e155' then raise exception 'POST: public.pos_pay_table_core(jsonb) md5 % (expected c0682f5d0edf0d0e6bda0db0b916e155)', md5(pg_get_functiondef('public.pos_pay_table_core(jsonb)'::regprocedure)); end if;
   if md5(pg_get_functiondef('public.pos_move_table_core(uuid,uuid,integer)'::regprocedure)) <> '6195b2add5797e20e40c2d59b913b557' then raise exception 'POST: public.pos_move_table_core(uuid,uuid,integer) md5 % (expected 6195b2add5797e20e40c2d59b913b557)', md5(pg_get_functiondef('public.pos_move_table_core(uuid,uuid,integer)'::regprocedure)); end if;
+  if md5(pg_get_functiondef('public.pos_complete_on_account_core(jsonb)'::regprocedure)) <> '01e57c4af3d5df7932020eaae7949b50' then raise exception 'POST: public.pos_complete_on_account_core(jsonb) md5 % (expected 01e57c4af3d5df7932020eaae7949b50)', md5(pg_get_functiondef('public.pos_complete_on_account_core(jsonb)'::regprocedure)); end if;
+  if md5(pg_get_functiondef('public.pos_complete_table_on_account_core(jsonb)'::regprocedure)) <> 'c0e34235829d65d633287b5289a54928' then raise exception 'POST: public.pos_complete_table_on_account_core(jsonb) md5 % (expected c0e34235829d65d633287b5289a54928)', md5(pg_get_functiondef('public.pos_complete_table_on_account_core(jsonb)'::regprocedure)); end if;
   for r in
     select * from (values
       ('public.pos_pay_order_core(jsonb)', '{postgres=X/postgres,service_role=X/postgres}'),
       ('public.pos_pay_table_core(jsonb)', '{postgres=X/postgres,service_role=X/postgres}'),
       ('public.pos_move_table_core(uuid,uuid,integer)', '{postgres=X/postgres,service_role=X/postgres}'),
       ('public.pos_move_table_v2(jsonb)', '{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}'),
-      ('public.pos_merge_tables_v4(jsonb)', '{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}')
+      ('public.pos_merge_tables_v4(jsonb)', '{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}'),
+      ('public.pos_complete_on_account_core(jsonb)', '{postgres=X/postgres,service_role=X/postgres}'),
+      ('public.pos_complete_table_on_account_core(jsonb)', '{postgres=X/postgres,service_role=X/postgres}')
     ) t(sig, acl)
   loop
     if to_regprocedure(r.sig) is null then raise exception 'POST: missing %', r.sig; end if;
@@ -543,16 +746,29 @@ begin
       and p.proname in ('pos_pay_order_core','pos_pay_table_core','pos_move_table_core','pos_move_table_v2','pos_merge_tables_v4')) <> 5 then
     raise exception 'POST: overload count is not exactly one each';
   end if;
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
+      and p.proname in ('pos_complete_on_account_core','pos_complete_table_on_account_core')) <> 2 then
+    raise exception 'POST: on-account core overload count changed';
+  end if;
   -- new functions: exact definitions (md5 of pg_get_functiondef, PG 17.6; identical on the staging rehearsal)
   if md5(pg_get_functiondef('public.pos_move_table_v2(jsonb)'::regprocedure)) <> '19c40c262fd55c7f68cfdf838d79422a'
      or md5(pg_get_functiondef('public.pos_merge_tables_v4(jsonb)'::regprocedure)) <> '4624ca679d038c5b649e857e6b4d32d7' then
     raise exception 'POST: new function definition differs from the reviewed text';
   end if;
   -- unchanged dependencies stay byte-identical
-  if md5(pg_get_functiondef('public.pos_merge_tables_v3(jsonb)'::regprocedure)) <> '4eb57a93f43b8dfeb12a6537c26d7cf3'
+  if md5(pg_get_functiondef('public.pos_pay_order(jsonb)'::regprocedure)) <> '70a7ccc17e6df5200b9e00610bda4192'
      or md5(pg_get_functiondef('public.pos_pay_table(jsonb)'::regprocedure)) <> '56588d0ecbc91069b5184107de0003aa'
-     or md5(pg_get_functiondef('public.pos_pay_order(jsonb)'::regprocedure)) <> '70a7ccc17e6df5200b9e00610bda4192'
-     or md5(pg_get_functiondef('public.pos_move_table(uuid,uuid,uuid,integer)'::regprocedure)) <> 'c342a7fa766ca0ab89c9f8f496e575a4' then
+     or md5(pg_get_functiondef('public.pos_move_table(uuid,uuid,uuid,integer)'::regprocedure)) <> 'c342a7fa766ca0ab89c9f8f496e575a4'
+     or md5(pg_get_functiondef('public.pos_merge_tables_v3(jsonb)'::regprocedure)) <> '4eb57a93f43b8dfeb12a6537c26d7cf3'
+     or md5(pg_get_functiondef('public.pos_op_replay(uuid,uuid,text,uuid)'::regprocedure)) <> '78e42ee7e2d5dc3d6687e297f7a058d4'
+     or md5(pg_get_functiondef('public.pos_op_record(uuid,uuid,uuid,text,uuid,jsonb)'::regprocedure)) <> '8a2df61e34abbb302698c06b377be017'
+     or md5(pg_get_functiondef('public.pos_op_error(text,text)'::regprocedure)) <> 'ed70a93fa4e5321e636ba82efe1c15bd'
+     or md5(pg_get_functiondef('public.pos_op_branch_of(text,text)'::regprocedure)) <> 'c8991f7c7452b82e9a43465e1d462816'
+     or md5(pg_get_functiondef('public.pos_split_settle_core(jsonb)'::regprocedure)) <> '66c8b850bbd5901faefc05559eb97d0b'
+     or md5(pg_get_functiondef('public.pos_complete_on_account(jsonb)'::regprocedure)) <> 'aff7ce602c0843598c5d50ef6eb94dbb'
+     or md5(pg_get_functiondef('public.pos_complete_table_on_account(jsonb)'::regprocedure)) <> '0739f9941891fa9cde520de41d164c18'
+     or md5(pg_get_functiondef('public._pos_recompute_order_payment(uuid)'::regprocedure)) <> '3bfe2160b6bd9bfc34ebfaf499ab8e9f'
+     or md5(pg_get_functiondef('public.pos_receivables_customer(uuid)'::regprocedure)) <> '2ffeed202200f3e28c1ee6d3c96de6a0' then
     raise exception 'POST: an unchanged dependency changed';
   end if;
 end

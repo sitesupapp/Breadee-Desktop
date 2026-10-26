@@ -91,7 +91,8 @@ export function classifyOperation(op: OfflineOperation): { category: ForensicCat
   if (SHIFTLESS.test(msg) || code === "shift_missing") {
     return { category: "HISTORICAL_SHIFTLESS_DINEIN", reason: "the order was created without a shift by a pre-rc.12 offline round; the server refuses to settle/move/merge it (nothing applied)" };
   }
-  if ((op.operation_type === "move_table" || op.operation_type === "merge_tables") && code !== "dependency_failed") {
+  // Only the pre-rc.12 schema-1 table ops are historical; 1.0.38 schema-2 move/merge refusals classify below.
+  if ((op.operation_type === "move_table" || op.operation_type === "merge_tables") && (op.schema_version ?? 1) < 2 && code !== "dependency_failed") {
     return { category: "SERVER_COORDINATION_REQUIRED", reason: "table move/merge captured offline by a pre-rc.12 build; it now runs online only (nothing applied)" };
   }
   if (code === "dependency_failed") return { category: "HISTORICAL_DEPENDENT", reason: "a prerequisite operation could not complete" };

@@ -50,6 +50,9 @@ export async function orderOnAccountOffline(input: {
   method: string;
   orderNumber?: string | null;
   discount?: { discount_type?: string; discount_value?: number };
+  /** 1.0.38 (Bug 9) — R = T − P in order currency, ONLY when known exactly at capture (no discount, no
+   *  unsynced change). Replayed as expected_amount; omitted otherwise (the order pin is always sent). */
+  expectedAmount?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   if (!input.orderId && !input.orderLocal) throw new Error("An order is required to put on account.");
   if (!input.customerId && !input.customerLocal) throw new Error("A customer is required to put this order on account.");
@@ -88,6 +91,7 @@ export async function orderOnAccountOffline(input: {
         method: input.method,
         order_number: input.orderNumber ?? null,
         ...(input.discount ? { discount: input.discount } : {}),
+        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) && !input.discount?.discount_type ? { expected_amount: input.expectedAmount } : {}),
       },
       status: "pending",
       retry_count: 0,

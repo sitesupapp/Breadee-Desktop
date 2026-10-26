@@ -59,6 +59,24 @@ export async function orderRefFor(id: string, scope: OrderRefScope): Promise<Ord
   return { orderId: null, orderLocal: id, dependencyIds: [takeawaySaleOpId(id)] };
 }
 
+/**
+ * 1.0.38 (D4, item edits) — re-point a projection-derived edit target at the ONE order reference. The
+ * projection decides local-vs-canonical from the legacy row (`txn.status`), which lags the entity map: a
+ * synced order whose row has not reconciled (or a local row shown after its txn synced) would otherwise be
+ * captured with the LOCAL uuid as a canonical order id (refused at replay), or as a local order with no op
+ * dependency on its create op (blocked forever if that create parks). The line target, version chain and
+ * the target's own dependencies are kept; the create-op dependency is added while the order is local.
+ */
+export function editTargetWithOrderRef<T extends { orderId: string | null; orderLocal: string | null; payloadOrderId: string; dependencyIds: string[] }>(target: T, ref: OrderRef): T {
+  return {
+    ...target,
+    orderId: ref.orderId,
+    orderLocal: ref.orderId ? null : ref.orderLocal,
+    payloadOrderId: ref.orderId ?? ref.orderLocal ?? target.payloadOrderId,
+    dependencyIds: Array.from(new Set([...target.dependencyIds, ...ref.dependencyIds])),
+  };
+}
+
 /** Statuses a NEW capture must never depend on: a parked/withdrawn op can never satisfy it (C3), and a
  *  synced op already has (and may be GC'd later, which would park the dependent as missing). */
 const NOT_A_CAPTURE_DEPENDENCY: OfflineOperation["status"][] = ["needs_attention", "cancelled", "synced"];

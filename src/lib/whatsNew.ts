@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.37";
+export const WHATS_NEW_VERSION = "1.0.38";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -22,12 +22,12 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titl
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
     glyph: "sync",
-    title: "Full Offline Mode",
-    titleAr: "وضع عدم الاتصال الكامل",
+    title: "More Reliable Offline Mode",
+    titleAr: "وضع عدم اتصال أكثر موثوقية",
     body:
-      "Full Offline Mode is now expanded across Ready Desktop. You can keep working during internet or backend interruptions with broader offline support for Takeaway, Dine-In and Delivery, including locally supported order editing, payments, customers, table operations, printing and automatic synchronization when the connection returns. Your existing data, orders and settings are preserved. Breadee safely reconciles offline work after reconnecting and protects against duplicate transactions. Some operations that require live server authorization remain connection-required for safety.",
+      "Offline Mode is now more reliable. Tables you settle offline stay settled after reconnecting, paid orders show as paid everywhere, Delivery orders and their payments sync exactly once, and pending work keeps syncing on its own without getting stuck. You can now Move and Merge tables while offline, including merging a partly paid bill: payments already taken stay recorded and only the remaining amount moves. Settings and POS now show the same Sync Center. Your existing data, orders and settings are preserved.",
     bodyAr:
-      "تم توسيع وضع عدم الاتصال الكامل في Ready Desktop. يمكنك متابعة العمل عند انقطاع الإنترنت أو تعذر الوصول إلى الخادم، مع دعم أوسع للطلبات في Takeaway وDine-In وDelivery، بما في ذلك تعديل الطلبات، وعمليات الدفع المدعومة، والعملاء، والطاولات، والطباعة، والمزامنة التلقائية عند عودة الاتصال. يتم الحفاظ على بياناتك الحالية وطلباتك وإعداداتك، وتقوم Breadee بمطابقة العمليات التي تمت دون اتصال بشكل آمن بعد عودة الاتصال مع الحماية من تكرار العمليات. بعض العمليات التي تحتاج إلى تحقق مباشر من الخادم ستبقى بحاجة إلى اتصال حفاظاً على الأمان.",
+      "أصبح وضع عدم الاتصال أكثر موثوقية. تبقى الطاولات التي تمت تسويتها دون اتصال مسوّاة بعد عودة الاتصال، وتظهر الطلبات المدفوعة كمدفوعة في كل مكان، وتتم مزامنة طلبات التوصيل ومدفوعاتها مرة واحدة فقط، وتستمر العمليات المعلّقة بالمزامنة تلقائياً دون أن تتوقف. يمكنك الآن نقل الطاولات ودمجها دون اتصال، بما في ذلك دمج فاتورة مدفوعة جزئياً: تبقى المدفوعات السابقة مسجّلة وينتقل المبلغ المتبقي فقط. تعرض الإعدادات ونقطة البيع الآن مركز المزامنة نفسه. يتم الحفاظ على بياناتك الحالية وطلباتك وإعداداتك.",
   },
 ];
 

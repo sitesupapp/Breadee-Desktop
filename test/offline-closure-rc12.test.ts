@@ -115,7 +115,11 @@ test("S1 offline End Shift is captured; its barrier holds ONLY close-relevant wo
   assert.equal(useShift.getState().shift, null);
   assert.equal(closeStateOf(end), "closing");
   for (const t of ["takeaway_sale", "pay_table", "pay_order", "split_settle", "on_account_order", "void_refund", "payout", "dinein_send_round"]) assert.ok(CLOSE_RELEVANT_TYPES.has(t), t);
-  for (const t of ["customer_upsert", "move_table", "merge_tables", "delivery_ops", "delivery_set_provider", "edit_order"]) assert.ok(!CLOSE_RELEVANT_TYPES.has(t), t);
+  for (const t of ["customer_upsert", "delivery_ops", "delivery_set_provider", "edit_order"]) assert.ok(!CLOSE_RELEVANT_TYPES.has(t), t);
+  // 1.0.38 (Bugs 5/6) — INTENTIONAL CHANGE: an offline Move / Merge (schema 2) re-homes bills under the shift
+  // lock, so it is close-relevant (replays BEFORE end_shift). The quarantined pre-rc.12 (schema 1) move above
+  // still never gates the close (isCloseRelevant) — hence the barrier is still ["pay", "sale"].
+  for (const t of ["move_table", "merge_tables"]) assert.ok(CLOSE_RELEVANT_TYPES.has(t), t);
 });
 
 test("S1b offline End Shift with an OPEN bill of this shift is refused up-front with the server's own rule", async () => {
@@ -377,10 +381,16 @@ test("Sync Center classifies another shift's parked work as UNRELATED_OLD_SHIFT 
 
 // ================================================================ M / V — move & merge
 
-test("M1/V1 Move and Merge are server-coordinated: offline the gate gives an explicit, visible reason (no silent no-op, no capture)", () => {
+// 1.0.38 (Bugs 5/6) — INTENTIONAL CHANGE (supersedes rc.12 M1/V1): Move and Merge are CAPTURED offline as
+// schema-2 ops (offline-ready devices) and replayed through pos_move_table_v2 / pos_merge_tables_v4; full
+// behaviour in test/offline-1038-movemerge.test.ts. Unchanged: a not-ready device still gets an explicit,
+// visible reason (never a silent no-op), and a pre-rc.12 (schema 1) move/merge stays quarantined for review.
+test("M1/V1 (1.0.38) Move and Merge capture offline when ready; a pre-rc.12 offline merge is reviewed, never blindly retried", () => {
   const dw = src("src/screens/pos/DineInWorkspace.tsx");
-  assert.match(dw, /offlineCapable: false/);
-  assert.doesNotMatch(dw, /captureMoveTableOffline\(|captureMergeTablesOffline\(/);
+  assert.match(dw, /offlineCapable: offlineProjOn/);
+  assert.match(dw, /captureMoveTableOffline\(/);
+  assert.match(dw, /captureMergeTablesOffline\(/);
+  assert.match(dw, /needs a connection on this device/);
   const panel = src("src/components/pos/TableBillPanel.tsx");
   assert.match(panel, /role="note"/);
   const pre = op({ operation_id: "mg", operation_type: "merge_tables", status: "needs_attention", last_error_code: "validation", last_error_message: 'invalid input syntax for type uuid: "a|b"' });

@@ -95,6 +95,40 @@ export function billIsPartPaid(table: TableSummary | null, bill: TableBill | nul
   return (bill?.orders ?? []).some((o) => o.payment_status === "partial" || o.payment_status === "partially_paid");
 }
 
+/**
+ * 1.0.38 (Bug 9) — the release-time switch for the server's remaining-obligation semantics: TRUE only once
+ * the production server charges / books R = T − P for a part-paid bill (S4 `pos_pay_table_core` /
+ * `pos_pay_order_core` AND the audited on-account cores `pos_complete_table_on_account_core` /
+ * `pos_complete_on_account_core` with `expected_amount` / `expected_order_ids` + ON_ACCOUNT_* codes).
+ *
+ * FALSE by default, so 1.0.38 stays safe against the CURRENT production server (which charges T): the F1
+ * guard (`billIsPartPaid` → PART_PAID_FULL_PAY_MESSAGE) keeps refusing a full Pay / On Account of a
+ * part-paid bill. How it flips (no other code changes):
+ *   1. release constant — set `SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE = true` in the build that ships after
+ *      both server migrations are applied in production; or
+ *   2. server capability — call `setServerDeductsPriorPayments(true)` from the session bootstrap when the
+ *      server reports the capability (e.g. a `pos_capabilities` read returning `deducts_prior_payments:
+ *      true`); `null` returns to the release default. A capability can only WIDEN behaviour the server
+ *      actually guarantees — never read it from local/offline state.
+ */
+export const SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE = false;
+let serverPriorPaymentsCapability: boolean | null = null;
+export function serverDeductsPriorPayments(): boolean {
+  return serverPriorPaymentsCapability ?? SERVER_DEDUCTS_PRIOR_PAYMENTS_AT_RELEASE;
+}
+export function setServerDeductsPriorPayments(capability: boolean | null): void {
+  serverPriorPaymentsCapability = capability;
+}
+
+/** 1.0.38 (Bug 9) — the amount a settle / on-account of this bill is FOR, in the bill's own currency: the
+ *  remaining obligation R = T − P when the server deducts prior payments, else the whole bill T (the F1 guard
+ *  refuses a part-paid bill in that case, so T == R whenever a settle is allowed). */
+export function settleAmountDue(total: number, collected: number | null | undefined): number {
+  const p = Math.max(0, Number(collected ?? 0) || 0);
+  if (!serverDeductsPriorPayments() || p === 0) return total;
+  return Math.max(0, Math.round((total - p) * 100) / 100);
+}
+
 export class TenderTooLowError extends Error {
   constructor() {
     super("The tendered amount is less than the amount due");
@@ -205,8 +239,9 @@ export function payTableGate(input: {
   if (input.bill.orders.some((o) => o.payment_status === "paid")) {
     return { allowed: false, reason: "This bill is already settled. Refresh the table map." };
   }
-  // 1.0.38 (F1) — client mitigation until the server deducts prior split payments (see PartPaidBillError).
-  if (billIsPartPaid(input.table, input.bill)) return { allowed: false, reason: PART_PAID_FULL_PAY_MESSAGE };
+  // 1.0.38 (F1) — client mitigation until the server deducts prior split payments (see PartPaidBillError
+  // and serverDeductsPriorPayments — false by default, so the guard stays on against today's server).
+  if (!serverDeductsPriorPayments() && billIsPartPaid(input.table, input.bill)) return { allowed: false, reason: PART_PAID_FULL_PAY_MESSAGE };
   if (input.bill.mixedCurrency) {
     return { allowed: false, reason: "These orders were created under different currency settings; settle or clear each order separately." };
   }
@@ -474,7 +509,7 @@ export async function performTablePayment(input: {
     }
     // 1.0.38 (F1) — the re-read is authoritative: a split paid since the dialog opened (another
     // terminal / cashier, or a transfer of a part-paid bill) still refuses the full charge.
-    if (billIsPartPaid(fresh.table, fresh.bill)) {
+    if (!serverDeductsPriorPayments() && billIsPartPaid(fresh.table, fresh.bill)) {
       return { ok: false, error: new PartPaidBillError(), retryable: false, steps };
     }
 

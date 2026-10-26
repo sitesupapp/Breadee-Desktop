@@ -228,7 +228,18 @@ export interface DineDraftRound {
  *  rc.10 — `settled` = a full settle / on-account was CAPTURED offline for this session: it is no
  *  longer the table's ACTIVE bill (the table is reusable locally), but it is kept durably — lines,
  *  rounds, the settle op reference — for receipt / Sync History / audit until it syncs. */
-export type DineDraftStatus = "open" | "settled" | "closed";
+export type DineDraftStatus = "open" | "settled" | "closed" | "merged";
+
+/** 1.0.38 (Bugs 5/6) — unpaid lines an OFFLINE merge folded into this (primary) session's bill, kept as a
+ *  display snapshot until the merge op is reflected in the canonical floor. Never a payment, never
+ *  authority: the server re-derives every figure. Paid lines of a part-paid source stay on that source. */
+export interface DineMergedBlock {
+  /** The merge_tables op that folded these lines. */
+  op_id: string;
+  source_table_id: string;
+  source_table_name: string;
+  lines: import("@/types/tables").BillLine[];
+}
 
 /**
  * The durable LOCAL Dine-In projection — the active bill the operator sees and edits
@@ -269,6 +280,25 @@ export interface DineDraft {
    *  (`_pos_lock_open_shift`: "This order is not attached to an open shift"). Absent on pre-rc.12 drafts. */
   shift_id?: string | null;
   shift_local?: string | null;
+  /** 1.0.38 (Bugs 5/6) — OFFLINE Move / Merge. All optional + additive (no index, no schema bump).
+   *  `structural_op_id` — the latest move_table / merge_tables op that placed this session's bill where
+   *  it is now: later rounds / settles / splits / edits of the bill DEPEND on it (barrier).
+   *  `moved_from` — the table the bill was on before an offline move (restored if the move is refused).
+   *  `carried_orders` / `carried_collected` — the canonical part of a bill moved offline (snapshot of the
+   *  source's cached orders + the server-collected amount), shown on the destination until the move is
+   *  reflected in the canonical floor. `merged_blocks` — unpaid lines folded in by offline merges (primary).
+   *  `merged_into_table` / `merged_op_id` — a SOURCE session folded into another table (status `merged`).
+   *  `carrier` — this session was created BY the move/merge (a canonical-only bill had no local session). */
+  structural_op_id?: string | null;
+  moved_from?: string | null;
+  carried_orders?: import("@/types/tables").BillOrder[] | null;
+  carried_collected?: number | null;
+  /** The (latest) move op that carried `carried_orders` here — the snapshot is shown while it is unsynced. */
+  carried_op_id?: string | null;
+  merged_blocks?: DineMergedBlock[];
+  merged_into_table?: string | null;
+  merged_op_id?: string | null;
+  carrier?: boolean;
   lines: DineDraftLine[];
   rounds: DineDraftRound[];
   /** Monotonic; bumped on every mutation. A deterministic client_op_id input for a send. */

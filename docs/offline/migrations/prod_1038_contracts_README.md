@@ -1,4 +1,4 @@
-# Desktop 1.0.38 — production server contracts (S1–S5)
+# Desktop 1.0.38 — production server contracts (S1–S5, S2b)
 
 Status: **written and rehearsed, NOT applied.** Production (`cltlqfqormkhppmbvyrv`) was read with SELECT only.
 Staging (`azjxprewycygsocusxjn`) was used only inside one DO block that ends in `RAISE EXCEPTION`, so it rolled back. After the run, staging was checked: the pre-images were unchanged, there were no v2/v4 functions, and no fixture rows remained.
@@ -10,8 +10,10 @@ Applying this needs an exact production GO plus a mandatory Konan review (financ
 | `prod_1038_offline_contracts_ROLLBACK.sql` | Rollback. Pre-publication only. It requires `set local breadee.rollback_1038_ack='PRE_PUBLICATION_NO_ADOPTION'` and refuses if it finds adoption evidence. |
 | `prod_1038_anchor_proof_READONLY.sql` | SELECT-only proof against live production. |
 | `prod_1038_staging_rehearsal_ROLLEDBACK.sql` | Staging behavioural rehearsal. It always rolls back. |
+| `prod_1038_staging_rehearsal_pay_onaccount_ROLLEDBACK.sql` | The S4/S5 + S2b subset that was executed for S2b (§8.5). It always rolls back. |
 
 All four SQL files are generated from one delta definition (anchor/replacement pairs plus the new function texts). Do not hand-edit the anchors.
+S2b (Bug 9, On Account of a part-paid bill) was added to the same generator and the same single transaction; see §8. The S2b staging runs executed the generated `rehearsal(lean=True)` variant (S4/S5 pay + S2b on-account; the S2/S3 move/merge part is unchanged and was not re-run).
 
 ## 1. Fingerprints (live PROD, 2026-10-26, PostgreSQL 17.6)
 
@@ -22,6 +24,8 @@ All four SQL files are generated from one delta definition (anchor/replacement p
 | `pos_pay_order_core(jsonb)` | `e21bac394d8f06b9c63fda903d5651e5` | `95f3b2a43abb9b5eb60b0965c2735ba8` | `{postgres=X/postgres,service_role=X/postgres}` |
 | `pos_pay_table_core(jsonb)` | `7b6ea08ffcbeca5f56d78d33c7cd1198` | `c0682f5d0edf0d0e6bda0db0b916e155` | same |
 | `pos_move_table_core(uuid,uuid,integer)` | `ecb0e6f3f47d37dc2837ac44985e2e56` | `6195b2add5797e20e40c2d59b913b557` (**byte-identical to the staging body**) | same |
+| `pos_complete_on_account_core(jsonb)` (S2b) | `0655ed697c7b94f2f50573ed10f321f7` | `01e57c4af3d5df7932020eaae7949b50` | same |
+| `pos_complete_table_on_account_core(jsonb)` (S2b) | `fd0f3b5bd53504352080fb88bd670bdd` | `c0e34235829d65d633287b5289a54928` | same |
 
 **New functions:**
 
@@ -46,6 +50,12 @@ The migration must be applied as `postgres`, as 1.0.37 was. If it runs as anothe
 | `pos_op_error` | `ed70a93f…` |
 | `pos_op_branch_of` | `c8991f7c…` |
 | `pos_split_settle_core` | `66c8b850…` |
+| `pos_complete_on_account` (S2b wrapper) | `aff7ce60…` |
+| `pos_complete_table_on_account` (S2b wrapper) | `0739f994…` |
+| `_pos_recompute_order_payment` (S2b) | `3bfe2160…` |
+| `pos_receivables_customer` (S2b balance derivation) | `2ffeed20…` |
+
+The POST guard now re-checks **every** PRE-guarded dependency (generated from the same list).
 
 ## 2. Anchor proof (read-only on PROD)
 
@@ -54,6 +64,10 @@ The migration must be applied as `postgres`, as 1.0.37 was. If it runs as anothe
 | pay_order_core | 1,1,1,1,1 | 1,1,1,1,1 | yes | `d3cccf48…` = local |
 | pay_table_core | 1,1,1,1,1,1 | 1,1,1,1,1,1 | yes | `e2de7356…` = local |
 | move_table_core | 1 | 1 | yes | `8e270dd6…` = local |
+| complete_on_account_core (S2b) | 1,1,1,1,1 | 1,1,1,1,1 | yes (`0655ed69…`) | `788a1b94…` = local |
+| complete_table_on_account_core (S2b) | 1,1,1,1,1,1,1 | 1,1,1,1,1,1,1 | yes (`fd0f3b5b…`) | `bdc929ba…` = local |
+
+The S2b post-images were also predicted locally from verbatim transcriptions of the live bodies (md5 = PRE) and matched the prod-computed values exactly. Re-checked 2026-10-26: the S4/S1 pre-images and `pos_split_settle_core`, `pos_op_replay`, `pos_op_record` are still live.
 
 ## 3. Where prior payments live (S4 basis, from the live bodies)
 
@@ -96,7 +110,9 @@ Prod data shape (read-only):
 | `pos_merge_tables_v3` + helpers | **SAFE AS-IS**. Unchanged, and wrapped by v4. Direct offline use is UNSAFE (all-or-nothing map, no pins). |
 | `pos_merge_tables_v4` | **NEW (S3)** |
 | `pos_op_replay` / `pos_op_record` / `pos_op_error` / `pos_op_branch_of` | **SAFE AS-IS** |
-| `pos_complete_on_account_core`, `pos_complete_table_on_account_core` | **UNSAFE for part-paid bills (inferred, not proven)**. They read `pos_payments` but never `pos_split_settlements`. Not changed here. The client must refuse on-account settle of a part-paid bill until these are audited. |
+| `pos_complete_on_account_core`, `pos_complete_table_on_account_core` | **ADDITIVE SERVER CHANGE REQUIRED (S2b)**. Before: UNSAFE for part-paid bills (proven on the live bodies, §8.2): paid-now cap, table allocation and reported outstanding all used T. After: SAFE, remainder-only (§8). |
+| `pos_complete_on_account`, `pos_complete_table_on_account` wrappers | **SAFE AS-IS**. Exactly-once by `client_op_id` (`pos_op_replay`/`pos_op_record`); the S2b pins carry bill identity/amount. |
+| `_pos_recompute_order_payment`, `pos_receivables_customer`, `post_from_pos_sale`, `post_from_pos_payment` | **SAFE AS-IS**. They already derive the receivable as `T − Σ pos_payments`. |
 | `pos_merge_tables` v1/v2 | legacy, **UNSAFE**, do not use |
 
 ## 5. Client contract (1.0.38)
@@ -298,9 +314,114 @@ Fixture:
 - `PAYMENT_RESIDUE` now also blocks `pos_pay_order` on the 7 prod on-account `completed/partial` orders. That path previously would have charged the full total again.
 - an `ALREADY_PAID` bill stays open and needs a manual close path;
 - remediation of the 8 over-collected orders ($108.72);
-- the on-account cores audit.
+- ~~the on-account cores audit~~ done: S2b, §8 (the S2b refusal choices below are listed there for the same gate).
 
 **Rollback:**
-- It restores the exact pre-images and drops v2/v4.
-- It re-opens F1 and the prod OU drift.
+- It restores the exact pre-images (now five functions, incl. both on-account cores) and drops v2/v4.
+- It re-opens F1, the prod OU drift and Bug 9.
+- It also refuses on S2b adoption evidence: a recorded `pos_complete_on_account` / `pos_complete_table_on_account` result carrying `prior_payments`, or an On Account completion since `installed_at` of an order that already had a payment row before it was completed.
 - It is **prohibited after 1.0.38 publication**: recovery after that is fix-forward only.
+
+## 8. S2b — Bug 9: PARTIALLY PAID → ON ACCOUNT creates only the unpaid remainder
+
+### 8.1 How On Account works on live prod (read-only trace)
+
+- **There is no receivable table.** `pos_complete_on_account_core` (order) / `pos_complete_table_on_account_core` (table, every open order of the table, `FOR UPDATE` in id order) set `status='completed'`, `settlement_mode='on_account'`, `customer_id`. The order itself is the receivable.
+- **Balance** = `total_amount − Σ pos_payments` of the order. `_pos_recompute_order_payment` writes `paid_amount_usd` and `payment_status` (unpaid/partial/paid, USD, 0.005 tolerance). `pos_receivables_customer` lists completed on-account orders in `unpaid/partial` with `bal_primary = total − paid_primary`.
+- **Paid now** (`amount`, order currency) inserts `pos_payments` rows: one row (order path) or one per order, pro-rata (table path), in the open shift. These are the only drawer rows. The on-account part writes no payment row.
+- **GL**: the `trg_accounting_pos_sale` trigger enqueues `POS_SALE:<order_id>` once on the transition to completed (`accounting_enqueue … on conflict (tenant_id,event_key) do nothing`). `post_from_pos_sale` posts Dr AR T. Each payment enqueues `POS_PAYMENT:<payment_id>`: Cr customer_deposits before the sale is recognised, else Cr AR. Deposits are moved to AR by `POS_DEPOSIT_APPLY:<order>`. So GL AR already nets to T − P − paid now.
+- **Inventory/COGS**: only the completion triggers (`_pos_order_freeze_demand_on_finalize`) run. They are the same for every completion. There is no consumption on settle (COGS comes from the Daily-Used engine).
+- **Idempotency**: the wrappers use `pos_op_replay` / `pos_op_record` with op types `pos_complete_on_account` / `pos_complete_table_on_account`. A replay returns the stored result with `idempotent:true`.
+
+### 8.2 Root cause (live bodies)
+
+P (split settlements and earlier tenders already on the order) is counted correctly by the balance derivation. The money is still wrong because the cores size everything else from the full total T:
+- order: `if v_usd > v_total_usd + 0.005 then raise 'Amount paid cannot exceed the order total'` → paid now up to T is accepted (over-collection). It reports `outstanding = T − paid now` and `outstanding_usd = T_usd − paid now`.
+- table: `if v_pay_primary > v_bill_total + 0.005 …` (T cap). The allocation is `round(v_pay_primary * v_finals[i] / v_bill_total)` (by T_i, not R_i). It reports `outstanding_primary = v_bill_total − paid now`.
+
+Proven on the unchanged prod bodies (staging, rolled back):
+
+| Case | Expected | Old body |
+|---|---|---|
+| G1: T=150000, split 100000 | outstanding 50000 | **reported 150000** (real balance 50000) |
+| G2: same bill, 150000 paid now | refuse (R=50000) | accepted: Σ paid **250000** on a 150000 bill |
+| G4: order T=50000, split 30000, 50000 paid now | refuse | accepted: Σ paid **80000** |
+| G3: two orders R1=10000 / R2=20000, 30000 paid now | 0 left | o1 over-paid, o2 left owing **6154** |
+
+Prod data: 37 on-account orders, 0 with a split or prior payment, 0 over-paid. The gap has not occurred yet.
+
+### 8.3 Delta (both cores, same transaction as S1–S5)
+
+P is computed per order as Σ over all `pos_payments` of the order, read under the existing order row lock(s): paid split settlements count at `amount_order_ccy`; other rows count as `pos_receivables_customer` counts them. R = max(T − P, 0) and R_usd = T_usd − Σ amount_usd.
+
+- Paid now must be ≤ R, else `ON_ACCOUNT_AMOUNT_EXCEEDS_REMAINING`. The old T cap and message are kept for bills with no prior payments.
+- Table: paid now is allocated by R_i. Reported `outstanding_primary` = Σ R_i − paid now. The order path reports `outstanding`, `outstanding_usd` = R − paid now.
+- R ≤ 0.005 USD with P > 0 gives `ALREADY_PAID`. This is the same rule as the S4 pay cores. The order stays open and nothing is written.
+- A discount on a part-paid bill gives `SPLIT_DISCOUNT_UNSUPPORTED` (as S4).
+- Previous payment rows are never touched. The on-account part writes no payment row, and GL/POS_SALE and inventory are unchanged.
+- No prior payment and no pins means identical arithmetic and result JSON. The new result keys appear only when P > 0.
+
+### 8.4 Client contract (S2b)
+
+**on_account_order** → `pos_complete_on_account(p_payload)`:
+- Existing keys are unchanged.
+- Optional `expected_amount` (order currency) = R before the amount paid now, with a tolerance of 0.005. If R differs, the call refuses with `ON_ACCOUNT_AMOUNT_CHANGED`.
+- When P > 0, the result also carries `remaining`, `prior_paid` (order ccy), `prior_paid_usd` and `prior_payments` (row count). `outstanding` and `outstanding_usd` are R-based.
+
+**on_account_table** → `pos_complete_table_on_account(p_payload)`:
+- Optional `expected_order_ids` (a set of the table's open orders, checked under lock) and `expected_amount` (Σ R_i, order currency).
+- Pinned and the bill differs → `ON_ACCOUNT_BILL_CHANGED`.
+- Pinned and the table has no open order while every pinned order is completed (paid or on account) → `ALREADY_SETTLED`.
+- The amount differs → `ON_ACCOUNT_AMOUNT_CHANGED`.
+- When P > 0, the result carries `remaining_total`, `prior_paid` and `prior_payments`. `outstanding_primary` is R-based.
+
+New refusal codes, all from `pos_op_error` (SQLSTATE `P0001`):
+
+| Error | Client class |
+|---|---|
+| `ON_ACCOUNT_AMOUNT_CHANGED` | CONFLICT |
+| `ON_ACCOUNT_BILL_CHANGED` | CONFLICT |
+| `ALREADY_PAID` | CONFLICT |
+| `ON_ACCOUNT_AMOUNT_EXCEEDS_REMAINING` | VALIDATION |
+| `SPLIT_DISCOUNT_UNSUPPORTED` | VALIDATION |
+| `ALREADY_SETTLED` | (the client may mark the op done) |
+
+An offline On Account of a part-paid bill must send `expected_amount = R` (and `expected_order_ids` for a table) and a frozen payload on replay. Client amounts are guards only; R is always computed by the server.
+
+### 8.5 Staging rehearsal (rolled back, two runs)
+
+Both runs were one DO block ending in `RAISE`.
+- **Fixture.** The exact **production** on-account pre-images were rebuilt on staging from the staging bodies (6 + 2 anchored text fixes, md5 asserted `0655ed69…` / `fd0f3b5b…`). The S2b deltas were applied through the same anchors. The post md5 asserted `01e57c4a…` / `c0e34235…`, and the transcription md5 of every applied delta equals the generator's value.
+- **Run 1** = S4/S5 pay + S2b; accounting was inactive. Run 1 re-proved S4/S5 A–G: A identical, B charged 50000, C charged 30000, D `ALREADY_PAID`, E `PAYMENT_RESIDUE`, F `SPLIT_DISCOUNT_UNSUPPORTED`, G pins and `ALREADY_SETTLED`, newer-bill `PAY_BILL_CHANGED`.
+- **Run 2** = S2b with the GL queue active (accounting activated in the txn).
+- **Every success case asserted:**
+  - the receivable equals R − paid now (`pos_receivables_customer` formula);
+  - the reported outstanding is the same value;
+  - prior payment rows are unchanged (ids, amounts);
+  - new payment rows equal the paid-now amount exactly (0 rows when nothing was paid now);
+  - there is exactly 1 `POS_SALE:<order>` outbox row per order;
+  - the inventory/demand delta is 0.
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | unpaid 2-order table + 40000 paid now; unpaid order + 20000 | result JSON, rows (ex ids), receivable and POS_SALE count **identical** to the old body |
+| 2 | cash split 100000 of 150000, 20000 paid now, with pins | receivable **30000**, 1 new payment row of 20000, `prior_paid` 100000, POS_SALE 1 |
+| 2x | earlier non-split tender 4000 on 10000 | receivable **6000** |
+| 3 | card split 60000 of 90000, order path | receivable **30000**, 0 new rows, `payment_status` partial |
+| 4 | cash + card splits 80000 of 100000 | receivable **20000** (`prior_payments` 2) |
+| 5 | two part-paid orders (R 10000 + 20000), 15000 paid now | per order **5000 / 10000**, 2 new rows Σ 15000, POS_SALE 2 |
+| 5b | same shape, R paid now | receivable 0, both orders completed/paid |
+| 6 | R = 0 | `ALREADY_PAID` (table and order), nothing written |
+| 7/8/9 | same `client_op_id` ×3 | `idempotent:true` ×3, same result, rows/GL unchanged, 1 submission |
+| 10a | newer bill opened, replay pinned to the old one | `ON_ACCOUNT_BILL_CHANGED`, nothing written |
+| 10b | item added, `expected_amount` stale | `ON_ACCOUNT_AMOUNT_CHANGED` (table and order), nothing written |
+| 10c/d | current pins | R on account (25000 / 20000); retry with a new op → `ALREADY_SETTLED` |
+| E1/E2 | paid now > R; discount on a part-paid bill | `ON_ACCOUNT_AMOUNT_EXCEEDS_REMAINING`, `SPLIT_DISCOUNT_UNSUPPORTED`, nothing written |
+
+After both runs, staging was checked: the pre-images were unchanged (`49a5038b…`, `9c5b12f5…`, `fb94df9f…`, `eb063605…`), with 0 fixture orders, tables or customers, and `accounting_settings` was untouched.
+
+**Not proven / residual:**
+- Concurrency was not exercised. Correctness relies on the existing order row locks, which split settle and the pay cores also take.
+- Staging's own `pos_receivables_customer` (a different body) showed 30003 for case 2, because of a USD-rounding path. The prod formula, reproduced exactly, gives 30000.
+- An LBP device-side R must use `amount_order_ccy` for split rows, or `expected_amount` can be off by rounding.
+- Business gate (A): refuse `ALREADY_PAID` rather than auto-close a zero-remainder bill, and refuse a discount on a part-paid bill.

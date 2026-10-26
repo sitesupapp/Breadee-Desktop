@@ -421,8 +421,10 @@ function matchesScope(s: OperationSummaryScope, row: { tenant_id: string; branch
 
 /**
  * 1.0.38 — per-state counts for UI badges (POS status bar, Sync Center chip). Every read goes through
- * the `status` INDEX (one cursor per state) — never a full-history scan: the synced cursor is bounded by
- * the 7-day GC. `includeSynced: false` skips that cursor for hot paths that only need unsettled counts.
+ * the `status` INDEX (one cursor per state) — never a full-history scan. The synced cursor is NOT bounded:
+ * the drain runs with `assumeLocked`, so the 7-day GC never executes (unchanged from 1.0.37, deliberately —
+ * no synced history is deleted in this release). Hot paths that only need unsettled counts must pass
+ * `includeSynced: false` to skip that cursor.
  */
 export async function summarizeOperations(scope: OperationSummaryScope, opts?: { includeSynced?: boolean }): Promise<OperationSummary> {
   const out: OperationSummary = { pending: 0, syncing: 0, retryable: 0, waiting_dependency: 0, needs_attention: 0, synced: 0, legacy_pending: 0, unsettled: 0 };

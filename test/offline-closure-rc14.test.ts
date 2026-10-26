@@ -336,6 +336,8 @@ test("G4/G10 historical shift-less refusals are classified with an actionable ex
   const dw = src("src/screens/pos/DineInWorkspace.tsx");
   assert.match(dw, /const hits = shiftlessCanonicalOrders\(tables\.bill, null\)/);
   assert.match(dw, /if \(g\.allowed && historicalShiftlessReason\) return \{ allowed: false, reason: historicalShiftlessReason \}/);
-  assert.match(dw, /move: historical\(serverCoordinated/);
-  assert.match(dw, /merge: historical\(serverCoordinated/);
+  // 1.0.38 — the wrapped gate is now the offline-capturable one (see offline-1038-movemerge); the
+  // historical shift-less refusal still wraps Move AND Merge (1.0.38 WS-F: inside the unsynced-work hold).
+  assert.match(dw, /move: (unsynced\()?historical\(offlineAware/);
+  assert.match(dw, /merge: (unsynced\()?historical\(offlineAware/);
 });

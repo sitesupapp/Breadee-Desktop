@@ -14,10 +14,14 @@ import type { CurrencyCode } from "@/lib/currency";
 import type { OfflineOperation, RetryClass } from "@/lib/offline/operationLog";
 import {
   type PosTxnSyncDeps,
+  type MoveTableV2Request,
+  type MergeTablesV4Request,
   terminalKind,
   errMsg,
+  errCode,
   isAlreadyPaid,
   classifyReplayError,
+  posErrorCode,
 } from "@/lib/offline/posTxnSync";
 import { resolveEntity } from "@/lib/offline/entityMap";
 import { getOperation } from "@/lib/offline/operationLog";
@@ -299,9 +303,9 @@ export const dineinOpenTableHandler: OperationHandler = {
     // foreign change but never trips on our own settle. Unknown → adopt (null), as for an occupied table.
     let expected = p.expected_version ?? null;
     if (p.version_after_op) {
-      const prev = await getOperation(p.version_after_op);
-      const v = prev?.status === "synced" ? prev.result_meta?.pos_entity_version : undefined;
-      expected = typeof v === "number" && Number.isFinite(v) ? v : null;
+      // 1.0.38 — the freeing op may be an offline move / merge that vacated this table: its result carries
+      // every involved TABLE's version in `table_versions` (a merge's pos_entity_version is an ORDER's).
+      expected = await tableVersionAfter(p.version_after_op, op.local_entity_id ?? "");
     }
     try {
       const r = await ctx.deps.openTable({
@@ -484,11 +488,42 @@ type PayTablePayload = {
   currency: string;
   discount?: { discount_type?: string; discount_value?: number };
   table_name?: string | null;
+  /** rc.10 — exactly the bill this settle covers (projection metadata; absent on pre-rc.10 ops). */
+  covers?: { session_local?: string | null; order_ids?: string[]; summary?: boolean } | null;
+  /** 1.0.38 (S5) — the remaining amount (order currency) the device collected, recorded ONLY when it is
+   *  known exactly (a fully-canonical bill, no discount, no local delta); absent otherwise. */
+  expected_amount?: number | null;
+  /** 1.0.38 — the bill pins resolved ONCE before the first send and frozen (retries send the same). */
+  resolved_pins?: { order_ids: string[] | null; amount: number | null } | null;
 };
+
+/** 1.0.38 (S5) — resolve the EXACT bill a settle covers to canonical order ids: its recorded canonical
+ *  orders + its local session's order (entity map, else the session's bound canonical order). A legacy
+ *  settle (no `covers`) or one that covered a map SUMMARY (orders unknown here) is not pinned (null) — it
+ *  keeps the pre-1.0.38 request. A session whose round 1 has not resolved yet → blocked (never guessed). */
+async function resolveSettlePins(p: PayTablePayload, ctx: HandlerContext): Promise<{ ok: true; ids: string[] | null } | { ok: false; result: HandlerResult }> {
+  const cv = p.covers;
+  if (!cv || typeof cv !== "object" || Object.keys(cv).length === 0 || cv.summary === true) return { ok: true, ids: null };
+  const ids = new Set<string>((cv.order_ids ?? []).filter((x) => typeof x === "string" && x !== ""));
+  if (typeof cv.session_local === "string" && cv.session_local !== "") {
+    const c = await ctx.canonicalFor(cv.session_local);
+    if (c) ids.add(c);
+    else {
+      const d = await localdb.dineDrafts.get(cv.session_local).catch(() => undefined);
+      if (d?.canonical_order_id) ids.add(d.canonical_order_id);
+      else if (d && d.rounds.length > 0) return { ok: false, result: { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "session order not yet synced" } };
+    }
+  }
+  return { ok: true, ids: ids.size > 0 ? [...ids].sort() : null };
+}
 
 /** pay_table — settle a dine-in TABLE bill offline (pos_pay_table), exactly-once on client_op_id.
  *  An ad-hoc table created offline is remapped from its open-table op; a configured table uses its
- *  canonical id directly. A bill settled another way meanwhile → CONFLICT (needs_attention). */
+ *  canonical id directly. A bill settled another way meanwhile → CONFLICT (needs_attention).
+ *  1.0.38 (S5) — the request is BOUND to the exact bill the settle was captured for (expected_order_ids,
+ *  + expected_amount when known): a re-opened parked settle can never pay a newer bill on the same table
+ *  (PAY_BILL_CHANGED → refused, the bill is shown unpaid, never a fake Paid); ALREADY_SETTLED (every pinned
+ *  order already paid another way) → reflected — the bill is closed, this device's payment was not applied. */
 export const payTableHandler: OperationHandler = {
   type: "pay_table",
   schemaVersion: 1,
@@ -501,12 +536,37 @@ export const payTableHandler: OperationHandler = {
       tableId = canonical;
     }
     if (!tableId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_table", message: "no table id" };
+    let pins = p.resolved_pins ?? null;
+    if (!pins) {
+      const r = await resolveSettlePins(p, ctx);
+      if (!r.ok) return r.result;
+      const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;
+      pins = { order_ids: r.ids, amount: r.ids ? amount : null };
+      await ctx.update({ payload: { ...p, resolved_pins: pins } });
+    }
     try {
-      const r = await ctx.deps.payTable({ tableId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id });
+      const r = await ctx.deps.payTable({
+        tableId,
+        method: p.method,
+        currency: (p.currency as CurrencyCode) ?? "USD",
+        discount: p.discount,
+        clientOpId: op.client_op_id,
+        ...(pins.order_ids ? { expectedOrderIds: pins.order_ids } : {}),
+        ...(pins.amount != null ? { expectedAmount: pins.amount } : {}),
+      });
       return { ok: true, canonicalId: tableId, resultMeta: { amount: r.amount, idempotent: r.idempotent, pos_entity_version: r.pos_entity_version ?? null } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "pay_table: transport", message: msg };
+      // 1.0.38 — the structured S4/S5 refusals, by code (their wording is not the legacy settle wording).
+      const code = posErrorCode(e);
+      if (code === "ALREADY_SETTLED") {
+        return { ok: false, retryClass: "CONFLICT", code: "already_settled", message: /already (paid|settled)/i.test(msg) ? msg : `already settled: ${msg}` };
+      }
+      if (code === "PAY_BILL_CHANGED" || code === "PAY_AMOUNT_CHANGED" || code === "ALREADY_PAID" || code === "PAYMENT_RESIDUE") {
+        return { ok: false, retryClass: "CONFLICT", code: code.toLowerCase(), message: msg };
+      }
+      if (code === "SPLIT_DISCOUNT_UNSUPPORTED") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "split_discount_unsupported", message: msg };
       if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
       const t = terminalClass(msg);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
@@ -561,11 +621,37 @@ type OnAccountTablePayload = {
   method: string;
   discount?: { discount_type?: string; discount_value?: number };
   table_name?: string | null;
+  /** rc.10 — exactly the bill this on-account covers (the same shape as pay_table's). */
+  covers?: PayTablePayload["covers"];
+  /** 1.0.38 (Bug 9) — R = T − P in order currency, recorded ONLY when known exactly (fully-canonical bill,
+   *  no local delta, no discount); absent otherwise. */
+  expected_amount?: number | null;
+  /** 1.0.38 (Bug 9) — the bill pins resolved ONCE before the first send and frozen (retries send the same). */
+  resolved_pins?: { order_ids: string[] | null; amount: number | null } | null;
 };
+
+/** 1.0.38 (Bug 9 / S2) — the on-account refusals by structured code. ALREADY_SETTLED / ALREADY_PAID: the
+ *  pinned bill is already closed / fully covered server-side → this receivable was NOT booked and the
+ *  canonical row stands ("reflected": the message names the closed state, see settlePrecedence).
+ *  ON_ACCOUNT_BILL_CHANGED / ON_ACCOUNT_AMOUNT_CHANGED (and the shared PAYMENT_RESIDUE): an authoritative
+ *  REFUSAL — the bill is shown refused (unpaid, with the reason), never a fake settled. Null = not one. */
+function onAccountRefusal(e: unknown, msg: string): HandlerResult | null {
+  const code = posErrorCode(e);
+  if (code === "ALREADY_SETTLED" || code === "ALREADY_PAID") {
+    return { ok: false, retryClass: "CONFLICT", code: code.toLowerCase(), message: /already (paid|settled)/i.test(msg) ? msg : `already settled: ${msg}` };
+  }
+  if (code === "ON_ACCOUNT_BILL_CHANGED" || code === "ON_ACCOUNT_AMOUNT_CHANGED" || code === "PAYMENT_RESIDUE") {
+    return { ok: false, retryClass: "CONFLICT", code: code.toLowerCase(), message: msg };
+  }
+  if (code === "SPLIT_DISCOUNT_UNSUPPORTED") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "split_discount_unsupported", message: msg };
+  return null;
+}
 
 /** on_account_table — put a dine-in TABLE bill on a customer's account offline
  *  (pos_complete_table_on_account), exactly-once on client_op_id. Depends on the table's open +
- *  rounds (so the orders exist server-side) and on a LOCALLY-KNOWN customer. */
+ *  rounds (so the orders exist server-side) and on a LOCALLY-KNOWN customer.
+ *  1.0.38 (Bug 9) — BOUND to the exact bill it was captured for, like pay_table: expected_order_ids (from
+ *  `covers` + the entity map) and, when known exactly, expected_amount = R — resolved once and frozen. */
 export const onAccountTableHandler: OperationHandler = {
   type: "on_account_table",
   schemaVersion: 1,
@@ -584,12 +670,31 @@ export const onAccountTableHandler: OperationHandler = {
       customerId = c;
     }
     if (!tableId || !customerId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "missing_ref", message: "no table or customer id" };
+    let pins = p.resolved_pins ?? null;
+    if (!pins) {
+      const r = await resolveSettlePins({ covers: p.covers ?? null } as PayTablePayload, ctx);
+      if (!r.ok) return r.result;
+      const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;
+      pins = { order_ids: r.ids, amount: r.ids ? amount : null };
+      await ctx.update({ payload: { ...p, resolved_pins: pins } });
+    }
     try {
-      const r = await ctx.deps.onAccountTable({ tableId, customerId, amount: p.amount, method: p.method, discount: p.discount, clientOpId: op.client_op_id });
+      const r = await ctx.deps.onAccountTable({
+        tableId,
+        customerId,
+        amount: p.amount,
+        method: p.method,
+        discount: p.discount,
+        clientOpId: op.client_op_id,
+        ...(pins.order_ids ? { expectedOrderIds: pins.order_ids } : {}),
+        ...(pins.amount != null ? { expectedAmount: pins.amount } : {}),
+      });
       return { ok: true, canonicalId: tableId, resultMeta: { idempotent: r.idempotent } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "on_account_table: transport", message: msg };
+      const refused = onAccountRefusal(e, msg);
+      if (refused) return refused;
       if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
       const t = terminalClass(msg);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
@@ -606,10 +711,16 @@ type OnAccountOrderPayload = {
   method: string;
   discount?: { discount_type?: string; discount_value?: number };
   order_number?: string | null;
+  /** 1.0.38 (Bug 9) — R in order currency, ONLY when known exactly at capture; absent otherwise. */
+  expected_amount?: number | null;
+  /** 1.0.38 (Bug 9) — frozen before the first send (see on_account_table). */
+  resolved_pins?: { order_ids: string[] | null; amount: number | null } | null;
 };
 
 /** on_account_order — put a single ORDER on a customer's account offline
- *  (pos_complete_on_account), exactly-once on client_op_id. */
+ *  (pos_complete_on_account), exactly-once on client_op_id. 1.0.38 (Bug 9) — bound to its order
+ *  (expected_order_ids = [the canonical order], via the entity map for an offline-created one) and, when
+ *  known exactly, expected_amount = R; frozen before the first send. */
 export const onAccountOrderHandler: OperationHandler = {
   type: "on_account_order",
   schemaVersion: 1,
@@ -628,12 +739,29 @@ export const onAccountOrderHandler: OperationHandler = {
       customerId = c;
     }
     if (!orderId || !customerId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "missing_ref", message: "no order or customer id" };
+    let pins = p.resolved_pins ?? null;
+    if (!pins) {
+      const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;
+      pins = { order_ids: [orderId], amount };
+      await ctx.update({ payload: { ...p, resolved_pins: pins } });
+    }
     try {
-      const r = await ctx.deps.onAccountOrder({ orderId, customerId, amount: p.amount, method: p.method, discount: p.discount, clientOpId: op.client_op_id });
+      const r = await ctx.deps.onAccountOrder({
+        orderId,
+        customerId,
+        amount: p.amount,
+        method: p.method,
+        discount: p.discount,
+        clientOpId: op.client_op_id,
+        ...(pins.order_ids ? { expectedOrderIds: pins.order_ids } : {}),
+        ...(pins.amount != null ? { expectedAmount: pins.amount } : {}),
+      });
       return { ok: true, canonicalId: orderId, resultMeta: { idempotent: r.idempotent } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "on_account_order: transport", message: msg };
+      const refused = onAccountRefusal(e, msg);
+      if (refused) return refused;
       if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
       const t = terminalClass(msg);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
@@ -1122,10 +1250,66 @@ export const editOrderHandler: OperationHandler = {
   },
 };
 
-/** A table-restructure refusal that means the floor changed since it was loaded — a stale version,
- *  a source no longer occupied / already settled / split / on-account, or a bill that moved. All are
- *  CONFLICTS the operator resolves (reload the floor + redo), never a hot retry and never a silent
- *  destructive move/merge; the server's locked re-read + client_op_id replay guarantee exactly-once. */
+// --- 1.0.38 (Bugs 5/6) — offline MOVE TABLE / MERGE TABLES (schema 2) ------------------------------
+//
+// The rc.4–rc.11 schema-1 handlers (pos_move_table / pos_merge_tables_v3 straight from the floor) are NOT
+// registered: such a parked op is quarantined (unknown_handler) and never replayed — it had no bill
+// identity in its op id, no barrier, no projection, no version chain and no close barrier. Schema 2 replays
+// through the offline-safe contracts (prod_1038 §5.1 / §5.2): bill-identity pins, paid-settlement pins,
+// table versions ONLY from this device's own prior results (never guessed), and a request FROZEN before
+// the first send so every retry is byte-identical (stable server fingerprint → a lost response replays).
+
+/** A bill reference (see operationalProjection.BillRef). */
+type BillRefP = { order_id: string | null; order_local: string | null };
+const refKey = (r: BillRefP): string => (r.order_id ? r.order_id : `L:${r.order_local ?? ""}`);
+
+/** The TABLE version this device's own prior op returned for `tableId`: a move/merge result's
+ *  `table_versions[tableId]`, else (pay_table / dinein_open_table, which return the TABLE's version) its
+ *  `pos_entity_version`. Null when unknown — the caller then OMITS the CAS (never guesses). */
+async function tableVersionAfter(opId: string | null | undefined, tableId: string): Promise<number | null> {
+  if (!opId) return null;
+  const prev = await getOperation(opId);
+  if (!prev || prev.status !== "synced") return null;
+  const rm = prev.result_meta ?? {};
+  const tv = rm.table_versions;
+  if (tv && typeof tv === "object" && !Array.isArray(tv)) {
+    const v = (tv as Record<string, unknown>)[tableId];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  }
+  if (prev.operation_type === "move_table" || prev.operation_type === "merge_tables") return null;
+  const v = rm.pos_entity_version;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** Resolve a bill ref to its canonical order id (null = its creating round has not synced yet). */
+async function canonicalOrderOf(r: BillRefP, ctx: HandlerContext): Promise<string | null> {
+  if (r.order_id) return r.order_id;
+  if (!r.order_local) return null;
+  return ctx.canonicalFor(r.order_local);
+}
+
+const TABLE_OP_CONFLICT_CODES = new Set([
+  "VERSION_CONFLICT",
+  "MOVE_SOURCE_CHANGED",
+  "MOVE_SOURCE_EMPTY",
+  "MOVE_PAYMENT_STATE_CHANGED",
+  "MOVE_DEST_OCCUPIED",
+  "MOVE_DEST_UNAVAILABLE",
+  "IDEMPOTENCY_PAYLOAD_MISMATCH",
+  "MERGE_EXPECTED_MISMATCH",
+  "MERGE_BILL_CHANGED",
+  "MERGE_PAYMENT_STATE_CHANGED",
+  "MERGE_PRIMARY_EMPTY",
+  "MERGE_SOURCE_EMPTY",
+  "MERGE_AMBIGUOUS_BILL",
+  "MERGE_NO_SHIFT",
+  "MERGE_CROSS_SHIFT",
+  "MERGE_CROSS_CURRENCY",
+]);
+const TABLE_OP_AUTHORITY_CODES = new Set(["CROSS_ACTOR_REPLAY_REJECTED", "CROSS_OU_REJECTED", "OU_ACCESS_DENIED", "CROSS_BRANCH_REPLAY_REJECTED"]);
+const TABLE_OP_VALIDATION_CODES = new Set(["MOVE_NO_OP", "MOVE_SAME_TABLE", "MERGE_NO_OP", "MERGE_NO_SOURCES"]);
+
+/** Legacy wording of a table-restructure refusal (pre-contract servers / unstructured messages). */
 function isTableOpConflict(message: string): boolean {
   const m = message.toLowerCase();
   return (
@@ -1140,51 +1324,153 @@ function isTableOpConflict(message: string): boolean {
   );
 }
 
-type MoveTablePayload = { from_table_id: string; to_table_id: string; expected_version: number | null };
+/** Classify a move_table_v2 / merge_tables_v4 failure (contract §5.1 / §5.2 client classes):
+ *   transport → TRANSPORT_RETRYABLE; MERGE_SHIFT_BUSY / deadlock / lock / 5xx → SERVER_RETRYABLE (bounded,
+ *   the shared classifier); MERGE_SHIFT_CLOSED → CONFLICT shift_closed; drift / pins / occupied / unsupported
+ *   state → CONFLICT (needs_attention, the bill stays on its original table); 42501 / cross-actor / OU →
+ *   AUTHORITY_REFUSED; a malformed request → VALIDATION_TERMINAL. Never a silent re-target. */
+function tableOpFailure(e: unknown, label: string, ctx: HandlerContext): HandlerResult {
+  const msg = errMsg(e);
+  if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: `${label}: transport`, message: msg };
+  const code = posErrorCode(e);
+  if (code === "MERGE_SHIFT_BUSY") return { ok: false, retryClass: "SERVER_RETRYABLE", code: "server_transient", message: msg };
+  const kind = classifyReplayError(e);
+  if (kind === "transient") return { ok: false, retryClass: "SERVER_RETRYABLE", code: "server_transient", message: msg };
+  if (kind === "auth") return { ok: false, retryClass: "SERVER_RETRYABLE", code: "auth_expired", message: msg };
+  if (code === "MERGE_SHIFT_CLOSED") return { ok: false, retryClass: "CONFLICT", code: "shift_closed", message: msg };
+  if ((code && TABLE_OP_AUTHORITY_CODES.has(code)) || errCode(e) === "42501") return { ok: false, retryClass: "AUTHORITY_REFUSED", code: "permission", message: msg };
+  if (code && (TABLE_OP_CONFLICT_CODES.has(code) || code.startsWith("UNSUPPORTED_STATE"))) return { ok: false, retryClass: "CONFLICT", code: code.toLowerCase(), message: msg };
+  if ((code && TABLE_OP_VALIDATION_CODES.has(code)) || errCode(e) === "22023") return { ok: false, retryClass: "VALIDATION_TERMINAL", code: code ? code.toLowerCase() : "invalid_request", message: msg };
+  if (terminalKind(msg) === "shift_closed") return { ok: false, retryClass: "CONFLICT", code: "shift_closed", message: msg };
+  if (isTableOpConflict(msg) || msg.toLowerCase().includes("unsupported")) return { ok: false, retryClass: "CONFLICT", code: `${label}_conflict`, message: msg };
+  const t = terminalClass(msg, e);
+  return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+}
 
-/** move_table — move an open bill between CANONICAL tables offline (pos_move_table), exactly-once on
- *  client_op_id. CAS on the from-table; a floor drift → CONFLICT → needs_attention. */
-export const moveTableHandler: OperationHandler = {
+type MoveTableV2Payload = {
+  from_table_id: string;
+  to_table_id: string;
+  /** The bill identity on the source (canonical order ids, or the local session creating it). */
+  bill: { orders: BillRefP[] };
+  /** Paid split-settlement count per bill ref (server-known + this device's earlier legs), or null when
+   *  not known on this device (a bill part-paid online) — the pin is then omitted, never guessed. */
+  paid_pins: Record<string, number> | null;
+  /** This device's own prior op whose RESULT carries each table's version (null = unknown → omitted). */
+  version_after: { from: string | null; to: string | null };
+  resolved?: MoveTableV2Request | null;
+};
+
+/** move_table@2 — move an open bill to a free table offline (pos_move_table_v2), exactly-once on
+ *  client_op_id. Replays strictly after the bill's open / rounds / edits / split legs and after whatever
+ *  freed the destination (dependency_ids); before any later round / settle / end_shift (they depend on it). */
+export const moveTableV2Handler: OperationHandler = {
   type: "move_table",
-  schemaVersion: 1,
+  schemaVersion: 2,
   async replay(op, ctx) {
-    const p = (op.payload ?? {}) as MoveTablePayload;
+    const p = (op.payload ?? {}) as MoveTableV2Payload;
     if (!p.from_table_id || !p.to_table_id) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_table", message: "no table id" };
+    let req = p.resolved ?? null;
+    if (!req) {
+      const ids: string[] = [];
+      const paid: Record<string, number> = {};
+      for (const r of p.bill?.orders ?? []) {
+        const id = await canonicalOrderOf(r, ctx);
+        if (!id) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "bill order not yet synced" };
+        if (!ids.includes(id)) ids.push(id);
+        if (p.paid_pins) paid[id] = (paid[id] ?? 0) + (Number(p.paid_pins[refKey(r)]) || 0);
+      }
+      if (ids.length === 0) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_bill", message: "no bill to move" };
+      const fromV = await tableVersionAfter(p.version_after?.from, p.from_table_id);
+      const toV = await tableVersionAfter(p.version_after?.to, p.to_table_id);
+      req = {
+        client_op_id: op.client_op_id,
+        from_table_id: p.from_table_id,
+        to_table_id: p.to_table_id,
+        expected_order_ids: ids.sort(),
+        ...(p.paid_pins ? { expected_paid_settlements: paid } : {}),
+        ...(fromV != null ? { expected_from_version: fromV } : {}),
+        ...(toV != null ? { expected_to_version: toV } : {}),
+      };
+      // FROZEN before the first send: every retry (transport / timeout / restart) is byte-identical.
+      await ctx.update({ payload: { ...p, resolved: req } });
+    }
     try {
-      const r = await ctx.deps.moveTable({ fromTableId: p.from_table_id, toTableId: p.to_table_id, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id });
-      return { ok: true, canonicalId: p.to_table_id, resultMeta: { orders_moved: r.orders_moved, idempotent: r.idempotent } };
+      const r = await ctx.deps.moveTableV2({ payload: req });
+      return {
+        ok: true,
+        canonicalId: p.to_table_id,
+        resultMeta: { orders_moved: r.orders_moved, order_ids: r.order_ids, table_versions: r.table_versions, idempotent: r.idempotent },
+      };
     } catch (e) {
-      const msg = errMsg(e);
-      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "move_table: transport", message: msg };
-      if (isTableOpConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "move_conflict", message: msg };
-      const t = terminalClass(msg);
-      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+      return tableOpFailure(e, "move_table", ctx);
     }
   },
 };
 
-type MergeTablesPayload = { primary_table_id: string; source_table_ids: string[]; expected: Record<string, number> };
+type MergeTablesV2Payload = {
+  primary_table_id: string;
+  source_table_ids: string[];
+  /** ONE bill per involved table (primary + each source). */
+  orders: Record<string, BillRefP>;
+  paid_pins: Record<string, number> | null;
+  version_after: Record<string, string>;
+  resolved?: MergeTablesV4Request | null;
+};
 
-/** merge_tables — fold source table bills into a primary offline (pos_merge_tables_v3), exactly-once
- *  on client_op_id, atomic server-side. CAS version-map on every table; any drift → CONFLICT →
- *  needs_attention, never a silent destructive merge. */
-export const mergeTablesHandler: OperationHandler = {
+/** merge_tables@2 — fold the UNPAID part of each source bill into the primary offline
+ *  (pos_merge_tables_v4 → v3 semantics), exactly-once on client_op_id, atomic server-side. Prior payments
+ *  stay on their source (a part-paid source is completed for P); nothing is charged, no drawer effect. */
+export const mergeTablesV2Handler: OperationHandler = {
   type: "merge_tables",
-  schemaVersion: 1,
+  schemaVersion: 2,
   async replay(op, ctx) {
-    const p = (op.payload ?? {}) as MergeTablesPayload;
-    if (!p.primary_table_id || !Array.isArray(p.source_table_ids) || p.source_table_ids.length === 0) {
+    const p = (op.payload ?? {}) as MergeTablesV2Payload;
+    const sources = Array.isArray(p.source_table_ids) ? [...p.source_table_ids] : [];
+    if (!p.primary_table_id || sources.length === 0) {
       return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_merge_target", message: "no primary or sources" };
     }
+    let req = p.resolved ?? null;
+    if (!req) {
+      const expectedOrders: Record<string, string> = {};
+      const paid: Record<string, number> = {};
+      const versions: Record<string, number> = {};
+      for (const t of [p.primary_table_id, ...sources]) {
+        const r = p.orders?.[t];
+        if (!r) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_bill", message: "a merged table has no recorded bill" };
+        const id = await canonicalOrderOf(r, ctx);
+        if (!id) return { ok: false, retryClass: "DEPENDENCY_BLOCKED", code: "order_unresolved", message: "bill order not yet synced" };
+        expectedOrders[t] = id;
+        if (p.paid_pins) paid[id] = Number(p.paid_pins[refKey(r)]) || 0;
+        const v = await tableVersionAfter(p.version_after?.[t], t);
+        if (v != null) versions[t] = v;
+      }
+      req = {
+        client_op_id: op.client_op_id,
+        primary_table_id: p.primary_table_id,
+        source_table_ids: sources.sort(),
+        expected_orders: expectedOrders,
+        ...(p.paid_pins ? { expected_paid_settlements: paid } : {}),
+        ...(Object.keys(versions).length > 0 ? { expected_versions: versions } : {}),
+      };
+      await ctx.update({ payload: { ...p, resolved: req } });
+    }
     try {
-      const r = await ctx.deps.mergeTables({ primaryTableId: p.primary_table_id, sourceTableIds: p.source_table_ids, expected: p.expected ?? {}, clientOpId: op.client_op_id });
-      return { ok: true, canonicalId: p.primary_table_id, resultMeta: { merge_id: r.merge_id, sources_merged: r.sources_merged, idempotent: r.idempotent } };
+      const r = await ctx.deps.mergeTablesV4({ payload: req });
+      return {
+        ok: true,
+        canonicalId: p.primary_table_id,
+        resultMeta: {
+          merge_id: r.merge_id,
+          primary_order_id: r.primary_order_id,
+          sources_merged: r.sources_merged,
+          // The primary ORDER version (never a table version — table CAS chains read table_versions).
+          primary_order_version: r.pos_entity_version,
+          table_versions: r.table_versions,
+          idempotent: r.idempotent,
+        },
+      };
     } catch (e) {
-      const msg = errMsg(e);
-      if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "merge_tables: transport", message: msg };
-      if (isTableOpConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "merge_conflict", message: msg };
-      const t = terminalClass(msg);
-      return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
+      return tableOpFailure(e, "merge_tables", ctx);
     }
   },
 };
@@ -1264,8 +1550,9 @@ export const HANDLERS: Record<string, OperationHandler> = {
   [`${customerUpsertHandler.type}@${customerUpsertHandler.schemaVersion}`]: customerUpsertHandler,
   [`${editOrderLineHandler.type}@${editOrderLineHandler.schemaVersion}`]: editOrderLineHandler,
   [`${addOrderItemsHandler.type}@${addOrderItemsHandler.schemaVersion}`]: addOrderItemsHandler,
-  [`${moveTableHandler.type}@${moveTableHandler.schemaVersion}`]: moveTableHandler,
-  [`${mergeTablesHandler.type}@${mergeTablesHandler.schemaVersion}`]: mergeTablesHandler,
+  // 1.0.38 — only the schema-2 (offline-safe) move / merge replay; schema 1 is quarantined (no handler).
+  [`${moveTableV2Handler.type}@${moveTableV2Handler.schemaVersion}`]: moveTableV2Handler,
+  [`${mergeTablesV2Handler.type}@${mergeTablesV2Handler.schemaVersion}`]: mergeTablesV2Handler,
   [`${receivableCollectHandler.type}@${receivableCollectHandler.schemaVersion}`]: receivableCollectHandler,
   [`${deliveryOpsHandler.type}@${deliveryOpsHandler.schemaVersion}`]: deliveryOpsHandler,
   [`${editOrderHandler.type}@${editOrderHandler.schemaVersion}`]: editOrderHandler,

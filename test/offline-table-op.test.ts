@@ -1,6 +1,11 @@
-// Phase E — offline dine-in TABLE RESTRUCTURE (move / merge of canonical tables): capture a durable
-// op, replay exactly-once with the CAS, and surface a floor/version drift as needs_attention (never
-// a silent destructive move/merge).
+// Phase E — offline dine-in TABLE RESTRUCTURE (move / merge of canonical tables).
+//
+// 1.0.38 (Bugs 5/6) — INTENTIONAL CHANGE: the rc.4–rc.11 schema-1 capture / replay this file pinned
+// (op id from the table pair only, no barrier, no projection, a floor-map CAS, pos_move_table /
+// pos_merge_tables_v3 straight from the floor) is RETIRED. Its ops are quarantined: no handler is
+// registered for schema 1, so a parked legacy op can never be replayed (no RPC), even on an operator
+// retry. The offline-safe schema-2 path (pos_move_table_v2 / pos_merge_tables_v4) is covered end-to-end in
+// test/offline-1038-movemerge.test.ts. The gate policy below is unchanged.
 
 import "fake-indexeddb/auto";
 import { test, beforeEach } from "node:test";
@@ -16,26 +21,27 @@ class MemStorage {
 (globalThis as unknown as { localStorage: MemStorage }).localStorage = new MemStorage();
 
 import { localdb } from "@/lib/offline/db";
-import { getOperation } from "@/lib/offline/operationLog";
+import { getOperation, requeueOperation, type OfflineOperation } from "@/lib/offline/operationLog";
 import { drainOffline, __resetDrainLockForTests } from "@/lib/offline/orchestrator";
+import { handlerFor } from "@/lib/offline/handlers";
 import type { PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
-import { captureMoveTableOffline, captureMergeTablesOffline, evaluateTableOpOfflineReady, type TableOpScope } from "@/lib/offline/tableOpOffline";
+import { evaluateTableOpOfflineReady } from "@/lib/offline/tableOpOffline";
 import { tableOpGate } from "@/lib/pos/tableOps";
 
-const SCOPE: TableOpScope = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1" };
+const OPSCOPE = { tenant_id: "t1", branch_id: "b1", device_id: "dev1", terminal_id: "term1", cashier_user_id: "u1" };
 const CTX = { tenantId: "t1", branchId: "b1", cashierUserId: "u1", deviceId: "dev1", terminalId: "term1", online: true };
 
-function deps(log: string[], over: Partial<PosTxnSyncDeps> = {}): { deps: Partial<PosTxnSyncDeps>; moves: Record<string, unknown>[]; merges: Record<string, unknown>[] } {
-  const moves: Record<string, unknown>[] = [];
-  const merges: Record<string, unknown>[] = [];
-  const d: Partial<PosTxnSyncDeps> = {
-    moveTable: async (a) => { log.push("move"); moves.push(a); return { ok: true, orders_moved: 1, idempotent: false }; },
-    mergeTables: async (a) => { log.push("merge"); merges.push(a); return { ok: true, merge_id: "M1", sources_merged: a.sourceTableIds.length, idempotent: false }; },
+function deps(calls: string[]): Partial<PosTxnSyncDeps> {
+  return {
+    moveTableV2: async () => { calls.push("move_v2"); return { ok: true, orders_moved: 1, order_ids: [], table_versions: {}, idempotent: false }; },
+    mergeTablesV4: async () => { calls.push("merge_v4"); return { ok: true, merge_id: "M1", primary_order_id: "O", sources_merged: 1, pos_entity_version: 1, table_versions: {}, idempotent: false }; },
     isTransport: (e) => e instanceof TypeError,
     hasSession: async () => true,
-    ...over,
   };
-  return { deps: d, moves, merges };
+}
+
+function legacy(over: Partial<OfflineOperation> & Pick<OfflineOperation, "operation_id" | "operation_type">): OfflineOperation {
+  return { schema_version: 1, scope: OPSCOPE, created_at: new Date().toISOString(), client_op_id: crypto.randomUUID(), local_entity_id: null, canonical_entity_id: null, dependency_ids: [], depends_on_local_entities: [], payload: {}, status: "pending", retry_count: 0, last_attempt_at: null, last_error_code: null, last_error_message: null, result_meta: null, synced_at: null, ...over } as OfflineOperation;
 }
 
 beforeEach(async () => {
@@ -63,51 +69,34 @@ test("tableOpGate policy: offlineCapable unwalls move/merge offline but NOT clos
   assert.equal(tableOpGate({ kind: "move", ...base, offlineCapable: false }).allowed, false);
 });
 
-test("move: capture (idempotent) → drain → pos_move_table with client_op_id + CAS, once", async () => {
-  const a = await captureMoveTableOffline({ scope: SCOPE, fromTableId: "T-A", toTableId: "T-B", expectedVersion: 5 });
-  const b = await captureMoveTableOffline({ scope: SCOPE, fromTableId: "T-A", toTableId: "T-B", expectedVersion: 5 });
-  assert.equal(b.alreadyCaptured, true); // deterministic from the from/to pair
-  assert.equal(b.clientOpId, a.clientOpId);
-
-  const log: string[] = [];
-  const { deps: d, moves } = deps(log);
-  const r = await drainOffline(CTX, "reconnect", d);
-  assert.equal(moves.length, 1);
-  assert.equal(moves[0].fromTableId, "T-A");
-  assert.equal(moves[0].toTableId, "T-B");
-  assert.equal(moves[0].expectedVersion, 5);
-  assert.equal(moves[0].clientOpId, a.clientOpId);
-  assert.equal(r.needsAttention.length, 0);
+test("1.0.38: schema-1 move/merge have NO handler — only the schema-2 offline-safe replay is registered", () => {
+  assert.equal(handlerFor("move_table", 1), undefined);
+  assert.equal(handlerFor("merge_tables", 1), undefined);
+  assert.ok(handlerFor("move_table", 2));
+  assert.ok(handlerFor("merge_tables", 2));
 });
 
-test("merge: capture (content-addressed id) → drain → pos_merge_tables_v3 with expected map, once", async () => {
-  const sig = "T-P|T-S1|T-S2";
-  await captureMergeTablesOffline({ scope: SCOPE, primaryTableId: "T-P", sourceTableIds: ["T-S1", "T-S2"], expected: { "T-P": 3, "T-S1": 2, "T-S2": 4 }, clientOpId: sig });
-  const log: string[] = [];
-  const { deps: d, merges } = deps(log);
-  const r = await drainOffline(CTX, "reconnect", d);
-  assert.equal(merges.length, 1);
-  assert.equal(merges[0].primaryTableId, "T-P");
-  assert.deepEqual(merges[0].sourceTableIds, ["T-S1", "T-S2"]);
-  assert.deepEqual(merges[0].expected, { "T-P": 3, "T-S1": 2, "T-S2": 4 });
-  assert.equal(merges[0].clientOpId, sig);
-  assert.equal(r.needsAttention.length, 0);
+test("1.0.38: a pending legacy (schema 1) move / merge is QUARANTINED at drain — never replayed (no RPC)", async () => {
+  await localdb.operations.bulkAdd([
+    legacy({ operation_id: "movetable:legacy", operation_type: "move_table", payload: { from_table_id: "T-A", to_table_id: "T-B", expected_version: 5 } }),
+    legacy({ operation_id: "mergetables:legacy", operation_type: "merge_tables", payload: { primary_table_id: "T-P", source_table_ids: ["T-S1"], expected: {} } }),
+  ]);
+  const calls: string[] = [];
+  const r = await drainOffline(CTX, "reconnect", deps(calls));
+  assert.deepEqual(calls, []);
+  assert.equal(r.needsAttention.length, 2);
+  for (const id of ["movetable:legacy", "mergetables:legacy"]) {
+    const o = await getOperation(id);
+    assert.equal(o?.status, "needs_attention");
+    assert.equal(o?.last_error_code, "unknown_handler");
+  }
 });
 
-test("move drift → needs_attention (CONFLICT), never a silent move", async () => {
-  const cap = await captureMoveTableOffline({ scope: SCOPE, fromTableId: "T-A", toTableId: "T-B", expectedVersion: 5 });
-  const log: string[] = [];
-  const { deps: d } = deps(log, { moveTable: async () => { throw new Error("version_conflict: the floor changed since it was loaded"); } });
-  const r = await drainOffline(CTX, "reconnect", d);
-  assert.equal(r.needsAttention.length, 1);
-  assert.equal((await getOperation(cap.operationId))?.status, "needs_attention");
-});
-
-test("merge drift (a source already settled) → needs_attention, never a silent destructive merge", async () => {
-  const cap = await captureMergeTablesOffline({ scope: SCOPE, primaryTableId: "T-P", sourceTableIds: ["T-S1"], expected: { "T-P": 3, "T-S1": 2 }, clientOpId: "T-P|T-S1" });
-  const log: string[] = [];
-  const { deps: d } = deps(log, { mergeTables: async () => { throw new Error("a source is no longer eligible: already settled"); } });
-  const r = await drainOffline(CTX, "reconnect", d);
-  assert.equal(r.needsAttention.length, 1);
-  assert.equal((await getOperation(cap.operationId))?.status, "needs_attention");
+test("1.0.38: an operator RETRY of a parked legacy move re-quarantines it — still no RPC", async () => {
+  await localdb.operations.add(legacy({ operation_id: "movetable:old", operation_type: "move_table", status: "needs_attention", last_error_code: "move_conflict", last_error_message: "The destination table already has an open order", payload: { from_table_id: "T-A", to_table_id: "T-B", expected_version: 5 } }));
+  assert.equal(await requeueOperation("movetable:old"), true);
+  const calls: string[] = [];
+  await drainOffline(CTX, "operator-retry", deps(calls));
+  assert.deepEqual(calls, []);
+  assert.equal((await getOperation("movetable:old"))?.last_error_code, "unknown_handler");
 });

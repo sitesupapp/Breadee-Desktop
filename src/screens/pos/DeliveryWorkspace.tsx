@@ -1488,6 +1488,9 @@ export function useDeliveryWorkspace(input: {
         return orderChainFor(liveProj.orders[0]);
       },
     },
+    // 1.0.38 (D4) — local vs canonical is decided by the ONE order reference (entity map), not by the
+    // projection's legacy-row status; a local order's edit also waits on (and escalates with) its create op.
+    resolveOrderRef: itemEditOfflineScope ? (id) => orderRefFor(id, itemEditOfflineScope) : undefined,
   });
   const [addPickerOpen, setAddPickerOpen] = useState(false);
   const canEditLineModifiers = useCallback(

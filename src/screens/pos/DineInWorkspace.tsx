@@ -91,6 +91,8 @@ import {
   payTable,
   payTableGate,
   performTablePayment,
+  serverDeductsPriorPayments,
+  settleAmountDue,
   validateTableDiscount,
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
@@ -131,12 +133,15 @@ import {
   SUMMARY_ONLY_SETTLE_MESSAGE,
   shiftlessRefusal,
   tablesWithUnreflectedWork,
+  structuralHoldReason,
+  offlineSettleAmount,
   SETTLE_ATTENTION_HOLD_MESSAGE,
   refusedSettleNotice,
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
 import { captureEditOrderLineOffline } from "@/lib/offline/itemEditOffline";
+import { captureMoveTableOffline, captureMergeTablesOffline } from "@/lib/offline/tableOpOffline";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
 import type { Gate } from "@/components/ui";
@@ -384,6 +389,9 @@ export function useDineInWorkspace(input: {
   // REFUSED (table → refusal text: the bill is unpaid again and the cashier is told so).
   const [attentionSettle, setAttentionSettle] = useState<Set<string>>(new Set());
   const [refusedSettle, setRefusedSettle] = useState<Map<string, string>>(new Map());
+  // 1.0.38 — tables whose offline work has not reached / is not reflected in the map yet: an ONLINE Move /
+  // Merge of them is held (it would race the offline replay).
+  const [structuralHold, setStructuralHold] = useState<Set<string>>(new Set());
   const projScopeKey = useRef<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -393,6 +401,7 @@ export function useDineInWorkspace(input: {
       setSyncingSettle(new Set());
       setAttentionSettle(new Set());
       setRefusedSettle(new Map());
+      setStructuralHold(new Set());
       return;
     }
     const scope = input.offlineScope;
@@ -405,6 +414,7 @@ export function useDineInWorkspace(input: {
       setSyncingSettle(new Set());
       setAttentionSettle(new Set());
       setRefusedSettle(new Map());
+      setStructuralHold(new Set());
     }
     void (async () => {
       // OFFLINE: every table through the ONE operational projection (rc.9). ONLINE (rc.13 — canonical
@@ -415,6 +425,7 @@ export function useDineInWorkspace(input: {
         setSyncingSettle(work?.syncingSettle ?? new Set());
         setAttentionSettle(work?.attentionSettle ?? new Set());
         setRefusedSettle(work?.refusedSettle ?? new Map());
+        setStructuralHold(work?.structuralHold ?? new Set());
       }
       if (work && work.touched.size === 0) {
         if (live) setOpTotals(new Map());
@@ -429,6 +440,7 @@ export function useDineInWorkspace(input: {
         setSyncingSettle(new Set());
         setAttentionSettle(new Set());
         setRefusedSettle(new Map());
+        setStructuralHold(new Set());
       }
     });
     return () => {
@@ -501,27 +513,41 @@ export function useDineInWorkspace(input: {
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
   const opGates = useMemo(() => {
-    // rc.12 — Move and Merge are SERVER-COORDINATED (online only), like Close/Clear. The server re-homes
-    // the bill (orders, rounds, payments, version) atomically under the shift lock; offline the device
-    // cannot predict that result (merged order/item ids, partial-payment re-allocation), so rc.4–rc.11's
-    // offline capture showed nothing on the floor and was refused at replay (F3/F4). Offline the gate says
-    // so explicitly — never a button that silently does nothing.
-    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: false };
+    // 1.0.38 (Bugs 5/6) — SUPERSEDES the rc.12–1.0.37 "online only" rule: Move and Merge are CAPTURED
+    // offline (when the device is offline-ready) as schema-2 ops through the one operations log
+    // (lib/offline/tableOpOffline): bill-identity pins, barriers, an atomic local projection, versions
+    // only from this device's own results, the close barrier; replayed exactly-once through
+    // pos_move_table_v2 / pos_merge_tables_v4. Every unsafe case (summary-only / shift-less / cross-shift /
+    // cross-currency / adjusted / partly-paid line / part-paid online) is refused AT CAPTURE with a reason.
+    // Close/Clear stay online-only (offlineCapable applies to move/merge only — tableOpGate).
+    const common = { table: selected, hasOpenShift, online: input.online, offlineCapable: offlineProjOn };
     // Permission first (an unpermitted operator is told that, online or not), then connectivity.
-    const serverCoordinated = (permitted: Gate, kind: "move" | "merge", what: string, verb: string): Gate =>
-      permitted.allowed && !input.online
-        ? { allowed: false, reason: `${what} needs a connection — the server moves the whole bill (rounds, payments, balance) in one step. Reconnect to ${verb}.` }
+    const offlineAware = (permitted: Gate, kind: "move" | "merge"): Gate =>
+      permitted.allowed && !input.online && !offlineProjOn
+        ? {
+            allowed: false,
+            reason: input.offlineReadyMissing && input.offlineReadyMissing.length
+              ? `Offline — this device isn't ready for Dine-In (${input.offlineReadyMissing.join(", ")}).`
+              : `${kind === "move" ? "Moving a table" : "Merging tables"} needs a connection on this device.`,
+          }
         : tableOpGate({ kind, permitted, ...common });
     // rc.14 — a historical shift-less bill is refused as a Move / Merge source with the explanation
-    // (permission still first: an unpermitted operator keeps the permission reason).
+    // (permission still first: an unpermitted operator keeps the permission reason). Offline the capture
+    // itself refuses it (shiftlessCanonicalOrders) with the same rule.
     const historical = (g: Gate): Gate => (g.allowed && historicalShiftlessReason ? { allowed: false, reason: historicalShiftlessReason } : g);
+    // 1.0.38 — ONLINE, a table with unsynced / unreflected offline work is held for Move / Merge (an online
+    // restructure would race the offline replay). Offline the capture chains behind that work instead.
+    const unsynced = (g: Gate): Gate => {
+      const reason = g.allowed && input.online ? structuralHoldReason([selected?.id], structuralHold) : null;
+      return reason ? { allowed: false, reason } : g;
+    };
     return {
-      move: historical(serverCoordinated(canMoveTable(pos.access), "move", "Moving a table", "move it")),
+      move: unsynced(historical(offlineAware(canMoveTable(pos.access), "move"))),
       close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
-      merge: historical(serverCoordinated(canMergeTables(pos.access), "merge", "Merging tables", "merge them")),
+      merge: unsynced(historical(offlineAware(canMergeTables(pos.access), "merge"))),
     };
-  }, [pos.access, selected, hasOpenShift, input.online, historicalShiftlessReason]);
+  }, [pos.access, selected, hasOpenShift, input.online, offlineProjOn, input.offlineReadyMissing, historicalShiftlessReason, structuralHold]);
 
   // Phase C/D — offline capture is live when the backend is unreachable AND the device is
   // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
@@ -625,7 +651,33 @@ export function useDineInWorkspace(input: {
       if (!selected || !opGates.move.allowed) return;
       const from = selected.name;
       const to = tables.map.tables.find((t) => t.id === destinationId)?.name ?? "the new table";
-      // rc.12 — server-coordinated only (the gate refuses offline with the reason); see opGates.
+      // 1.0.38 — OFFLINE: capture the move durably (op + session re-home, one transaction) against the RAW
+      // map rows; the floor re-derives from the ONE projection at once. A refusal is shown, never a no-op.
+      if (offlineProjOn && input.offlineScope) {
+        const scope = input.offlineScope;
+        const fromRow = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
+        const toRow = tables.map.tables.find((t) => t.id === destinationId);
+        void runOp(
+          "move",
+          async () => {
+            if (!toRow) throw new Error("Choose a free table to move to.");
+            const r = await captureMoveTableOffline({ scope, from: fromRow, to: toRow, mapLoadedAt: tables.lastLoadedAt });
+            if (!r.ok) throw new Error(r.reason);
+            bumpProj();
+            setFocusedId(destinationId);
+            void tables.select(destinationId, ctx);
+            return `Moved ${from} to ${to} offline — it syncs when you reconnect.`;
+          },
+          { offline: true },
+        );
+        return;
+      }
+      // 1.0.38 — never move onto / off a table whose offline work has not synced (races its replay).
+      const held = structuralHoldReason([selected.id, destinationId], structuralHold);
+      if (held) {
+        setOpError(held);
+        return;
+      }
       void runOp(
         "move",
         async () => moveOutcomeMessage(await moveTable({ fromTableId: selected.id, toTableId: destinationId }), from, to),
@@ -633,7 +685,8 @@ export function useDineInWorkspace(input: {
         { selectAfter: destinationId },
       );
     },
-    [selected, opGates.move.allowed, tables.map.tables, runOp],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, opGates.move.allowed, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, ctx, structuralHold],
   );
 
   const confirmClose = useCallback(() => {
@@ -663,10 +716,36 @@ export function useDineInWorkspace(input: {
     (sourceTableIds: string[]) => {
       if (!selected || !opGates.merge.allowed || sourceTableIds.length === 0) return;
       const primaryName = selected.name;
+      // 1.0.38 — OFFLINE: capture the merge (only the UNPAID whole items fold into this bill; prior payments
+      // stay on their source; nothing is charged) against the RAW map rows. Refusals are shown.
+      if (offlineProjOn && input.offlineScope) {
+        const scope = input.offlineScope;
+        const primaryRow = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
+        const sourceRows = sourceTableIds.map((id) => tables.map.tables.find((t) => t.id === id)).filter((t): t is TableSummary => t != null);
+        void runOp(
+          "merge",
+          async () => {
+            if (sourceRows.length !== sourceTableIds.length) throw new Error("A selected table is no longer on this floor. Reopen Merge.");
+            const r = await captureMergeTablesOffline({ scope, primary: primaryRow, sources: sourceRows, mapLoadedAt: tables.lastLoadedAt });
+            if (!r.ok) throw new Error(r.reason);
+            bumpProj();
+            const due = r.outstanding != null && selected.currency ? ` Outstanding ${formatMoney(r.outstanding, selected.currency)}.` : "";
+            return `Merged ${sourceRows.length} table${sourceRows.length === 1 ? "" : "s"} into ${primaryName} offline — it syncs when you reconnect.${due}`;
+          },
+          { offline: true },
+        );
+        return;
+      }
       // rc.11 — the SAME projected rows the picker offered (a bill settled locally is not a source).
       const sources = sourceTableIds
         .map((id) => displayMap.tables.find((t) => t.id === id))
         .filter((t): t is TableSummary => t != null);
+      // 1.0.38 — never merge a table whose offline work has not synced (races its replay).
+      const held = structuralHoldReason([selected.id, ...sourceTableIds], structuralHold);
+      if (held) {
+        setOpError(held);
+        return;
+      }
       const expected = buildMergeExpected(selected, sources);
       const sig = mergeAttemptSignature(selected.id, sourceTableIds);
       // rc.12 — server-coordinated only (the gate refuses offline with the reason). The rc.4–rc.11
@@ -685,7 +764,8 @@ export function useDineInWorkspace(input: {
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
-    [selected, opGates.merge.allowed, displayMap.tables, runOp],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -726,7 +806,8 @@ export function useDineInWorkspace(input: {
               seats,
               currency: input.currency,
               baseOrderVersion: raw?.pos_entity_version ?? null,
-              afterSettleOpId: proj?.settlingOpId ?? null,
+              // 1.0.38 — or after the offline move / merge that took the previous bill away.
+              afterSettleOpId: proj?.freedByOpId ?? proj?.settlingOpId ?? null,
             });
           }
           setSeatOpen(false);
@@ -991,7 +1072,7 @@ export function useDineInWorkspace(input: {
             baseOrderVersion: raw.pos_entity_version ?? null,
             canonicalOrderId,
             // rc.10 — a table reused after a local settle: the new bill's open replays after it.
-            afterSettleOpId: canonicalOrderId ? null : proj.settlingOpId,
+            afterSettleOpId: canonicalOrderId ? null : (proj.freedByOpId ?? proj.settlingOpId),
           });
         }
         // 1.0.38 — STAGE (replace the unsent lines), never append: a retried Send after a failure that
@@ -1130,7 +1211,7 @@ export function useDineInWorkspace(input: {
    */
   const offlineSettleTarget = useCallback(
     async (table: TableSummary): Promise<
-      | { ok: true; sessionId: string | null; table: CanonicalTableTarget | undefined; deps: string[]; covers: { orderIds: string[]; summary: boolean } }
+      | { ok: true; sessionId: string | null; table: CanonicalTableTarget | undefined; deps: string[]; covers: { orderIds: string[]; summary: boolean }; exactAmount: number | null }
       | { ok: false; reason: string }
     > => {
       if (!input.offlineScope) return { ok: false, reason: "This table isn't available offline. Reconnect to settle it." };
@@ -1139,9 +1220,10 @@ export function useDineInWorkspace(input: {
       // rc.10 — a bill already settled offline is CLOSED locally (absent from the projection), so a
       // second settle of it is impossible here; only the table's CURRENT active bill can be settled.
       if (p.bill.orders.length === 0) return { ok: false, reason: "This table has no open bill to settle." };
-      if (p.paidPending > 0 || p.collected > 0) {
-        return { ok: false, reason: "Part of this bill is already paid. Settle the remaining items with Split, or reconnect." };
-      }
+      // 1.0.38 (Bug 9) — a SERVER-held part-payment (collected) is settleable only once the server deducts
+      // it (R = T − P, serverDeductsPriorPayments); a locally captured, unsynced leg never is (R unknown).
+      const amount = offlineSettleAmount(p, serverDeductsPriorPayments());
+      if (!amount.ok) return { ok: false, reason: amount.reason };
       const draft = await getDineDraftForTable(input.offlineScope, table.id);
       // rc.13 — LOCAL SUCCESS RULE: a bill the server holds WITHOUT a shift can never be settled
       // (_pos_lock_open_shift refuses it), so it is never shown as paid locally (the rc.12 native
@@ -1167,6 +1249,12 @@ export function useDineInWorkspace(input: {
         deps: p.pendingMutationOpIds,
         // EXACTLY the bill on screen — the projection closes this and nothing else.
         covers: { orderIds: canonicalIds, summary: p.summaryOnly },
+        // 1.0.38 (S5) — the amount due is known EXACTLY only for a fully-canonical bill with no local delta
+        // (no unsynced round / edit / leg / move / merge): then it is the server's own total. Otherwise the
+        // pin is omitted (a locally-priced figure is never asserted to the server).
+        // 1.0.38 (Bug 9) — it is the REMAINING obligation R = T − P (prior paid splits deducted), the amount
+        // the S4 server charges / books; equal to T for an unpaid bill (offlineSettleAmount).
+        exactAmount: amount.exactAmount,
       };
     },
     [input.offlineScope, input.currency, tables.map],
@@ -1338,7 +1426,8 @@ export function useDineInWorkspace(input: {
             tableName: selected.name,
             orderNumber: st.order_number,
             // Replay only after the lines it pays for exist (rounds) and every earlier edit of this bill.
-            dependencyIds: [...sessionDeps, ...po.bumpOps, ...creators],
+            // 1.0.38 — and after the offline move / merge that brought this bill here (barrier).
+            dependencyIds: [...sessionDeps, ...po.bumpOps, ...creators, ...p.structuralOpIds],
           });
           if (!cap.ok) {
             setSplitError(cap.reason);
@@ -1784,6 +1873,7 @@ export function useDineInWorkspace(input: {
             cashAmountUsd,
             extraDependencyIds: target.deps,
             covers: target.covers,
+            expectedAmount: offlineDiscount.amount > 0 ? null : target.exactAmount,
           });
           setPayOpen(false);
           toast.push({
@@ -1953,6 +2043,8 @@ export function useDineInWorkspace(input: {
             discount: offDiscount,
             extraDependencyIds: target.deps,
             covers: target.covers,
+            // 1.0.38 (Bug 9) — R, frozen at capture (only when exact; never with a discount).
+            expectedAmount: offDiscount ? null : target.exactAmount,
           });
           setPayOpen(false);
           toast.push({
@@ -2427,7 +2519,9 @@ export function useDineInWorkspace(input: {
         /* OFFLINE: the payable total MUST come from the same operational bill the table panel shows
            (settleBill = offline dineDraft projection when offline, else server bill) — NOT the
            server-only tables.bill, which is null offline and rendered the total as 0. */
-        subtotal={settleBill?.subtotal ?? 0}
+        /* 1.0.38 (Bug 9) — the amount due is R = T − P for a part-paid bill once the server deducts prior
+           payments (settleAmountDue; T otherwise — the F1 gate then refuses a part-paid bill anyway). */
+        subtotal={settleAmountDue(settleBill?.subtotal ?? 0, offlineCapture ? offlineProj?.collected : selected?.collected)}
         primaryCurrency={settleBill?.currency ?? input.currency}
         rate={input.rate}
         discountGate={pos.gates.applyDiscounts}
@@ -2487,7 +2581,9 @@ export function useDineInWorkspace(input: {
       <MergeTablesDialog
         open={opDialog === "merge"}
         primary={selected}
-        sources={mergeableSources(displayMap.tables, selected)}
+        /* 1.0.38 — online, a table with unsynced offline work is not offered as a source (it would race
+           its replay); confirmMerge re-checks the same hold. */
+        sources={mergeableSources(displayMap.tables, selected).filter((t) => !input.online || !structuralHold.has(t.id))}
         busy={opBusy}
         gate={opGates.merge}
         error={opError}

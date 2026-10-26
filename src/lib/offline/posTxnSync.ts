@@ -208,6 +208,74 @@ export type OpenTablePayload = {
   expected_version?: number | null;
 };
 
+/** 1.0.38 — the exact pos_move_table_v2 request (prod_1038 contract §5.1). Optional keys are OMITTED
+ *  (never sent as null) when unknown. */
+export type MoveTableV2Request = {
+  client_op_id: string;
+  from_table_id: string;
+  to_table_id: string;
+  expected_order_ids: string[];
+  expected_paid_settlements?: Record<string, number>;
+  expected_from_version?: number;
+  expected_to_version?: number;
+};
+export type MoveTableV2Result = {
+  ok: boolean;
+  orders_moved: number;
+  order_ids: string[];
+  table_versions: Record<string, number>;
+  idempotent: boolean;
+};
+
+/** 1.0.38 — the exact pos_merge_tables_v4 request (prod_1038 contract §5.2). */
+export type MergeTablesV4Request = {
+  client_op_id: string;
+  primary_table_id: string;
+  source_table_ids: string[];
+  expected_orders: Record<string, string>;
+  expected_paid_settlements?: Record<string, number>;
+  expected_versions?: Record<string, number>;
+};
+export type MergeTablesV4Result = {
+  ok: boolean;
+  merge_id: string;
+  primary_order_id: string;
+  sources_merged: number;
+  /** The primary ORDER version (never a table version — use table_versions for table CAS chaining). */
+  pos_entity_version: number | null;
+  table_versions: Record<string, number>;
+  idempotent: boolean;
+};
+
+/** 1.0.38 — the structured business code of a refusal: pos_op_error puts it in `details`
+ *  ({"pos_error_code": CODE}); some carry it in the message. Null when none. */
+export function posErrorCode(e: unknown): string | null {
+  if (!e || typeof e !== "object") return null;
+  const details = (e as { details?: unknown }).details;
+  if (typeof details === "string" && details.includes("pos_error_code")) {
+    try {
+      const j = JSON.parse(details) as { pos_error_code?: unknown };
+      if (typeof j.pos_error_code === "string" && j.pos_error_code !== "") return j.pos_error_code;
+    } catch {
+      const m = /"pos_error_code"\s*:\s*"([A-Z0-9_]+)"/.exec(details);
+      if (m) return m[1];
+    }
+  }
+  const m = /\b((?:MOVE|MERGE|PAY|ON_ACCOUNT)_[A-Z0-9_]+|VERSION_CONFLICT|ALREADY_SETTLED|ALREADY_PAID|PAYMENT_RESIDUE|SPLIT_DISCOUNT_UNSUPPORTED|IDEMPOTENCY_PAYLOAD_MISMATCH|CROSS_ACTOR_REPLAY_REJECTED|CROSS_OU_REJECTED|OU_ACCESS_DENIED|CROSS_BRANCH_REPLAY_REJECTED|UNSUPPORTED_STATE)\b/.exec(errMsg(e));
+  return m ? m[1] : null;
+}
+
+const numMap = (v: unknown): Record<string, number> => {
+  const out: Record<string, number> = {};
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      const n = Number(x);
+      if (x != null && Number.isFinite(n)) out[k] = n;
+    }
+  }
+  return out;
+};
+
 export type PosTxnSyncDeps = {
   submit: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string }>;
   pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown> }) => Promise<unknown>;
@@ -233,13 +301,19 @@ export type PosTxnSyncDeps = {
     expectedRefundUsd: number | null;
   }) => Promise<{ order_id: string; status: string; refunded: boolean; refund_usd: number; refund_id: string | null; idempotent: boolean }>;
   /** Phase-D: settle a dine-in TABLE bill (pos_pay_table). client_op_id → exactly-once. The
-   *  method is any ACTIVE catalog key (cash or a dynamic tender); the server derives the amount. */
+   *  method is any ACTIVE catalog key (cash or a dynamic tender); the server derives the amount.
+   *  1.0.38 (S5 binding) — `expectedOrderIds` pins the EXACT bill the settle was captured for (set
+   *  equality with the table's open orders, under lock): a newer bill on the same table is never paid by
+   *  a re-opened parked settle (PAY_BILL_CHANGED; ALREADY_SETTLED when every pinned order is already paid).
+   *  `expectedAmount` (order currency, only when known exactly) → PAY_AMOUNT_CHANGED on drift. */
   payTable: (args: {
     tableId: string;
     method: string;
     currency: CurrencyCode;
     discount?: { discount_type?: string; discount_value?: number };
     clientOpId: string;
+    expectedOrderIds?: string[] | null;
+    expectedAmount?: number | null;
   }) => Promise<{ ok: boolean; amount: number; idempotent: boolean; pos_entity_version?: number | null }>;
   /** Phase-D: settle a single ORDER (pos_pay_order) offline. client_op_id → exactly-once;
    *  expectedVersion pins the order when known. */
@@ -251,7 +325,10 @@ export type PosTxnSyncDeps = {
     clientOpId: string;
     expectedVersion: number | null;
   }) => Promise<{ order_id: string; paid: boolean; amount: number; idempotent: boolean }>;
-  /** Phase-D: put a dine-in TABLE bill on a customer's account (pos_complete_table_on_account). */
+  /** Phase-D: put a dine-in TABLE bill on a customer's account (pos_complete_table_on_account).
+   *  1.0.38 (Bug 9 / S2) — the same bill binding as pay_table: `expectedOrderIds` (set equality with the
+   *  table's open orders → ON_ACCOUNT_BILL_CHANGED) and `expectedAmount` = R = T − P in order currency, only
+   *  when known exactly (→ ON_ACCOUNT_AMOUNT_CHANGED on drift). Omitted (never null) when unknown. */
   onAccountTable: (args: {
     tableId: string;
     customerId: string;
@@ -259,8 +336,10 @@ export type PosTxnSyncDeps = {
     method: string;
     discount?: { discount_type?: string; discount_value?: number };
     clientOpId: string;
+    expectedOrderIds?: string[] | null;
+    expectedAmount?: number | null;
   }) => Promise<{ ok: boolean; idempotent: boolean }>;
-  /** Phase-D: put a single ORDER on a customer's account (pos_complete_on_account). */
+  /** Phase-D: put a single ORDER on a customer's account (pos_complete_on_account). 1.0.38 — same pins. */
   onAccountOrder: (args: {
     orderId: string;
     customerId: string;
@@ -268,6 +347,8 @@ export type PosTxnSyncDeps = {
     method: string;
     discount?: { discount_type?: string; discount_value?: number };
     clientOpId: string;
+    expectedOrderIds?: string[] | null;
+    expectedAmount?: number | null;
   }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-D: canonically END a shift (pos_end_shift) — replays LAST, after every shift op. */
   endShiftOp: (args: {
@@ -322,12 +403,13 @@ export type PosTxnSyncDeps = {
   /** Phase-F (rc.8): edit an order's NOTE (pos_edit_order). Payload is the exact p_payload
    *  (order_id + note + client_op_id). Replay-safe; every field is a SET so replay converges. */
   editOrder: (args: { payload: Record<string, unknown> }) => Promise<{ ok: boolean; idempotent: boolean }>;
-  /** Phase-E: move a table's open bill to another table (pos_move_table). client_op_id → exactly-once;
-   *  expectedVersion is the CAS on the from-table. */
-  moveTable: (args: { fromTableId: string; toTableId: string; expectedVersion: number | null; clientOpId: string }) => Promise<{ ok: boolean; orders_moved: number; idempotent: boolean }>;
-  /** Phase-E: merge source table bills into a primary (pos_merge_tables_v3). client_op_id →
-   *  exactly-once; `expected` is the per-table version-map CAS. */
-  mergeTables: (args: { primaryTableId: string; sourceTableIds: string[]; expected: Record<string, number>; clientOpId: string }) => Promise<{ ok: boolean; merge_id: string; sources_merged: number; idempotent: boolean }>;
+  /** 1.0.38 (Bugs 5/6) — offline MOVE TABLE replay (pos_move_table_v2, contract §5.1). `payload` is the
+   *  FROZEN request (client_op_id + from/to + bill pins + optional versions), sent byte-identically on
+   *  every retry so the server fingerprint is stable and a lost response replays the cached result. */
+  moveTableV2: (args: { payload: MoveTableV2Request }) => Promise<MoveTableV2Result>;
+  /** 1.0.38 (Bugs 5/6) — offline MERGE TABLES replay (pos_merge_tables_v4, contract §5.2). Same frozen-
+   *  request rule. `table_versions` in the result chains this device's next table CAS. */
+  mergeTablesV4: (args: { payload: MergeTablesV4Request }) => Promise<MergeTablesV4Result>;
   /** Phase-F: collect a payment against ONE on-account order (pos_receivable_collect). Exactly-once
    *  via the server's pos_operation_idempotency on client_op_id; the server re-derives the
    *  outstanding balance under a FOR UPDATE lock and refuses over-collection → a stale/over balance
@@ -410,6 +492,10 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
     if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
+    // 1.0.38 (S5) — the bill-identity / amount pins; omitted (never null) when unknown, so an older
+    // caller's request is unchanged.
+    if (args.expectedOrderIds && args.expectedOrderIds.length > 0) payload.expected_order_ids = args.expectedOrderIds;
+    if (args.expectedAmount != null && Number.isFinite(args.expectedAmount)) payload.expected_amount = args.expectedAmount;
     const row = (await callPosRpc("pos_pay_table", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent, pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
@@ -434,6 +520,8 @@ export const defaultDeps: PosTxnSyncDeps = {
     const payload: Record<string, unknown> = { table_id: args.tableId, customer_id: args.customerId, amount: args.amount, method: args.method, client_op_id: args.clientOpId };
     if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
+    if (args.expectedOrderIds && args.expectedOrderIds.length > 0) payload.expected_order_ids = args.expectedOrderIds;
+    if (args.expectedAmount != null && Number.isFinite(args.expectedAmount)) payload.expected_amount = args.expectedAmount;
     const row = (await callPosRpc("pos_complete_table_on_account", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: true, idempotent };
@@ -443,6 +531,8 @@ export const defaultDeps: PosTxnSyncDeps = {
     const payload: Record<string, unknown> = { order_id: args.orderId, customer_id: args.customerId, amount: args.amount, method: args.method, client_op_id: args.clientOpId };
     if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
+    if (args.expectedOrderIds && args.expectedOrderIds.length > 0) payload.expected_order_ids = args.expectedOrderIds;
+    if (args.expectedAmount != null && Number.isFinite(args.expectedAmount)) payload.expected_amount = args.expectedAmount;
     const row = (await callPosRpc("pos_complete_on_account", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: true, idempotent };
@@ -567,29 +657,34 @@ export const defaultDeps: PosTxnSyncDeps = {
     const idempotent = row.idempotent === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok !== false, idempotent };
   },
-  moveTable: async (args) => {
+  moveTableV2: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");
-    const row = (await callPosRpc("pos_move_table", {
-      p_from: args.fromTableId,
-      p_to: args.toTableId,
-      p_client_op_id: args.clientOpId,
-      ...(args.expectedVersion == null ? {} : { p_expected_version: args.expectedVersion }),
-    })) as Record<string, unknown>;
+    // REQUEST (rpc.ts, not owned here): add "pos_move_table_v2" to PosRpcName. Until then the name is
+    // asserted at this one call site; the wire call is identical.
+    const row = (await callPosRpc("pos_move_table_v2" as Parameters<typeof callPosRpc>[0], { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
-    return { ok: row.ok !== false, orders_moved: row.orders_moved == null ? 0 : Number(row.orders_moved), idempotent };
+    return {
+      ok: row.ok !== false,
+      orders_moved: row.orders_moved == null ? 0 : Number(row.orders_moved),
+      order_ids: Array.isArray(row.order_ids) ? (row.order_ids as unknown[]).map(String) : [],
+      table_versions: numMap(row.table_versions),
+      idempotent,
+    };
   },
-  mergeTables: async (args) => {
+  mergeTablesV4: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");
-    const row = (await callPosRpc("pos_merge_tables_v3", {
-      p_payload: {
-        primary_table_id: args.primaryTableId,
-        source_table_ids: args.sourceTableIds,
-        client_op_id: args.clientOpId,
-        ...(Object.keys(args.expected).length > 0 ? { expected: args.expected } : {}),
-      },
-    })) as Record<string, unknown>;
+    // REQUEST (rpc.ts): add "pos_merge_tables_v4" to PosRpcName (see moveTableV2).
+    const row = (await callPosRpc("pos_merge_tables_v4" as Parameters<typeof callPosRpc>[0], { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
-    return { ok: row.ok !== false, merge_id: String(row.merge_id ?? ""), sources_merged: row.sources_merged == null ? 0 : Number(row.sources_merged), idempotent };
+    return {
+      ok: row.ok !== false,
+      merge_id: String(row.merge_id ?? ""),
+      primary_order_id: String(row.primary_order_id ?? ""),
+      sources_merged: row.sources_merged == null ? 0 : Number(row.sources_merged),
+      pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version),
+      table_versions: numMap(row.table_versions),
+      idempotent,
+    };
   },
   receivableCollect: async (args) => {
     const { callPosRpc } = await import("@/lib/pos/rpc");

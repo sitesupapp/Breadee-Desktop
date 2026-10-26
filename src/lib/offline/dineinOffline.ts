@@ -20,7 +20,7 @@ import {
   normalizeCustomerRef,
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
-import { settleStillCovers } from "@/lib/offline/operationalProjection";
+import { settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
 import type { CartLine, SelectedModifier } from "@/types/pos";
@@ -367,7 +367,9 @@ export async function sendRoundOffline(
         local_entity_id: isFirst ? d.local_session_id : roundLocalId,
         canonical_entity_id: null,
         // Strict op-completion chain: open -> R1 -> R2 -> ... (acyclic; a failed prereq blocks).
-        dependency_ids: [prevRoundOpId],
+        // 1.0.38 — plus the offline move / merge that brought this bill to its table (barrier): the round
+        // targets the table the bill is on AFTER it (submit.table_id), so it must never replay before it.
+        dependency_ids: Array.from(new Set([prevRoundOpId, ...(d.structural_op_id ? [d.structural_op_id] : [])])),
         // R>=2 depends on the session's canonical order (resolved by R1); an offline-opened shift
         // must resolve before any round (the order is created ON that shift).
         depends_on_local_entities: [...(isFirst ? [] : [d.local_session_id]), ...(d.shift_local ? [d.shift_local] : [])],
@@ -464,6 +466,9 @@ export async function settleTableOffline(input: {
    *  canonical SUMMARY (no cached lines) is part of it. Recorded on the op so the operational projection
    *  can close exactly that bill locally (the table becomes reusable) without guessing. */
   covers?: { orderIds: string[]; summary: boolean };
+  /** 1.0.38 (S5) — the amount due in ORDER currency, only when it is known EXACTLY (a fully-canonical bill
+   *  with no local delta and no discount). Replayed as pos_pay_table expected_amount; omitted otherwise. */
+  expectedAmount?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
@@ -495,7 +500,7 @@ export async function settleTableOffline(input: {
           cashier_user_id: d.cashier_user_id,
         }
       : canonicalTableScope(input.table as CanonicalTableTarget);
-    const sessionDeps = d ? [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)] : [];
+    const sessionDeps = d ? sessionBarrier(d) : [];
     const op: OfflineOperation = {
       operation_id: operationId,
       operation_type: "pay_table",
@@ -516,7 +521,9 @@ export async function settleTableOffline(input: {
         table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
         ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
-        // Projection-only metadata (the handler sends table_id/method/currency/discount only).
+        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) && !input.discount?.discount_type ? { expected_amount: input.expectedAmount } : {}),
+        // What this settle covers: projection metadata, AND (1.0.38 S5) the bill pins the handler resolves
+        // to expected_order_ids at replay — a re-opened settle can never pay a newer bill on the table.
         covers: settleCovers(d, input.covers, input.table),
       },
       status: "pending",
@@ -532,6 +539,12 @@ export async function settleTableOffline(input: {
     if (d) await markDraftSettled(d, operationId);
     return { operationId, clientOpId, alreadyCaptured: false };
   });
+}
+
+/** What any later capture against a session's bill must replay AFTER: its open, every round and — 1.0.38 —
+ *  the offline move / merge that brought the bill to its table (a carrier session's open IS that op). */
+export function sessionBarrier(d: DineDraft): string[] {
+  return Array.from(new Set([d.open_operation_id, ...d.rounds.map((r) => r.operation_id), ...(d.structural_op_id ? [d.structural_op_id] : [])]));
 }
 
 /** The projection-only record of exactly which bill a settle covers. */
@@ -572,6 +585,9 @@ export async function tableOnAccountOffline(input: {
   extraDependencyIds?: string[];
   /** rc.10 — the exact bill this on-account closes (see settleTableOffline). */
   covers?: { orderIds: string[]; summary: boolean };
+  /** 1.0.38 (Bug 9) — the remaining obligation R = T − P (order currency), only when it is known EXACTLY (a
+   *  fully-canonical bill with no local delta and no discount). Replayed as expected_amount; omitted otherwise. */
+  expectedAmount?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   // rc.10 — an offline-created customer travels as customer_local (waits for + remaps to canonical).
   input = { ...input, ...(await normalizeCustomerRef(input.customerId, input.customerLocal)) };
@@ -598,7 +614,7 @@ export async function tableOnAccountOffline(input: {
     const tableId = d ? d.table_id : (input.table as CanonicalTableTarget).tableId;
     const tableName = d ? d.table_name : (input.table as CanonicalTableTarget).tableName;
     const dependsLocal: string[] = input.customerLocal ? [input.customerLocal] : [];
-    const sessionDeps = d ? [d.open_operation_id, ...d.rounds.map((r) => r.operation_id)] : [];
+    const sessionDeps = d ? sessionBarrier(d) : [];
     const op: OfflineOperation = {
       operation_id: operationId,
       operation_type: "on_account_table",
@@ -619,6 +635,8 @@ export async function tableOnAccountOffline(input: {
         method: input.method,
         table_name: tableName,
         ...(input.discount ? { discount: input.discount } : {}),
+        ...(input.expectedAmount != null && Number.isFinite(input.expectedAmount) && !input.discount?.discount_type ? { expected_amount: input.expectedAmount } : {}),
+        // Projection metadata AND (1.0.38, Bug 9) the bill pins the handler resolves to expected_order_ids.
         covers: settleCovers(d, input.covers, input.table),
       },
       status: "pending",
@@ -719,7 +737,7 @@ export async function splitDineDraftOffline(input: {
       local_entity_id: null,
       canonical_entity_id: null,
       // Needs the order + its items on the server first (open + every round), plus strict leg order.
-      dependency_ids: [d.open_operation_id, ...d.rounds.map((r) => r.operation_id), ...(prevLeg ? [prevLeg] : [])],
+      dependency_ids: Array.from(new Set([...sessionBarrier(d), ...(prevLeg ? [prevLeg] : [])])),
       depends_on_local_entities: [d.local_session_id],
       payload: {
         order_id: null,
@@ -849,7 +867,57 @@ export async function findSettleOpForSession(sessionId: string): Promise<Offline
 // conflict (the op's needs_attention is the operator-facing signal via Sync History).
 // ---------------------------------------------------------------------------
 
+/**
+ * 1.0.38 (Bugs 5/6) — a session follows the AUTHORITATIVE fate of the offline move / merge that re-homed
+ * it. Refused by the server (or withdrawn) → the bill is back where it was: a moved session returns to
+ * its original table, a merged-away source session is the active bill of its table again, a session the
+ * op itself created (a canonical-only bill had none) and that holds no round is retired. Valid again
+ * (operator retry succeeded / awaiting recovery) → re-homed as captured. Nothing is re-sent here; the
+ * refused op stays in needs_attention for the operator (never silently re-applied). Never puts two open
+ * sessions on one table. ONE Dexie transaction.
+ */
+export async function reconcileStructuralDrafts(): Promise<void> {
+  await localdb.transaction("rw", localdb.dineDrafts, localdb.operations, async () => {
+    const drafts = (await localdb.dineDrafts.toArray()).filter((d) => d.structural_op_id || d.merged_op_id);
+    const undone = (o: OfflineOperation | undefined) => !o || o.status === "cancelled" || structuralRefusedByServer(o);
+    const openOn = async (d: DineDraft, tableId: string) =>
+      localdb.dineDrafts
+        .where("tenant_id")
+        .equals(d.tenant_id)
+        .filter((x) => x.local_session_id !== d.local_session_id && x.status === "open" && x.table_id === tableId && (x.branch_id ?? null) === (d.branch_id ?? null) && x.device_id === d.device_id && x.cashier_user_id === d.cashier_user_id)
+        .count();
+    const now = new Date().toISOString();
+    for (const d of drafts) {
+      // A merged-away SOURCE session.
+      if (d.merged_op_id && (d.status === "merged" || d.status === "open")) {
+        const m = await localdb.operations.get(d.merged_op_id);
+        const want = undone(m) ? "open" : "merged";
+        if (want !== d.status && (want === "merged" || (await openOn(d, d.table_id)) === 0)) {
+          await localdb.dineDrafts.update(d.local_session_id, { status: want, updated_at: now });
+        }
+        continue;
+      }
+      if (d.status !== "open" || !d.structural_op_id) continue;
+      const s = await localdb.operations.get(d.structural_op_id);
+      if (!s) continue;
+      const refused = undone(s);
+      // A session CREATED by the op (carrier) with nothing sent on it: retired when the op is undone.
+      if (refused && d.carrier && d.rounds.length === 0) {
+        await localdb.dineDrafts.update(d.local_session_id, { status: "closed", updated_at: now });
+        continue;
+      }
+      if (s.operation_type !== "move_table") continue;
+      const p = (s.payload ?? {}) as { from_table_id?: string; to_table_id?: string; from_table_name?: string; to_table_name?: string };
+      const target = refused ? p.from_table_id : p.to_table_id;
+      const name = refused ? p.from_table_name : p.to_table_name;
+      if (!target || target === d.table_id || (await openOn(d, target)) > 0) continue;
+      await localdb.dineDrafts.update(d.local_session_id, { table_id: target, table_name: name ?? d.table_name, updated_at: now });
+    }
+  });
+}
+
 export async function reconcileDineDraftsFromOperations(): Promise<void> {
+  await reconcileStructuralDrafts();
   // rc.13 — a session closed locally by a settle the SERVER REFUSED (money not applied) is the table's
   // active bill again (SETTLEMENT_CONFLICT) — unless a newer session is already open on that table (that
   // one stays the active local session; the refused settle stays visible in the Sync Center for review).

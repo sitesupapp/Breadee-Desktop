@@ -44,10 +44,17 @@ const END_SHIFT_OP_PREFIX = "endshift:";
 /**
  * rc.12 — the operation types a canonical shift CLOSE actually depends on: everything that creates,
  * changes or settles money / orders of the shift (pos_end_shift refuses open orders and computes the
- * expected drawer from server payments). Customer records, table moves/merges, delivery logistics and
- * order notes never change what the close counts, so they never hold the close hostage.
+ * expected drawer from server payments). Customer records, delivery logistics and order notes never
+ * change what the close counts, so they never hold the close hostage.
+ * 1.0.38 (Bugs 5/6) — an offline Move / Merge (schema 2) IS close-relevant: a merge completes a part-paid
+ * source, voids a clean one and re-homes the remaining obligation onto the primary under the shift lock
+ * (MERGE_SHIFT_CLOSED after the close), and the bills it re-homes are what the close counts. It must
+ * replay BEFORE end_shift. The quarantined rc.4–rc.11 (schema 1) ones never reach the server — see
+ * `isCloseRelevant` — so a parked legacy one still never holds the close.
  */
 export const CLOSE_RELEVANT_TYPES: ReadonlySet<string> = new Set([
+  "move_table",
+  "merge_tables",
   "open_shift",
   "takeaway_sale",
   "dinein_open_table",
@@ -78,8 +85,17 @@ export function closeEffectiveDependencies(op: OfflineOperation, byId: Map<strin
   return op.dependency_ids.filter((id) => {
     const d = byId.get(id);
     if (!d) return true;
-    return d.status !== "cancelled" && CLOSE_RELEVANT_TYPES.has(String(d.operation_type));
+    return d.status !== "cancelled" && isCloseRelevant(d);
   });
+}
+
+/** 1.0.38 — close-relevant by type, EXCEPT a legacy (schema 1, rc.4–rc.11) move / merge: those are
+ *  quarantined (no handler; they never reach the server), so they can never change what the close counts. */
+export function isCloseRelevant(o: OfflineOperation): boolean {
+  const t = String(o.operation_type);
+  if (!CLOSE_RELEVANT_TYPES.has(t)) return false;
+  if ((t === "move_table" || t === "merge_tables") && o.schema_version < 2) return false;
+  return true;
 }
 
 /**
@@ -142,8 +158,8 @@ export async function captureEndShiftOffline(input: {
       .filter(
         (o) =>
           o.operation_type !== "end_shift" &&
-          // rc.12 — only work the canonical close depends on (see CLOSE_RELEVANT_TYPES).
-          CLOSE_RELEVANT_TYPES.has(String(o.operation_type)) &&
+          // rc.12 — only work the canonical close depends on (see CLOSE_RELEVANT_TYPES / isCloseRelevant).
+          isCloseRelevant(o) &&
           o.status !== "cancelled" &&
           o.status !== "synced" &&
           inScope(o, input.scope) &&

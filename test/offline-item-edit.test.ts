@@ -93,7 +93,9 @@ test("UI source: the hook branches to offline capture (rc.9: re-derives the proj
   assert.match(h, /const offlineCapable = !online && input\.offlineReady === true && input\.offlineScope != null;/);
   // offline: submit_ok, then (rc.9) ONLY the offline-aware projection reload — never a server re-read.
   assert.match(h, /if \(offlineCapable\)[\s\S]{0,260}dispatch\(\{ t: "submit_ok", key \}\);[\s\S]{0,260}if \(input\.offlinePlan\) await reload\(\)\.catch\(\(\) => undefined\);[\s\S]{0,40}return;/, "offline: submit_ok + projection refresh");
-  assert.match(h, /if \(offlineCapable && offlineScope && t\) \{[\s\S]{0,400}chain: \{ targetRef: t\.ref, versionAfterOp: t\.versionAfterOp, dependencyIds: t\.dependencyIds \}/, "projection target + version chain");
+  // 1.0.38 (WS-F, D4) — the projection target is re-pointed at the ONE order reference (withRef) first.
+  assert.match(h, /if \(offlineCapable && offlineScope && t\) \{\s*const r = await withRef\(t\);[\s\S]{0,400}chain: \{ targetRef: r\.ref, versionAfterOp: r\.versionAfterOp, dependencyIds: r\.dependencyIds \}/, "projection target + version chain");
+  assert.match(srcOf("src/screens/pos/DeliveryWorkspace.tsx"), /resolveOrderRef: itemEditOfflineScope \? \(id\) => orderRefFor\(id, itemEditOfflineScope\) : undefined,/, "D4: the ONE order reference");
   assert.match(h, /if \(offlineCapable && offlineScope\) await captureEditOrderLineOffline\(/, "line edit captures offline");
   assert.match(h, /if \(offlineCapable && offlineScope\) await captureAddOrderItemsOffline\(/, "add items captures offline");
   assert.match(h, /else await editOrderLine\(payload\);/, "online editOrderLine preserved");
