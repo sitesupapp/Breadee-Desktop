@@ -96,6 +96,22 @@ jobs:
           VITE_BUILD_SHA: ${{ github.sha }}
           VITE_BUILD_RUN: ${{ github.run_id }}
           VITE_RC_DIAGNOSTICS: "1"
+          # 1.0.38 staging acceptance: the 1.0.38 server contracts are live on STAGING
+          # (remainder settlement R = T - P, move_v2 / merge_v4, bill pins).
+          VITE_SERVER_1038_CONTRACTS: "1"
+
+      # 5b. Prove the bundle targets STAGING (never production) and carries the 1.0.38
+      #     contracts switch ON (the compiled constant sits right after PartPaidBillError).
+      - name: Verify bundle backend + 1.0.38 contracts flag
+        shell: bash
+        env:
+          STAGING_REF: azjxprewycygsocusxjn
+          PRODUCTION_REF: cltlqfqormkhppmbvyrv
+        run: |
+          grep -rlq "$STAGING_REF" dist/assets || { echo "::error::bundle does not reference the STAGING project"; exit 1; }
+          if grep -rlq "$PRODUCTION_REF" dist/assets; then echo "::error::bundle references the PRODUCTION project"; exit 1; fi
+          node -e "const fs=require('fs');const p='dist/assets';let ok=false;for(const f of fs.readdirSync(p).filter(x=>x.endsWith('.js'))){const s=fs.readFileSync(p+'/'+f,'utf8');const i=s.indexOf('this.name=\"PartPaidBillError\"');if(i>=0&&/=\"1\"\.trim\(\)===\"1\"/.test(s.slice(i,i+600)))ok=true}if(!ok){console.error('1.0.38 contracts flag NOT enabled in the bundle');process.exit(1)}console.log('1.0.38 contracts flag: ON')"
+          echo "Bundle backend: STAGING ($STAGING_REF); production ref absent."
 
       # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
@@ -113,8 +129,11 @@ jobs:
       #    tauri:build re-runs `npm run build` (beforeBuildCommand), so the same
       #    STAGING Supabase env must be present here too, or the packaged app
       #    ships a blank window. Secrets only — never a committed .env.
+      #    The staging overlay gives the app its OWN identity ("Breadee Staging",
+      #    app.breadee.desktop.staging1038, breadee-staging.exe) so installing it can never
+      #    overwrite or stop a real production "Breadee" install or touch its data folder.
       - name: Build Tauri installer
-        run: npm run tauri:build
+        run: npm run tauri:build -- --config src-tauri/tauri.staging.conf.json
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
@@ -125,6 +144,19 @@ jobs:
           VITE_BUILD_SHA: ${{ github.sha }}
           VITE_BUILD_RUN: ${{ github.run_id }}
           VITE_RC_DIAGNOSTICS: "1"
+          VITE_SERVER_1038_CONTRACTS: "1"
+
+      # 8b. Identity + checksum of the produced installer (and re-check the bundle the
+      #     installer embeds — tauri:build re-ran the frontend build).
+      - name: Verify installer identity
+        shell: bash
+        run: |
+          ls -la src-tauri/target/release/bundle/nsis/
+          exe=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)
+          case "$(basename "$exe")" in "Breadee Staging_"*) ;; *) echo "::error::unexpected installer name $exe"; exit 1;; esac
+          test -f "src-tauri/target/release/breadee-staging.exe" || { echo "::error::main binary is not breadee-staging.exe"; exit 1; }
+          grep -rlq azjxprewycygsocusxjn dist/assets || { echo "::error::final bundle is not STAGING"; exit 1; }
+          sha256sum "$exe"
 
       # 9. Upload the generated Windows installer as a build artifact.
       #    Tauri v2 (targets: ["nsis"]) emits the setup .exe here:

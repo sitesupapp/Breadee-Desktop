@@ -1,0 +1,6 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Breadee Staging",
+  "mainBinaryName": "breadee-staging",
+  "identifier": "app.breadee.desktop.staging1038"
+}
