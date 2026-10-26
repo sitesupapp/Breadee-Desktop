@@ -1,76 +1,33 @@
-import { useEffect, useState } from "react";
-import { localdb, type OutboxItem } from "@/lib/offline/db";
-import { syncNow, type SyncReport } from "@/lib/offline/sync";
-import { useSession } from "@/state/session";
-import { Button, Card, Badge } from "@/components/ui";
+// Settings → Sync Center.
+//
+// 1.0.38 (Bug 7) — this screen used to read the legacy `outbox` store (which nothing writes any
+// more), unscoped across every tenant and branch on the device, and so always said "All changes
+// are synced" even while POS work was pending or parked; its "Sync now" drained only that dead
+// store. It now renders the SAME SyncCenterPanel as the POS Sync Center, scoped to the session
+// tenant + the operational branch POS uses (the session-pinned branch), so both entry points show
+// identical states, counts and labels. Opening it never writes: no drain, no migration, no replay.
+// Quarantined legacy outbox records appear here as "Manager review" operations (never deleted).
+
+import { Card } from "@/components/ui";
+import { SyncCenterPanel, useCurrentShiftId, useSyncScope } from "@/components/sync/SyncCenterPanel";
 
 export function SyncCenter() {
-  const s = useSession();
-  const [items, setItems] = useState<OutboxItem[]>([]);
-  const [report, setReport] = useState<SyncReport | null>(null);
-  const [running, setRunning] = useState(false);
-
-  async function refresh() {
-    setItems(await localdb.outbox.orderBy("created_at").reverse().toArray());
-  }
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  async function runSync() {
-    setRunning(true);
-    const r = await syncNow(s.userId ?? "unknown");
-    setReport(r);
-    setRunning(false);
-    await refresh();
-  }
-
-  const toneFor = (st: string) =>
-    st === "synced" ? "green" : st === "failed" || st === "conflict" ? "red" : st === "review" ? "amber" : "slate";
+  const { tenantId, branchId } = useSyncScope();
+  const currentShiftId = useCurrentShiftId();
 
   return (
     <div className="space-y-5">
-      <Card className="p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-bold">Sync Center</h2>
-            <p className="mt-1 text-sm text-sub">Push offline changes to Breadee. Visible to all users; every run is recorded in the audit log.</p>
-          </div>
-          <Button onClick={runSync} disabled={running || !s.online}>{running ? "Syncing…" : "Sync now"}</Button>
+      <Card className="flex max-h-[75vh] flex-col overflow-hidden">
+        <div className="border-b border-line px-5 py-4">
+          <h2 className="text-lg font-bold">Sync Center</h2>
+          <p className="mt-1 text-sm text-sub">
+            Offline work on this terminal for the current business and branch, and how it synced. The same view as the Sync Center in the POS.
+          </p>
         </div>
-        {!s.online && <p className="mt-3 text-sm font-medium text-amber-600">No internet — connect to sync.</p>}
-      </Card>
-
-      {report && (
-        <Card className="p-5">
-          <p className="font-bold">Last sync report</p>
-          <div className="mt-2 flex flex-wrap gap-2 text-xs">
-            <Badge tone="green">{report.synced.length} synced</Badge>
-            <Badge tone="amber">{report.review.length} manager review</Badge>
-            <Badge tone="red">{report.failed.length} failed</Badge>
-            <Badge tone="slate">{report.skipped.length} skipped</Badge>
-            <Badge tone="slate">{report.conflicts.length} conflicts</Badge>
-          </div>
-          <p className="mt-2 text-[11px] text-sub">Triggered by {report.triggeredBy} · {report.finishedAt}</p>
-        </Card>
-      )}
-
-      <Card className="p-5">
-        <p className="mb-3 font-bold">Queue ({items.length})</p>
-        {items.length === 0 ? (
-          <p className="text-sm text-sub">Nothing queued. All changes are synced.</p>
+        {tenantId ? (
+          <SyncCenterPanel tenantId={tenantId} branchId={branchId} currentShiftId={currentShiftId} />
         ) : (
-          <ul className="divide-y divide-line">
-            {items.map((it) => (
-              <li key={it.id} className="flex items-center justify-between py-2 text-sm">
-                <div>
-                  <p className="font-semibold">{it.kind}</p>
-                  <p className="text-xs text-sub">{it.created_at} · terminal {it.terminal_id}</p>
-                </div>
-                <Badge tone={toneFor(it.status) as "green" | "amber" | "red" | "slate"}>{it.status}</Badge>
-              </li>
-            ))}
-          </ul>
+          <p className="px-5 py-8 text-center text-sm text-sub">Sign in to a business to see its sync status.</p>
         )}
       </Card>
     </div>

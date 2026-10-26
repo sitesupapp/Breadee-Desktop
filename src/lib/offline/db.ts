@@ -544,16 +544,18 @@ const tableMapKey = (branchId: string | null) => `tables:${branchId ?? "none"}`;
 /**
  * Cache the last successfully-loaded table map for a branch. Called ONLY after a
  * successful online load, so a failed/empty network response can never overwrite
- * a valid snapshot. Branch/tenant scoped.
+ * a valid snapshot. Branch/tenant scoped. 1.0.38 (C8) — `fetchedAt` = when the READ STARTED (mirrors
+ * cacheBill), so a restored map never claims to post-date work that synced during its read.
  */
-export async function cacheTableMap(map: unknown, tenantId: string | null, branchId: string | null): Promise<void> {
+export async function cacheTableMap(map: unknown, tenantId: string | null, branchId: string | null, fetchedAt?: number): Promise<void> {
   if (!tenantId) return;
+  const at = fetchedAt != null && Number.isFinite(fetchedAt) ? new Date(fetchedAt) : new Date();
   await localdb.snapshots.put({
     key: tableMapKey(branchId),
     tenant_id: tenantId,
     branch_id: branchId,
     data: map,
-    cached_at: new Date().toISOString(),
+    cached_at: at.toISOString(),
   });
 }
 

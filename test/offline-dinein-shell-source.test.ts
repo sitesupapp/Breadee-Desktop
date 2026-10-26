@@ -115,9 +115,11 @@ test("Phase D: Delivery On-Account is offline-capable via CAPTURE (local-vs-cano
   const src = ts(DELW);
   // settleOnAccount offline branch captures the receivable; offline-captured order (its id is the
   // local_txn_id) chains via order_local + mig op, hydrated uses canonical id; online unchanged.
-  assert.match(src, /if \(!online\)[\s\S]{0,1400}orderOnAccountOffline\(/);
-  assert.match(src, /const localTxn = await getPosOfflineTxn\(order\.id\)/);
-  assert.match(src, /migOpId: localTxn \? takeawaySaleOpId\(order\.id\) : null/);
+  // 1.0.38 (D4/D7b) — decided by the ONE order reference (entity map first), and the receivable also
+  // waits for the order's live unsynced edits (same capture, dependencies added atomically).
+  assert.match(src, /if \(!online\)[\s\S]{0,2600}orderOnAccountWithDependencies\(/);
+  assert.match(src, /const ref = await orderRefFor\(order\.id, scope\)/);
+  assert.match(src, /migOpId: ref\.dependencyIds\[0\] \?\? null/);
   assert.match(src, /await performOnAccount\(/, "online on-account path preserved");
 });
 

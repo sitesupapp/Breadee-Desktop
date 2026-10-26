@@ -49,6 +49,12 @@ export async function capturePayOrderOffline(input: {
   /** rc.9 — every still-unsynced mutation of this order (item edits / provider / ops) from the
    *  operational projection: the settle replays only AFTER them, never against a pre-edit total. */
   dependencyIds?: string[];
+  /** 1.0.38 (D2) — the pay-step pricing the operator confirmed, in the EXACT online pos_pay_order
+   *  p_payload field names (buildDeliveryPaymentPayload): discount_type / discount_value /
+   *  delivery_fee. Never an amount or total — the server's finance engine computes the charge. */
+  pricing?: PayOrderPricing | null;
+  /** Display-only order kind for the Sync Center label ("delivery"); ignored by the handler. */
+  orderType?: string | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   const clientOpId = input.clientOpId;
   const operationId = PAY_ORDER_OP_PREFIX + clientOpId;
@@ -73,6 +79,11 @@ export async function capturePayOrderOffline(input: {
       currency: input.currency,
       expected_version: input.expectedVersion ?? null,
       order_number: input.orderNumber ?? null,
+      ...(input.orderType ? { order_type: input.orderType } : {}),
+      // D2 — `discount` is the pay_order handler's pass-through pricing object: replay spreads it
+      // verbatim into pos_pay_order's p_payload (posTxnSync payOrderOp), i.e. the same fields the
+      // online settle sends. Absent when nothing was entered (byte-identical to the pre-1.0.38 op).
+      ...(pricingFields(input.pricing) ? { discount: pricingFields(input.pricing) } : {}),
       ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
     },
     status: "pending",
@@ -93,8 +104,32 @@ export async function capturePayOrderOffline(input: {
   return { operationId, clientOpId, alreadyCaptured: false };
 }
 
+/** 1.0.38 (D2) — the pay-step pricing carried to replay (online pos_pay_order field names). */
+export type PayOrderPricing = {
+  discount_type?: "percent" | "amount";
+  discount_value?: number;
+  delivery_fee?: number;
+};
+
+/** The named pricing fields only (never a spread of the dialog result); null when none is set. */
+function pricingFields(p: PayOrderPricing | null | undefined): PayOrderPricing | null {
+  if (!p) return null;
+  const out: PayOrderPricing = {};
+  if (p.discount_type !== undefined && p.discount_value !== undefined) {
+    out.discount_type = p.discount_type;
+    out.discount_value = p.discount_value;
+  }
+  if (p.delivery_fee !== undefined && p.delivery_fee !== null) out.delivery_fee = p.delivery_fee;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 /** A deterministic per-attempt client_op_id for an order settlement (stable for the same
- *  order+method+currency so a double-tap collapses; a fresh method/order is a new attempt). */
-export function payOrderClientOpId(scope: PayOrderScope, orderRef: string, method: string, currency: string): string {
-  return deterministicUuid([scope.tenantId, scope.branchId ?? "", scope.deviceId, scope.terminalId ?? "", "pay_order", orderRef, method, currency]);
+ *  order+method+currency so a double-tap collapses; a fresh method/order is a new attempt).
+ *  1.0.38 (D2) — the pricing joins the derivation when present, so an op id always names exactly
+ *  the discount/fee it replays (no pricing → the pre-1.0.38 id, unchanged). */
+export function payOrderClientOpId(scope: PayOrderScope, orderRef: string, method: string, currency: string, pricing?: PayOrderPricing | null): string {
+  const base = [scope.tenantId, scope.branchId ?? "", scope.deviceId, scope.terminalId ?? "", "pay_order", orderRef, method, currency];
+  const p = pricingFields(pricing);
+  if (!p) return deterministicUuid(base);
+  return deterministicUuid([...base, p.discount_type ?? "", String(p.discount_value ?? ""), p.delivery_fee == null ? "~" : String(p.delivery_fee)]);
 }

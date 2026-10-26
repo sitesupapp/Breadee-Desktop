@@ -17,6 +17,7 @@ import {
   terminalKind,
   errMsg,
   isAlreadyPaid,
+  classifyReplayError,
 } from "@/lib/offline/posTxnSync";
 import { resolveEntity } from "@/lib/offline/entityMap";
 import { getOperation } from "@/lib/offline/operationLog";
@@ -107,8 +108,15 @@ export type OperationHandler = {
 };
 
 /** Map a definitive (non-transport) refusal to a terminal retry class (mirrors Phase A:
- *  a definitive refusal parks the work for a human, never a hot retry). */
-function terminalClass(message: string): { retryClass: RetryClass; code: string } {
+ *  a definitive refusal parks the work for a human, never a hot retry).
+ *  1.0.38 (C1) — routed through the ONE classifier first: a transient server fault (5xx wording,
+ *  deadlock, serialization, read-only failover, connection limits, MERGE_SHIFT_BUSY) or an expired JWT
+ *  is SERVER_RETRYABLE (bounded by the orchestrator), never a terminal "validation". The orchestrator
+ *  additionally re-classifies with the error's HTTP status / PG code, which this message-only view lacks. */
+function terminalClass(message: string, e?: unknown): { retryClass: RetryClass; code: string } {
+  const replayKind = classifyReplayError(e ?? new Error(message));
+  if (replayKind === "transient") return { retryClass: "SERVER_RETRYABLE", code: "server_transient" };
+  if (replayKind === "auth") return { retryClass: "SERVER_RETRYABLE", code: "auth_expired" };
   const kind = terminalKind(message);
   if (kind === "permission") return { retryClass: "AUTHORITY_REFUSED", code: "permission" };
   if (kind === "shift_closed") return { retryClass: "CONFLICT", code: "shift_closed" };

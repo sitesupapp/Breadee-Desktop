@@ -8,6 +8,8 @@
 // pre-built RPC payload + the order's local id (when the order was itself created offline, so the
 // orchestrator remaps order_local → canonical before replay). Exactly-once on client_op_id. This
 // module holds NO authority — the server RPC is the source of truth after sync.
+// 1.0.38 (D3) — callers mint the client_op_id PER INTENT (orderRef.createIntentIds), never from the
+// chosen values: re-selecting an earlier value is a new op, not a silent "already captured".
 
 import {
   type OfflineOperation,
@@ -80,6 +82,8 @@ export async function captureDeliveryOpsOffline(input: {
   orderLocal?: string | null;
   payload: Record<string, unknown>;
   clientOpId: string;
+  /** 1.0.38 (D4) — e.g. the order-create op while the order is still local (orderRefFor). */
+  dependencyIds?: string[];
 }): Promise<CaptureDeliveryActionResult> {
   return capture("delivops:", "delivery_ops", { ...input, orderLocal: input.orderLocal ?? null });
 }
@@ -92,6 +96,8 @@ export async function captureEditOrderNoteOffline(input: {
   orderLocal?: string | null;
   payload: Record<string, unknown>;
   clientOpId: string;
+  /** 1.0.38 (D4) — e.g. the order-create op while the order is still local (orderRefFor). */
+  dependencyIds?: string[];
 }): Promise<CaptureDeliveryActionResult> {
   return capture("editorder:", "edit_order", { ...input, orderLocal: input.orderLocal ?? null });
 }

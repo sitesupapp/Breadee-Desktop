@@ -186,9 +186,9 @@ import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { capturePayOrderOffline, payOrderClientOpId } from "@/lib/offline/payOrderOffline";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
-import { addPosOfflineTxn, getPosOfflineTxnByOp, getPosOfflineTxn, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
+import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
 import { getDeviceIdentity } from "@/lib/device";
-import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
+import { createIntentIds, liveCaptureDependencies, orderOnAccountWithDependencies, orderRefFor } from "@/lib/offline/orderRef";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import type { PosContext } from "@/state/pos";
 import type { LayoutSpec } from "@/lib/layout";
@@ -324,6 +324,12 @@ export function useDeliveryWorkspace(input: {
    * authority; this flag exists so the gate can grey the button out.
    */
   const [saving, setSaving] = useState(false);
+  /** 1.0.38 (D3) — one client_op_id per dialog submit (stable across that submit's retries), never
+   *  derived from the chosen values: P1 → P2 → P1 is three ops that replay in order, ending on P1. */
+  const intentIds = useRef(createIntentIds()).current;
+  /** 1.0.38 (D7c) — the just-sent (customer-half) order settled offline on this device: Pay / on-account
+   *  are withdrawn for it, so a second tender never becomes a second op. */
+  const [offlineSettledOrderId, setOfflineSettledOrderId] = useState<string | null>(null);
 
   // --- Level 3B ordering state ------------------------------------------------
   const [view, setView] = useState<DeliveryView>("customer");
@@ -850,8 +856,11 @@ export function useDeliveryWorkspace(input: {
         // Phase E — OFFLINE: capture the edit as a durable customer_upsert (it replays exactly-once;
         // a same-OU clash surfaces as needs_attention). The card keeps its locally-known details.
         if (customerOfflineReady && (!online || !(await isBackendReachable()))) {
-          const clientOpId = deterministicUuid([selected.id, values.name ?? "", values.phone ?? "", values.notes ?? "", "delivery_customer_edit"]);
+          // 1.0.38 (D3) — per-intent id: an edit back to an earlier name/phone is a NEW op, not a no-op.
+          const intentKey = `customer_edit:${selected.id}`;
+          const clientOpId = intentIds.clientOpId(intentKey, [values.name, values.phone, values.notes]);
           await upsertCustomerOfflineAware(editPayload as unknown as Record<string, unknown>, clientOpId);
+          intentIds.done(intentKey);
           await useCustomers.getState().refresh();
           setDialog({ kind: "none" });
           toast.push({ tone: "success", message: "Customer update saved offline", detail: "It will sync when you reconnect." });
@@ -869,7 +878,7 @@ export function useDeliveryWorkspace(input: {
         setSaving(false);
       }
     },
-    [branchId, toast, writeGate.allowed, online, customerOfflineReady],
+    [branchId, toast, writeGate.allowed, online, customerOfflineReady, intentIds],
   );
 
   // --- addresses -------------------------------------------------------------
@@ -892,8 +901,12 @@ export function useDeliveryWorkspace(input: {
         // it is immediately selectable and a dependent offline order chains to address_local; the
         // handler remaps it on replay. A deterministic client_op_id makes a double-tap idempotent.
         if (customerOfflineReady && (!online || !(await isBackendReachable()))) {
-          const clientOpId = deterministicUuid([selected.id, values.street ?? "", dialog.addressId ?? "", "delivery_address"]);
+          // 1.0.38 (D3) — per-intent id (stable across this submit's retries; a later edit back to an
+          // earlier street is a NEW op instead of colliding with the first one).
+          const intentKey = `address:${selected.id}:${dialog.addressId ?? "new"}`;
+          const clientOpId = intentIds.clientOpId(intentKey, [values.street]);
           const r = await upsertCustomerOfflineAware(addressPayload as unknown as Record<string, unknown>, clientOpId);
+          intentIds.done(intentKey);
           await useCustomers.getState().refresh();
           if (r.address_id) useCustomers.getState().selectAddress(r.address_id);
           setDialog({ kind: "none" });
@@ -914,7 +927,7 @@ export function useDeliveryWorkspace(input: {
         setSaving(false);
       }
     },
-    [branchId, dialog, toast, writeGate.allowed, online, customerOfflineReady],
+    [branchId, dialog, toast, writeGate.allowed, online, customerOfflineReady, intentIds],
   );
 
   // --- Level 3B: sending ------------------------------------------------------
@@ -1532,17 +1545,17 @@ export function useDeliveryWorkspace(input: {
         setOpsBusy(true);
         setOpsError(null);
         try {
-          const txn = await getPosOfflineTxn(target.id).catch(() => undefined);
-          const pending = txn ? txn.status !== "synced" : false;
-          const clientOpId = deterministicUuid([
-            target.id, "delivery_ops", values.handlerType ?? "", target.delivered_by_user_id ?? "", values.personRef ?? "", String(values.cost ?? ""),
-          ]);
+          // 1.0.38 (D4) — the ONE order reference (canonical once mapped; local + create-op dependency
+          // while not yet synced) and (D3) a per-intent op id, never one derived from the values.
+          const ref = await orderRefFor(target.id, itemEditOfflineScope);
+          const intentKey = `delivery_ops:${target.id}`;
+          const clientOpId = intentIds.clientOpId(intentKey, [values.handlerType, target.delivered_by_user_id, values.personRef, values.cost]);
           await captureDeliveryOpsOffline({
             scope: itemEditOfflineScope,
-            orderId: pending ? null : target.id,
-            orderLocal: pending ? target.id : null,
+            orderId: ref.orderId,
+            orderLocal: ref.orderLocal,
             payload: {
-              order_id: target.id,
+              order_id: ref.orderId ?? target.id,
               handler_type: values.handlerType,
               delivered_by_user_id: target.delivered_by_user_id ?? null,
               person_ref: values.personRef,
@@ -1550,7 +1563,9 @@ export function useDeliveryWorkspace(input: {
               client_op_id: clientOpId,
             },
             clientOpId,
+            dependencyIds: ref.dependencyIds,
           });
+          intentIds.done(intentKey);
           setOpsEditing(false);
           await refreshDetail(target.id);
           toast.push({ tone: "success", message: "Delivery details saved offline", detail: "They will sync when you reconnect." });
@@ -1584,7 +1599,7 @@ export function useDeliveryWorkspace(input: {
         opsLatch.current.release();
       }
     },
-    [detail, input.manageDelivery, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast],
+    [detail, input.manageDelivery, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast, intentIds],
   );
 
   // Save the order's advanced settlement PROVIDER + delivery cost through the ONE
@@ -1618,24 +1633,26 @@ export function useDeliveryWorkspace(input: {
         setProvBusy(true);
         setProvError(null);
         try {
-          const txn = await getPosOfflineTxn(target.id).catch(() => undefined);
-          const pending = txn ? txn.status !== "synced" : false;
-          const clientOpId = deterministicUuid([
-            target.id, "delivery_set_provider", values.providerId, values.cost.provided ? String(values.cost.value ?? "") : "~",
-          ]);
+          // 1.0.38 (D4 + D3) — the ONE order reference and a per-intent op id: P1 → P2 → P1 captures
+          // three ops that replay in order (the server ends on P1), never "already captured" on the 3rd.
+          const ref = await orderRefFor(target.id, itemEditOfflineScope);
+          const intentKey = `delivery_set_provider:${target.id}`;
+          const clientOpId = intentIds.clientOpId(intentKey, [values.providerId, values.cost.provided ? values.cost.value : "~"]);
           await captureDeliveryProviderOffline({
             scope: itemEditOfflineScope,
-            orderId: pending ? null : target.id,
-            orderLocal: pending ? target.id : null,
+            orderId: ref.orderId,
+            orderLocal: ref.orderLocal,
             payload: {
-              order_id: target.id,
+              order_id: ref.orderId ?? target.id,
               provider_id: values.providerId,
               cost: values.cost.provided ? values.cost.value : null,
               cost_provided: values.cost.provided,
               client_op_id: clientOpId,
             },
             clientOpId,
+            dependencyIds: ref.dependencyIds,
           });
+          intentIds.done(intentKey);
           setProvEditing(false);
           await refreshDetail(target.id);
           toast.push({ tone: "success", message: "Delivery provider saved offline", detail: "It will sync when you reconnect." });
@@ -1663,7 +1680,7 @@ export function useDeliveryWorkspace(input: {
         provLatch.current.release();
       }
     },
-    [detail, costCaptureGate, online, refreshDetail, refreshQueue, toast, itemEditOfflineScope, providers],
+    [detail, costCaptureGate, online, refreshDetail, refreshQueue, toast, itemEditOfflineScope, providers, intentIds],
   );
 
   // Load the queue when Orders is opened, and whenever the shift changes under
@@ -1734,12 +1751,46 @@ export function useDeliveryWorkspace(input: {
       currencyBlockedReason: paymentBlockedReason(input.currency, input.rate),
       paying,
     });
-    // Never offer a SECOND offline settle of an order already settled on this device.
+    // Never offer a SECOND offline settle of an order already settled on this device (1.0.38 D7c: the
+    // just-sent order too — it had no guard, so a second tender became a second op).
     if (g.allowed && !online && payTarget.fromQueue && detailProj?.settlingOpId) {
       return { allowed: false, reason: "This order was settled offline — it will sync when you reconnect." };
     }
+    if (g.allowed && !payTarget.fromQueue && payTarget.order != null && payTarget.order.id === offlineSettledOrderId) {
+      return { allowed: false, reason: "This order was settled offline — it will sync when you reconnect." };
+    }
     return g;
-  }, [accessGate, input.takePayments, payTarget, online, providersFeatureOn, providersKnown, itemEditOfflineScope, input.currency, input.rate, paying, detailProj]);
+  }, [accessGate, input.takePayments, payTarget, online, providersFeatureOn, providersKnown, itemEditOfflineScope, input.currency, input.rate, paying, detailProj, offlineSettledOrderId]);
+
+  /** 1.0.38 (D7c) — the settle target's ONE operational projection: the queue detail's, or — for the
+   *  just-sent order on the customer half (previously never projected) — one built from that order,
+   *  keyed by its canonical id when already mapped so ops captured against either id are seen. */
+  const projectSettleTarget = useCallback(
+    async (order: OpenDeliveryOrder, canonicalId: string | null): Promise<OperationalDeliveryOrder | null> => {
+      if (payTarget.fromQueue) return projectOrder(order.id);
+      const scope = itemEditOfflineScopeRef.current;
+      if (!scope) return null;
+      const row: DeliveryQueueOrder = {
+        id: canonicalId ?? order.id,
+        order_number: order.order_number,
+        status: order.status,
+        payment_status: order.payment_status,
+        payment_method: null,
+        subtotal: order.subtotal ?? null,
+        discount_amount: null,
+        delivery_fee: order.delivery_fee ?? null,
+        total_amount: order.total_amount,
+        currency: order.currency,
+        customer_id: order.customer_id,
+        address_id: order.address_id,
+        notes: order.notes,
+        shift_id: null,
+        created_at: order.created_at,
+      };
+      return getOperationalOrderProjection(scope, row).catch(() => null);
+    },
+    [payTarget.fromQueue, projectOrder],
+  );
 
   /**
    * WHOSE order this is, for a receipt.
@@ -1808,12 +1859,19 @@ export function useDeliveryWorkspace(input: {
         setPaying(true);
         setPayError(null);
         try {
-          const localTxn = await getPosOfflineTxn(order.id).catch(() => undefined);
-          const orderLocal = localTxn && localTxn.status !== "synced" ? order.id : null;
+          // 1.0.38 (D7c) — never a second offline settle of the just-sent order on this device.
+          if (offlineSettledOrderId === order.id) {
+            setPayError("This order was settled offline — it will sync when you reconnect.");
+            return;
+          }
+          // 1.0.38 (D4) — the ONE order reference: canonical once the order synced (even if the legacy
+          // row has not reconciled), else order_local + a dependency on the order-create op.
+          const ref = await orderRefFor(order.id, itemEditOfflineScope);
           // rc.9 — the settle replays only AFTER every unsynced mutation of this order (item edits,
           // provider, ops, note) from the ONE operational projection, so the server never charges a
-          // pre-edit total or finalizes before the provider is recorded.
-          const proj = payTarget.fromQueue ? await projectOrder(order.id) : null;
+          // pre-edit total or finalizes before the provider is recorded. 1.0.38 (D7c) — the just-sent
+          // order is projected too (it was skipped), so its own settle/edits are seen.
+          const proj = await projectSettleTarget(order, ref.orderId);
           if (proj?.settlingOpId) {
             setPayError("This order was settled offline — it will sync when you reconnect.");
             return;
@@ -1830,19 +1888,45 @@ export function useDeliveryWorkspace(input: {
               return;
             }
           }
-          const clientOpId = payOrderClientOpId(itemEditOfflineScope, order.id, confirm.method, confirm.currency);
-          await capturePayOrderOffline({
+          // 1.0.38 (D2) — the discount + delivery fee confirmed in the dialog REPLAY: validated and named
+          // exactly as the online settle does (same base subtotal the dialog showed, same builder, same
+          // pos_pay_order field names), so the total on screen is the total the server charges.
+          const discount = validateDeliveryDiscount({
+            canDiscount: input.applyDiscounts,
+            subtotal: order.subtotal ?? order.total_amount ?? 0,
+            type: confirm.discountType,
+            value: confirm.discountValue,
+          });
+          const priced = buildDeliveryPaymentPayload({
+            orderId: order.id,
+            method: confirm.method,
+            currency: confirm.currency,
+            discount: discount.fields,
+            deliveryFee: confirm.deliveryFee,
+          });
+          const pricing = { discount_type: priced.discount_type, discount_value: priced.discount_value, delivery_fee: priced.delivery_fee };
+          // C3 — a parked (needs_attention / cancelled) mutation is never a prerequisite of a NEW settle.
+          const dependencyIds = [...ref.dependencyIds, ...(await liveCaptureDependencies(proj?.mutationOpIds ?? []))];
+          const clientOpId = payOrderClientOpId(itemEditOfflineScope, order.id, confirm.method, confirm.currency, pricing);
+          const cap = await capturePayOrderOffline({
             scope: itemEditOfflineScope,
-            orderId: orderLocal ? null : order.id,
-            orderLocal,
+            orderId: ref.orderId,
+            orderLocal: ref.orderLocal,
             method: confirm.method,
             currency: confirm.currency,
             clientOpId,
             orderNumber: order.order_number ?? null,
-            dependencyIds: proj?.mutationOpIds ?? [],
+            dependencyIds,
+            pricing,
+            orderType: "delivery",
           });
+          if (!payTarget.fromQueue) setOfflineSettledOrderId(order.id);
           setPayOpen(false);
-          toast.push({ tone: "success", message: "Delivery settled offline", detail: "Recorded on this device — it will sync when you reconnect." });
+          toast.push(
+            cap.alreadyCaptured
+              ? { tone: "info", message: "This payment was already recorded offline", detail: "No second payment was taken — it will sync when you reconnect." }
+              : { tone: "success", message: "Delivery settled offline", detail: "Recorded on this device — it will sync when you reconnect." },
+          );
           if (payTarget.fromQueue && detail) void refreshDetail(detail.id);
           await input.refreshCashBox().catch(() => {});
         } catch (e) {
@@ -2002,7 +2086,7 @@ export function useDeliveryWorkspace(input: {
         setPaying(false);
       }
     },
-    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast, online, providerModeOn, itemEditOfflineScope, projectOrder, providers, detail],
+    [payTarget, payGate.allowed, input, pos.branch.name, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast, online, providerModeOn, itemEditOfflineScope, projectSettleTarget, offlineSettledOrderId, providers, detail],
   );
 
   /**
@@ -2050,18 +2134,37 @@ export function useDeliveryWorkspace(input: {
             confirm.discountType !== "none" && confirm.discountValue.trim() !== ""
               ? { discount_type: confirm.discountType, discount_value: Number(confirm.discountValue) }
               : undefined;
-          const localTxn = await getPosOfflineTxn(order.id);
-          await orderOnAccountOffline({
-            scope,
-            orderId: localTxn ? null : order.id,
-            orderLocal: localTxn ? order.id : null,
-            migOpId: localTxn ? takeawaySaleOpId(order.id) : null,
-            customerId: offCustomerId,
-            amount: confirm.amountNow,
-            method: confirm.method,
-            orderNumber: order.order_number ?? null,
-            discount: offDiscount,
-          });
+          // 1.0.38 (D7c) — never a second offline settle of the just-sent order on this device.
+          if (offlineSettledOrderId === order.id) {
+            setPayError("This order was settled offline — it will sync when you reconnect.");
+            return;
+          }
+          // 1.0.38 (D4) — the ONE order reference (a synced order is referenced canonically even before
+          // its legacy row reconciles; a local one waits for its create op).
+          const ref = await orderRefFor(order.id, scope);
+          const proj = await projectSettleTarget(order, ref.orderId);
+          if (proj?.settlingOpId) {
+            setPayError("This order was settled offline — it will sync when you reconnect.");
+            return;
+          }
+          // 1.0.38 (D7b + C3) — the receivable also waits for the order's earlier LIVE unsynced edits
+          // (never a parked one), so it never replays against a pre-edit total.
+          const editDeps = await liveCaptureDependencies(proj?.mutationOpIds ?? []);
+          await orderOnAccountWithDependencies(
+            {
+              scope,
+              orderId: ref.orderId,
+              orderLocal: ref.orderLocal,
+              migOpId: ref.dependencyIds[0] ?? null,
+              customerId: offCustomerId,
+              amount: confirm.amountNow,
+              method: confirm.method,
+              orderNumber: order.order_number ?? null,
+              discount: offDiscount,
+            },
+            editDeps,
+          );
+          if (!payTarget.fromQueue) setOfflineSettledOrderId(order.id);
           settleDone.current = true;
           setPayOpen(false);
           void refreshQueue();
@@ -2199,7 +2302,7 @@ export function useDeliveryWorkspace(input: {
         setPaying(false);
       }
     },
-    [payTarget, payGate.allowed, online, input, pos.branch.name, pos.branch.id, pos.tenantId, pos.tenantName, pos.userId, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast],
+    [payTarget, payGate.allowed, online, input, pos.branch.name, pos.branch.id, pos.tenantId, pos.tenantName, pos.userId, pos.userName, receiptIdentity, refreshDetail, refreshQueue, toast, offlineSettledOrderId, projectSettleTarget],
   );
 
   // --- Level 3D: edit ---------------------------------------------------------
@@ -2233,16 +2336,20 @@ export function useDeliveryWorkspace(input: {
             return;
           }
           const noteText = (intent.note ?? "").trim();
-          const txn = await getPosOfflineTxn(target.id).catch(() => undefined);
-          const pending = txn ? txn.status !== "synced" : false;
-          const clientOpId = deterministicUuid([target.id, "edit_order_note", noteText]);
+          // 1.0.38 (D4 + D3) — the ONE order reference and a per-intent op id (a note changed back to an
+          // earlier text is a new op, not swallowed as "already captured").
+          const ref = await orderRefFor(target.id, itemEditOfflineScope);
+          const intentKey = `edit_order_note:${target.id}`;
+          const clientOpId = intentIds.clientOpId(intentKey, [noteText]);
           await captureEditOrderNoteOffline({
             scope: itemEditOfflineScope,
-            orderId: pending ? null : target.id,
-            orderLocal: pending ? target.id : null,
-            payload: { order_id: target.id, note: noteText, client_op_id: clientOpId },
+            orderId: ref.orderId,
+            orderLocal: ref.orderLocal,
+            payload: { order_id: ref.orderId ?? target.id, note: noteText, client_op_id: clientOpId },
             clientOpId,
+            dependencyIds: ref.dependencyIds,
           });
+          intentIds.done(intentKey);
           setEditOpen(false);
           void refreshDetail(target.id);
           toast.push({ tone: "success", message: "Order note saved offline", detail: "It will sync when you reconnect." });
@@ -2314,7 +2421,7 @@ export function useDeliveryWorkspace(input: {
         setEditBusy(false);
       }
     },
-    [detail, editGate.allowed, queue, input.applyDiscounts, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast],
+    [detail, editGate.allowed, queue, input.applyDiscounts, online, itemEditOfflineScope, refreshDetail, refreshQueue, toast, intentIds],
   );
 
   // --- Level 3D: cancel / refund ----------------------------------------------

@@ -1,10 +1,17 @@
-import { localdb, type OutboxItem } from "@/lib/offline/db";
-import { supabase } from "@/lib/supabase";
+import { localdb } from "@/lib/offline/db";
 
-// Sync engine (foundation). Replays queued offline actions when online and produces
-// a structured report. SAFETY: it never silently overwrites sensitive data — actions
-// whose full server RPC mapping isn't wired yet are marked "review" instead of pushed,
-// so nothing corrupts staging/production. Manual + auto sync share this path.
+// DEPRECATED (1.0.38, Bug 7) — the legacy-outbox "sync engine".
+//
+// It never replayed anything: every handler answered "review", it made no server writes, and it
+// only flipped `outbox` rows queued/failed → syncing → review (rows `pendingCount` still counted, so
+// the badge never cleared). Nothing writes the outbox any more (`enqueue` has no callers), so it
+// drove Settings → Sync Center to report "All changes are synced" while real POS work was pending.
+//
+// The single replay owner is the orchestrator (drainOffline, via syncPosTxns). Legacy outbox rows
+// are QUARANTINED by the migration as `legacy_outbox:<kind>` needs_attention operations and shown
+// in the Sync Center as manager-review items. This module is kept only for backward compatibility
+// and is now READ-ONLY: it reports outbox rows as manager review and writes nothing (no status
+// flip, no audit row). Delete it once nothing imports it. Do NOT add a drain here.
 
 export type SyncReport = {
   startedAt: string;
@@ -17,74 +24,18 @@ export type SyncReport = {
   review: number[];
 };
 
-// Per-kind replay handlers. Return the resulting status.
-// TODO(desktop): implement true replay against pos_save_order / pos_pay_order /
-// inventory movement RPCs with server-side validation + conflict detection.
-const HANDLERS: Record<string, (item: OutboxItem) => Promise<"synced" | "review" | "failed">> = {
-  "pos.save_order": async () => "review",
-  "pos.pay_order": async () => "review",
-  "inventory.movement": async () => "review",
-  "expense.create": async () => "review",
-};
-
+/** @deprecated Read-only. Use the Sync Center (operations log); replay belongs to the orchestrator. */
 export async function syncNow(triggeredBy: string): Promise<SyncReport> {
-  const report: SyncReport = {
-    startedAt: new Date().toISOString(),
-    finishedAt: "",
+  const startedAt = new Date().toISOString();
+  const items = await localdb.outbox.toArray().catch(() => []);
+  return {
+    startedAt,
+    finishedAt: new Date().toISOString(),
     triggeredBy,
     synced: [],
     failed: [],
     conflicts: [],
     skipped: [],
-    review: [],
+    review: items.map((i) => i.id).filter((id): id is number => id != null),
   };
-
-  if (!navigator.onLine) {
-    report.finishedAt = new Date().toISOString();
-    return report;
-  }
-
-  // Confirm we still have a valid session before pushing anything (no offline bypass).
-  const { data: sess } = await supabase.auth.getSession();
-  if (!sess.session) {
-    report.finishedAt = new Date().toISOString();
-    return report;
-  }
-
-  const items = await localdb.outbox.where("status").anyOf("queued", "failed").toArray();
-  for (const item of items) {
-    const id = item.id!;
-    const handler = HANDLERS[item.kind];
-    if (!handler) {
-      report.skipped.push(id);
-      continue;
-    }
-    await localdb.outbox.update(id, { status: "syncing" });
-    try {
-      const result = await handler(item);
-      await localdb.outbox.update(id, { status: result, attempts: item.attempts + 1 });
-      if (result === "synced") report.synced.push(id);
-      else if (result === "review") report.review.push(id);
-      else report.failed.push({ id, error: "handler failed" });
-    } catch (e) {
-      await localdb.outbox.update(id, { status: "failed", attempts: item.attempts + 1, last_error: String(e) });
-      report.failed.push({ id, error: String(e) });
-    }
-  }
-
-  // Audit the sync run (who/when/what), retained locally for owner/super-admin review.
-  await localdb.audit.add({
-    action: "sync.run",
-    user_id: triggeredBy,
-    tenant_id: items[0]?.tenant_id ?? "",
-    branch_id: items[0]?.branch_id ?? null,
-    device_id: items[0]?.device_id ?? "",
-    terminal_id: items[0]?.terminal_id ?? "",
-    at: new Date().toISOString(),
-    sync_status: "local",
-    detail: { synced: report.synced.length, review: report.review.length, failed: report.failed.length },
-  });
-
-  report.finishedAt = new Date().toISOString();
-  return report;
 }

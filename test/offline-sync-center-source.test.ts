@@ -22,19 +22,26 @@ const jsx = (rel: string) => stripJsxComments(read(rel));
 const ts = (rel: string) => stripComments(read(rel));
 
 const SYNC_CENTER = "src/components/pos/SyncCenter.tsx";
+// 1.0.38 (Bug 7) — the Sync Center body (summary, operations, history, retry) is the shared panel that
+// both the POS dialog and Settings → Sync Center render; its labels/summary live in the shared model.
+const SYNC_PANEL = "src/components/sync/SyncCenterPanel.tsx";
+const SYNC_MODEL = "src/components/sync/syncCenterModel.ts";
 
 // --- it is a read-only observability lens ------------------------------------
 
 test("the Sync Center reads only the durable history + summary, scoped to tenant and branch", () => {
-  const src = jsx(SYNC_CENTER);
+  const src = jsx(SYNC_PANEL);
   // Reads the observability store, not the live queues.
   assert.match(src, /from "@\/lib\/offline\/syncHistory"/, "reads from the sync-history store");
-  assert.match(src, /historySummary\(\s*tenantId\s*,\s*branchId\s*\)/, "summary is scoped to tenant + branch");
+  assert.match(src, /loadSyncSummary\(\s*tenantId\s*,\s*branchId\s*,/, "summary is scoped to tenant + branch");
   assert.match(src, /listHistory\(\s*tenantId\s*,\s*branchId\s*,/, "history list is scoped to tenant + branch");
+  // The POS chip reads the same scoped summary.
+  assert.match(jsx(SYNC_CENTER), /useSyncSummary\(\s*tenantId\s*,\s*branchId\s*\)/, "chip summary is scoped to tenant + branch");
 });
 
 test("the Sync Center never replays, mutates, migrates, or touches a server/store directly", () => {
-  const src = ts(SYNC_CENTER);
+  for (const file of [SYNC_CENTER, SYNC_PANEL]) {
+  const src = ts(file);
   for (const forbidden of [
     "localdb",
     "drainOffline",
@@ -48,7 +55,8 @@ test("the Sync Center never replays, mutates, migrates, or touches a server/stor
     "supabase",
     ".rpc(",
   ]) {
-    assert.ok(!src.includes(forbidden), `SyncCenter.tsx must not contain ${forbidden} (observability only)`);
+    assert.ok(!src.includes(forbidden), `${file} must not contain ${forbidden} (observability only)`);
+  }
   }
 });
 
@@ -57,13 +65,16 @@ test("the Sync Center never replays, mutates, migrates, or touches a server/stor
 test("the Sync Center exposes no engine jargon to the operator", () => {
   // Comment-stripped: the file's own header may NAME the jargon it promises to keep off
   // the screen (as open-tables-source.test.ts does); what must be clean is the code/UI.
-  const src = jsx(SYNC_CENTER);
-  for (const jargon of ["client_op_id", "Dexie", "TOCTOU", "idempoten"]) {
-    assert.ok(!src.includes(jargon), `SyncCenter.tsx must not surface "${jargon}"`);
+  for (const file of [SYNC_CENTER, SYNC_PANEL, SYNC_MODEL]) {
+    const src = jsx(file);
+    for (const jargon of ["client_op_id", "Dexie", "TOCTOU", "idempoten"]) {
+      assert.ok(!src.includes(jargon), `${file} must not surface "${jargon}"`);
+    }
   }
   // It speaks in outcomes a cashier understands.
-  assert.match(src, /All changes synced/, "has a plain all-clear state");
-  assert.match(src, /needs attention/i, "names the attention state in plain words");
+  const model = ts(SYNC_MODEL);
+  assert.match(model, /All changes synced/, "has a plain all-clear state");
+  assert.match(model, /needs attention/i, "names the attention state in plain words");
 });
 
 // --- wiring: additive, gated, and does not disturb the existing badge --------

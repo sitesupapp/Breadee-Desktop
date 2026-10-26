@@ -17,7 +17,7 @@
 // a multi-level chain yet (the one live chain remains shift->order, via the compat handler).
 
 import { localdb } from "@/lib/offline/db";
-import type { OfflineOperation } from "@/lib/offline/operationLog";
+import { type OfflineOperation, producedLocalIds, implicitLocalDependencies } from "@/lib/offline/operationLog";
 
 /** A durable local->canonical mapping row. PK = local_entity_id. Write-once on resolve.
  *  Carries the FULL immutable scope that created it, so a lookup can fail closed when the
@@ -102,44 +102,90 @@ export function evaluateDependencies(
   op: OfflineOperation,
   byId: Map<string, OfflineOperation>,
   resolvedLocalEntities: Set<string>,
+  opts?: {
+    /** 1.0.38 (C6) — declared dependency ids that no longer exist locally but are PROVEN to have synced
+     *  (garbage-collected after sync, per durable sync history + entity map). Treated as satisfied. */
+    goneSynced?: ReadonlySet<string>;
+  },
 ): DependencyState {
   // 1. Circular-dependency detection over the operation dependency graph (DFS).
   const cycle = findCycle(op.operation_id, byId);
   if (cycle) return { ready: false, reason: "circular", cycle };
 
-  // 2. Missing declared operation dependencies.
-  const missing = op.dependency_ids.filter((d) => !byId.has(d));
+  // 2. Missing declared operation dependencies. (1.0.38: one proven synced-then-GC'd is not missing.)
+  const gone = opts?.goneSynced;
+  const missing = op.dependency_ids.filter((d) => !byId.has(d) && !gone?.has(d));
   if (missing.length) return { ready: false, reason: "missing", missing };
+  const present = op.dependency_ids.filter((d) => byId.has(d));
 
   // 3. SCOPE guard: a prerequisite that belongs to a DIFFERENT scope
   //    (tenant/OU-branch/device/cashier) than the dependent is cross-context
   //    contamination — fail CLOSED (never resolve/remap across scopes), even if that
   //    prerequisite is already synced. This preserves the Phase-A rule that a shift's
   //    canonical id never leaks into another context's replay.
-  const sameScope = (a: OfflineOperation["scope"], b: OfflineOperation["scope"]) =>
-    a.tenant_id === b.tenant_id &&
-    (a.branch_id ?? null) === (b.branch_id ?? null) &&
-    a.device_id === b.device_id &&
-    a.cashier_user_id === b.cashier_user_id;
-  const scopeMismatch = op.dependency_ids.filter((d) => !sameScope(byId.get(d)!.scope, op.scope));
+  const scopeMismatch = present.filter((d) => !sameScope(byId.get(d)!.scope, op.scope));
   if (scopeMismatch.length) return { ready: false, reason: "dependency_failed", failed: scopeMismatch };
 
   // 4. A prerequisite that reached a TERMINAL non-synced state (needs_attention /
   //    cancelled) can never resolve — the dependent must itself go needs_attention
   //    rather than wait forever.
-  const failed = op.dependency_ids.filter((d) => {
+  const failed = present.filter((d) => {
     const s = byId.get(d)!.status;
     return s === "needs_attention" || s === "cancelled";
   });
   if (failed.length) return { ready: false, reason: "dependency_failed", failed };
 
+  // 4b. 1.0.38 (D1) — a LOCAL-ENTITY prerequisite whose every producing op (same scope, the op whose
+  //     local_entity_id / offline address it is) is parked or cancelled can never resolve either. Through
+  //     1.0.37 only dependency_ids escalated, so an order behind a parked customer create (identity
+  //     conflict) — and its pay / provider / note / the shift close — waited "blocked" forever. Name the
+  //     blocking producer op(s). A local entity with no known producer keeps waiting (unchanged).
+  const producers = producerIndex(byId);
+  const blockingProducers: string[] = [];
+  for (const local of implicitLocalDependencies(op)) {
+    if (resolvedLocalEntities.has(local)) continue;
+    const ps = (producers.get(local) ?? []).filter((p) => p.operation_id !== op.operation_id && sameScope(p.scope, op.scope));
+    if (ps.length === 0) continue;
+    if (ps.every((p) => p.status === "needs_attention" || p.status === "cancelled")) {
+      for (const p of ps) if (!blockingProducers.includes(p.operation_id)) blockingProducers.push(p.operation_id);
+    }
+  }
+  if (blockingProducers.length) return { ready: false, reason: "dependency_failed", failed: blockingProducers };
+
   // 4. Unsynced operation prerequisites OR unresolved local-entity prerequisites.
-  const unsyncedDeps = op.dependency_ids.filter((d) => byId.get(d)!.status !== "synced");
+  const unsyncedDeps = present.filter((d) => byId.get(d)!.status !== "synced");
   const unresolvedEntities = op.depends_on_local_entities.filter((e) => !resolvedLocalEntities.has(e));
   const unresolved = [...unsyncedDeps, ...unresolvedEntities];
   if (unresolved.length) return { ready: false, reason: "blocked", unresolved };
 
   return { ready: true };
+}
+
+function sameScope(a: OfflineOperation["scope"], b: OfflineOperation["scope"]): boolean {
+  return (
+    a.tenant_id === b.tenant_id &&
+    (a.branch_id ?? null) === (b.branch_id ?? null) &&
+    a.device_id === b.device_id &&
+    a.cashier_user_id === b.cashier_user_id
+  );
+}
+
+/** local entity id → the ops that produce it. Built once per operation-set map (cached by identity), so
+ *  the gate stays O(n) per drain pass; statuses are read live from the (mutated-in-place) op objects. */
+const producerCache = new WeakMap<Map<string, OfflineOperation>, { size: number; index: Map<string, OfflineOperation[]> }>();
+function producerIndex(byId: Map<string, OfflineOperation>): Map<string, OfflineOperation[]> {
+  const cached = producerCache.get(byId);
+  if (cached && cached.size === byId.size) return cached.index;
+  const index = new Map<string, OfflineOperation[]>();
+  for (const o of byId.values()) {
+    for (const l of producedLocalIds(o)) {
+      const list = index.get(l);
+      if (list) list.push(o);
+      else index.set(l, [o]);
+    }
+  }
+  producerCache.set(byId, { size: byId.size, index });
+  return index;
 }
 
 /** DFS cycle detection starting from `start` over dependency_ids edges. Returns the cycle path or null. */

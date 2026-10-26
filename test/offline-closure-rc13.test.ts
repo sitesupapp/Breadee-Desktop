@@ -216,7 +216,10 @@ test("G3 a refusal that PROVES the bill is already closed server-side still cove
     assert.equal(settleStillCovers(op({ operation_id: "y", operation_type: "pay_table", status: st })), true, st);
   }
   assert.equal(settleStillCovers(op({ operation_id: "z", operation_type: "pay_table", status: "cancelled" })), false);
-  assert.equal(settleStillCovers(op({ operation_id: "w", operation_type: "pay_table", status: "needs_attention", last_error_code: "dependency_failed", last_error_message: "A prerequisite could not be completed" })), false);
+  // 1.0.38 (BUG 1) — a settle PARKED behind a failed prerequisite was never refused by the server: the
+  // money was taken, it keeps covering the bill (awaiting recovery, held online). Was `false` through rc.14.
+  assert.equal(settleStillCovers(op({ operation_id: "w", operation_type: "pay_table", status: "needs_attention", last_error_code: "dependency_failed", last_error_message: "A prerequisite could not be completed" })), true);
+  assert.equal(settleStillCovers(op({ operation_id: "v", operation_type: "pay_table", status: "needs_attention", last_error_code: "validation", last_error_message: "This order is not attached to an open shift" })), false, "an authoritative refusal still re-opens");
 });
 
 test("G3 a refused settle never reopens a session when a NEWER session is already open on that table", async () => {

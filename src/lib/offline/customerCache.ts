@@ -44,8 +44,14 @@ export async function currentCustomerScope(): Promise<CustomerScope> {
   // never need scope, so they stay import-safe.
   const { useSession } = await import("@/state/session");
   const { resolveBranchId } = await import("@/lib/branch");
+  const { useOperationalBranch } = await import("@/state/operationalBranch");
   const s = useSession.getState();
-  return { tenantId: s.tenant?.id ?? null, branchId: resolveBranchId(s.tenant, s.membership) };
+  const tenantId = s.tenant?.id ?? null;
+  // 1.0.38 (C4) — the SAME operational branch the POS captures in: an all-branches operator's PINNED
+  // branch (R5), not Main. Through 1.0.37 the customer cache + offline customer writes of a pinned
+  // non-Main operator were scoped to Main, so the drain (and the picker) never matched them.
+  const pinned = tenantId && s.userId ? useOperationalBranch.getState().getBranch(tenantId, s.userId) : null;
+  return { tenantId, branchId: resolveBranchId(s.tenant, s.membership, pinned) };
 }
 
 /** The immutable 5-D scope an offline customer WRITE is captured under (the same dimensions the

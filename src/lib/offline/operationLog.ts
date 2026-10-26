@@ -158,6 +158,10 @@ export interface OfflineOperation {
   /** rc.10 — the app build (git SHA) that CAPTURED this op, stamped automatically on creation, so queue
    *  forensics can separate this build's work from historical QA leftovers. Absent on older ops. */
   captured_build?: string | null;
+  /** 1.0.38 (C1) — consecutive SERVER-side retryable failures (transient / auth / unclassified) since the
+   *  last success or operator retry. Bounds the retry: past the class budget the op parks
+   *  (needs_attention, `retry_exhausted`) instead of looping forever. Absent on older ops (= 0). */
+  server_retry_count?: number;
 }
 
 // rc.10 — build provenance: every new operation is stamped with the running build (set once at startup
@@ -250,8 +254,100 @@ export async function requeueOperation(operationId: string): Promise<boolean> {
     status: "pending",
     last_error_code: null,
     last_error_message: null,
+    server_retry_count: 0,
   });
+  // 1.0.38 (C2) — the retry CASCADES to the dependency_failed chain parked behind this op (only that
+  // chain — never an unrelated parked op), and asks the live POS for a drain: "Try again on next sync"
+  // through 1.0.37 re-queued one op and then waited for a connectivity flip that might never come.
+  await requeueDependents([operationId]).catch(() => undefined);
+  requestDrain("operator-retry");
   return true;
+}
+
+const sameOpScope = (a: OperationScope, b: OperationScope) =>
+  a.tenant_id === b.tenant_id &&
+  (a.branch_id ?? null) === (b.branch_id ?? null) &&
+  a.device_id === b.device_id &&
+  a.cashier_user_id === b.cashier_user_id;
+
+/**
+ * 1.0.38 (C2) — re-open (needs_attention → pending) every op parked as `dependency_failed` BECAUSE of
+ * one of `rootIds`, transitively: it declares the root in dependency_ids, or depends on a local entity
+ * the root produces (its local_entity_id / an offline address it creates). Same immutable scope only.
+ * Ops parked for any other reason are never touched. A dependent whose OTHER prerequisite is still
+ * parked simply re-parks on the next gate (naming it). Returns the re-opened ids (FIFO).
+ */
+export async function requeueDependents(rootIds: string[]): Promise<string[]> {
+  const parked = (await localdb.operations.where("status").equals("needs_attention").toArray()).filter(
+    (o) => o.last_error_code === "dependency_failed",
+  );
+  if (parked.length === 0 || rootIds.length === 0) return [];
+  const roots = (await localdb.operations.bulkGet(rootIds)).filter((o): o is OfflineOperation => !!o);
+  const done = new Set(rootIds);
+  const frontier = [...roots];
+  const reopened: OfflineOperation[] = [];
+  while (frontier.length > 0) {
+    const r = frontier.shift() as OfflineOperation;
+    const produced = producedLocalIds(r);
+    for (const o of parked) {
+      if (done.has(o.operation_id) || !sameOpScope(o.scope, r.scope)) continue;
+      const viaOp = o.dependency_ids.includes(r.operation_id);
+      const viaEntity = produced.length > 0 && implicitLocalDependencies(o).some((l) => produced.includes(l));
+      if (!viaOp && !viaEntity) continue;
+      done.add(o.operation_id);
+      reopened.push(o);
+      frontier.push(o);
+    }
+  }
+  reopened.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  for (const o of reopened) {
+    await localdb.operations.update(o.operation_id, { status: "pending", last_error_code: null, last_error_message: null, server_retry_count: 0 });
+  }
+  return reopened.map((o) => o.operation_id);
+}
+
+/** The local entity ids an op PRODUCES on success (its local_entity_id + an offline address it creates). */
+export function producedLocalIds(o: OfflineOperation): string[] {
+  const out: string[] = [];
+  if (o.local_entity_id) out.push(o.local_entity_id);
+  const addr = (o.payload as { local_address_id?: unknown } | null)?.local_address_id;
+  if (typeof addr === "string" && addr !== "") out.push(addr);
+  return out;
+}
+
+/** The local entity ids an op NEEDS resolved: its declared depends_on_local_entities plus an offline
+ *  address it remaps at replay (payload.address_local), which the gate does not list. */
+export function implicitLocalDependencies(o: OfflineOperation): string[] {
+  const out = [...o.depends_on_local_entities];
+  const addr = (o.payload as { address_local?: unknown } | null)?.address_local;
+  if (typeof addr === "string" && addr !== "" && !out.includes(addr)) out.push(addr);
+  return out;
+}
+
+// --- 1.0.38 (C2/D5) — drain requests --------------------------------------------------------------
+// The replay core cannot import the UI, so an operator retry ANNOUNCES that a drain is wanted; the live
+// POS workspace (the owner of the authoritative drain context) subscribes and runs its existing
+// single-flight drain. No listener (tests, settings screen without POS) = a harmless no-op.
+type DrainListener = (reason: string) => void;
+const drainListeners = new Set<DrainListener>();
+
+/** Subscribe to drain requests. Returns the unsubscribe function. */
+export function onDrainRequested(listener: DrainListener): () => void {
+  drainListeners.add(listener);
+  return () => {
+    drainListeners.delete(listener);
+  };
+}
+
+/** Ask the live POS (if mounted) to run a drain now. Never throws. */
+export function requestDrain(reason: string): void {
+  for (const l of [...drainListeners]) {
+    try {
+      l(reason);
+    } catch {
+      /* a listener fault never breaks the caller */
+    }
+  }
 }
 
 /**
@@ -260,16 +356,140 @@ export async function requeueOperation(operationId: string): Promise<boolean> {
  * that is younger than the window — durable work is never dropped. Returns the count removed. The
  * entity map + sync history are intentionally retained (audit/remap continuity). Safe to call on
  * mount; bounded by the synced-status index.
+ *
+ * 1.0.38 (C6) — a synced op that any UNSETTLED op (incl. needs_attention, which an operator may retry)
+ * still references is KEPT: as a declared dependency, as the version source of a later op
+ * (payload.version_after_op), or as the line source of a later edit (payload.target_ref.op_id).
+ * Deleting it parked the dependent as `missing_dependency` (or silently lost its version chain).
  */
 export async function gcSyncedOperations(olderThanMs = 7 * 24 * 60 * 60 * 1000): Promise<number> {
   const cutoff = Date.now() - olderThanMs;
   const synced = await localdb.operations.where("status").equals("synced").toArray();
+  const live = await localdb.operations.where("status").anyOf(UNSETTLED_STATUSES).toArray();
+  const referenced = new Set<string>();
+  for (const o of live) {
+    for (const d of o.dependency_ids) referenced.add(d);
+    const p = (o.payload ?? {}) as { version_after_op?: unknown; target_ref?: { kind?: unknown; op_id?: unknown } | null };
+    if (typeof p.version_after_op === "string") referenced.add(p.version_after_op);
+    if (p.target_ref && p.target_ref.kind === "after" && typeof p.target_ref.op_id === "string") referenced.add(p.target_ref.op_id);
+  }
   const stale = synced.filter((o) => {
+    if (referenced.has(o.operation_id)) return false;
     const t = Date.parse(o.synced_at ?? o.created_at);
     return Number.isFinite(t) && t < cutoff;
   });
   await Promise.all(stale.map((o) => localdb.operations.delete(o.operation_id)));
   return stale.length;
+}
+
+// --- 1.0.38 — read helpers for badges / Device Settings / sign-out ------------------------------------
+
+/** A (partial) scope filter. An omitted (undefined) dimension is not filtered. `branchId` null OR
+ *  undefined = TENANT-WIDE (the same convention as the Sync Center rows / history); the other
+ *  dimensions: undefined = not filtered, a value = exact match. */
+export type OperationSummaryScope = {
+  tenantId: string | null;
+  branchId?: string | null;
+  cashierUserId?: string | null;
+  deviceId?: string | null;
+  terminalId?: string | null;
+};
+
+/** Counts per state for a scope. `waiting_dependency` = blocked_dependency. `legacy_pending` = captured
+ *  rows still only in the legacy stores (posOfflineTxns / pendingShifts) — not yet staged into the log
+ *  (they are migrated on the next drain), so they are unsynced work the op-log counts cannot see yet.
+ *  `unsettled` = pending + syncing + retryable + waiting_dependency + needs_attention + legacy_pending. */
+export type OperationSummary = {
+  pending: number;
+  syncing: number;
+  retryable: number;
+  waiting_dependency: number;
+  needs_attention: number;
+  synced: number;
+  legacy_pending: number;
+  unsettled: number;
+};
+
+function matchesScope(s: OperationSummaryScope, row: { tenant_id: string; branch_id: string | null; cashier_user_id: string; device_id: string; terminal_id?: string | null }): boolean {
+  if (row.tenant_id !== s.tenantId) return false;
+  if (s.branchId != null && (row.branch_id ?? null) !== s.branchId) return false;
+  if (s.cashierUserId !== undefined && row.cashier_user_id !== s.cashierUserId) return false;
+  if (s.deviceId !== undefined && row.device_id !== s.deviceId) return false;
+  if (s.terminalId !== undefined && s.terminalId !== null && (row.terminal_id ?? null) !== s.terminalId) return false;
+  return true;
+}
+
+/**
+ * 1.0.38 — per-state counts for UI badges (POS status bar, Sync Center chip). Every read goes through
+ * the `status` INDEX (one cursor per state) — never a full-history scan: the synced cursor is bounded by
+ * the 7-day GC. `includeSynced: false` skips that cursor for hot paths that only need unsettled counts.
+ */
+export async function summarizeOperations(scope: OperationSummaryScope, opts?: { includeSynced?: boolean }): Promise<OperationSummary> {
+  const out: OperationSummary = { pending: 0, syncing: 0, retryable: 0, waiting_dependency: 0, needs_attention: 0, synced: 0, legacy_pending: 0, unsettled: 0 };
+  if (!scope.tenantId) return out;
+  const m = (o: OfflineOperation) => matchesScope(scope, o.scope);
+  const count = (s: OperationStatus) => localdb.operations.where("status").equals(s).filter(m).count();
+  [out.pending, out.syncing, out.retryable, out.waiting_dependency, out.needs_attention] = await Promise.all([
+    count("pending"),
+    count("syncing"),
+    count("retryable"),
+    count("blocked_dependency"),
+    count("needs_attention"),
+  ]);
+  if (opts?.includeSynced !== false) out.synced = await count("synced");
+  out.legacy_pending = await countUnstagedLegacy(scope);
+  out.unsettled = out.pending + out.syncing + out.retryable + out.waiting_dependency + out.needs_attention + out.legacy_pending;
+  return out;
+}
+
+/** Legacy capture rows (offline sale / offline-opened shift) whose work the op log does not show yet:
+ *  not staged at all (queued / syncing / needs_attention rows with no mig: op), or a QUEUED sale row whose
+ *  op already SYNCED — a later phase (e.g. a cash payment after the order synced) waiting for the next
+ *  migrate to re-open the op (the C5 bridge). Without this the badges could read "all synced" while that
+ *  payment waits. */
+async function countUnstagedLegacy(scope: OperationSummaryScope): Promise<number> {
+  const txns = (await localdb.posOfflineTxns.where("status").anyOf(["queued", "syncing", "needs_attention"]).toArray()).filter((t) => matchesScope(scope, t));
+  const shifts = (await localdb.pendingShifts.where("status").anyOf(["pending_sync", "needs_attention"]).toArray()).filter((s) => matchesScope(scope, s));
+  if (txns.length === 0 && shifts.length === 0) return 0;
+  const txnOps = await localdb.operations.bulkGet(txns.map((t) => `mig:txn:${t.local_txn_id}`));
+  const shiftOps = await localdb.operations.bulkGet(shifts.map((s) => `mig:shift:${s.local_shift_id}`));
+  let n = 0;
+  txns.forEach((t, i) => {
+    const o = txnOps[i];
+    if (!o || (t.status === "queued" && o.status === "synced")) n++;
+  });
+  for (const o of shiftOps) if (!o) n++;
+  return n;
+}
+
+/** 1.0.38 (C4) — unsettled work captured on this DEVICE (any cashier/branch), incl. not-yet-staged
+ *  legacy rows. Device Settings refuses a terminal-id change while this is > 0: the drain replays only
+ *  ops whose terminal equals the live one, so renaming the terminal would orphan them. */
+export async function unsettledOperationCountForDevice(deviceId: string): Promise<number> {
+  const ops = await localdb.operations.where("status").anyOf(UNSETTLED_STATUSES).filter((o) => o.scope.device_id === deviceId).count();
+  const txns = await localdb.posOfflineTxns.where("status").anyOf(["queued", "syncing", "needs_attention"]).filter((t) => t.device_id === deviceId).count();
+  const shifts = await localdb.pendingShifts.where("status").anyOf(["pending_sync", "needs_attention"]).filter((s) => s.device_id === deviceId).count();
+  return ops + txns + shifts;
+}
+
+/** 1.0.38 — local entity ids (offline customers / addresses) that unsettled work still needs: what an
+ *  unsettled op depends on or remaps, and what an unsettled customer create produces. Sign-out keeps the
+ *  matching pending-local customer rows so a re-login can still see and replay them. */
+export async function localEntityIdsNeededByUnsettledOps(): Promise<Set<string>> {
+  const out = new Set<string>();
+  const live = await localdb.operations.where("status").anyOf(UNSETTLED_STATUSES).toArray();
+  for (const o of live) {
+    for (const l of implicitLocalDependencies(o)) out.add(l);
+    const c = (o.payload as { customer_local?: unknown } | null)?.customer_local;
+    if (typeof c === "string" && c !== "") out.add(c);
+    if (o.operation_type === "customer_upsert") for (const l of producedLocalIds(o)) out.add(l);
+  }
+  const txns = await localdb.posOfflineTxns.where("status").anyOf(["queued", "syncing", "needs_attention"]).toArray();
+  for (const t of txns) {
+    if (t.customer_local) out.add(t.customer_local);
+    if (t.address_local) out.add(t.address_local);
+  }
+  return out;
 }
 
 /**

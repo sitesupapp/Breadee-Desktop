@@ -17,7 +17,7 @@
 // go through the existing op-log engines; the server stays authoritative after sync. The ONLY totals
 // calculator is `foldBill` (lib/pos/tableBill) over captured line prices.
 
-import { localdb, readCachedBill, readCachedDeliveryLines, readCachedDeliveryLinesMany, type DineDraft, type DineDraftLine, type PosOfflineTxn } from "@/lib/offline/db";
+import { localdb, readCachedBill, readCachedTableMap, readCachedDeliveryLines, readCachedDeliveryLinesMany, type DineDraft, type DineDraftLine, type PosOfflineTxn } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import type { EditTargetRef } from "@/lib/offline/handlers";
 import { foldBill } from "@/lib/pos/tableBill";
@@ -86,16 +86,74 @@ function live(op: OfflineOperation): boolean {
 /** rc.13 — a refusal whose text proves the bill is ALREADY closed on the server (paid / settled elsewhere). */
 const ALREADY_CLOSED = /already paid|already settled|no open order/i;
 
+/** 1.0.38 — needs_attention codes written by the ORCHESTRATOR (never by the settle's own RPC): the server
+ *  never saw this settle, so it was not refused — it is parked behind a prerequisite / an engine fault. */
+const NOT_A_SERVER_REFUSAL = new Set(["dependency_failed", "missing_dependency", "circular_dependency", "unknown_handler", "engine_error", "awaiting_parked_prerequisite"]);
+/** 1.0.38 — transient server / auth faults that 1.0.37 mis-parked as terminal (C1): not a refusal either. */
+const TRANSIENT_FAULT =
+  /jwt|refresh token|internal server error|bad gateway|service unavailable|gateway time-?out|upstream connect|timed out|deadlock detected|could not serialize|could not obtain lock|too many connections|remaining connection slots|read-only transaction/i;
+
 /**
- * rc.13 — does a captured settle still close the bill it covers? Valid (pending / blocked / retrying /
- * syncing / synced) → yes. Refused (needs_attention) → only when the refusal proves the bill is already
- * closed server-side; any other refusal (shift-less order, permission, validation, version drift, a failed
- * prerequisite) means the money was NOT applied → the bill stays ACTIVE (SETTLEMENT_CONFLICT).
+ * 1.0.38 — was this settle AUTHORITATIVELY refused by the server (its own canonical RPC said no, and not
+ * because the bill is already closed)? Only that re-opens a bill the cashier already settled.
+ */
+export function settleRefusedByServer(o: OfflineOperation): boolean {
+  if (o.status !== "needs_attention") return false;
+  const msg = o.last_error_message ?? "";
+  if (ALREADY_CLOSED.test(msg)) return false;
+  if (NOT_A_SERVER_REFUSAL.has(o.last_error_code ?? "")) return false;
+  return !TRANSIENT_FAULT.test(msg);
+}
+
+/**
+ * rc.13 / 1.0.38 — does a captured settle still close the bill it covers? Valid (pending / blocked /
+ * retrying / syncing / synced) → yes. Parked (needs_attention) but NOT refused by the server (a failed /
+ * missing prerequisite, an engine fault, a transient fault mis-parked by 1.0.37) → yes: the cashier took
+ * the money, the settle is awaiting recovery, the bill must never reopen as payable (BUG 1). Refused by the
+ * server → only when the refusal proves the bill is already closed; any other authoritative refusal
+ * (shift-less order, permission, validation, version drift) means the money was NOT applied → the bill
+ * stays ACTIVE (SETTLEMENT_CONFLICT), shown with the refusal, never as paid.
  */
 export function settleStillCovers(o: OfflineOperation): boolean {
   if (o.status === "cancelled") return false;
-  if (o.status !== "needs_attention") return true;
-  return ALREADY_CLOSED.test(o.last_error_message ?? "");
+  return !settleRefusedByServer(o);
+}
+
+/** 1.0.38 — a covering settle parked for the operator (not refused): the bill stays closed + HELD. */
+export function settleAwaitingRecovery(o: OfflineOperation): boolean {
+  return o.status === "needs_attention" && settleStillCovers(o) && !ALREADY_CLOSED.test(o.last_error_message ?? "");
+}
+
+/**
+ * 1.0.38 — THE payment precedence rule, shared by the Dine-In floor, the Delivery queue and Orders History
+ * (one rule, never three). Against a canonical snapshot read at `snapshotAt`, a captured settle is:
+ *   "pending"   — valid, not yet confirmed (incl. awaiting recovery): it WINS over the older snapshot;
+ *   "confirmed" — synced AFTER the snapshot was read: it WINS (the snapshot predates it);
+ *   "reflected" — synced at/before the snapshot read: the snapshot already shows it — the snapshot stands.
+ *                 Also a refusal proving the order was ALREADY closed server-side: this device's payment
+ *                 was not applied, the canonical row is the truth (never a payment claimed by this device);
+ *   "refused"   — cancelled, or authoritatively refused by the server: it never claims payment.
+ * (The floor additionally keeps an already-closed bill CLOSED on a stale map — `settleStillCovers`.)
+ */
+export type SettlePrecedence = "pending" | "confirmed" | "reflected" | "refused";
+export function settlePrecedence(o: OfflineOperation, snapshotAt: number | null): SettlePrecedence {
+  if (!settleStillCovers(o)) return "refused";
+  if (o.status === "needs_attention" && ALREADY_CLOSED.test(o.last_error_message ?? "")) return "reflected";
+  if (o.status !== "synced") return "pending";
+  return reflectedIn(o, snapshotAt) ? "reflected" : "confirmed";
+}
+
+/** 1.0.38 — every order id a dine-in table settle closes: its recorded canonical orders, its local session,
+ *  and that session's canonical order (`resolve`: local session id → canonical order id, when known). */
+export function settleCoveredIds(s: OfflineOperation, resolve: (localId: string) => string | null | undefined): string[] {
+  const cv = rec(rec(s.payload).covers);
+  const out = new Set<string>(((cv.order_ids as string[] | undefined) ?? []).filter((x) => typeof x === "string" && x !== ""));
+  if (typeof cv.session_local === "string" && cv.session_local !== "") {
+    out.add(cv.session_local);
+    const c = resolve(cv.session_local);
+    if (c) out.add(c);
+  }
+  return [...out];
 }
 
 export function opInScope(op: OfflineOperation, s: ProjectionScope): boolean {
@@ -244,10 +302,18 @@ export type OperationalTableBill = {
   /** What remains to be paid: gross − collected − paidPending (0 once a settle is captured). */
   outstanding: number | null;
   currency: CurrencyCode | null;
-  /** Unsynced ops that make up this projection's local delta (settle must replay after them). */
+  /** Unsynced ops that make up this projection's local delta (display: incl. parked ones). */
   mutationOpIds: string[];
+  /** 1.0.38 (C3) — the unsynced, NOT parked mutations: the ONLY ones a new settle may depend on (a
+   *  needs_attention edit / leg would make the settle dead at capture — dependency_failed). */
+  pendingMutationOpIds: string[];
   /** Ops in this projection parked for the operator (needs_attention). */
   attention: number;
+  /** 1.0.38 — the parked (needs_attention) item ops / legs / rounds: shown as attention items, never
+   *  applied to the payable bill. */
+  attentionOpIds: string[];
+  /** 1.0.38 — the server's refusal text of the latest REFUSED settle of this table (SETTLEMENT_CONFLICT). */
+  refusedSettleMessage: string | null;
   /** The latest captured, not-yet-reflected settle / on-account of this table (its covered bill is
    *  closed locally; a NEW session on the table chains its open after it). */
   settlingOpId: string | null;
@@ -291,9 +357,13 @@ export function projectTableBill(input: {
   canonical: { bill: TableBill; fetchedAt: number } | null;
   draft: DineDraft | null;
   ops: OfflineOperation[];
+  /** 1.0.38 — when the map that shows this table FREE was read (read START). With no canonical bill, a
+   *  synced op at or before it is already inside that (closed) server state — never re-added as a ghost
+   *  unpaid balance on a table the server shows free. */
+  freeMapAt?: number | null;
 }): OperationalTableBill {
   const { tableId, mapRow } = input;
-  const fetchedAt = input.canonical?.fetchedAt ?? null;
+  const fetchedAt = input.canonical?.fetchedAt ?? input.freeMapAt ?? null;
   const meta = new Map<string, LineMeta>();
   const porders: ProjectedOrder[] = [];
   const bills: BillOrder[] = [];
@@ -312,6 +382,9 @@ export function projectTableBill(input: {
   // not applied, so the bill is still the table's active, unpaid bill — shown with attention, never as
   // paid. (rc.12 kept a refused settle covering the bill offline; after reconnect the raw server map then
   // "resurrected" it.) Only a refusal that proves the bill is ALREADY closed server-side still covers it.
+  // 1.0.38 — a settle merely PARKED (prerequisite failed / transient fault) still covers it (BUG 1).
+  // (= settlePrecedence's pending / confirmed, plus the floor-only rule: a bill proven closed elsewhere
+  // stays closed on a stale map — never offered for a second payment.)
   const settleOps = tableSettles.filter((o) => settleStillCovers(o));
   const refusedSettles = tableSettles.filter((o) => !settleStillCovers(o));
   const coveredOrders = new Set<string>();
@@ -333,9 +406,11 @@ export function projectTableBill(input: {
   // `covers.order_ids` could not name it yet) is closed too. Without this, a canonical bill fetched after
   // the round synced but before the settle synced showed that order UNPAID again — the F1 resurrection.
   if (coveredSessions.size > 0) {
+    const sessionOrder = new Map<string, string>();
     for (const o of input.ops) {
-      if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && o.local_entity_id && coveredSessions.has(o.local_entity_id)) coveredOrders.add(o.canonical_entity_id);
+      if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && o.local_entity_id && coveredSessions.has(o.local_entity_id)) sessionOrder.set(o.local_entity_id, o.canonical_entity_id);
     }
+    for (const s of settleOps) for (const id of settleCoveredIds(s, (l) => sessionOrder.get(l))) coveredOrders.add(id);
   }
   // rc.11 — the LEGACY rule (a pre-rc.10 settle with no `covers`, matched only by its dependency on the
   // session's open) closes the session ONLY when no round was sent AFTER that settle: a later round is
@@ -392,11 +467,21 @@ export function projectTableBill(input: {
 
   const opsById = new Map(input.ops.map((o) => [o.operation_id, o]));
   const mutationOpIds: string[] = [];
+  const pendingMutationOpIds: string[] = [];
+  const attentionOpIds: string[] = [];
   let attention = 0;
   const note = (op: OfflineOperation) => {
     mutationOpIds.push(op.operation_id);
-    if (op.status === "needs_attention") attention += 1;
+    if (op.status === "needs_attention") {
+      attention += 1;
+      attentionOpIds.push(op.operation_id);
+    } else {
+      pendingMutationOpIds.push(op.operation_id);
+    }
   };
+  // 1.0.38 (C3) — a PARKED item edit / add / split leg was never applied by the server: it is an attention
+  // item, never part of the payable bill, the version chain, or a new capture's dependencies.
+  const parked = (op: OfflineOperation) => op.status === "needs_attention";
 
   // 2 — local session rounds (unsynced, or synced after the snapshot was fetched).
   if (draft) {
@@ -481,9 +566,10 @@ export function projectTableBill(input: {
     if (!key) continue;
     const po = porders.find((x) => x.key === key)!;
     const bo = bills.find((b) => b.id === key)!;
+    note(op);
+    if (parked(op)) continue;
     if (op.operation_type !== "edit_order") applyItemOp(op, bo, key, meta);
     po.bumpOps.push(op.operation_id);
-    note(op);
   }
 
   // 4 — split legs (unsynced) → paid quantities + amount captured.
@@ -494,6 +580,10 @@ export function projectTableBill(input: {
     if (!key) continue;
     const po = porders.find((x) => x.key === key)!;
     const bo = bills.find((b) => b.id === key)!;
+    if (parked(op)) {
+      note(op); // a refused leg: attention only — never counted as paid, never blocks the full settle
+      continue;
+    }
     const allocs = (rec(op.payload).allocations as { order_item_id?: string | null; line_local?: string | null; quantity: number }[] | undefined) ?? [];
     for (const a of allocs) {
       const id = a.order_item_id ?? a.line_local ?? "";
@@ -531,7 +621,10 @@ export function projectTableBill(input: {
     outstanding,
     currency: bill.currency,
     mutationOpIds,
+    pendingMutationOpIds,
     attention,
+    attentionOpIds,
+    refusedSettleMessage: refusedSettles.length > 0 ? (refusedSettles[refusedSettles.length - 1].last_error_message ?? "refused by the server") : null,
     settlingOpId: lastSettleOpId,
     settledLocally: lastSettleOpId != null && nonEmpty.length === 0,
     settlementConflict: refusedSettles.length > 0 && nonEmpty.length > 0,
@@ -606,16 +699,24 @@ export async function getOperationalTableBill(
   table: TableSummary,
   preloadedOps?: OfflineOperation[],
   preloadedDrafts?: DineDraft[],
+  /** 1.0.38 — when the map holding `table` was read (read START). Omitted → the cached map's stamp. */
+  mapLoadedAt?: number | null,
 ): Promise<OperationalTableBill> {
-  const [cached, draft, ops] = await Promise.all([
+  const free = table.orders === 0;
+  const [cached, draft, ops, mapAt] = await Promise.all([
     readCachedBill(table.id, scope.tenantId, scope.branchId).catch(() => null),
     preloadedDrafts ? Promise.resolve(preloadedDrafts.find((d) => d.table_id === table.id) ?? null) : openDraftForTable(scope, table.id),
     preloadedOps ? Promise.resolve(preloadedOps) : scopedOperations(scope),
+    !free || mapLoadedAt !== undefined
+      ? Promise.resolve(mapLoadedAt ?? null)
+      : readCachedTableMap(scope.tenantId, scope.branchId).then((m) => m?.cachedAt ?? null).catch(() => null),
   ]);
   const canonical = cached ? { bill: cached.bill as TableBill, fetchedAt: cached.cachedAt } : null;
   // A cached bill for a table the (newer) map shows as FREE belongs to a bill that has since closed.
-  const fresh = canonical && table.orders > 0 ? canonical : null;
-  return projectTableBill({ tableId: table.id, mapRow: table, canonical: fresh, draft, ops });
+  const fresh = canonical && !free ? canonical : null;
+  // 1.0.38 (BUG 1 ghost balance) — the FREE map is itself a canonical statement: work synced before it was
+  // read is inside that closed server state, never re-added as an unpaid balance.
+  return projectTableBill({ tableId: table.id, mapRow: table, canonical: fresh, draft, ops, freeMapAt: free ? mapAt : null });
 }
 
 /** rc.13 — the table a dine-in op acts on (open: its entity; round: its submit; settle: its payload). */
@@ -635,19 +736,48 @@ function tableOfOp(o: OfflineOperation): string | null {
  *               map was loaded): these keep the operational projection online too;
  *   `syncingSettle` — tables whose local settle has NOT reached the server yet: online actions on them are
  *               held until it lands (never append to / pay a bill that is mid-settle).
+ *               1.0.38 — this includes a settle PARKED but not refused (`attentionSettle`): its bill was
+ *               paid by the customer; no second payment / new round until it is resolved (BUG 1).
+ *   `refusedSettle` — table → the server's refusal of its latest REFUSED settle (shown to the cashier;
+ *               the bill is active and payable again, never a fake Paid).
  */
-export async function tablesWithUnreflectedWork(scope: ProjectionScope, mapLoadedAt: number | null): Promise<{ touched: Set<string>; syncingSettle: Set<string> }> {
+export async function tablesWithUnreflectedWork(
+  scope: ProjectionScope,
+  mapLoadedAt: number | null,
+): Promise<{ touched: Set<string>; syncingSettle: Set<string>; attentionSettle: Set<string>; refusedSettle: Map<string, string> }> {
   const touched = new Set<string>();
   const syncingSettle = new Set<string>();
-  for (const o of await scopedOperations(scope)) {
+  const attentionSettle = new Set<string>();
+  const refusedSettle = new Map<string, string>();
+  const ops = (await scopedOperations(scope)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  for (const o of ops) {
     if (o.status === "cancelled") continue;
     const t = tableOfOp(o);
     if (!t) continue;
     if (!reflectedIn(o, mapLoadedAt)) touched.add(t);
     const settle = o.operation_type === "pay_table" || o.operation_type === "on_account_table";
-    if (settle && o.status !== "synced" && o.status !== "needs_attention") syncingSettle.add(t);
+    if (!settle) continue;
+    if (settleRefusedByServer(o)) {
+      refusedSettle.set(t, o.last_error_message ?? "refused by the server");
+      continue;
+    }
+    refusedSettle.delete(t); // a LATER settle of the table supersedes an earlier refusal
+    if (o.status === "synced") continue;
+    if (o.status !== "needs_attention" || settleAwaitingRecovery(o)) {
+      syncingSettle.add(t);
+      if (o.status === "needs_attention") attentionSettle.add(t);
+    }
   }
-  return { touched, syncingSettle };
+  return { touched, syncingSettle, attentionSettle, refusedSettle };
+}
+
+/** 1.0.38 — the parked-settle hold text (the payment was taken; the settle needs the operator). */
+export const SETTLE_ATTENTION_HOLD_MESSAGE =
+  "This table's offline payment needs attention in the Sync Center. It was already collected — don't take payment or add a new round until it is resolved.";
+
+/** 1.0.38 — the cashier-facing notice for a settle the server REFUSED (the bill is unpaid again). */
+export function refusedSettleNotice(message: string): string {
+  return `The server refused this table's offline payment (${message}). The bill is still unpaid — check the Sync Center before collecting payment again.`;
 }
 
 /** The Map/List card totals for every table, from the SAME projection (card == detail == payment). */
@@ -656,6 +786,8 @@ export async function getOperationalTableTotals(
   tables: TableSummary[],
   /** rc.13 — ONLINE: project only these tables (local work the server map does not reflect yet). */
   onlyTables?: Set<string>,
+  /** 1.0.38 — when `tables` was read (read START); omitted → the cached map's stamp. */
+  mapLoadedAt?: number | null,
 ): Promise<Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>> {
   if (onlyTables) tables = tables.filter((t) => onlyTables.has(t.id));
   const out = new Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>();
@@ -663,11 +795,15 @@ export async function getOperationalTableTotals(
   // rc.12 — ONE read of the ops and ONE of the sessions for the whole floor (was one sessions read per
   // table), and a free table with no local session is skipped without any read: it can have no bill
   // (the projection would return an empty bill for it — the result is identical).
-  const [ops, drafts] = await Promise.all([scopedOperations(scope), openDraftsInScope(scope)]);
+  const [ops, drafts, mapAt] = await Promise.all([
+    scopedOperations(scope),
+    openDraftsInScope(scope),
+    mapLoadedAt !== undefined ? Promise.resolve(mapLoadedAt) : readCachedTableMap(scope.tenantId, scope.branchId).then((m) => m?.cachedAt ?? null).catch(() => null),
+  ]);
   const withSession = new Set(drafts.map((d) => d.table_id));
   for (const t of tables) {
     if (t.orders === 0 && !withSession.has(t.id)) continue;
-    const p = await getOperationalTableBill(scope, t, ops, drafts);
+    const p = await getOperationalTableBill(scope, t, ops, drafts, mapAt);
     if (p.bill.orders.length === 0 && t.orders === 0) continue;
     if (p.bill.orders.length === 0) {
       // rc.10 — the canonical bill the map still shows was SETTLED locally: the table is available.
@@ -929,13 +1065,19 @@ export function projectDeliveryOrder(input: {
         break;
       case "pay_order":
       case "on_account_order":
-        settlingOpId = op.operation_id;
+        // 1.0.38 — a settle the server REFUSED (or a cancelled one) no longer blocks Pay: the money was not
+        // applied. A still-unresolved one (pending / retrying / parked behind a prerequisite / proven
+        // already-closed) keeps blocking it — never a second payment.
+        if (settlePrecedence(op, rowFetchedAt) !== "refused") settlingOpId = op.operation_id;
         // rc.11 — PAYMENT PRECEDENCE: an unresolved local settlement > a newer confirmed canonical
         // settlement > an older cached row. A valid (pending / blocked / retrying / synced-after-the-row)
         // settle overlays the status, so a stale snapshot can never show a paid order as Unpaid. A
         // REFUSED settle (needs_attention) never claims payment — the server row stands, flagged.
-        if (op.status !== "needs_attention") {
-          const pending = op.status !== "synced";
+        // 1.0.38 — the ONE shared rule (settlePrecedence): a settle merely PARKED behind a prerequisite /
+        // a transient fault is not a refusal — the money was taken, it still wins (pending sync).
+        const prec = settlePrecedence(op, rowFetchedAt);
+        if (prec === "pending" || prec === "confirmed") {
+          const pending = prec === "pending";
           if (op.operation_type === "pay_order") {
             payOverlay = { payment_status: "paid", status: "completed", settlement_mode: null, local_pending_sync: pending };
           } else {

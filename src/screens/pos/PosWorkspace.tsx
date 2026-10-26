@@ -103,7 +103,9 @@ import { loadOperationalProviders } from "@/lib/pos/deliveryProviderCapture";
 import { cacheDeliveryProviders } from "@/lib/offline/db";
 import { useCustomers } from "@/state/customers";
 import { type CurrencyCode } from "@/lib/currency";
-import { pendingCount, readCachedFloor } from "@/lib/offline/db";
+import { readCachedFloor } from "@/lib/offline/db";
+import { onDrainRequested, summarizeOperations } from "@/lib/offline/operationLog";
+import { useOperationalBranch } from "@/state/operationalBranch";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
@@ -406,7 +408,7 @@ function PosWorkspaceInner() {
   // syncPosTxns is single-flight, so two triggers racing coalesce into one safe pass
   // that is already running under fresh context - the loser simply no-ops.
   const drainWithFreshContext = useCallback(
-    async (trigger: "reconnect" | "backend-returned") => {
+    async (trigger: "reconnect" | "backend-returned" | "periodic" | "operator-retry") => {
       // Thin wrapper over the extracted, integration-tested drain sequence. It drains
       // under the server-authoritative context and re-validates that context before
       // committing any post-sync state, re-passing if an OU switch / sign-out landed
@@ -420,7 +422,11 @@ function PosWorkspaceInner() {
           const t = s.tenant?.id ?? null;
           const u = s.userId ?? null;
           if (!t || !u) return null;
-          return { tenantId: t, userId: u, branchId: resolveBranchId(s.tenant, s.membership) };
+          // 1.0.38 (C4) — replay in the SAME operational branch the capture used: an all-branches
+          // operator's PINNED branch (R5; the pin pos.ts resolves/repairs), not Main. Through 1.0.37 every
+          // op captured in a pinned non-Main branch was deferred forever, and the post-drain shift re-read
+          // under Main dropped that branch's (pending) open shift.
+          return { tenantId: t, userId: u, branchId: resolveBranchId(s.tenant, s.membership, useOperationalBranch.getState().getBranch(t, u)) };
         },
         sync: (c) =>
           syncPosTxns(
@@ -469,6 +475,49 @@ function PosWorkspaceInner() {
     void drainWithFreshContext("backend-returned");
   }, [backendReachable, drainWithFreshContext]);
 
+  // 1.0.38 (C2/D5) — two more triggers into the SAME single-flight drain:
+  //   * an operator Retry (Sync Center / Needs Attention) announces a drain request — it no longer waits
+  //     for a connectivity flip that may never come;
+  //   * a bounded periodic pass every 45 s, ONLY while online and THIS context (5-D scope) still holds
+  //     replayable work (pending / syncing / retryable / waiting on a dependency, or legacy rows not yet
+  //     staged). A transient failure on a stable connection otherwise waited for the next restart/flap.
+  //     `periodicBusy` keeps the timer single-flight at the UI layer too (the orchestrator lock is the
+  //     real guard); parked ops alone never trigger it (they wait for a human).
+  const periodicBusy = useRef(false);
+  useEffect(() => {
+    if (!online) return;
+    const offRequest = onDrainRequested(() => {
+      void drainWithFreshContext("operator-retry");
+    });
+    const tick = async () => {
+      if (periodicBusy.current) return;
+      const s = useSession.getState();
+      const t = s.tenant?.id ?? null;
+      const u = s.userId ?? null;
+      if (!t || !u) return;
+      periodicBusy.current = true;
+      try {
+        const dev = getDeviceIdentity();
+        const sum = await summarizeOperations(
+          { tenantId: t, branchId: resolveBranchId(s.tenant, s.membership, useOperationalBranch.getState().getBranch(t, u)), cashierUserId: u, deviceId: dev.device_id, terminalId: dev.terminal_id },
+          { includeSynced: false },
+        );
+        if (sum.pending + sum.syncing + sum.retryable + sum.waiting_dependency + sum.legacy_pending > 0) {
+          await drainWithFreshContext("periodic");
+        }
+      } catch {
+        /* best-effort; the next tick retries */
+      } finally {
+        periodicBusy.current = false;
+      }
+    };
+    const id = window.setInterval(() => void tick(), 45_000);
+    return () => {
+      offRequest();
+      window.clearInterval(id);
+    };
+  }, [online, drainWithFreshContext]);
+
   // --- window ----------------------------------------------------------------
   useEffect(() => {
     void restoreWindowState();
@@ -499,13 +548,30 @@ function PosWorkspaceInner() {
   }, []);
 
   // --- pending sync badge ----------------------------------------------------
+  // 1.0.38 — the operation log is the source of truth (the legacy outbox it used to count is dormant and
+  // quarantined, so the badge read 0 while offline work was pending). Scoped to tenant + the operational
+  // branch; counts every unsettled state incl. Needs Attention and not-yet-staged legacy captures.
   const [pending, setPending] = useState(0);
+  const badgeBranchId = pos.branch.id;
   useEffect(() => {
-    const tick = () => pendingCount().then(setPending).catch(() => {});
+    if (!tenantId) {
+      setPending(0);
+      return;
+    }
+    let live = true;
+    const tick = () =>
+      summarizeOperations({ tenantId, branchId: badgeBranchId ?? undefined }, { includeSynced: false })
+        .then((s) => {
+          if (live) setPending(s.unsettled);
+        })
+        .catch(() => {});
     tick();
     const id = window.setInterval(tick, 15_000);
-    return () => window.clearInterval(id);
-  }, []);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+    };
+  }, [tenantId, badgeBranchId]);
 
   // --- derived menu views ----------------------------------------------------
   const indexed = useMemo(() => withSearchIndex(menu.items), [menu.items]);

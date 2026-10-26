@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getDeviceIdentity, updateDeviceIdentity } from "@/lib/device";
+import { unsettledOperationCountForDevice } from "@/lib/offline/operationLog";
 import { useSession } from "@/state/session";
 import { Button, Card, Input } from "@/components/ui";
 
@@ -9,9 +10,33 @@ export function DeviceSettings() {
   const [name, setName] = useState(dev.device_name);
   const [terminal, setTerminal] = useState(dev.terminal_id);
   const [saved, setSaved] = useState(false);
+  // 1.0.38 (C4) — offline work replays only on the terminal that captured it. While this device still
+  // holds unsynced work, the Terminal ID is locked (a rename would strand that work, never replayed).
+  // null = still counting (locked until known).
+  const [unsettled, setUnsettled] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    void unsettledOperationCountForDevice(dev.device_id)
+      .then((n) => {
+        if (live) setUnsettled(n);
+      })
+      .catch(() => {
+        if (live) setUnsettled(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [dev.device_id, saved]);
+  const terminalLocked = unsettled !== 0;
 
-  function save() {
-    const next = updateDeviceIdentity({ device_name: name.trim() || "Desktop Terminal", terminal_id: terminal.trim() || dev.terminal_id });
+  async function save() {
+    // Re-check at save time (work may have been captured since the screen opened): never rewrite the
+    // terminal id while unsynced work exists for this device.
+    const n = await unsettledOperationCountForDevice(dev.device_id).catch(() => null);
+    setUnsettled(n);
+    const terminalId = n === 0 ? terminal.trim() || dev.terminal_id : dev.terminal_id;
+    if (n !== 0) setTerminal(dev.terminal_id);
+    const next = updateDeviceIdentity({ device_name: name.trim() || "Desktop Terminal", terminal_id: terminalId });
     setDev(next);
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
@@ -28,7 +53,14 @@ export function DeviceSettings() {
         </label>
         <label className="text-sm">
           <span className="font-semibold">Terminal ID</span>
-          <Input className="mt-1" value={terminal} onChange={(e) => setTerminal(e.target.value)} />
+          <Input className="mt-1" value={terminal} disabled={terminalLocked} onChange={(e) => setTerminal(e.target.value)} />
+          {terminalLocked && (
+            <span className="mt-1 block text-xs text-sub">
+              {unsettled == null
+                ? "Checking for offline work on this device…"
+                : `Locked: this device has ${unsettled} offline change${unsettled === 1 ? "" : "s"} not yet synced. They can only sync under this Terminal ID — change it after they sync.`}
+            </span>
+          )}
         </label>
       </div>
       <dl className="mt-5 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
@@ -38,7 +70,7 @@ export function DeviceSettings() {
         <div><dt className="text-sub">Branch scope</dt><dd className="font-semibold">{s.membership?.all_branches ? "All branches" : s.membership?.branch_id ?? "—"}</dd></div>
       </dl>
       <div className="mt-5 flex items-center gap-3">
-        <Button onClick={save}>Save device</Button>
+        <Button onClick={() => void save()}>Save device</Button>
         {saved && <span className="text-sm font-semibold text-brand-dark">Saved</span>}
       </div>
     </Card>

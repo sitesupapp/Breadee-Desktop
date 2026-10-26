@@ -37,6 +37,13 @@ function shiftStatus(s: PendingShiftStatus): OperationStatus {
   if (s === "needs_attention") return "needs_attention";
   return "pending"; // pending_sync
 }
+/** 1.0.38 (C5) — a staged sale op that has NOT carried a payment intent yet and can still take one:
+ *  not synced (that path re-opens), not syncing (in flight / crashed — replays first), not cancelled. */
+function needsPaymentBridge(op: OfflineOperation): boolean {
+  if (op.status === "synced" || op.status === "syncing" || op.status === "cancelled") return false;
+  return !(op.payload as { payment_intent?: unknown } | null)?.payment_intent;
+}
+
 function txnStatus(s: PosOfflineTxnStatus): OperationStatus {
   if (s === "synced") return "synced";
   if (s === "needs_attention") return "needs_attention";
@@ -114,6 +121,20 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
           payload: { ...((existingTxnOp.payload as object | null) ?? {}), order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true },
           last_error_code: null,
           last_error_message: null,
+        });
+      } else if (t.payment_intent && needsPaymentBridge(existingTxnOp)) {
+        // 1.0.38 (C5) — a cash payment taken AFTER a connection flap. The flap staged the unpaid send
+        // (payment_intent null) but did not finish replaying it (pending / retryable / blocked /
+        // needs_attention); the later offline Pay wrote the intent to the LEGACY row only. Through 1.0.37
+        // the bridge fired only for a synced op, so the op replayed submit-only → synced → the legacy
+        // row was reconciled as synced and the payment was never replayed (drawer short, order Open).
+        // Merge the intent into the not-yet-synced op EXACTLY ONCE (the op then carries it, so this
+        // branch never fires again), keeping its status, canonical id and remap fields. A syncing op
+        // (crashed mid-replay) is left alone: it replays as is and the synced re-open bridge above then
+        // carries the payment. A cancelled op is never resurrected.
+        const prev = (existingTxnOp.payload as { paid?: unknown } | null) ?? {};
+        await localdb.operations.update(id, {
+          payload: { ...prev, order_payload: t.order_payload, payment_intent: t.payment_intent, paid: prev.paid === true || t.paid === true },
         });
       } else {
         report.skippedAlreadyMigrated++;
@@ -227,6 +248,11 @@ export async function reconcileLegacyFromOperations(): Promise<void> {
     } else if (op.operation_type === "takeaway_sale" && op.operation_id.startsWith("mig:txn:")) {
       const localId = op.operation_id.slice("mig:txn:".length);
       if (op.status === "synced") {
+        // 1.0.38 (C5) — a payment captured on the legacy row while this op was replaying submit-only:
+        // never mark the row synced over it (that ended the bridge forever); leave it queued so the next
+        // migrate re-opens the synced op with the payment (the synced → pending bridge).
+        const row = await localdb.posOfflineTxns.get(localId);
+        if (row && row.status === "queued" && row.payment_intent && !(op.payload as { payment_intent?: unknown } | null)?.payment_intent) continue;
         const orderNumber = (op.result_meta?.order_number as string | undefined) ?? undefined;
         // Mirror the remap: the handler rewrote order_payload.shift_id to the canonical
         // server shift and cleared the local dependency, so the legacy row reflects it too.

@@ -244,6 +244,22 @@ export async function addDraftLine(sessionId: string, line: Omit<DineDraftLine, 
   });
 }
 
+/**
+ * 1.0.38 — stage the cart as EXACTLY the session's unsent round: the draft's UNSENT lines are replaced by
+ * `lines` (sent lines are untouched). The cart is the only producer of unsent draft lines and stays the
+ * source of truth until the round is durably sent, so a Send that failed AFTER staging (e.g. a refused
+ * shift check) and is retried never stages the same cart lines twice — the duplicate-items path the
+ * Hush 261024-0045 review looked for (an append-then-send retry used to re-append every line).
+ */
+export async function stageUnsentDraftLines(sessionId: string, lines: (Omit<DineDraftLine, "line_id" | "sent_round"> & { line_id?: string })[]): Promise<DineDraft> {
+  return mutateDraft(sessionId, (d) => {
+    d.lines = [
+      ...d.lines.filter((x) => x.sent_round !== null),
+      ...lines.map((line) => ({ line_id: line.line_id ?? nid(), sent_round: null, ...line, modifiers: line.modifiers ?? [] })),
+    ];
+  });
+}
+
 export async function setDraftLineQuantity(sessionId: string, lineId: string, quantity: number): Promise<DineDraft> {
   return mutateDraft(sessionId, (d) => {
     const l = d.lines.find((x) => x.line_id === lineId);
@@ -622,11 +638,13 @@ export async function tableOnAccountOffline(input: {
 
 const SPLIT_OP_PREFIX = "dineinsplit:";
 
-/** Split legs captured for a session's order, in capture order (for chaining + projection). */
+/** Split legs captured for a session's order, in capture order (for chaining + projection).
+ *  1.0.38 (C3) — a leg PARKED in needs_attention was never applied by the server: it allocates nothing
+ *  and is never chained onto (a new leg depending on it would be dead at capture). */
 async function sessionSplitLegs(d: DineDraft): Promise<OfflineOperation[]> {
   const rows = await localdb.operations.where("operation_type").equals("split_settle").toArray();
   return rows
-    .filter((o) => o.status !== "cancelled" && (o.payload as { order_local?: string } | null)?.order_local === d.local_session_id)
+    .filter((o) => o.status !== "cancelled" && o.status !== "needs_attention" && (o.payload as { order_local?: string } | null)?.order_local === d.local_session_id)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
@@ -767,7 +785,10 @@ export async function splitOperationalBillOffline(input: {
         return (input.orderId != null && p.order_id === input.orderId) || (input.orderLocal != null && p.order_local === input.orderLocal);
       })
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
-    const prevLeg = legs.length > 0 ? legs[legs.length - 1].operation_id : null;
+    // 1.0.38 (C3) — strict leg order chains onto the last leg the server can still apply, never onto a
+    // PARKED (needs_attention) one: that dependency would make this leg dead at capture.
+    const chainable = legs.filter((o) => o.status !== "needs_attention");
+    const prevLeg = chainable.length > 0 ? chainable[chainable.length - 1].operation_id : null;
     const op: OfflineOperation = {
       operation_id: operationId,
       operation_type: "split_settle",

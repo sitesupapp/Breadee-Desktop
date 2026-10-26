@@ -111,7 +111,7 @@ import { useFloor } from "@/state/floor";
 import {
   type DineinScope,
   openTableOffline,
-  addDraftLine,
+  stageUnsentDraftLines,
   sendRoundOffline,
   draftLineFromCart,
   getDineDraftForTable,
@@ -131,6 +131,8 @@ import {
   SUMMARY_ONLY_SETTLE_MESSAGE,
   shiftlessRefusal,
   tablesWithUnreflectedWork,
+  SETTLE_ATTENTION_HOLD_MESSAGE,
+  refusedSettleNotice,
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
@@ -378,6 +380,10 @@ export function useDineInWorkspace(input: {
   const [opTotals, setOpTotals] = useState<Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>>(new Map());
   // rc.13 — tables whose local offline settle has not reached the server yet (online actions held).
   const [syncingSettle, setSyncingSettle] = useState<Set<string>>(new Set());
+  // 1.0.38 — of those, the settles PARKED for the operator (paid, not refused), and the settles the server
+  // REFUSED (table → refusal text: the bill is unpaid again and the cashier is told so).
+  const [attentionSettle, setAttentionSettle] = useState<Set<string>>(new Set());
+  const [refusedSettle, setRefusedSettle] = useState<Map<string, string>>(new Map());
   const projScopeKey = useRef<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -385,6 +391,8 @@ export function useDineInWorkspace(input: {
       projScopeKey.current = null;
       setOpTotals(new Map());
       setSyncingSettle(new Set());
+      setAttentionSettle(new Set());
+      setRefusedSettle(new Map());
       return;
     }
     const scope = input.offlineScope;
@@ -395,23 +403,32 @@ export function useDineInWorkspace(input: {
       projScopeKey.current = key;
       setOpTotals(new Map());
       setSyncingSettle(new Set());
+      setAttentionSettle(new Set());
+      setRefusedSettle(new Map());
     }
     void (async () => {
       // OFFLINE: every table through the ONE operational projection (rc.9). ONLINE (rc.13 — canonical
       // refresh is a MERGE): only tables with local dine-in work the loaded map does not reflect yet, so a
       // stale/offline-cached map can never show a bill settled on this device as unpaid again.
       const work = offlineProjOn ? null : await tablesWithUnreflectedWork(scope, tables.lastLoadedAt);
-      if (live) setSyncingSettle(work?.syncingSettle ?? new Set());
+      if (live) {
+        setSyncingSettle(work?.syncingSettle ?? new Set());
+        setAttentionSettle(work?.attentionSettle ?? new Set());
+        setRefusedSettle(work?.refusedSettle ?? new Map());
+      }
       if (work && work.touched.size === 0) {
         if (live) setOpTotals(new Map());
         return;
       }
-      const m = await getOperationalTableTotals(scope, tables.map.tables, work?.touched);
+      // 1.0.38 — the map's read-START time: a FREE table's synced work is inside that closed server state.
+      const m = await getOperationalTableTotals(scope, tables.map.tables, work?.touched, tables.lastLoadedAt);
       if (live) setOpTotals(m);
     })().catch(() => {
       if (live) {
         setOpTotals(new Map());
         setSyncingSettle(new Set());
+        setAttentionSettle(new Set());
+        setRefusedSettle(new Map());
       }
     });
     return () => {
@@ -442,9 +459,13 @@ export function useDineInWorkspace(input: {
 
   // rc.13 — ONLINE, a table whose offline settle has not reached the server yet is held: opening, adding
   // to or paying it now could append to / charge the bill that is mid-settle on the server.
+  // 1.0.38 — a settle PARKED for the operator (paid, not refused) holds the table too (BUG 1: no second
+  // payment, no new round on that bill until it is resolved), with its own instruction.
   const settleSyncHoldReason: string | null =
     input.online && selected && syncingSettle.has(selected.id)
-      ? "This table's offline payment is still syncing — wait a moment; the floor refreshes when it lands."
+      ? attentionSettle.has(selected.id)
+        ? SETTLE_ATTENTION_HOLD_MESSAGE
+        : "This table's offline payment is still syncing — wait a moment; the floor refreshes when it lands."
       : null;
 
   // rc.14 (F1/F2/F5) — ONLINE, the selected table's loaded server bill holds an order WITHOUT a shift
@@ -873,6 +894,22 @@ export function useDineInWorkspace(input: {
     if (offlineProj?.settledLocally) useCart.getState().releaseIfOwner({ kind: "table", tableId: offlineProj.tableId });
   }, [offlineProj]);
 
+  // 1.0.38 — a settle the server REFUSED re-opens the bill (never a fake Paid) and the cashier is TOLD so,
+  // once per refused table bill per screen, when that table (with an open bill) is selected.
+  const refusalShown = useRef<Set<string>>(new Set());
+  const selectedRefusal =
+    selected && selected.orders > 0
+      ? (refusedSettle.get(selected.id) ?? (offlineProj?.tableId === selected.id && offlineProj.settlementConflict ? offlineProj.refusedSettleMessage : null))
+      : null;
+  useEffect(() => {
+    if (!selected || !selectedRefusal) return;
+    const k = `${selected.id}|${selectedRefusal}`;
+    if (refusalShown.current.has(k)) return;
+    refusalShown.current.add(k);
+    toast.push({ tone: "warning", message: "Offline payment refused", detail: refusedSettleNotice(selectedRefusal) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, selectedRefusal]);
+
   /**
    * Enter Add Items. The bill is RE-READ first: the operator is about to build a
    * round against what they can see, so what they see must be current.
@@ -957,7 +994,9 @@ export function useDineInWorkspace(input: {
             afterSettleOpId: canonicalOrderId ? null : proj.settlingOpId,
           });
         }
-        for (const l of submitted) await addDraftLine(draft.local_session_id, draftLineFromCart(l));
+        // 1.0.38 — STAGE (replace the unsent lines), never append: a retried Send after a failure that
+        // followed staging must not send the same cart lines twice.
+        await stageUnsentDraftLines(draft.local_session_id, submitted.map(draftLineFromCart));
         // durable capture (atomic). rc.12 — the CURRENT shift lets a pre-rc.12 session (no shift ref) be
         // attached only when provably its own; otherwise a new order is refused, never sent shift-less.
         const liveShift = useShift.getState().shift;
@@ -1123,7 +1162,9 @@ export function useDineInWorkspace(input: {
         table: hasCanonical
           ? { scope: input.offlineScope, tableId: table.id, tableName: table.name, currency: p.currency ?? input.currency, orderIds: canonicalIds }
           : undefined,
-        deps: p.mutationOpIds,
+        // 1.0.38 (C3) — only mutations the server can still apply; a PARKED edit / leg would make this
+        // settle dead at capture (dependency_failed) and is not part of the payable bill.
+        deps: p.pendingMutationOpIds,
         // EXACTLY the bill on screen — the projection closes this and nothing else.
         covers: { orderIds: canonicalIds, summary: p.summaryOnly },
       };

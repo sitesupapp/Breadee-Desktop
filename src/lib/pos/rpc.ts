@@ -18,7 +18,11 @@
 // top-level import would drag an environment into every module that merely wants
 // to build a payload - and would make the contract layer untestable in isolation.
 
-type RpcResponse = { data: unknown; error: { message: string } | null };
+type RpcResponse = {
+  data: unknown;
+  error: { message: string; code?: string | null; details?: string | null; hint?: string | null } | null;
+  status?: number;
+};
 
 /** The POS RPCs this level is allowed to call. Narrow on purpose. */
 export type PosRpcName =
@@ -286,13 +290,23 @@ export type PosRpcName =
   // pos.view_all_shifts, otherwise only the caller's own — the correct server gate for the browser.
   | "pos_shifts_list";
 
-/** Raised for any server-side refusal, carrying the server's own wording. */
+/** Raised for any server-side refusal, carrying the server's own wording. 1.0.38 (C1): it also keeps
+ *  the HTTP `status` and the PostgreSQL/PostgREST `code` (+ `details`, where pos_op_error puts its
+ *  structured code), so the offline replay classifier can tell a transient server fault (5xx, deadlock,
+ *  serialization, read-only failover, expired JWT) from a definitive business refusal. The message is
+ *  unchanged, so every existing wording match keeps working. */
 export class PosRpcError extends Error {
   readonly rpc: PosRpcName;
-  constructor(rpc: PosRpcName, message: string) {
+  readonly status: number | null;
+  readonly code: string | null;
+  readonly details: string | null;
+  constructor(rpc: PosRpcName, message: string, meta?: { status?: number | null; code?: string | null; details?: string | null }) {
     super(message);
     this.name = "PosRpcError";
     this.rpc = rpc;
+    this.status = typeof meta?.status === "number" && Number.isFinite(meta.status) ? meta.status : null;
+    this.code = meta?.code ? String(meta.code) : null;
+    this.details = meta?.details ? String(meta.details) : null;
   }
 }
 
@@ -302,8 +316,8 @@ export async function callPosRpc(rpc: PosRpcName, args: Record<string, unknown>)
   const client = supabase as unknown as {
     rpc(name: string, args: Record<string, unknown>): PromiseLike<RpcResponse>;
   };
-  const { data, error } = await client.rpc(rpc, args);
-  if (error) throw new PosRpcError(rpc, error.message);
+  const { data, error, status } = await client.rpc(rpc, args);
+  if (error) throw new PosRpcError(rpc, error.message, { status: status ?? null, code: error.code ?? null, details: error.details ?? null });
   return data;
 }
 

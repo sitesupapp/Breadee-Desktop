@@ -91,9 +91,12 @@ test("GC: drops only OLD synced ops; never unsettled work or recent synced", asy
   assert.ok(await getOperation("old-pending")); // unsettled — never dropped
 });
 
+// 1.0.38 (Bug 7) — the Sync Center body moved to the shared SyncCenterPanel (rendered by both the
+// POS dialog and Settings → Sync Center); the retry contract is asserted there. A quarantined legacy
+// record ("Manager review") is no longer offered a retry — it has no handler and would only re-park.
 test("Sync Center source: a needs_attention event offers a requeue action; it calls requeueOperation", () => {
-  const src = srcOf("src/components/pos/SyncCenter.tsx");
+  const src = srcOf("src/components/sync/SyncCenterPanel.tsx");
   assert.match(src, /import \{[^}]*\brequeueOperation\b[^}]*\} from "@\/lib\/offline\/operationLog";/);
   assert.match(src, /await requeueOperation\(operationId\)/);
-  assert.match(src, /e\.status === "needs_attention" && e\.operation_id && \(/, "retry button gated on needs_attention");
+  assert.match(src, /e\.status === "needs_attention" && e\.operation_id && canRetry\(state\) &&/, "retry button gated on needs_attention");
 });

@@ -141,9 +141,12 @@ export const useTables = create<TableState>((set, get) => ({
     }
 
     try {
+      // 1.0.38 (C8) — freshness = when the read STARTED (as rc.9 does for bills): a map read that began
+      // before a settle synced and finished after it must never count as "after the settle".
+      const startedAt = Date.now();
       const map = await loadTableMap(ctx.branchId);
       // Cache only a successful load, so a later offline session has a valid map.
-      await cacheTableMap(map, ctx.tenantId, ctx.branchId).catch(() => {});
+      await cacheTableMap(map, ctx.tenantId, ctx.branchId, startedAt).catch(() => {});
       // A selection that vanished from the refreshed map is dropped safely.
       const selected = get().selectedTableId;
       const stillThere = selected !== null && map.tables.some((t) => t.id === selected);
@@ -153,7 +156,7 @@ export const useTables = create<TableState>((set, get) => ({
         loading: false,
         refreshing: false,
         offline: false,
-        lastLoadedAt: Date.now(),
+        lastLoadedAt: startedAt,
         selectedTableId: stillThere ? selected : null,
         bill: stillThere ? get().bill : null,
       });

@@ -1,8 +1,8 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
-import { pendingCount } from "@/lib/offline/db";
+import { useSyncScope, useSyncSummary } from "@/components/sync/SyncCenterPanel";
 import { roleLabel } from "@/lib/permissions";
 import { visibleNav } from "@/lib/nav";
 import { Badge } from "@/components/ui";
@@ -15,7 +15,10 @@ export function Shell() {
   const s = useSession();
   const navigate = useNavigate();
   const device = getDeviceIdentity();
-  const [pending, setPending] = useState(0);
+  // 1.0.38 (Bug 7) — the badge reads the SAME scoped summary as both Sync Centers (live
+  // operations log for this tenant + operational branch), not the dead legacy outbox.
+  const { tenantId: syncTenantId, branchId: syncBranchId } = useSyncScope();
+  const sync = useSyncSummary(syncTenantId, syncBranchId);
 
   // Nav is derived from the session's feature flags + permissions, so unauthorized
   // modules never appear. Recomputes when role/features/permissions change.
@@ -23,13 +26,6 @@ export function Shell() {
     () => visibleNav({ features: s.features, permissions: s.permissions, role: s.membership?.role, status: s.membership?.status }),
     [s.features, s.permissions, s.membership?.role, s.membership?.status],
   );
-
-  useEffect(() => {
-    const tick = () => pendingCount().then(setPending).catch(() => {});
-    tick();
-    const id = window.setInterval(tick, 4000);
-    return () => window.clearInterval(id);
-  }, []);
 
   // ONE update check, once, after the shell is up. Fire-and-forget on purpose:
   // it is not awaited, nothing renders behind it, and it cannot reject - so a
@@ -92,7 +88,8 @@ export function Shell() {
             <Badge tone="slate">{roleLabel(s.membership?.role)}</Badge>
           </div>
           <div className="flex items-center gap-3 text-xs">
-            {pending > 0 && <Badge tone="amber">{pending} to sync</Badge>}
+            {sync.parked > 0 && <Badge tone="amber">{sync.parked} need attention</Badge>}
+            {sync.toSync > 0 && <Badge tone="amber">{sync.toSync} to sync</Badge>}
             {s.offlineMode ? (
               <Badge tone="amber">Offline mode</Badge>
             ) : s.online ? (

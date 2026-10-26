@@ -83,8 +83,91 @@ export function isTransportFailure(e: unknown): boolean {
 
 export type TerminalKind = "shift_closed" | "permission" | "validation" | null;
 
-/** Classify a DEFINITIVE (non-transport) server refusal. Transport is handled separately. */
+// --- 1.0.38 (C1) — the ONE replay-error classifier -----------------------------------------------
+//
+// Through 1.0.37 every non-transport error that was not specifically recognised became
+// VALIDATION_TERMINAL (needs_attention): a 5xx, an expired JWT, a deadlock, a serialization failure or
+// a read-only failover parked a payment for a human. Every replay RPC is idempotent on client_op_id,
+// so a transient server fault is safe to retry; only a STRUCTURED business refusal is definitive.
+
+/** How one replay failure is classified:
+ *  - transport: no route / connection dropped (the handler's TRANSPORT_RETRYABLE path).
+ *  - transient: a server fault that heals by itself (408/429/5xx, deadlock, serialization, lock, read-only
+ *    failover, connection limits, MERGE_SHIFT_BUSY) → bounded retry with backoff.
+ *  - auth: the JWT expired / the session must be refreshed → refresh, then bounded retry.
+ *  - business: a structured refusal (pos_op_error code, 22xxx/23xxx/42xxx/P0001, a known wording) →
+ *    terminal as the handler decided (needs_attention).
+ *  - unknown: none of the above (no status/code, unrecognised text) → bounded retry, then needs_attention. */
+export type ReplayErrorKind = "transport" | "transient" | "auth" | "business" | "unknown";
+
+/** The HTTP status carried by an error (PosRpcError / PostgREST), or null. */
+export function errStatus(e: unknown): number | null {
+  if (!e || typeof e !== "object") return null;
+  const s = (e as { status?: unknown }).status;
+  return typeof s === "number" && Number.isFinite(s) ? s : null;
+}
+
+/** The PostgreSQL / PostgREST error code carried by an error, or null. */
+export function errCode(e: unknown): string | null {
+  if (!e || typeof e !== "object") return null;
+  const c = (e as { code?: unknown }).code;
+  return typeof c === "string" && c !== "" ? c : null;
+}
+
+const TRANSIENT_PG_CODES = new Set([
+  "40001", // serialization_failure
+  "40P01", // deadlock_detected
+  "55P03", // lock_not_available
+  "57014", // query_canceled (statement timeout)
+  "53300", // too_many_connections
+  "53400", // configuration_limit_exceeded
+  "53200", // out_of_memory
+  "57P01", // admin_shutdown
+  "57P02", // crash_shutdown
+  "57P03", // cannot_connect_now
+  "25006", // read_only_sql_transaction (replica failover)
+]);
+const AUTH_CODES = new Set(["PGRST301", "PGRST302", "PGRST303"]);
+const TRANSIENT_MSG =
+  /deadlock detected|could not serialize|read-only transaction|could not obtain lock|lock_not_available|lock not available|too many connections|remaining connection slots|bad gateway|service unavailable|gateway time-?out|upstream connect|upstream request timeout|timed out|connection (?:reset|refused|terminated|closed)|econnreset|server closed the connection|statement timeout|temporarily unavailable|internal server error|merge_shift_busy/i;
+const AUTH_MSG = /\bjwt\b|refresh token|auth session missing|not authenticated/i;
+/** A structured business code in the message or details (pos_op_error `pos_error_code`, or an
+ *  UPPER_SNAKE code such as VERSION_CONFLICT / CUSTOMER_IDENTITY_CONFLICT / EXPECTED_ORDER_MISMATCH). */
+const STRUCTURED_MSG = /pos_error_code|\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/;
+const BUSINESS_PG_CODE = /^(?:P0001|P0002|P0003|P0004|22[0-9A-Z]{3}|23[0-9A-Z]{3}|42[0-9A-Z]{3}|28[0-9A-Z]{3})$/;
+
+/**
+ * Classify one replay failure. Order matters: a permission refusal (42501) is business even when
+ * PostgREST answers 401/403; an expired JWT is auth; a transient code/status/wording beats any keyword
+ * match ("cannot execute … in a read-only transaction" is NOT a validation refusal); only then is a
+ * structured code / known wording a definitive business refusal. Pure.
+ */
+export function classifyReplayError(e: unknown): ReplayErrorKind {
+  if (isTransportFailure(e)) return "transport";
+  const status = errStatus(e);
+  const code = errCode(e);
+  const msg = errMsg(e);
+  const details = e && typeof e === "object" ? String((e as { details?: unknown }).details ?? "") : "";
+  if (code === "42501") return "business";
+  if ((code && AUTH_CODES.has(code)) || AUTH_MSG.test(msg) || (status === 401 && !(code && BUSINESS_PG_CODE.test(code)))) return "auth";
+  if (code && (TRANSIENT_PG_CODES.has(code) || code.startsWith("08"))) return "transient";
+  if (TRANSIENT_MSG.test(msg)) return "transient";
+  if (status != null && (status === 408 || status === 429 || status >= 500) && !(code && BUSINESS_PG_CODE.test(code))) return "transient";
+  if (code && BUSINESS_PG_CODE.test(code)) return "business";
+  if (STRUCTURED_MSG.test(msg) || STRUCTURED_MSG.test(details)) return "business";
+  if (rawTerminalKind(msg) !== null) return "business";
+  return "unknown";
+}
+
+/** Classify a DEFINITIVE (non-transport) server refusal. Transport is handled separately. 1.0.38: a
+ *  transient/auth wording ("cannot execute … read-only transaction", "invalid JWT") is never a refusal. */
 export function terminalKind(message: string): TerminalKind {
+  const k = rawTerminalKind(message);
+  if (k === "validation" && (TRANSIENT_MSG.test(message) || AUTH_MSG.test(message))) return null;
+  return k;
+}
+
+function rawTerminalKind(message: string): TerminalKind {
   const m = message.toLowerCase();
   if (
     m.includes("shift is closed") ||
@@ -252,6 +335,10 @@ export type PosTxnSyncDeps = {
   receivableCollect: (args: { orderId: string; amount: number; method: string; clientOpId: string }) => Promise<{ ok: boolean; payment_id: string | null; payment_status: string; idempotent: boolean }>;
   isTransport: (e: unknown) => boolean;
   hasSession: () => Promise<boolean>;
+  /** 1.0.38 (C1) — refresh the auth session after a replay failed on an expired/invalid JWT, so the
+   *  next attempt carries a fresh token. Resolves true when a session is available afterwards. Optional:
+   *  a missing dep simply skips the refresh (the op stays bounded-retryable). */
+  refreshSession?: () => Promise<boolean>;
 };
 
 export const defaultDeps: PosTxnSyncDeps = {
@@ -523,6 +610,15 @@ export const defaultDeps: PosTxnSyncDeps = {
     const { data } = await supabase.auth.getSession();
     return Boolean(data.session);
   },
+  refreshSession: async () => {
+    try {
+      const { supabase } = await import("@/lib/supabase");
+      const { data, error } = await supabase.auth.refreshSession();
+      return !error && Boolean(data.session);
+    } catch {
+      return false;
+    }
+  },
 };
 
 /**
@@ -588,10 +684,15 @@ export async function syncPosTxns(
  *  non-needs_attention ops) and its legacy mirror, keyed by the local entity id. */
 export async function requeueForAttention(localTxnId: string): Promise<void> {
   await updatePosOfflineTxn(localTxnId, { status: "queued", review_reason: null, last_error: null });
-  const { updateOperation } = await import("@/lib/offline/operationLog");
-  await updateOperation(`mig:txn:${localTxnId}`, {
+  const { updateOperation, requeueDependents, requestDrain } = await import("@/lib/offline/operationLog");
+  const opId = `mig:txn:${localTxnId}`;
+  await updateOperation(opId, {
     status: "pending",
     last_error_code: null,
     last_error_message: null,
+    server_retry_count: 0,
   }).catch(() => undefined);
+  // 1.0.38 (C2) — an operator retry re-opens the dependency_failed chain behind it and asks for a drain.
+  await requeueDependents([opId]).catch(() => undefined);
+  requestDrain("operator-retry");
 }

@@ -1,7 +1,32 @@
 import { create } from "zustand";
 import { supabase } from "@/lib/supabase";
 import { getDeviceIdentity } from "@/lib/device";
-import { purgeForeignSnapshots, clearSnapshotCache, purgeForeignCachedCustomers, clearCachedCustomers } from "@/lib/offline/db";
+import { purgeForeignSnapshots, clearSnapshotCache, purgeForeignCachedCustomers, clearCachedCustomers, localdb } from "@/lib/offline/db";
+import { localEntityIdsNeededByUnsettledOps } from "@/lib/offline/operationLog";
+
+/**
+ * 1.0.38 — drop cached customers (sign-out privacy / foreign-scope purge) EXCEPT the offline-created
+ * (pending-local) customers that unsettled offline work still needs: the customer create that has not
+ * synced yet and the orders/payments chained to it. Through 1.0.37 sign-out cleared them all, so after
+ * a re-login the picker lost the customer while its order still waited to replay. Their personal data
+ * already lives in that unsettled op's payload (which is never dropped), so nothing new is retained.
+ * `foreignOnly` limits the drop to rows outside the given tenant/branch (the login purge).
+ */
+async function dropCachedCustomersKeepingUnsettled(foreignOnly?: { tenantId: string | null; branchId: string | null }): Promise<void> {
+  const keep = await localEntityIdsNeededByUnsettledOps().catch(() => new Set<string>());
+  if (keep.size === 0) {
+    if (foreignOnly) await purgeForeignCachedCustomers(foreignOnly.tenantId, foreignOnly.branchId);
+    else await clearCachedCustomers();
+    return;
+  }
+  const rows = await localdb.posCustomers.toArray();
+  const drop = rows.filter((c) => {
+    if (c.pending_local === true && keep.has(c.id)) return false;
+    if (!foreignOnly) return true;
+    return c.tenant_id !== foreignOnly.tenantId || (foreignOnly.branchId != null && (c.branch_id ?? null) !== foreignOnly.branchId);
+  });
+  await localdb.posCustomers.bulkDelete(drop.map((c) => c.id));
+}
 import { clearPosSessionSnapshot } from "@/lib/offline/posSession";
 import { clearBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
@@ -245,7 +270,8 @@ export const useSession = create<SessionState>((set, get) => ({
     await purgeForeignSnapshots(tenant?.id ?? null, (membership as Membership)?.branch_id ?? null).catch(() => {});
     // Same hardening for the delivery customer cache (phones/addresses): a
     // previous session's callers must never surface for a different tenant/branch.
-    await purgeForeignCachedCustomers(tenant?.id ?? null, (membership as Membership)?.branch_id ?? null).catch(() => {});
+    // (1.0.38: offline-created customers still needed by unsettled offline work are kept.)
+    await dropCachedCustomersKeepingUnsettled({ tenantId: tenant?.id ?? null, branchId: (membership as Membership)?.branch_id ?? null }).catch(() => {});
 
     const next = {
       userId: user.id,
@@ -353,8 +379,9 @@ export const useSession = create<SessionState>((set, get) => ({
     // The durable outbox (unsynced work) is preserved by design — never dropped here.
     await clearSnapshotCache().catch(() => {});
     // The delivery customer cache holds personal data (names, phones, addresses);
-    // drop it entirely on sign-out so it never outlives the session that cached it.
-    await clearCachedCustomers().catch(() => {});
+    // drop it on sign-out so it never outlives the session that cached it — EXCEPT
+    // offline-created customers that unsynced offline work still needs (1.0.38).
+    await dropCachedCustomersKeepingUnsettled().catch(() => {});
     set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false });
   },
 

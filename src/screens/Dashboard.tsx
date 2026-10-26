@@ -18,7 +18,7 @@
 // handed to the operating system's browser, and no token or session travels
 // with it.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
@@ -29,7 +29,7 @@ import { publicSiteOrigin } from "@/lib/site";
 import { openExternal, webUrl } from "@/lib/webApp";
 import { env } from "@/env";
 import { visibleModules, type ModuleEntry } from "@/lib/modules";
-import { pendingCount } from "@/lib/offline/db";
+import { useSyncScope, useSyncSummary } from "@/components/sync/SyncCenterPanel";
 import { Card, Badge } from "@/components/ui";
 
 const AVAIL_BADGE: Record<ModuleEntry["availability"], { tone: "green" | "amber" | "slate"; label: string }> = {
@@ -96,13 +96,13 @@ function ModuleCard({ m, onOpenWeb }: { m: ModuleEntry; onOpenWeb: (m: ModuleEnt
 export function Dashboard() {
   const s = useSession();
   const device = getDeviceIdentity();
-  const [pending, setPending] = useState(0);
+  // 1.0.38 (Bug 7) — the same scoped summary as both Sync Centers (live operations log for this
+  // tenant + operational branch, incl. parked work), not the dead legacy outbox.
+  const { tenantId: syncTenantId, branchId: syncBranchId } = useSyncScope();
+  const syncSummary = useSyncSummary(syncTenantId, syncBranchId);
+  const pending = syncSummary.toSync + syncSummary.parked;
   /** Why a web module could not be opened. Shown in place, never swallowed. */
   const [webError, setWebError] = useState<string | null>(null);
-
-  useEffect(() => {
-    pendingCount().then(setPending).catch(() => {});
-  }, []);
 
   const ctx = useMemo(
     () => ({ features: s.features, permissions: s.permissions, role: s.membership?.role, status: s.membership?.status }),

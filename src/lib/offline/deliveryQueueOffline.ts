@@ -68,11 +68,23 @@ export async function projectLocalDeliveryOrders(
 ): Promise<DeliveryQueueOrder[]> {
   if (!tenantId) return [];
   const txns = await listPosOfflineTxns().catch(() => [] as PosOfflineTxn[]);
-  const scoped = txns
+  const inOu = txns
     .filter((t) => t.tenant_id === tenantId && (t.branch_id ?? null) === (branchId ?? null))
     .filter((t) => rec(t.order_payload).order_type === "delivery")
-    .filter((t) => (shiftId ? t.shift_id === shiftId : true))
     .filter((t) => t.status !== "synced");
+  // 1.0.38 (D7a) — an order captured under an OFFLINE-opened shift carries that shift's LOCAL id. Once
+  // the shift syncs, the workspace asks for the CANONICAL shift id while the order (not yet synced) still
+  // holds the local one — it vanished from the list. Match on either side's entity-map resolution.
+  const shiftLocals = new Set<string>();
+  if (shiftId) shiftLocals.add(shiftId);
+  for (const t of inOu) {
+    if (t.shift_id) shiftLocals.add(t.shift_id);
+    if (t.pending_shift_local_id) shiftLocals.add(t.pending_shift_local_id);
+  }
+  const shiftCanon = shiftId ? await canonicalIds(Array.from(shiftLocals)).catch(() => ({}) as Record<string, string | null>) : {};
+  const same = (id: string | null | undefined) => (id ? shiftCanon[id] ?? id : null);
+  const wanted = same(shiftId);
+  const scoped = inOu.filter((t) => !shiftId || t.shift_id === shiftId || same(t.shift_id) === wanted || (t.pending_shift_local_id != null && same(t.pending_shift_local_id) === wanted));
   // rc.11 — an order whose submit already synced (entity map resolved) but whose legacy row is not yet
   // reconciled projects under its CANONICAL id, so the merge de-dups it against the server row instead
   // of showing it twice in the window between the op sync and the legacy reconcile.

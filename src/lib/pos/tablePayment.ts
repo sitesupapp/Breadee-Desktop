@@ -71,6 +71,30 @@ export class StaleBillError extends Error {
   }
 }
 
+/**
+ * 1.0.38 (F1, CLIENT MITIGATION) — a full Pay of a bill that already has PAID split settlements.
+ *
+ * Production proved `pos_pay_table_core` / `pos_pay_order_core` charge the ENTIRE order total and never
+ * deduct prior split payments (8 orders, $108.72 over-collected). Until the server charges R = T − P
+ * (separate server workstream), the desktop refuses a full Pay of a part-paid bill and sends the cashier
+ * to Split for the remaining items — exactly what the offline path already does.
+ */
+export const PART_PAID_FULL_PAY_MESSAGE =
+  "Part of this bill is already paid by split. Settle the remaining items via split — a full payment would charge the whole bill again.";
+
+export class PartPaidBillError extends Error {
+  constructor() {
+    super(PART_PAID_FULL_PAY_MESSAGE);
+    this.name = "PartPaidBillError";
+  }
+}
+
+/** True when the table's open bill already holds paid split money (server `collected`, or a part-paid order). */
+export function billIsPartPaid(table: TableSummary | null, bill: TableBill | null): boolean {
+  if (table && Number(table.collected ?? 0) > 0) return true;
+  return (bill?.orders ?? []).some((o) => o.payment_status === "partial" || o.payment_status === "partially_paid");
+}
+
 export class TenderTooLowError extends Error {
   constructor() {
     super("The tendered amount is less than the amount due");
@@ -181,6 +205,8 @@ export function payTableGate(input: {
   if (input.bill.orders.some((o) => o.payment_status === "paid")) {
     return { allowed: false, reason: "This bill is already settled. Refresh the table map." };
   }
+  // 1.0.38 (F1) — client mitigation until the server deducts prior split payments (see PartPaidBillError).
+  if (billIsPartPaid(input.table, input.bill)) return { allowed: false, reason: PART_PAID_FULL_PAY_MESSAGE };
   if (input.bill.mixedCurrency) {
     return { allowed: false, reason: "These orders were created under different currency settings; settle or clear each order separately." };
   }
@@ -445,6 +471,11 @@ export async function performTablePayment(input: {
     const changed = billChangedSincePreview(input.shownBill, fresh.bill, fresh.table);
     if (changed) {
       return { ok: false, error: new StaleBillError(changed), retryable: false, steps };
+    }
+    // 1.0.38 (F1) — the re-read is authoritative: a split paid since the dialog opened (another
+    // terminal / cashier, or a transfer of a part-paid bill) still refuses the full charge.
+    if (billIsPartPaid(fresh.table, fresh.bill)) {
+      return { ok: false, error: new PartPaidBillError(), retryable: false, steps };
     }
 
     // 2. Submit. Exactly once.
