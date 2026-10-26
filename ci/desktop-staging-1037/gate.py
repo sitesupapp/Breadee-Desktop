@@ -42,8 +42,14 @@ for name, pre in (seed.get("idb") or {}).items():
     check(f"IndexedDB '{name}' kept (version {pre.get('version')}->{(po or {}).get('version')}), no store lost/shrunk", ok and not lost, ",".join(lost))
 check("data-folder marker file preserved byte-for-byte", facts.get("marker_pre") and facts.get("marker_pre") == facts.get("marker_post"), "")
 check("staging data folder still present", facts.get("datadir_exists_post") is True, facts.get("datadir"))
-check("channel served the STAGING latest.json and the installer", facts.get("served_manifest") and facts.get("served_installer"), "")
-check("production channel never requested", facts.get("prod_channel_requested") is False, "")
+if facts.get("live"):
+    # LIVE post-publish mode: the REAL staging channel + the REAL GitHub Release asset.
+    check("LIVE: real staging channel advertises " + TO + " with the release URL", facts.get("live_channel_version") == TO and "/releases/download/desktop-staging-v" + TO + "/" in str(facts.get("live_channel_url", "")), f"{facts.get('live_channel_version')} {facts.get('live_channel_url')}")
+    check("LIVE: published release asset SHA256 = the release's SHA256SUMS", facts.get("asset_sha256_ok") is True, facts.get("asset_sha256"))
+    check("LIVE: installed exe SHA256 changed from 1.0.35 (the hop really replaced the binary)", facts.get("pre_exe_sha256") and facts.get("pre_exe_sha256") != facts.get("post_exe_sha256"), "")
+else:
+    check("channel served the STAGING latest.json and the installer", facts.get("served_manifest") and facts.get("served_installer"), "")
+    check("production channel never requested", facts.get("prod_channel_requested") is False, "")
 check(f"post-update recheck reaches the staging channel and offers nothing newer than {TO}", recheck.get("reached") is True and recheck.get("available") is False, json.dumps(recheck))
 
 ok = all(x["ok"] for x in checks)
