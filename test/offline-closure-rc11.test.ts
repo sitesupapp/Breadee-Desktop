@@ -412,6 +412,6 @@ test("C6 release identity: 1.0.38 is the PRODUCTION bundle (no RC suffix, the fl
   const conf = JSON.parse(src("src-tauri/tauri.conf.json")) as { version: string; identifier: string };
   // The RC stage (1.0.37-rc.N / app.breadee.desktop.offlinerc) ended at rc.14; the production release ships
   // under the installed fleet's identity so the in-app update replaces it in place (offline-rc-diagnostics pins the rest).
-  assert.equal(conf.version, "1.0.39");
+  assert.equal(conf.version, "1.0.38");
   assert.equal(conf.identifier, "app.breadee.desktop");
 });

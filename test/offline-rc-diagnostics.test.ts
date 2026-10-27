@@ -110,13 +110,13 @@ test("1.0.38 PRODUCTION identity: normal bundle, production channel, no RC ident
     productName: string;
     plugins: { updater: { endpoints: string[]; pubkey: string } };
   };
-  assert.equal(conf.version, "1.0.39", "plain SemVer — no RC suffix reaches tenants");
+  assert.equal(conf.version, "1.0.38", "plain SemVer — no RC suffix reaches tenants");
   assert.equal(conf.identifier, "app.breadee.desktop", "the installed fleet's identity (updater + data folder)");
   assert.equal(conf.productName, "Breadee");
   assert.deepEqual(conf.plugins.updater.endpoints, ["https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json"]);
   assert.match(conf.plugins.updater.pubkey, /^dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3Nzk5OUQ4MjFGODJGRDcK/, "the SAME production updater key (never regenerated)");
-  assert.equal(JSON.parse(rawOf("package.json")).version, "1.0.39");
-  assert.match(rawOf("src-tauri/Cargo.toml"), /^version = "1\.0\.39"$/m);
+  assert.equal(JSON.parse(rawOf("package.json")).version, "1.0.38");
+  assert.match(rawOf("src-tauri/Cargo.toml"), /^version = "1\.0\.38"$/m);
   // The RC diagnostics strip stays build-flag gated: only the staging RC/installer workflow sets it.
   const wf = rawOf(".github/workflows/desktop-windows-installer.yml");
   assert.match(wf, /VITE_RC_DIAGNOSTICS: "1"/);

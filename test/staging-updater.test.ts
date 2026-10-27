@@ -243,7 +243,7 @@ test("there is ONE staging identity: the acceptance installer uses the staging o
 test("What's New: the approved bilingual text leads, plus the offline-first page, describing exactly this version", () => {
   const whatsNew = read("src", "lib", "whatsNew.ts");
   assert.match(whatsNew, new RegExp(`export const WHATS_NEW_VERSION = "${base.version.replace(/\./g, "\\.")}";`));
-  assert.equal(base.version, "1.0.39");
+  assert.equal(base.version, "1.0.38");
   const lit = (key: string) => JSON.parse(new RegExp(`\\b${key}:\\s*("(?:[^"\\\\]|\\\\.)*")`).exec(whatsNew)![1]);
   assert.match(whatsNew, /glyph: "sync"/);
   assert.equal(lit("title"), "Expanded Full Offline POS");

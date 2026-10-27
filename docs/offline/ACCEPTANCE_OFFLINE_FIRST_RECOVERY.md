@@ -1,6 +1,6 @@
 # Offline-First Recovery — Final Human Staging Acceptance
 
-Candidate: **Breadee Staging 1.0.39** (staging identity `app.breadee.desktop.staging`, staging updater channel).
+Candidate: **Breadee Staging 1.0.38** (final; supersedes the accidental staging-only 1.0.39 label) (staging identity `app.breadee.desktop.staging`, staging updater channel).
 Backend: Supabase **staging** only. Production is untouched by this candidate.
 
 ## What changed (lowest layers first)
