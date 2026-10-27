@@ -40,7 +40,7 @@ import {
 import { canPrintReceipts, type PosAccessContext } from "@/lib/pos/access";
 import { autoPrintLatch } from "@/lib/pos/autoPrint";
 import { loadServerPrinters } from "@/lib/pos/printerRegistry";
-import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolvePrintRouteCached } from "@/lib/pos/printRouteResolver";
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { describeBlock, resolveRouteTarget, type PrintResolution } from "@/lib/pos/printTarget";
 import { printerById, routeFromPrinter } from "@/lib/pos/stationTickets";
@@ -316,11 +316,13 @@ async function resolveCollectionTarget(input: {
   }
 
   if (!input.branchId) return { kind: "blocked", block: { reason: "no_route" } };
-  const route = await resolvePrintRoute({
+  // 1.0.38 (PERF C3) — the receivable collection is offline-capable, so its ticket routes from the
+  // per-branch cache when the backend is unreachable (written through on every online resolve).
+  const route = await resolvePrintRouteCached({
     branchId: input.branchId,
     purpose: "receipt",
     orderSource: input.source,
-  }).catch(() => null);
+  });
   if (!route) return { kind: "blocked", block: { reason: "no_route" } };
   return resolveRouteTarget({ route, installed });
 }

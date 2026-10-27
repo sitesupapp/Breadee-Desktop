@@ -71,6 +71,7 @@ export async function historySummary(
   // Summary is derived from the live operation log (current truth), not the append-only
   // history (which keeps past events). Scope-filtered. (rc.12 measured: ONE bulk read beats per-status
   // index cursors by ~35× on QA-sized logs — cursor steps are individually async.)
+  // (Final Foundation: the bulk read is bounded by the local retention window; no production caller.)
   const ops = await localdb.operations.toArray();
   for (const o of ops) {
     if (o.scope.tenant_id !== tenantId) continue;

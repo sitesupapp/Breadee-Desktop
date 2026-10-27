@@ -78,7 +78,9 @@ test("1.0.36 → 1.0.37: the existing local database upgrades in place — every
   // ---- the updated 1.0.37 app opens the SAME database ----
   const { localdb } = await import("@/lib/offline/db");
   await localdb.open();
-  assert.equal(localdb.verno, 11, "upgraded additively to the 1.0.37 schema");
+  // Final Foundation (PERF): the app schema is now v12 (additive indexes only, no new store), so a 1.0.36
+  // database upgrades additively straight through v11 to v12.
+  assert.equal(localdb.verno, 12, "upgraded additively to the current (1.0.38 v12) schema");
   assert.equal(await localdb.snapshots.count(), 2, "menu + table cache retained");
   assert.deepEqual((await localdb.snapshots.get("menu"))?.data, { items: [{ id: "m1", name: "Pizza" }] });
   assert.equal((await localdb.posOfflineTxns.get("TX-QUEUED"))?.status, "queued", "unsynced local work retained");
@@ -97,7 +99,7 @@ test("1.0.36 → 1.0.37: the existing local database upgrades in place — every
   // ---- idempotent: a restart re-opens without any change ----
   localdb.close();
   await localdb.open();
-  assert.equal(localdb.verno, 11);
+  assert.equal(localdb.verno, 12);
   assert.equal(await localdb.posOfflineTxns.count(), 1, "no duplicate on re-open");
   assert.equal(await localdb.snapshots.count(), 2);
 });

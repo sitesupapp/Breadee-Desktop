@@ -9,11 +9,12 @@
 // This file is deliberately paranoid about the two fields most likely to be
 // added by a well-meaning edit:
 //
-//   client_op_id - because `pos_submit_order` has one (m224) and the symmetry is
-//     tempting. Sending it would be worse than useless: it would imply an
-//     idempotency guarantee the server does not give, and the whole recovery
-//     model in `tablePayment.ts` exists precisely because that guarantee is
-//     absent.
+//   client_op_id - RETARGETED BY 1.0.38 (Foundation R-1): the 1.0.38 server wraps
+//     `pos_pay_table` in `pos_op_replay`, so the key IS honoured now. It is sent
+//     (with the bill pin expected_order_ids / expected_amount) by
+//     `performTablePayment`, once per payment attempt - see
+//     test/offline-foundation-online-pins.test.ts. The bare builder still adds
+//     none of the three.
 //
 //   tendered / change - because the dialog computes both, hands them back in the
 //     same object as the discount, and a `...spread` is all it takes.
@@ -294,7 +295,8 @@ test("every payload key is one the RPC declares", () => {
 
 // The named-field cases, each asserted individually so a failure says WHICH
 // field leaked rather than "a forbidden field was present".
-for (const forbidden of ["shift_id", "branch_id", "order_id", "order_number", "client_op_id", "tendered", "change", "batch_no"]) {
+// 1.0.38 R-1: client_op_id left this list intentionally (now a real, per-attempt key).
+for (const forbidden of ["shift_id", "branch_id", "order_id", "order_number", "tendered", "change", "batch_no"]) {
   test(`the payload never carries ${forbidden}`, () => {
     const payload = buildTablePaymentPayload({
       tableId: "tbl1",
@@ -311,7 +313,6 @@ test("the forbidden list itself is the documented one", () => {
     "batch_no",
     "branch_id",
     "change",
-    "client_op_id",
     "order_id",
     "order_number",
     "shift_id",
@@ -356,7 +357,13 @@ test("what actually reaches the wire is the exact payload, end to end", async ()
   });
 
   assert.ok(sent, "nothing was submitted");
-  assert.deepEqual(Object.keys(sent!).sort(), ["currency_code", "method", "table_id"]);
+  // 1.0.38 R-1 (intentional): the wire payload adds exactly the bill pin + this attempt's op id.
+  assert.deepEqual(Object.keys(sent!).sort(), ["client_op_id", "currency_code", "expected_amount", "expected_order_ids", "method", "table_id"]);
+  assert.deepEqual(sent!.expected_order_ids, ["o1"]);
+  assert.equal(sent!.expected_amount, 40);
+  for (const key of Object.keys(sent!)) {
+    assert.ok((TABLE_PAYMENT_PAYLOAD_KEYS as readonly string[]).includes(key), `${key} is not part of the pos_pay_table contract`);
+  }
   for (const f of FORBIDDEN_PAYMENT_FIELDS) {
     assert.equal(f in sent!, false, `${f} reached the server`);
   }

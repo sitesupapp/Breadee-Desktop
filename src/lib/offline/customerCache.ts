@@ -135,17 +135,19 @@ export function matchCachedCustomers(rows: CachedCustomer[], query: string): Cus
   const lower = term.toLowerCase();
   const e164 = looksLikePhone(term) ? normalizePhoneE164(term) : null;
   const digits = phoneDigits(term);
-  const hits = rows.filter((c) => {
+  // Final Foundation (PERF): stop at the SEARCH_LIMIT-th hit (same rows, same order as filter + slice).
+  const hits: CachedCustomer[] = [];
+  for (const c of rows) {
+    if (hits.length >= SEARCH_LIMIT) break;
     const nameHit = c.name != null && c.name.toLowerCase().includes(lower);
     const phoneHit =
+      nameHit ||
       (e164 != null && c.phone_e164 === e164) ||
       (c.phone != null && samePhone(c.phone, term)) ||
       (digits.length >= 4 && ((c.phone ?? "").replace(/\D/g, "").includes(digits) || (c.phone_e164 ?? "").includes(digits)));
-    return nameHit || phoneHit;
-  });
-  return hits
-    .slice(0, SEARCH_LIMIT)
-    .map((c) => ({ id: c.id, name: c.name, phone: c.phone, phone_e164: c.phone_e164 }));
+    if (nameHit || phoneHit) hits.push(c);
+  }
+  return hits.map((c) => ({ id: c.id, name: c.name, phone: c.phone, phone_e164: c.phone_e164 }));
 }
 
 // --- the offline-aware wrappers the stores call ------------------------------

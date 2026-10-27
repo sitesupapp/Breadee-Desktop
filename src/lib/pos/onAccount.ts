@@ -23,10 +23,27 @@
 //
 // `customer_id` IS REQUIRED. A receivable with no customer is a debt owed by
 // nobody. The client refuses to submit one; the server refuses too.
+//
+// 1.0.38 (Foundation Track 13, R-1) — the TABLE on-account now carries the same online bill pin as Pay
+// (see lib/pos/tablePayment): `expected_order_ids` (the bill the cashier saw → ON_ACCOUNT_BILL_CHANGED),
+// `expected_amount` (R as presented, after the discount, before the amount paid now →
+// ON_ACCOUNT_AMOUNT_CHANGED) and a `client_op_id` per user attempt, honoured by the 1.0.38
+// `pos_complete_table_on_account` wrapper through `pos_op_replay` (recorded on success only). An older
+// server ignores the keys. The single-order `pos_complete_on_account` payload is unchanged.
 
 import { asRecord, callPosRpc, num, str } from "@/lib/pos/rpc";
 import type { CurrencyCode } from "@/lib/currency";
 import type { PaymentMethod } from "@/lib/pos/payments";
+import type { TableBill, TableSummary } from "@/types/tables";
+import { posErrorCode } from "@/lib/offline/posTxnSync";
+import {
+  InvalidDiscountError,
+  billChangedRefusal,
+  closePaymentAttempt,
+  paymentAttemptOpId,
+  tableSettlePins,
+  type TableSettlePins,
+} from "@/lib/pos/tablePayment";
 
 // --- errors ------------------------------------------------------------------
 
@@ -100,6 +117,12 @@ export type TableOnAccountPayload = {
   method: PaymentMethod;
   discount_type?: "percent" | "amount";
   discount_value?: number;
+  /** 1.0.38 R-1 — the canonical order ids of the bill the cashier saw. */
+  expected_order_ids?: string[];
+  /** 1.0.38 R-1 — R as presented (bill currency, after the discount); omitted when not one figure. */
+  expected_amount?: number;
+  /** 1.0.38 R-1 — one per user attempt, reused by a retry of the same attempt (pos_op_replay). */
+  client_op_id?: string;
 };
 
 export const ON_ACCOUNT_PAYLOAD_KEYS = [
@@ -111,6 +134,7 @@ export const ON_ACCOUNT_PAYLOAD_KEYS = [
   "discount_value",
 ] as const;
 
+/** 1.0.38 R-1 — INTENTIONALLY grown by the three bill-pin keys the 1.0.38 wrapper/core read. */
 export const TABLE_ON_ACCOUNT_PAYLOAD_KEYS = [
   "table_id",
   "customer_id",
@@ -118,6 +142,9 @@ export const TABLE_ON_ACCOUNT_PAYLOAD_KEYS = [
   "method",
   "discount_type",
   "discount_value",
+  "expected_order_ids",
+  "expected_amount",
+  "client_op_id",
 ] as const;
 
 function applyDiscount<T extends { discount_type?: "percent" | "amount"; discount_value?: number }>(
@@ -151,6 +178,9 @@ export function buildTableOnAccountPayload(input: {
   amount: number;
   method: PaymentMethod;
   discount?: OnAccountDiscount;
+  /** 1.0.38 R-1 — the pin of the bill on screen (`tableSettlePins`) and this attempt's op id. */
+  pins?: TableSettlePins;
+  clientOpId?: string;
 }): TableOnAccountPayload {
   const payload: TableOnAccountPayload = {
     table_id: input.tableId,
@@ -158,7 +188,11 @@ export function buildTableOnAccountPayload(input: {
     amount: input.amount,
     method: input.method,
   };
-  return applyDiscount(payload, input.discount);
+  applyDiscount(payload, input.discount);
+  if (input.pins && input.pins.expectedOrderIds.length > 0) payload.expected_order_ids = input.pins.expectedOrderIds;
+  if (input.pins && input.pins.expectedAmount != null) payload.expected_amount = input.pins.expectedAmount;
+  if (input.clientOpId) payload.client_op_id = input.clientOpId;
+  return payload;
 }
 
 // --- results (every figure is the server's) ----------------------------------
@@ -249,17 +283,50 @@ export async function completeTableOnAccount(input: {
   method: PaymentMethod;
   discountType?: "percent" | "amount";
   discountValue?: number;
+  /** 1.0.38 R-1 — the bill (and its table row) the cashier is looking at. When given, the request is
+   *  pinned to it and carries this attempt's client_op_id; absent → the pre-1.0.38 payload. */
+  shown?: { bill: TableBill | null; table: TableSummary | null };
+  /** Test seam only: the wire call (defaults to the real RPC). */
+  rpc?: (payload: TableOnAccountPayload) => Promise<unknown>;
 }): Promise<TableOnAccountResult> {
   if (!input.customerId) throw new OnAccountCustomerRequiredError();
   assertOnAccountAmount(input.amount);
+  const discount = { discountType: input.discountType, discountValue: input.discountValue };
+  let pins: TableSettlePins | undefined;
+  let clientOpId: string | undefined;
+  const slot = `on_account_table:${input.tableId}`;
+  if (input.shown?.bill) {
+    const pinned = tableSettlePins(input.shown.bill, input.shown.table, {
+      discount_type: input.discountType,
+      discount_value: input.discountValue,
+    });
+    if (!pinned.ok) throw new InvalidDiscountError(pinned.reason);
+    pins = pinned.pins;
+    clientOpId = paymentAttemptOpId(
+      slot,
+      JSON.stringify([input.customerId, input.amount, input.method, input.discountType ?? null, input.discountValue ?? null, pins.expectedOrderIds, pins.expectedAmount]),
+    );
+  }
   const payload = buildTableOnAccountPayload({
     tableId: input.tableId,
     customerId: input.customerId,
     amount: input.amount,
     method: input.method,
-    discount: { discountType: input.discountType, discountValue: input.discountValue },
+    discount,
+    pins,
+    clientOpId,
   });
-  const row = asRecord(await callPosRpc("pos_complete_table_on_account", { p_payload: payload }));
+  let raw: unknown;
+  try {
+    raw = input.rpc ? await input.rpc(payload) : await callPosRpc("pos_complete_table_on_account", { p_payload: payload });
+  } catch (error) {
+    // A definitive server refusal closes the attempt (nothing was recorded); a transport failure keeps it,
+    // so the operator's retry of the same attempt replays rather than booking a second receivable.
+    if (isDefinitiveOnAccountRefusal(error)) closePaymentAttempt(slot, clientOpId);
+    throw error;
+  }
+  closePaymentAttempt(slot, clientOpId);
+  const row = asRecord(raw);
   const ccy = str(row.currency_code, "USD");
   return {
     bill_total: num(row.bill_total),
@@ -317,6 +384,13 @@ export type OnAccountOutcome<T> =
   | { ok: true; result: T | null; recovered: boolean }
   | { ok: false; error: unknown; retryable: boolean };
 
+/** 1.0.38 R-1 — a structured ON_ACCOUNT_* / bill-pin refusal: the server raised before any write. */
+export function isDefinitiveOnAccountRefusal(error: unknown): boolean {
+  if (billChangedRefusal(error)) return true;
+  const code = posErrorCode(error);
+  return code !== null && code.startsWith("ON_ACCOUNT_");
+}
+
 /**
  * Run one on-account completion, once.
  *
@@ -343,6 +417,17 @@ export async function performOnAccount<T>(input: {
     try {
       result = await input.submit();
     } catch (error) {
+      // 1.0.38 R-1 — a bill-pin / ON_ACCOUNT_* refusal is DEFINITIVE: nothing was booked. The bill-changed
+      // ones become the cashier message; never a success, never offered as "try again". The re-read only
+      // refreshes what is on screen.
+      if (isDefinitiveOnAccountRefusal(error)) {
+        try {
+          await input.reread();
+        } catch {
+          // The refusal stands either way.
+        }
+        return { ok: false, error: billChangedRefusal(error) ?? error, retryable: false };
+      }
       let verdict: OnAccountVerdict;
       try {
         verdict = await input.reread();

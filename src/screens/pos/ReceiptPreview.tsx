@@ -41,7 +41,7 @@ import {
 import { customerRenderOptions, type ReceiptRenderOptions } from "@/lib/pos/receiptRender";
 import { readReceiptDesignSafe } from "@/lib/pos/receiptSettings";
 import { readShowPaymentQr } from "@/lib/pos/qrCode";
-import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolvePrintRouteCached } from "@/lib/pos/printRouteResolver";
 import {
   blockMessage,
   receiptOrderSource,
@@ -321,7 +321,9 @@ export function ReceiptModal({ data, onClose }: { data: ReceiptData; onClose: ()
     void (async () => {
       const [installed, route] = await Promise.all([
         listPrinters(),
-        resolvePrintRoute({ branchId, purpose: "receipt", orderSource: source }).catch(() => null),
+        // 1.0.38 (PERF C1) — online resolve writes through to the per-branch cache; offline falls back to
+        // it, so a manual receipt print / reprint still routes instead of blocking with "no_route".
+        resolvePrintRouteCached({ branchId, purpose: "receipt", orderSource: source }),
       ]);
       if (cancelled) return;
       if (!route) {

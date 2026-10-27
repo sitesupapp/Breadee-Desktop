@@ -228,7 +228,7 @@ export async function loadSyncSummary(
   if (!tenantId) return { ...EMPTY_SUMMARY };
   const base = await summarizeOperations({ tenantId, branchId: branchId ?? undefined }, { includeSynced: opts.includeSynced === true });
   const match = inScope(tenantId, branchId);
-  const parked = (await localdb.operations.where("status").equals("needs_attention").toArray()).filter((o) => match(o.scope));
+  const parked = (await localdb.operations.where("status").equals("needs_attention").toArray()).filter((o) => match(o.scope)); // bounded: the parked set
   const split = summarize(parked);
   const s: SyncSummary = {
     pending: base.pending + base.legacy_pending,

@@ -26,7 +26,9 @@ import {
   type SyncSummary,
 } from "@/components/sync/syncCenterModel";
 
-const POLL_MS = 4000;
+// Final Foundation (PERF): 10 s (was 4 s). Every tick is now a bounded indexed read (summary via the status
+// index; rows = unsettled + the newest synced), and the panel still refreshes right after an operator retry.
+const POLL_MS = 10_000;
 
 /** Text colour per state tone — the same in every entry point. */
 function toneClass(state: SyncDisplayState): string {

@@ -4,10 +4,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "@/state/session";
-import { loadBranchContext, UNKNOWN_BRANCH, type BranchContext } from "@/lib/branch";
-import { useOperationalBranch } from "@/state/operationalBranch";
+import { loadBranchContext, resolveBranchId, UNKNOWN_BRANCH, type BranchContext } from "@/lib/branch";
+import { filterToEntitledScope, useOperationalBranch } from "@/state/operationalBranch";
 import { findOpenShift } from "@/lib/pos/shifts";
 import { loadOperatorName } from "@/lib/operator";
+import { isBackendReachable } from "@/lib/offline/reachability";
 import {
   canApplyDiscounts,
   canCollectReceivables,
@@ -71,6 +72,22 @@ export type PosContext = {
   };
 };
 
+/** 1.0.38 (PERF C9) — how long an OFFLINE POS boot waits for the branch context before a placeholder. */
+export const POS_BOOT_READ_TIMEOUT_MS = 4_000;
+
+/** The promise's value if it settles within `ms`, else null (the promise keeps running). */
+export async function raceBootRead<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function usePosContext(): PosContext {
   const session = useSession();
   const [branch, setBranch] = useState<BranchContext>(UNKNOWN_BRANCH);
@@ -100,7 +117,11 @@ export function usePosContext(): PosContext {
       // which validates the pos_op_branch cookie against active branches before trusting it.
       let activeBranches: { id: string; name: string }[] = [];
       let branchesKnown = false;
-      if (allBranches && tenantId) {
+      // 1.0.38 (PERF C9) — ask the SHARED reachability store first (TTL-fresh, de-duplicated with the
+      // workspace's own probe). Unreachable: none of the boot reads below is attempted except the branch
+      // name, which is bounded (see the offline block) — POS readiness never waits on a hung link.
+      const reachable = await isBackendReachable().catch(() => false);
+      if (allBranches && tenantId && reachable) {
         try {
           const { supabase } = await import("@/lib/supabase");
           // PostgREST returns { data, error } WITHOUT throwing for most failures, so an unreadable list must
@@ -147,6 +168,25 @@ export function usePosContext(): PosContext {
             setBranchInStore(tenantId, userId, effectiveSelected);
           }
         }
+      }
+
+      if (!reachable) {
+        // Offline: the branch context serves its durable cache (it fails fast on a real disconnect); a
+        // half-open link is bounded by POS_BOOT_READ_TIMEOUT_MS with a placeholder of the SAME resolved id,
+        // replaced by the late answer. The operator name is the same fallback a failed read gives.
+        const branchP = loadBranchContext(session.tenant, session.membership, { currency, selectedBranchId: effectiveSelected }).catch(() => UNKNOWN_BRANCH);
+        const early = await raceBootRead(branchP, POS_BOOT_READ_TIMEOUT_MS);
+        if (!active) return;
+        const placeholderId = resolveBranchId(session.tenant, session.membership, effectiveSelected);
+        setBranch(early ?? (placeholderId ? { id: placeholderId, name: "Branch unavailable", pinned: !allBranches } : UNKNOWN_BRANCH));
+        if (!early) {
+          void branchP.then((late) => {
+            if (active) setBranch(late);
+          });
+        }
+        setOperatorName(email?.trim() || "Cashier");
+        setBranchOptions(allBranches ? filterToEntitledScope(activeBranches) : []);
+        return;
       }
 
       const [b, name] = await Promise.all([

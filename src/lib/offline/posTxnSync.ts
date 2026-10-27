@@ -748,8 +748,14 @@ export async function syncPosTxns(
   // Map operation ids back to the operator-facing LOCAL entity ids the historical report
   // used, split by operation type (open_shift vs sale), so existing callers/tests read the
   // same shape. Unknown/legacy types fall into the generic needsAttention bucket.
+  // Final Foundation (PERF): ONE bulkGet for every id the report names (was one read per id, incl. every
+  // deferred out-of-scope op).
+  const ids = [...new Set([...r.drained, ...r.needsAttention.map((n) => n.id), ...r.retryable, ...r.skippedBackoff, ...r.deferred])];
+  const { localdb } = await import("@/lib/offline/db");
+  const rows = ids.length > 0 ? await localdb.operations.bulkGet(ids) : [];
+  const byId = new Map(ids.map((id, i) => [id, rows[i]] as const));
   const ref = async (id: string) => {
-    const op = await getOperation(id);
+    const op = byId.has(id) ? byId.get(id) : await getOperation(id);
     return { local: op?.local_entity_id ?? id, type: op?.operation_type ?? "" };
   };
   for (const id of r.drained) {

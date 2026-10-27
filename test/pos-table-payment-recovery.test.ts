@@ -418,10 +418,12 @@ test("no offline queue and no replay exist on the payment path", () => {
   );
   assert.doesNotMatch(sources, /enqueue|offline\/db|localdb/i, "a queue entered the payment path");
 
-  // `client_op_id` may appear ONLY as a name on the forbidden list. Anywhere
-  // else it would be an invented idempotency key the server does not honour.
-  const opIdHits = sources.split("client_op_id").length - 1;
-  assert.equal(opIdHits, 1, "client_op_id appears outside the forbidden-field list");
+  // RETARGETED BY 1.0.38 (Foundation R-1), INTENTIONALLY: the 1.0.38 `pos_pay_table` wrapper honours
+  // `client_op_id` through `pos_op_replay` (recorded on success only), so it is now a real idempotency key
+  // and has left the forbidden list. What must still hold: it is minted ONLY per payment attempt
+  // (`paymentAttemptOpId`), never per click / per request, and it never becomes a replay queue.
   const forbidden = /FORBIDDEN_PAYMENT_FIELDS = \[([\s\S]*?)\]/.exec(sources)?.[1] ?? "";
-  assert.match(forbidden, /"client_op_id"/, "the one client_op_id mention is not the forbidden-list entry");
+  assert.doesNotMatch(forbidden, /"client_op_id"/, "client_op_id is still on the forbidden list");
+  assert.equal(sources.split("paymentAttemptOpId(").length - 1, 2, "the attempt op id is minted from more than one place");
+  assert.doesNotMatch(sources, /randomUUID\(\)[\s\S]{0,40}client_op_id|client_op_id:\s*newPaymentOpId/, "a per-request op id was minted");
 });

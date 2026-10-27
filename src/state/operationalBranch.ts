@@ -27,6 +27,22 @@ type State = {
 
 const k = (t: string | null, u: string | null) => `${t ?? ""}:${u ?? ""}`;
 
+// Foundation (device-bound authority): while the session runs on a VERIFIED offline entitlement, the
+// branches/OUs it may operate in come from the signed claims, not the editable cache. Set by the session
+// store; null = no entitlement scope in force (online, or legacy authority).
+let entitledScope: ReadonlySet<string> | null = null;
+export function setEntitledBranchScope(ids: readonly string[] | null): void {
+  entitledScope = ids ? new Set(ids) : null;
+}
+/** True when `branchId` may be operated in under the current entitlement scope (always true without one). */
+export function withinEntitledScope(branchId: string | null | undefined): boolean {
+  return !entitledScope || (!!branchId && entitledScope.has(branchId));
+}
+/** The picker options restricted to the entitlement scope (unchanged without one). */
+export function filterToEntitledScope<T extends { id: string }>(options: T[]): T[] {
+  return entitledScope ? options.filter((o) => entitledScope!.has(o.id)) : options;
+}
+
 export const useOperationalBranch = create<State>((set, get) => ({
   sel: loadAll(),
   setBranch: (tenantId, userId, branchId) =>
@@ -39,5 +55,9 @@ export const useOperationalBranch = create<State>((set, get) => ({
       }
       return { sel };
     }),
-  getBranch: (tenantId, userId) => get().sel[k(tenantId, userId)] ?? null,
+  // A stored pin outside the entitlement scope is treated as no pin (the resolver then falls back).
+  getBranch: (tenantId, userId) => {
+    const pinned = get().sel[k(tenantId, userId)] ?? null;
+    return withinEntitledScope(pinned) ? pinned : null;
+  },
 }));

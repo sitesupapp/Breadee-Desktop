@@ -41,7 +41,7 @@ import {
 } from "@/lib/nativePrinting";
 import { canPrintReceipts, type PosAccessContext } from "@/lib/pos/access";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
-import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolvePrintRouteCached } from "@/lib/pos/printRouteResolver";
 import { describeBlock, resolveRouteTarget } from "@/lib/pos/printTarget";
 import type { CollectResult } from "@/lib/pos/receivables";
 
@@ -180,11 +180,12 @@ export async function printReceivableConfirmationNow(input: {
 
   const installedResult = await listPrinters();
   const installed = installedResult.ok ? installedResult.value : [];
-  const route = await resolvePrintRoute({
+  // 1.0.38 (PERF C3) — cache-backed: an offline collection still routes its confirmation.
+  const route = await resolvePrintRouteCached({
     branchId: input.branchId,
     purpose: "receipt",
     orderSource: "takeaway",
-  }).catch(() => null);
+  });
   if (!route) return { kind: "failed", message: "No receipt printer is routed for this branch." };
   const resolution = resolveRouteTarget({ route, installed });
   if (resolution.kind !== "single") {

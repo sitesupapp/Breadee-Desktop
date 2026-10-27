@@ -26,10 +26,23 @@
 // The server also allocates a bill-level discount across the table's orders
 // itself (proportionally, remainder on the last). The client sends one
 // type/value and never prorates.
+//
+// 1.0.38 (Foundation Track 13, R-1) — THE ONLINE BILL PIN. The 1.0.38 server wraps `pos_pay_table` /
+// `pos_complete_table_on_account` in `pos_op_replay` (p_payload.client_op_id, recorded ONLY on success) and
+// its cores honour `expected_order_ids` (PAY_BILL_CHANGED / ON_ACCOUNT_BILL_CHANGED) and `expected_amount`
+// (PAY_AMOUNT_CHANGED / ON_ACCOUNT_AMOUNT_CHANGED) — the same contract the offline replay already uses. The
+// pre-charge re-read alone left a window: a round from another terminal landing between that read and the
+// RPC was charged (135,000 booked while 90,000 was presented). The ONLINE settle now pins the bill the
+// cashier SAW (its canonical order ids + the exact amount presented) and carries one client_op_id per user
+// payment attempt, reused by a retry of that same attempt, so a lost response replays instead of charging
+// again. The state guard and the recovery model below are unchanged. An older server ignores the extra
+// keys (verified), so this is backward compatible.
 
 import { callPosRpc, asRecord, bool, num, numOrNull, str } from "@/lib/pos/rpc";
 import { hasValidRate, type CurrencyCode } from "@/lib/currency";
 import { computeDiscount, type DiscountType } from "@/lib/pos/discounts";
+import { offlineSettlePin, roundNumeric } from "@/lib/offline/operationalProjection";
+import { posErrorCode } from "@/lib/offline/posTxnSync";
 import type { TableBill, TableSummary } from "@/types/tables";
 import type { Gate } from "@/components/ui";
 import type { PaymentMethod } from "@/lib/pos/payments";
@@ -41,6 +54,12 @@ export type TablePaymentPayload = {
   currency_code: CurrencyCode;
   discount_type?: "percent" | "amount";
   discount_value?: number;
+  /** 1.0.38 R-1 — the canonical order ids of the bill the cashier saw (set equality, server-checked). */
+  expected_order_ids?: string[];
+  /** 1.0.38 R-1 — the exact amount presented, bill currency (omitted when no single figure exists). */
+  expected_amount?: number;
+  /** 1.0.38 R-1 — one per user payment attempt; a retry of the SAME attempt reuses it (pos_op_replay). */
+  client_op_id?: string;
 };
 
 /** The authoritative result. `pos_pay_table` returns no order_number. */
@@ -69,6 +88,36 @@ export class StaleBillError extends Error {
     this.name = "StaleBillError";
     this.detail = detail;
   }
+}
+
+/** 1.0.38 R-1 — the cashier-facing reason for a server bill-pin refusal (nothing was charged or booked). */
+export const BILL_CHANGED_ELSEWHERE_DETAIL = "it was changed on another terminal — refresh and check the total before collecting";
+
+/**
+ * 1.0.38 R-1 — the server refused the settle because the bill it holds is not the bill the cashier saw
+ * (PAY_BILL_CHANGED / PAY_AMOUNT_CHANGED / ON_ACCOUNT_BILL_CHANGED / ON_ACCOUNT_AMOUNT_CHANGED). A
+ * StaleBillError on purpose: same meaning (review the bill first), same non-retryable handling, same
+ * `stale_bill_total` classification in errors.ts. Never a success.
+ */
+export class BillChangedElsewhereError extends StaleBillError {
+  readonly code: string;
+  readonly cause: unknown;
+  constructor(code: string, cause: unknown) {
+    super(BILL_CHANGED_ELSEWHERE_DETAIL);
+    this.name = "BillChangedElsewhereError";
+    this.code = code;
+    this.cause = cause;
+  }
+}
+
+const BILL_PIN_REFUSALS = new Set(["PAY_BILL_CHANGED", "PAY_AMOUNT_CHANGED", "ON_ACCOUNT_BILL_CHANGED", "ON_ACCOUNT_AMOUNT_CHANGED"]);
+
+/** 1.0.38 R-1 — a server bill-pin refusal mapped to the cashier message, else null. Definitive: the core
+ *  raised before any write and pos_op_replay records nothing on failure. */
+export function billChangedRefusal(error: unknown): BillChangedElsewhereError | null {
+  if (error instanceof BillChangedElsewhereError) return error;
+  const code = posErrorCode(error);
+  return code && BILL_PIN_REFUSALS.has(code) ? new BillChangedElsewhereError(code, error) : null;
 }
 
 /**
@@ -335,6 +384,71 @@ export function billChangedSincePreview(
   return null;
 }
 
+// --- the online bill pin (1.0.38 R-1) -----------------------------------------
+
+/** The pin of the bill the cashier saw: what the server must still hold for the settle to proceed. */
+export type TableSettlePins = { expectedOrderIds: string[]; expectedAmount: number | null };
+
+/**
+ * PURE — the pin of the bill ON SCREEN (never a re-read: the pin is what the cashier presented).
+ *
+ * `expectedOrderIds` = the bill's canonical order ids (sorted, distinct). `expectedAmount` = the exact amount
+ * presented, in the bill's own currency, computed with the OFFLINE helpers so online and offline pins can
+ * never disagree: R = T − P when the server deducts prior split payments (`serverDeductsPriorPayments`,
+ * the same switch as `settleAmountDue`), else T (the F1 guard refuses a part-paid bill in that case), at
+ * numeric rounding (`roundNumeric`); then the server's discount math (`offlineSettlePin`). Null when no
+ * single figure exists (mixed currencies) — the order-id pin still applies. A discount on a bill the server
+ * already holds part-payment for is refused here, exactly as the server refuses it.
+ */
+export function tableSettlePins(
+  bill: TableBill,
+  table: TableSummary | null,
+  discount: Pick<TablePaymentPayload, "discount_type" | "discount_value"> | null | undefined,
+): { ok: true; pins: TableSettlePins } | { ok: false; reason: string } {
+  const expectedOrderIds = [...new Set(bill.orders.map((o) => o.id))].sort();
+  const collected = Math.max(0, Number(table?.collected ?? 0) || 0);
+  const due =
+    bill.mixedCurrency || bill.total == null
+      ? null
+      : Math.max(0, roundNumeric(bill.total - (serverDeductsPriorPayments() ? collected : 0), 2));
+  const pin = offlineSettlePin(due, { subtotal: bill.subtotal, collected }, discount);
+  if (!pin.ok) return { ok: false, reason: pin.reason };
+  return { ok: true, pins: { expectedOrderIds, expectedAmount: pin.amount } };
+}
+
+/** A fresh client_op_id. The server casts it to uuid, so the fallback is a v4-shaped uuid too. */
+export function newPaymentOpId(): string {
+  const c = typeof globalThis !== "undefined" ? (globalThis.crypto as Crypto | undefined) : undefined;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    return (ch === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+/**
+ * One open payment ATTEMPT per slot (`pay_table:<table>` / `on_account_table:<table>`), as `stableMergeOpId`
+ * does for merges. The attempt identity is the full request minus the op id (bill pin, method, currency,
+ * discount, customer, amount now): pressing Pay again for the SAME bill and the SAME choices after a failure
+ * is a retry of that attempt and reuses its client_op_id — so a request whose response was lost replays the
+ * recorded result instead of charging again. Anything different is a new attempt with a fresh id. Closed on
+ * success or a definitive refusal; a failure the server never recorded is harmless to reuse (pos_op_replay
+ * records only successes).
+ */
+const openAttempts = new Map<string, { fingerprint: string; clientOpId: string }>();
+
+export function paymentAttemptOpId(slot: string, fingerprint: string, mint: () => string = newPaymentOpId): string {
+  const held = openAttempts.get(slot);
+  if (held && held.fingerprint === fingerprint) return held.clientOpId;
+  const clientOpId = mint();
+  openAttempts.set(slot, { fingerprint, clientOpId });
+  return clientOpId;
+}
+
+export function closePaymentAttempt(slot: string, clientOpId: string | undefined): void {
+  if (clientOpId !== undefined && openAttempts.get(slot)?.clientOpId === clientOpId) openAttempts.delete(slot);
+}
+
 // --- payload -----------------------------------------------------------------
 
 /**
@@ -344,6 +458,9 @@ export function billChangedSincePreview(
  * back `tendered` alongside the discount, and a spread is how a cash-drawer aid
  * ends up posted to a financial RPC. Each field is named here, so adding one is
  * an edit to this function - which the exact-payload test guards.
+ *
+ * 1.0.38 R-1 — `pins` / `clientOpId` are added by `performTablePayment`, which holds the bill on screen;
+ * a caller building the bare payload is unchanged.
  */
 export function buildTablePaymentPayload(input: {
   tableId: string;
@@ -351,6 +468,8 @@ export function buildTablePaymentPayload(input: {
   currency: CurrencyCode;
   /** Only ever the two discount fields, from `validateTableDiscount`. */
   discount?: Pick<TablePaymentPayload, "discount_type" | "discount_value">;
+  pins?: TableSettlePins;
+  clientOpId?: string;
 }): TablePaymentPayload {
   const payload: TablePaymentPayload = {
     table_id: input.tableId,
@@ -359,32 +478,40 @@ export function buildTablePaymentPayload(input: {
   };
   if (input.discount?.discount_type !== undefined) payload.discount_type = input.discount.discount_type;
   if (input.discount?.discount_value !== undefined) payload.discount_value = input.discount.discount_value;
+  if (input.pins && input.pins.expectedOrderIds.length > 0) payload.expected_order_ids = input.pins.expectedOrderIds;
+  if (input.pins && input.pins.expectedAmount != null) payload.expected_amount = input.pins.expectedAmount;
+  if (input.clientOpId) payload.client_op_id = input.clientOpId;
   return payload;
 }
 
-/** Keys `pos_pay_table` reads. Exported so the contract test cannot drift from the builder. */
+/** Keys `pos_pay_table` reads. Exported so the contract test cannot drift from the builder.
+ *  1.0.38 R-1 — INTENTIONALLY grown by the three bill-pin keys the 1.0.38 wrapper/core read. */
 export const TABLE_PAYMENT_PAYLOAD_KEYS = [
   "table_id",
   "method",
   "currency_code",
   "discount_type",
   "discount_value",
+  "expected_order_ids",
+  "expected_amount",
+  "client_op_id",
 ] as const;
 
 /**
  * Fields that must NEVER reach `pos_pay_table`.
  *
  * `shift_id` / `branch_id` come from the ORDERS server-side; `order_id` and
- * `order_number` would contradict the table-level contract; `client_op_id` does
- * not exist on this RPC and inventing one would imply an idempotency guarantee
- * the server does not give; `tendered` / `change` / `batch_no` have no column.
+ * `order_number` would contradict the table-level contract; `tendered` /
+ * `change` / `batch_no` have no column.
+ * 1.0.38 R-1 — `client_op_id` was INTENTIONALLY removed from this list: the 1.0.38 `pos_pay_table`
+ * wrapper honours it through `pos_op_replay` (recorded on success only), so it is now a real
+ * idempotency key, minted once per payment attempt (`paymentAttemptOpId`), never per click.
  */
 export const FORBIDDEN_PAYMENT_FIELDS = [
   "shift_id",
   "branch_id",
   "order_id",
   "order_number",
-  "client_op_id",
   "tendered",
   "change",
   "batch_no",
@@ -411,6 +538,9 @@ export async function payTable(payload: TablePaymentPayload): Promise<TablePayme
 export const NO_OPEN_ORDER = /no open order on this table to pay/i;
 
 export function isNoOpenOrderRefusal(error: unknown): boolean {
+  // 1.0.38 R-1 — with the order-id pin, "nothing left to pay" arrives as ALREADY_SETTLED (every pinned
+  // order already paid): the same evidence, under its structured code.
+  if (posErrorCode(error) === "ALREADY_SETTLED") return true;
   return NO_OPEN_ORDER.test(error instanceof Error ? error.message : String(error ?? ""));
 }
 
@@ -519,12 +649,50 @@ export async function performTablePayment(input: {
       return { ok: false, error: new PartPaidBillError(), retryable: false, steps };
     }
 
+    // 1b. 1.0.38 R-1 — pin the bill the cashier SAW (ids + exact amount presented) and carry this attempt's
+    //     client_op_id, so a round another terminal lands between the re-read and the RPC is REFUSED by the
+    //     server, never charged, and a lost response replays instead of charging twice.
+    const shown = input.shownBill as TableBill; // non-null: billChangedSincePreview refuses a missing bill
+    const pinned = tableSettlePins(shown, input.table, input.payload);
+    if (!pinned.ok) return { ok: false, error: new InvalidDiscountError(pinned.reason), retryable: false, steps };
+    const slot = `pay_table:${input.payload.table_id}`;
+    const fingerprint = JSON.stringify([
+      input.payload.method,
+      input.payload.currency_code,
+      input.payload.discount_type ?? null,
+      input.payload.discount_value ?? null,
+      pinned.pins.expectedOrderIds,
+      pinned.pins.expectedAmount,
+    ]);
+    const wire = buildTablePaymentPayload({
+      tableId: input.payload.table_id,
+      method: input.payload.method,
+      currency: input.payload.currency_code,
+      discount: input.payload,
+      pins: pinned.pins,
+      clientOpId: input.payload.client_op_id ?? paymentAttemptOpId(slot, fingerprint),
+    });
+
     // 2. Submit. Exactly once.
     let result: TablePaymentResult;
     try {
-      result = await input.submit(input.payload);
+      result = await input.submit(wire);
       steps.push("submit");
+      closePaymentAttempt(slot, wire.client_op_id);
     } catch (error) {
+      // 1.0.38 R-1 — a bill-pin refusal is DEFINITIVE (nothing charged, nothing recorded): say so in the
+      // cashier's words and never infer success. The re-read only refreshes what is on screen.
+      const refusal = billChangedRefusal(error);
+      if (refusal) {
+        closePaymentAttempt(slot, wire.client_op_id);
+        try {
+          await input.recoverRead();
+          steps.push("recover-read");
+        } catch {
+          // The refusal stands either way; the operator is told to refresh.
+        }
+        return { ok: false, error: refusal, retryable: false, steps };
+      }
       // The response may have been lost AFTER the server committed. Ask the
       // server what actually happened rather than assuming either way.
       let verdict: RecoveryVerdict = "ambiguous";
@@ -539,6 +707,7 @@ export async function performTablePayment(input: {
       // "No open order to pay" plus a settled re-read is proof the earlier call
       // landed. Anything less is not proof, and is not treated as one.
       if (verdict === "settled") {
+        closePaymentAttempt(slot, wire.client_op_id);
         await input.complete(null);
         steps.push("complete");
         await input.refresh();

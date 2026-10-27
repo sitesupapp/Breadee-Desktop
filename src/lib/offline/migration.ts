@@ -61,9 +61,11 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
 
   // --- pendingShifts -> open_shift operations ---
   const shifts = await localdb.pendingShifts.toArray();
-  for (const s of shifts) {
+  // Final Foundation (PERF): ONE bulkGet of the already-staged ops (was one get per legacy row, every drain).
+  const stagedShifts = await localdb.operations.bulkGet(shifts.map((s) => shiftOpId(s.local_shift_id)));
+  for (const [si, s] of shifts.entries()) {
     const id = shiftOpId(s.local_shift_id);
-    if (await localdb.operations.get(id)) { report.skippedAlreadyMigrated++; continue; }
+    if (stagedShifts[si]) { report.skippedAlreadyMigrated++; continue; }
     const op: OfflineOperation = {
       operation_id: id,
       operation_type: "open_shift",
@@ -105,9 +107,10 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
 
   // --- posOfflineTxns -> takeaway_sale operations ---
   const txns = await localdb.posOfflineTxns.toArray();
-  for (const t of txns) {
+  const stagedTxns = await localdb.operations.bulkGet(txns.map((t) => txnOpId(t.local_txn_id)));
+  for (const [ti, t] of txns.entries()) {
     const id = txnOpId(t.local_txn_id);
-    const existingTxnOp = await localdb.operations.get(id);
+    const existingTxnOp = stagedTxns[ti];
     if (existingTxnOp) {
       // Second-phase re-capture bridge. The capture layer re-queues a SYNCED sale row to
       // carry a later phase on the SAME logical order — classically a cash payment taken
@@ -241,14 +244,32 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
  * resurrects or deletes anything. Idempotent.
  */
 export async function reconcileLegacyFromOperations(): Promise<void> {
-  const ops = await localdb.operations.toArray();
+  // Final Foundation (PERF) — only the migrated ops (operation_id range "mig:" … — the primary key), and a
+  // legacy row is written only when the mirror actually CHANGES it: through 1.0.38-dev every drain re-read the
+  // whole log and re-wrote every synced legacy row (one write per historical offline sale, every 45 s).
+  const ops = await localdb.operations.where("operation_id").startsWith("mig:").toArray();
+  const txnRows = new Map(
+    (await localdb.posOfflineTxns.bulkGet(ops.filter((o) => o.operation_id.startsWith("mig:txn:")).map((o) => o.operation_id.slice("mig:txn:".length))))
+      .filter((r): r is NonNullable<typeof r> => !!r)
+      .map((r) => [r.local_txn_id, r]),
+  );
+  const shiftRows = new Map(
+    (await localdb.pendingShifts.bulkGet(ops.filter((o) => o.operation_id.startsWith("mig:shift:")).map((o) => o.operation_id.slice("mig:shift:".length))))
+      .filter((r): r is NonNullable<typeof r> => !!r)
+      .map((r) => [r.local_shift_id, r]),
+  );
+  /** Same effect as Table.update (absent row = no-op), skipped when every patched field already holds its value. */
+  const changes = (row: object | undefined, patch: Record<string, unknown>) =>
+    row != null && Object.entries(patch).some(([k, v]) => JSON.stringify((row as Record<string, unknown>)[k]) !== JSON.stringify(v) || (v === undefined) !== ((row as Record<string, unknown>)[k] === undefined));
   for (const op of ops) {
     if (op.operation_type === "open_shift" && op.operation_id.startsWith("mig:shift:")) {
       const localId = op.operation_id.slice("mig:shift:".length);
       if (op.status === "synced" && op.canonical_entity_id) {
-        await localdb.pendingShifts.update(localId, { status: "synced", server_shift_id: op.canonical_entity_id });
+        const patch = { status: "synced", server_shift_id: op.canonical_entity_id };
+        if (changes(shiftRows.get(localId), patch)) await localdb.pendingShifts.update(localId, patch as never);
       } else if (op.status === "needs_attention") {
-        await localdb.pendingShifts.update(localId, { status: "needs_attention", review_reason: op.last_error_code ?? "needs_attention" });
+        const patch = { status: "needs_attention", review_reason: op.last_error_code ?? "needs_attention" };
+        if (changes(shiftRows.get(localId), patch)) await localdb.pendingShifts.update(localId, patch as never);
       }
     } else if (op.operation_type === "takeaway_sale" && op.operation_id.startsWith("mig:txn:")) {
       const localId = op.operation_id.slice("mig:txn:".length);
@@ -256,7 +277,7 @@ export async function reconcileLegacyFromOperations(): Promise<void> {
         // 1.0.38 (C5) — a payment captured on the legacy row while this op was replaying submit-only:
         // never mark the row synced over it (that ended the bridge forever); leave it queued so the next
         // migrate re-opens the synced op with the payment (the synced → pending bridge).
-        const row = await localdb.posOfflineTxns.get(localId);
+        const row = txnRows.get(localId);
         if (row && row.status === "queued" && row.payment_intent && !(op.payload as { payment_intent?: unknown } | null)?.payment_intent) continue;
         const orderNumber = (op.result_meta?.order_number as string | undefined) ?? undefined;
         // Mirror the remap: the handler rewrote order_payload.shift_id to the canonical
@@ -264,7 +285,7 @@ export async function reconcileLegacyFromOperations(): Promise<void> {
         const remappedPayload = (op.payload as { order_payload?: unknown } | null)?.order_payload;
         const remappedShift = (remappedPayload as { shift_id?: string } | undefined)?.shift_id;
         const hadDependency = op.depends_on_local_entities.length > 0;
-        await localdb.posOfflineTxns.update(localId, {
+        const patch = {
           status: "synced",
           server_order_id: op.canonical_entity_id ?? undefined,
           server_order_number: orderNumber,
@@ -274,9 +295,16 @@ export async function reconcileLegacyFromOperations(): Promise<void> {
           ...(hadDependency ? { pending_shift_local_id: null, shift_id: remappedShift, order_payload: remappedPayload } : {}),
           last_error: null,
           review_reason: null,
-        });
+        };
+        if (!changes(row, patch)) continue; // already mirrored: no write
+        // About to write: re-read the row NOW (a capture may have re-queued it since the bulk read — the C5
+        // guard must see the current row, exactly as the per-row read before the write did).
+        const fresh = await localdb.posOfflineTxns.get(localId);
+        if (fresh && fresh.status === "queued" && fresh.payment_intent && !(op.payload as { payment_intent?: unknown } | null)?.payment_intent) continue;
+        await localdb.posOfflineTxns.update(localId, patch as never);
       } else if (op.status === "needs_attention") {
-        await localdb.posOfflineTxns.update(localId, { status: "needs_attention", review_reason: op.last_error_code ?? "needs_attention" });
+        const patch = { status: "needs_attention", review_reason: op.last_error_code ?? "needs_attention" };
+        if (changes(txnRows.get(localId), patch)) await localdb.posOfflineTxns.update(localId, patch as never);
       }
     }
   }

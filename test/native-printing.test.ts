@@ -534,6 +534,18 @@ test("the capability grants no shell, filesystem, network or arbitrary process a
     "updater:allow-check",
     "updater:allow-download-and-install",
     "process:allow-restart",
+    // RETARGETED (Final Foundation, Track 4): app commands are now ACL-gated
+    // (build.rs app manifest), so every command is granted here by name.
+    "allow-list-printers",
+    "allow-print-test-page",
+    "allow-print-receipt",
+    "allow-print-kitchen-ticket",
+    "allow-print-report",
+    "allow-device-public-key",
+    "allow-device-sign",
+    "allow-seal-secret",
+    "allow-unseal-secret",
+    "allow-clear-secret",
   ]);
   // Window access is fullscreen ONLY - no move, resize, close or create.
   const windowPerms = parsed.permissions.filter((p) => p.startsWith("core:window:"));
@@ -608,6 +620,9 @@ test("the windows crate is reused at its locked version with minimal features", 
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Printing",
     "Win32_Security",
+    // RETARGETED (Final Foundation, Track 4): NCrypt device key + DPAPI sealing
+    // for src-tauri/src/device_security. Same crate, same locked version.
+    "Win32_Security_Cryptography",
     "Win32_Storage_Xps",
   ]);
   // No third-party printing crate, and Tauri is untouched.

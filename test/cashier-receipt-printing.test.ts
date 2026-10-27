@@ -452,7 +452,8 @@ test("printing is manual - nothing prints on open, on payment or on a timer", ()
   assert.equal(effect.includes("printReceipt"), false);
   assert.match(effect, /listPrinters\(\)/);
   // The destination is ASKED FOR, not decided here.
-  assert.match(effect, /resolvePrintRoute\(\{ branchId, purpose: "receipt", orderSource: source \}\)/);
+  // 1.0.38 (PERF C1) — through the cache-backed lookup (same server resolve online; cached route offline).
+  assert.match(effect, /resolvePrintRouteCached\(\{ branchId, purpose: "receipt", orderSource: source \}\)/);
   for (const timer of ["setTimeout", "setInterval"]) {
     assert.equal(preview.includes(timer), false, `${timer} must not drive printing`);
   }
@@ -609,6 +610,23 @@ test("printing still needs no capability of its own", () => {
   // Those have nothing to do with printing either - and the point stands: after
   // three separate features touched this list, PRINTING still holds no
   // capability, because it never needed one.
+  //
+  // RETARGETED (Final Foundation, Track 4): app commands are now ACL-gated by an
+  // app manifest in build.rs, so each printing command holds exactly ONE
+  // `allow-<command>` grant - its own, by name - and nothing broader. The
+  // device-security commands are granted the same way.
+  const appCommandGrants = new Set([
+    "allow-list-printers",
+    "allow-print-test-page",
+    "allow-print-receipt",
+    "allow-print-kitchen-ticket",
+    "allow-print-report",
+    "allow-device-public-key",
+    "allow-device-sign",
+    "allow-seal-secret",
+    "allow-unseal-secret",
+    "allow-clear-secret",
+  ]);
   const parsed = JSON.parse(capabilities) as { permissions: string[] };
   for (const p of parsed.permissions) {
     assert.ok(
@@ -616,12 +634,13 @@ test("printing still needs no capability of its own", () => {
         p === "opener:default" ||
         p.startsWith("core:window:") ||
         p.startsWith("updater:") ||
-        p === "process:allow-restart",
+        p === "process:allow-restart" ||
+        appCommandGrants.has(p),
       `unexpected capability: ${p}`,
     );
   }
-  // `print` is the one that matters here, and it is still absent.
-  for (const forbidden of ["print", "shell", "fs:", "http"]) {
+  // No plugin-level print/shell/fs/http surface - only the per-command grants above.
+  for (const forbidden of ["shell", "fs:", "http"]) {
     assert.equal(parsed.permissions.some((p) => p.includes(forbidden)), false, `${forbidden} must not be granted`);
   }
   // Process access, if any, is restart and never exit.
