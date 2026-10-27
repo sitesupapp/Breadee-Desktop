@@ -9,10 +9,11 @@
 // desktop-entitlement) on 2026-10-27; the selftest JWS from that deployment verifies
 // against exactly this key.
 //
-// PRODUCTION: intentionally EMPTY until the production key is bootstrapped under an
-// exact GO (docs/offline/migrations/foundation_desktop_devices_PROD_README.md). While
-// it is empty a production build runs the legacy 7-day authority (plus the clock
-// guard) - it does not fail open to "any key" and it does not lock every till out.
+// PRODUCTION: bootstrapped under the 1.0.38 production GO (2026-10-27) and published by
+// the deployed production function (GET /functions/v1/desktop-entitlement); the
+// selftest JWS from that deployment verifies against exactly this key. Without a
+// production kid a production build ran the legacy 7-day authority (plus the clock
+// guard) - it never failed open to "any key".
 // Rotation: ADD the new kid here first (ship), then switch the signer; never remove a
 // kid that unexpired entitlements still carry until 7 days after the switch.
 
@@ -31,5 +32,11 @@ export const ENTITLEMENT_PUBLIC_KEYS: Readonly<Record<AppEnv, readonly Entitleme
       y: "iX2_LRM2C-UBaG8M24t048aYnK8gni23dxtIkBfUXiY",
     },
   ],
-  production: [],
+  production: [
+    {
+      kid: "production-a92b3164756579c9",
+      x: "v-ImY8247iD14-WQdleY7-JezkbMgTiGgBflIlEGX0U",
+      y: "eUpDUJ4hpb_UB_R8_Mf1bod0X6IABSu5_MwxXEE9-74",
+    },
+  ],
 };

@@ -32,6 +32,7 @@ import {
   type EntitlementServer,
 } from "@/lib/security/deviceAuthority";
 import { ENTITLEMENT_PUBLIC_KEYS } from "@/lib/security/entitlementKeys";
+import { verifyEs256Jws } from "@/lib/security/jws";
 import { decideOfflineAuthority } from "@/lib/offline/offlineAuthority";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -141,8 +142,20 @@ test("ATTACK change tenant / user / OU ids in the cache: mismatch, and foreign O
 
 test("staging entitlements are refused by a production build (env + separate keys)", async () => {
   assert.deepEqual(await verifyEntitlement(await sign(claims()), ctx({ env: "production" })), { ok: false, reason: "wrong_env" });
-  assert.equal(ENTITLEMENT_PUBLIC_KEYS.production.length, 0, "production key is PREPARED only - none embedded yet");
+  // 1.0.38 production GO — the production signer was bootstrapped in the production Vault; only its PUBLIC key
+  // is embedded, separate from staging's by construction.
+  assert.equal(ENTITLEMENT_PUBLIC_KEYS.production.length, 1);
+  assert.ok(ENTITLEMENT_PUBLIC_KEYS.production.every((k) => k.kid.startsWith("production-")));
   assert.ok(ENTITLEMENT_PUBLIC_KEYS.staging.every((k) => k.kid.startsWith("staging-")));
+  assert.ok(!ENTITLEMENT_PUBLIC_KEYS.production.some((p) => ENTITLEMENT_PUBLIC_KEYS.staging.some((s) => s.x === p.x || s.kid === p.kid)));
+  // The deployed production function's selftest JWS (no authority in it) verifies against the embedded key —
+  // and a staging-signed entitlement never verifies against the production key.
+  const prodSelftest =
+    "eyJ0eXAiOiJicmVhZGVlLXNlbGZ0ZXN0K2p3cyIsImtpZCI6InByb2R1Y3Rpb24tYTkyYjMxNjQ3NTY1NzljOSIsImFsZyI6IkVTMjU2In0.eyJ2ZXIiOjEsImVudiI6InByb2R1Y3Rpb24iLCJzZWxmdGVzdCI6dHJ1ZSwiaWF0IjoxNzkzMTIxNjY0fQ.MuR5JwJi2wiPGaUBk3NdxIYGTDmPNLtADcwwDGVK27NcKGVaen0tWRiHbhZ2tFzane7MnDhEWN_U7rB7Y22TxQ";
+  const st = await verifyEs256Jws(prodSelftest, ENTITLEMENT_PUBLIC_KEYS.production, SELFTEST_JWS_TYP);
+  assert.equal(st.ok, true, "the deployed production signer and the embedded production key agree");
+  assert.equal((await verifyEs256Jws(prodSelftest, ENTITLEMENT_PUBLIC_KEYS.staging, SELFTEST_JWS_TYP)).ok, false);
+  assert.equal((await verifyEntitlement(prodSelftest, ctx({ env: "production", keys: ENTITLEMENT_PUBLIC_KEYS.production }))).ok, false, "a selftest token is never an entitlement");
   assert.equal((await verifyEntitlement(await sign(claims({ env: "production" })), ctx({ env: "production", keys: undefined }))).ok, false);
 });
 

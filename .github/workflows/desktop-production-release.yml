@@ -46,6 +46,9 @@ env:
   CHANNEL_BRANCH: desktop-production-channel
   STAGING_REF: azjxprewycygsocusxjn
   PRODUCTION_REF: cltlqfqormkhppmbvyrv
+  # The customer-facing note shown in "Breadee Update Available" (latest.json
+  # `notes`) and in the GitHub release description. Business language only.
+  RELEASE_NOTE: "Full Offline POS improvements: reliable offline sign-in and Switch User, faster local-first startup, improved Dine-In Open Table and Open Tables, safer Merge/Move reconciliation and quantity changes, stronger Sync Center recovery, and protection against duplicate effects after reconnect."
 
 jobs:
   release:
@@ -130,6 +133,11 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: production
+          # 1.0.38: the 1.0.38 server contracts are LIVE in PRODUCTION (ledger
+          # desktop_1038_offline_contracts + desktop_1038_open_shift_require_new,
+          # applied under the 1.0.38 production GO) - the same switch the
+          # human-accepted staging build ran with.
+          VITE_SERVER_1038_CONTRACTS: "1"
 
       - name: Verify built bundle targets production
         shell: bash
@@ -143,6 +151,8 @@ jobs:
             exit 1
           fi
           echo "Bundle backend target verified: production."
+          # The compiled 1.0.38 contracts switch must be ON (same check as staging).
+          node -e "const fs=require('fs');const p='dist/assets';let ok=false;for(const f of fs.readdirSync(p).filter(x=>x.endsWith('.js'))){const s=fs.readFileSync(p+'/'+f,'utf8');const i=s.indexOf('this.name=\"PartPaidBillError\"');if(i>=0&&/=\"1\"\.trim\(\)===\"1\"/.test(s.slice(i,i+600)))ok=true}if(!ok){console.log('::error::The 1.0.38 contracts flag is NOT enabled in the bundle. Refusing.');process.exit(1)}console.log('1.0.38 contracts flag: ON')"
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -180,6 +190,7 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: production
+          VITE_SERVER_1038_CONTRACTS: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
 
@@ -217,6 +228,8 @@ jobs:
           body: |
             Breadee Desktop production release ${{ env.VERSION }}.
 
+            ${{ env.RELEASE_NOTE }}
+
             - `Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe` — fresh installation
             - `Breadee_${{ env.VERSION }}_x64-setup.exe` + `.sig` — signed automatic update
             - `SHA256SUMS.txt` — checksums
@@ -244,7 +257,7 @@ jobs:
           cat > channel/latest.json <<JSON
           {
             "version": "${VERSION}",
-            "notes": "Breadee Desktop ${VERSION}",
+            "notes": "${RELEASE_NOTE}",
             "pub_date": "${pub_date}",
             "platforms": {
               "windows-x86_64": {

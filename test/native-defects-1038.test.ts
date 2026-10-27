@@ -300,6 +300,26 @@ test("BUG 6: Open Tables and its rail count read the SAME effective floor the Di
   assert.match(read("src", "screens", "pos", "DineInWorkspace.tsx"), /effectiveTables: displayMap\.tables,/);
 });
 
+test("RELEASE 1.0.38 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
+  const NOTE =
+    "Full Offline POS improvements: reliable offline sign-in and Switch User, faster local-first startup, improved Dine-In Open Table and Open Tables, safer Merge/Move reconciliation and quantity changes, stronger Sync Center recovery, and protection against duplicate effects after reconnect.";
+  const wf = read(".github", "workflows", "desktop-production-release.yml");
+  assert.ok(wf.includes(`RELEASE_NOTE: "${NOTE}"`), "the exact customer note");
+  assert.match(wf, /"notes": "\$\{RELEASE_NOTE\}",/, "latest.json notes = the customer note");
+  assert.doesNotMatch(wf, /"notes": "Breadee Desktop \$\{VERSION\}"/);
+  assert.match(wf, /body: \|\s*\n\s*Breadee Desktop production release \$\{\{ env\.VERSION \}\}\.\s*\n\s*\n\s*\$\{\{ env\.RELEASE_NOTE \}\}/, "release description carries the note");
+  assert.doesNotMatch(NOTE, /\b(RPC|Supabase|migration|operation id|rc\.\d|client_op)/i, "business language only");
+  assert.equal((wf.match(/VITE_SERVER_1038_CONTRACTS: "1"/g) ?? []).length, 2, "both production build steps compile the 1.0.38 contracts ON");
+  assert.match(wf, /1\.0\.38 contracts flag is NOT enabled in the bundle/);
+  assert.match(wf, /tags:\s*\n\s*- 'desktop-prod-v\*'/);
+  // One version everywhere; What's New stays on 1.0.38.
+  assert.equal(JSON.parse(read("package.json")).version, "1.0.38");
+  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.38");
+  assert.match(read("src-tauri", "Cargo.toml"), /^version = "1\.0\.38"$/m);
+  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).identifier, "app.breadee.desktop");
+  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.38"/);
+});
+
 test("BUG 5: an offline quantity INCREASE of a sent line is a new round (never the version-checked line edit); decrease / remove stay audited edits", () => {
   const ws = read("src", "screens", "pos", "DineInWorkspace.tsx");
   assert.match(ws, /if \(newQuantity > line\.quantity\) \{\s*await sendExtraQuantityOffline\(line, newQuantity - line\.quantity\);\s*return;\s*\}/);
