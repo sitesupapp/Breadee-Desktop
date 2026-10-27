@@ -25,3 +25,16 @@ export const supabase = createClient<Database>(env.SUPABASE_URL, env.SUPABASE_AN
     fetch: timeoutFetch,
   },
 });
+
+/**
+ * Offline-first recovery — a SEPARATE client carrying ONLY a parked user's own session, for replaying
+ * that user's captured work after a user switch (lib/offline/parkedDrain). Same anon key + RLS, same
+ * bounded transport; its session lives in the caller-supplied storage (the user's sealed vault record),
+ * never in the active user's slot. No auto-refresh timer: a refresh happens only inside a replay.
+ */
+export function createReplayClient(storageKey: string, storage: { getItem(k: string): Promise<string | null>; setItem(k: string, v: string): Promise<void>; removeItem(k: string): Promise<void> }) {
+  return createClient<Database>(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: false, detectSessionInUrl: false, storageKey, storage },
+    global: { headers: { "x-breadee-client": "desktop" }, fetch: timeoutFetch },
+  });
+}

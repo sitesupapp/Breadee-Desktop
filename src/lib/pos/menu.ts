@@ -162,6 +162,9 @@ export async function loadPosMenu(branchId: string | null): Promise<MenuData> {
   const { supabase } = await import("@/lib/supabase");
   const { data, error } = await supabase.rpc("pos_menu" as never, { p_branch: branchId } as never);
   if (error) throw new Error(error.message);
+  // Offline-first recovery — a missing payload is a failed read, never an empty menu (an empty menu
+  // would be cached over the branch's real one).
+  if (data == null) throw new Error("The menu could not be read.");
   const menu = mapPosMenu(data as PosMenuJson | null);
 
   // `pos_menu` is OU-isolated but does NOT project `menu_items.ingredients`, the

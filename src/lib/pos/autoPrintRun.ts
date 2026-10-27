@@ -63,6 +63,15 @@ import {
 } from "@/lib/pos/stationTickets";
 import type { Gate } from "@/components/ui";
 import type { KitchenTicketStatus } from "@/state/kitchenTicket";
+import { lastKnownReachable } from "@/lib/offline/reachability";
+
+/** Offline-first recovery — a print-routing read: the live answer (written through by the caller), the
+ *  cached one when it fails, and ONLY the cached one when the backend is already known unreachable (the
+ *  ticket of an order captured offline no longer waits out three read timeouts before printing). */
+function liveOrCached<T>(live: () => Promise<T>, cached: () => Promise<T>): Promise<T> {
+  if (lastKnownReachable() === false) return cached();
+  return live().catch(() => cached());
+}
 
 /**
  * Ask the server where a document goes and whether this terminal can reach it.
@@ -84,19 +93,14 @@ async function resolveFor(input: {
   // to the local cache so the SAME destination can be routed offline; when the resolve throws
   // (backend unreachable), fall back to the cached route — a ticket still prints to where it was
   // resolved while online. Routing resolution creates no business mutation either way.
-  const route = await resolvePrintRoute({
-    branchId,
-    purpose: input.purpose,
-    orderSource: input.orderSource,
-  })
-    .then((r) => {
-      if (r.resolved) void cachePrintRoute(branchId, input.purpose, input.orderSource, r);
-      return r;
-    })
-    .catch(async () => {
-      const cached = await readCachedPrintRoute(branchId, input.purpose, input.orderSource).catch(() => null);
-      return (cached as ResolvedRoute | null) ?? null;
-    });
+  const route = await liveOrCached<ResolvedRoute | null>(
+    () =>
+      resolvePrintRoute({ branchId, purpose: input.purpose, orderSource: input.orderSource }).then((r) => {
+        if (r.resolved) void cachePrintRoute(branchId, input.purpose, input.orderSource, r);
+        return r;
+      }),
+    async () => ((await readCachedPrintRoute(branchId, input.purpose, input.orderSource).catch(() => null)) as ResolvedRoute | null) ?? null,
+  );
   if (!route) return { kind: "blocked", block: { reason: "no_route" } };
   const resolution = resolveRouteTarget({ route, installed: input.installed.ok ? input.installed.value : [] });
   return resolution.kind === "single"
@@ -190,24 +194,28 @@ export async function autoPrintKitchenTicket(input: {
   // Phase F (GAP 4): write the branch's item/station routes through to the cache on a successful
   // online load, and fall back to the cached routes offline — so an offline ticket reproduces the
   // EXACT same station split it had online, not a silent reroute to the branch default.
-  const routes = await loadItemRoutes({ tenantId: input.tenantId, branchId: input.branchId })
-    .then((r) => {
-      void cacheItemRoutes(input.tenantId, input.branchId, r);
-      return r;
-    })
-    .catch(async () => ((await readCachedItemRoutes(input.tenantId, input.branchId).catch(() => null)) as Awaited<ReturnType<typeof loadItemRoutes>> | null) ?? []);
+  const routes = await liveOrCached(
+    () =>
+      loadItemRoutes({ tenantId: input.tenantId, branchId: input.branchId }).then((r) => {
+        void cacheItemRoutes(input.tenantId, input.branchId, r);
+        return r;
+      }),
+    async () => ((await readCachedItemRoutes(input.tenantId, input.branchId).catch(() => null)) as Awaited<ReturnType<typeof loadItemRoutes>> | null) ?? [],
+  );
   const stations = splitTicketByStation({ ticket: input.ticket, routes, orderSource: input.source });
 
   // Only read when an explicit rule actually matched. A branch with no station
   // routing pays nothing for this feature - not a query, not a round trip.
   const needsPrinters = stations.some((s) => s.printerId !== null);
   const printers = needsPrinters
-    ? await loadServerPrinters({ tenantId: input.tenantId, branchId: input.branchId })
-        .then((p) => {
-          void cacheServerPrinters(input.tenantId, input.branchId, p);
-          return p;
-        })
-        .catch(async () => ((await readCachedServerPrinters(input.tenantId, input.branchId).catch(() => null)) as ServerPrinter[] | null) ?? [])
+    ? await liveOrCached(
+        () =>
+          loadServerPrinters({ tenantId: input.tenantId, branchId: input.branchId }).then((p) => {
+            void cacheServerPrinters(input.tenantId, input.branchId, p);
+            return p;
+          }),
+        async () => ((await readCachedServerPrinters(input.tenantId, input.branchId).catch(() => null)) as ServerPrinter[] | null) ?? [],
+      )
     : [];
 
   const render = kitchenRenderOptions(design);

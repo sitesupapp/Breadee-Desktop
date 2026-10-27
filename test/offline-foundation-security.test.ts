@@ -471,10 +471,12 @@ test("Rust device key: non-exportable, public blob only, closed seal names, unsu
   assert.match(cng, /CRYPTPROTECT_UI_FORBIDDEN/);
   assert.match(mod, /#\[cfg\(not\(target_os = "windows"\)\)\]\s*mod platform/);
   assert.match(mod, /unsupported_platform/);
-  assert.match(fmt, /pub const SEAL_NAMES: \[&str; 3\] = \["auth-session", "time-guard", "entitlement"\];/);
+  // Offline-first recovery adds exactly ONE closed name: the per-user offline sign-in vault.
+  assert.match(fmt, /pub const SEAL_NAMES: \[&str; 4\] = \["auth-session", "time-guard", "entitlement", "offline-vault"\];/);
   assert.match(fmt, /deny_unknown_fields/);
+  assert.match(mod, /format::validate_seal_value_for\(&name, &value\)\?;/, "the size bound is per allowlisted name");
   const native = read("src", "lib", "security", "native.ts");
-  assert.match(native, /export type SealName = "auth-session" \| "time-guard" \| "entitlement";/);
+  assert.match(native, /export type SealName = "auth-session" \| "time-guard" \| "entitlement" \| "offline-vault";/);
 });
 
 // ============================================================ session wiring

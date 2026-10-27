@@ -564,11 +564,16 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
   },
   {
     kind: "offline",
-    test: /failed to fetch|network|offline|ERR_INTERNET/i,
-    hint: "Reconnect to the internet - POS orders cannot be saved offline yet.",
+    // Offline-first recovery — a read timeout / abort is the same condition as a dropped link.
+    test: /failed to fetch|network|offline|ERR_INTERNET|timed out|timeout|aborted|AbortError|load failed/i,
+    hint: "Nothing was lost. Actions that work offline are kept on this device and sync automatically when the connection returns.",
     expected: true,
   },
 ];
+
+/** Offline-first recovery — the words a cashier sees for a connection failure, instead of the raw
+ *  transport text ("TypeError: Failed to fetch", "Request timed out after 15000 ms"). */
+export const OFFLINE_MESSAGE = "The server can't be reached right now.";
 
 export function classifyError(error: unknown): ClassifiedError {
   const message =
@@ -584,7 +589,7 @@ export function classifyError(error: unknown): ClassifiedError {
   }
   for (const rule of RULES) {
     if (rule.test.test(message)) {
-      return { kind: rule.kind, message, hint: rule.hint, expected: rule.expected };
+      return { kind: rule.kind, message: rule.kind === "offline" ? OFFLINE_MESSAGE : message, hint: rule.hint, expected: rule.expected };
     }
   }
   return { kind: "unknown", message, hint: null, expected: false };

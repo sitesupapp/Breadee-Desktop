@@ -61,7 +61,10 @@ test("catalog cache: tenant-scoped round-trip; a different tenant never reads it
 test("source-contract: useActivePaymentMethods reads the cache OFFLINE and mirrors ONLINE, no Cash substitution", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = stripComments(readFileSync(join(here, "..", "src/lib/pos/useActivePaymentMethods.ts"), "utf8"));
-  assert.match(src, /if \(!online\)[\s\S]{0,300}readCachedPaymentMethods\(tenantId\)/, "offline reads the cached catalog");
+  // Offline-first recovery — offline AND a failed live read both answer from the cached catalog.
+  assert.match(src, /const fromCache = \(\) =>\s*readCachedPaymentMethods\(tenantId\)/, "the cached catalog read");
+  assert.match(src, /if \(!online\) \{\s*void fromCache\(\);/, "offline reads the cached catalog");
+  assert.match(src, /\.catch\(\(\) => \{\s*if \(!cancelled\) void fromCache\(\);/, "a failed live read falls back to the cache, never Cash-only over it");
   assert.match(src, /offlineCapableMethods\(/, "offline offers the local-recording subset");
   assert.match(src, /void cachePaymentMethods\(tenantId, m\)/, "online mirrors the live catalog to cache");
 });

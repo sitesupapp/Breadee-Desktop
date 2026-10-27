@@ -165,32 +165,43 @@ const CASH_ONLY: SplitPaymentMethod[] = [{ key: "cash", label: "Cash", is_cash: 
 export async function loadSplitPaymentMethods(tenantId: string | null | undefined): Promise<SplitPaymentMethod[]> {
   if (!tenantId) return CASH_ONLY;
   try {
-    const { supabase } = await import("@/lib/supabase");
-    // `database.types.ts` predates `pos_payment_methods` (same reason `rpc.ts` casts the
-    // client): a documented structural cast rather than a schema regen for one read.
-    const client = supabase as unknown as {
-      from(table: string): {
-        select(cols: string): {
+    const rows = await loadActivePaymentMethodsStrict(tenantId);
+    return rows.length === 0 ? CASH_ONLY : rows;
+  } catch {
+    return CASH_ONLY;
+  }
+}
+
+/**
+ * Offline-first recovery — the same catalog read, but a FAILED read THROWS instead of answering
+ * Cash-only. The checkout hook mirrors what it loads to the offline cache, and through 1.0.38 one failed
+ * or timed-out read wrote [Cash] over the tenant's real tenders. A legitimately empty catalog is [].
+ */
+export async function loadActivePaymentMethodsStrict(tenantId: string): Promise<SplitPaymentMethod[]> {
+  const { supabase } = await import("@/lib/supabase");
+  // `database.types.ts` predates `pos_payment_methods` (same reason `rpc.ts` casts the
+  // client): a documented structural cast rather than a schema regen for one read.
+  const client = supabase as unknown as {
+    from(table: string): {
+      select(cols: string): {
+        eq(col: string, val: unknown): {
           eq(col: string, val: unknown): {
-            eq(col: string, val: unknown): {
-              order(col: string): PromiseLike<{ data: unknown; error: { message: string } | null }>;
-            };
+            order(col: string): PromiseLike<{ data: unknown; error: { message: string } | null }>;
           };
         };
       };
     };
-    const { data, error } = await client
-      .from("pos_payment_methods")
-      .select("key,label,is_cash,is_active,sort_order")
-      .eq("tenant_id", tenantId)
-      .eq("is_active", true)
-      .order("sort_order");
-    if (error || !Array.isArray(data) || data.length === 0) return CASH_ONLY;
-    return (data as unknown[]).map((row) => {
-      const m = asRecord(row);
-      return { key: str(m.key, "cash"), label: str(m.label, "Cash"), is_cash: bool(m.is_cash) };
-    });
-  } catch {
-    return CASH_ONLY;
-  }
+  };
+  const { data, error } = await client
+    .from("pos_payment_methods")
+    .select("key,label,is_cash,is_active,sort_order")
+    .eq("tenant_id", tenantId)
+    .eq("is_active", true)
+    .order("sort_order");
+  if (error) throw new Error(error.message);
+  if (!Array.isArray(data)) throw new Error("The payment methods could not be read.");
+  return (data as unknown[]).map((row) => {
+    const m = asRecord(row);
+    return { key: str(m.key, "cash"), label: str(m.label, "Cash"), is_cash: bool(m.is_cash) };
+  });
 }

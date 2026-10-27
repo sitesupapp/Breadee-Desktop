@@ -16,7 +16,7 @@ import { EMPTY_FLOOR_LAYOUT, loadFloorLayout, type FloorLayout } from "@/lib/pos
 import { resolveActiveSection } from "@/lib/pos/floorSections";
 import type { Transform } from "@/lib/pos/floorGeometry";
 import { cacheFloor, readCachedFloor } from "@/lib/offline/db";
-import { isBackendReachable } from "@/lib/offline/reachability";
+import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
 
 /** How long a loaded floor is considered fresh before a sensible re-fetch. */
 export const FLOOR_STALE_AFTER_MS = 60_000;
@@ -47,6 +47,9 @@ type FloorState = {
 
 const sameContext = (a: Context, b: Context) => a.tenantId === b.tenantId && a.branchId === b.branchId;
 
+/** Offline-first recovery — the latest load; an older reply (previous OU) never overwrites a newer one. */
+let floorRequest = 0;
+
 export const useFloor = create<FloorState>((set, get) => ({
   layout: EMPTY_FLOOR_LAYOUT,
   activeSectionId: null,
@@ -69,8 +72,26 @@ export const useFloor = create<FloorState>((set, get) => ({
         ? { layout: EMPTY_FLOOR_LAYOUT, activeSectionId: null, transform: null, lastLoadedAt: null }
         : {}),
     });
+    const req = ++floorRequest;
+    // Offline-first recovery — LOCAL FIRST: the last hydrated floor of this context renders before any
+    // network call (through 1.0.38 the map waited on `floor_service_layout`, indefinitely on a half-open
+    // link), then the live layout replaces it when the backend answers.
+    if (contextChanged || state.lastLoadedAt === null) {
+      const cached = await readCachedFloor(ctx.tenantId, ctx.branchId).catch(() => null);
+      if (req !== floorRequest) return;
+      const cachedLayout = cached?.layout as FloorLayout | undefined;
+      if (cachedLayout && cachedLayout.sections) {
+        const nextActive = resolveActiveSection(cachedLayout.sections, get().activeSectionId);
+        set({ layout: cachedLayout, activeSectionId: nextActive, transform: null, context: ctx, loading: false, refreshing: true, offline: true, error: null, lastLoadedAt: Date.now() });
+      }
+    }
+    if (lastKnownReachable() === false && get().lastLoadedAt !== null && sameContext(get().context, ctx)) {
+      set({ refreshing: false, offline: true });
+      return;
+    }
     try {
       const layout = await loadFloorLayout(ctx.branchId);
+      if (req !== floorRequest) return;
       // Keep the current section if it survived a republish; otherwise fall back
       // to the first. A section change (or a first load) resets the transform so
       // the canvas re-fits.
@@ -90,6 +111,7 @@ export const useFloor = create<FloorState>((set, get) => ({
       // cache-write failure must never affect the (successful) online load.
       void cacheFloor(layout, ctx.tenantId, ctx.branchId);
     } catch (e) {
+      if (req !== floorRequest) return;
       // OFFLINE FALLBACK: the backend was unreachable. Render the last hydrated floor from
       // the cache instead of an error, so the Floor Map stays active offline. Only this
       // (failure) branch changes; the online success path above is unchanged.

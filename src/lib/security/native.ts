@@ -14,7 +14,7 @@ export type DeviceSignRequest = {
   counter: number;
 };
 export type DeviceSignature = { message: string; signature: string; fingerprint: string };
-export type SealName = "auth-session" | "time-guard" | "entitlement";
+export type SealName = "auth-session" | "time-guard" | "entitlement" | "offline-vault";
 
 export type SecurityNative = {
   available(): boolean;

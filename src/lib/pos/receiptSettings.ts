@@ -95,23 +95,32 @@ export async function readAutoPrintSettings(input: {
   tenantId: string;
   branchId: string | null;
 }): Promise<AutoPrintSettings> {
+  // Offline-first recovery — the branch's two switches as last read online are the offline answer
+  // (through 1.0.38 nothing was cached, so offline auto-print was always off). A known-dead link is not asked.
+  const { readCachedAutoPrint, cacheAutoPrint } = await import("@/lib/offline/autoPrintCache");
+  const cached = readCachedAutoPrint(input.tenantId, input.branchId);
+  const { lastKnownReachable } = await import("@/lib/offline/reachability");
+  if (lastKnownReachable() === false) return cached ?? AUTO_PRINT_UNKNOWN;
   try {
     const { supabase } = await import("@/lib/supabase");
     const { data, error } = await supabase
       .from("pos_receipt_settings")
       .select("branch_id, auto_print_customer, auto_print_kitchen")
       .eq("tenant_id", input.tenantId);
-    if (error || !Array.isArray(data) || data.length === 0) return AUTO_PRINT_UNKNOWN;
+    if (error || !Array.isArray(data)) return cached ?? AUTO_PRINT_UNKNOWN;
+    if (data.length === 0) return AUTO_PRINT_UNKNOWN;
 
     const row = pickRow(data.map(asRecord), input.branchId);
     if (!row) return AUTO_PRINT_UNKNOWN;
 
-    return {
+    const settings = {
       customer: bool(row.auto_print_customer),
       kitchen: bool(row.auto_print_kitchen),
     };
+    cacheAutoPrint(input.tenantId, input.branchId, settings);
+    return settings;
   } catch {
-    return AUTO_PRINT_UNKNOWN;
+    return cached ?? AUTO_PRINT_UNKNOWN;
   }
 }
 
@@ -177,6 +186,10 @@ export async function readReceiptDesignSafe(input: {
   tenantId: string;
   branchId: string | null;
 }): Promise<ReceiptDesignSettings | null> {
+  // Offline-first recovery — a known-dead link is not asked (null = the default full layout); the
+  // template itself is never stored on the desktop.
+  const { lastKnownReachable } = await import("@/lib/offline/reachability");
+  if (lastKnownReachable() === false) return null;
   try {
     return await readReceiptDesign(input);
   } catch {

@@ -314,12 +314,13 @@ export class PosRpcError extends Error {
   }
 }
 
-export async function callPosRpc(rpc: PosRpcName, args: Record<string, unknown>): Promise<unknown> {
-  const { supabase } = await import("@/lib/supabase");
+/** A client a POS RPC can be called on. Offline-first recovery: the offline drain replays a PARKED
+ *  user's captured work on THAT user's own client (their own session), never on the active user's. */
+export type RpcClient = { rpc(name: string, args: Record<string, unknown>): PromiseLike<RpcResponse> };
+
+export async function callPosRpc(rpc: PosRpcName, args: Record<string, unknown>, explicitClient?: RpcClient): Promise<unknown> {
   // The one documented cast. `rpc` is invoked as a method so `this` is intact.
-  const client = supabase as unknown as {
-    rpc(name: string, args: Record<string, unknown>): PromiseLike<RpcResponse>;
-  };
+  const client = explicitClient ?? ((await import("@/lib/supabase")).supabase as unknown as RpcClient);
   const { data, error, status } = await client.rpc(rpc, args);
   if (error) throw new PosRpcError(rpc, error.message, { status: status ?? null, code: error.code ?? null, details: error.details ?? null });
   return data;

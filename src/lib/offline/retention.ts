@@ -26,7 +26,7 @@
 
 import { localdb, readAllOperationsMirrored, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
 import { type OfflineOperation, UNSETTLED_STATUSES, operationsWithStatus } from "@/lib/offline/operationLog";
-import { readPosSessionSnapshot } from "@/lib/offline/posSession";
+import { readAllPosSessionSnapshots } from "@/lib/offline/posSession";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -184,8 +184,8 @@ async function liveGuards(): Promise<LiveGuards> {
       if (p.after_end_op_id) refs.add(p.after_end_op_id);
     }
   }
-  const session = readPosSessionSnapshot();
-  if (session?.shift?.id) shifts.add(session.shift.id);
+  // Every cashier's open shift on this device (one snapshot per cashier since the offline-first recovery).
+  for (const session of readAllPosSessionSnapshots()) if (session.shift?.id) shifts.add(session.shift.id);
   // A live op's prerequisite may already be gone (GC'd by an older build): the orchestrator proves it
   // synced from its history event + the mapping of that event's local ref (provenGoneSynced) — keep both.
   if (deps.size > 0) {

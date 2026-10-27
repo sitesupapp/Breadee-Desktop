@@ -182,10 +182,12 @@ test("clear removes the snapshot", () => {
 // ---------------------------------------------------------------------------
 test("shift store: offline refresh restores the snapshot; a live 'no shift' clears it", () => {
   const src = stripComments(read("state", "shift.ts"));
-  assert.match(src, /catch[\s\S]*restoreShiftFromSnapshot\(readPosSessionSnapshot\(\)/, "offline refresh restores from snapshot");
+  // Offline-first recovery — snapshots are per cashier: the restore reads THIS cashier's, a live 'no shift'
+  // clears only THIS cashier's.
+  assert.match(src, /catch[\s\S]*restoreShiftFromSnapshot\(readPosSessionSnapshot\(userId\)/, "offline refresh restores from this cashier's snapshot");
   assert.match(src, /const deviceId = getDeviceIdentity\(\)\.device_id/, "restore is device-scoped");
   assert.match(src, /offlineRestored: true/, "an offline-restored shift is flagged, not passed off as live");
-  assert.match(src, /clearPosSessionSnapshot\(\)/, "server 'no shift' / close clears the snapshot");
+  assert.match(src, /clearPosSessionSnapshot\(userId\)/, "server 'no shift' / close clears this cashier's snapshot");
   assert.match(src, /offlineRestored: false/, "a successful live read clears the offline flag");
   // Case 2: an offline-opened shift is restored from the durable pending-shift store.
   assert.match(src, /getActivePendingShift\(/, "offline refresh falls back to a pending offline-opened shift");
@@ -193,7 +195,7 @@ test("shift store: offline refresh restores the snapshot; a live 'no shift' clea
 
 test("branch resolver: offline name falls back to the snapshot, never widening access", () => {
   const src = stripComments(read("lib", "branch.ts"));
-  assert.match(src, /restoreBranchNameFromSnapshot\(readPosSessionSnapshot\(\)/, "offline branch name from the open-shift snapshot");
+  assert.match(src, /readAllPosSessionSnapshots\(\)\.map\(\(snap\) => restoreBranchNameFromSnapshot\(snap,/, "offline branch name from any cashier's open-shift snapshot on this device (identity-gated)");
   assert.match(src, /restoreBranchName\(\{ deviceId, tenantId, branchId \}\)/, "offline branch name from the shift-INDEPENDENT branch-context cache");
   assert.match(src, /\?\? "Branch unavailable"/, "honest fallback when no cache applies");
   assert.match(src, /export function resolveBranchId/, "branch id remains resolved from tenant/membership, not the snapshot");

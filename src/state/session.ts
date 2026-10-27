@@ -27,12 +27,35 @@ async function dropCachedCustomersKeepingUnsettled(foreignOnly?: { tenantId: str
   });
   await localdb.posCustomers.bulkDelete(drop.map((c) => c.id));
 }
+/**
+ * Offline-first recovery — on an online sign-in, drop cached POS data (snapshots + customers) of
+ * tenants that NO saved user of this device belongs to. Through 1.0.38 the purge was branch-scoped
+ * for the single remembered user, which deleted the data a second saved cashier of the same business
+ * needs offline. Reads stay tenant + branch keyed and the branch picker is bounded by each user's own
+ * authority, so a user never sees another branch's cache. Offline-created customers still needed by
+ * unsettled work are kept, as before.
+ */
+async function purgeTenantsWithoutSavedUsers(currentTenantId: string | null): Promise<void> {
+  const keepTenants = await vault.vaultTenantIds().catch(() => new Set<string>());
+  if (currentTenantId) keepTenants.add(currentTenantId);
+  const snaps = await localdb.snapshots.toArray();
+  // The authority mirror is owned by offlineAuthority (rewritten right after this purge).
+  const foreignSnaps = snaps.filter((x) => x.key !== "auth.context" && !keepTenants.has(x.tenant_id));
+  if (foreignSnaps.length > 0) await localdb.snapshots.bulkDelete(foreignSnaps.map((x) => x.key));
+  const keep = await localEntityIdsNeededByUnsettledOps().catch(() => new Set<string>());
+  const customers = await localdb.posCustomers.toArray();
+  const foreignCustomers = customers.filter((c) => !keepTenants.has(c.tenant_id) && !(c.pending_local === true && keep.has(c.id)));
+  if (foreignCustomers.length > 0) await localdb.posCustomers.bulkDelete(foreignCustomers.map((c) => c.id));
+}
 import { clearPosSessionSnapshot } from "@/lib/offline/posSession";
 import { clearBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
 import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
 import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
+import { AUTH_STORAGE_KEY, sealedAuthStorage } from "@/lib/security/sealedAuthStorage";
+import * as vault from "@/lib/security/offlineVault";
+import { markStart, recordSince } from "@/lib/perf/timings";
 import { applyCaptureLock, type CaptureLockReason } from "@/lib/security/captureLock";
 import { setEntitledBranchScope } from "@/state/operationalBranch";
 import { overlayAuthorityWithEntitlement } from "@/lib/security/entitlement";
@@ -41,7 +64,9 @@ import {
   clearEntitlement,
   entitlementEnforced,
   entitlementRefreshDue,
+  installEntitlementSlot,
   observeDeviceClock,
+  readEntitlementSlot,
   refreshEntitlement,
   resetClockAfterOnlineAuth,
   verifyStoredEntitlement,
@@ -87,6 +112,144 @@ let securityStarted = false;
 /** OU list of the entitlement verified for the current offline restore (null otherwise). */
 let restoredEntitledBranchIds: string[] | null = null;
 export const SECURITY_TICK_MS = 60_000;
+
+/** Offline-first recovery — the password of a LOCAL sign-in whose user had NO parked session (so the
+ *  server cannot be reached with a token), held in memory ONLY until the first online revalidation of
+ *  that user, never persisted, dropped on switch / sign-out / definitive refusal. */
+let pendingSecret: { userId: string; email: string; password: string } | null = null;
+let revalidating: Promise<void> | null = null;
+
+export const FIRST_SIGNIN_MESSAGE = "FIRST SECURE SIGN-IN REQUIRES AN INTERNET CONNECTION. This user has not signed in online on this device yet.";
+export const WRONG_PASSWORD_MESSAGE = "Incorrect password.";
+
+/** The server refused this identity (revoked / deleted / banned / password changed): stop NEW captures
+ *  and stop future OFFLINE sign-ins for it. Recorded work is untouched and still syncs if accepted. */
+async function markReauthRequired(userId: string): Promise<void> {
+  pendingSecret = null;
+  await vault.invalidateVaultUser(userId).catch(() => undefined);
+  if (useSession.getState().userId !== userId) return;
+  standingLock = "reauth_required";
+  setCaptureLock("reauth_required");
+}
+
+/**
+ * Offline-first recovery — NETWORK REVALIDATION of the active (locally authorized) user. Runs in the
+ * background after a local sign-in / cold-start restore and on reconnect; never on the interaction
+ * path. Reachable: adopt the live session (or, for a user without a parked session, the in-memory
+ * password once) and reload the server-authoritative context — which leaves offline mode. A transport
+ * failure keeps the device offline; a definitive refusal locks new captures (markReauthRequired).
+ */
+export function revalidateActiveSession(): Promise<void> {
+  if (revalidating) return revalidating;
+  revalidating = (async () => {
+    const s = useSession.getState();
+    if (!s.userId) return;
+    const userId = s.userId;
+    if (!(await isBackendReachable().catch(() => false))) return;
+    try {
+      const r = await supabase.auth.getSession();
+      let live = r.data.session;
+      if (!live && r.error && !isAuthInvalidation(r.error)) return; // a flapping link: stay offline
+      if (!live && pendingSecret && pendingSecret.userId === userId) {
+        const r2 = await supabase.auth.signInWithPassword({ email: pendingSecret.email, password: pendingSecret.password });
+        if (r2.error) {
+          if (isAuthTransportError(r2.error)) return;
+          await markReauthRequired(userId);
+          return;
+        }
+        live = r2.data.session;
+      }
+      if (useSession.getState().userId !== userId) return; // switched meanwhile
+      if (!live || live.user?.id !== userId) {
+        await markReauthRequired(userId);
+        return;
+      }
+      await useSession.getState().loadContextOnline();
+      pendingSecret = null;
+    } catch (e) {
+      if (isAuthInvalidation(e)) await markReauthRequired(userId);
+    }
+  })().finally(() => {
+    revalidating = null;
+  });
+  return revalidating;
+}
+
+/** Render a locally authorized user (cold-start restore or local sign-in): their verified authority,
+ *  offline mode until the background revalidation reaches the server. */
+function applyRestore(cache: AuthorityCache, clockRollback: boolean): void {
+  const c = cache as unknown as CachedContext;
+  grantedPermissions = c.permissions ?? {};
+  useSession.setState({
+    loading: false,
+    offlineMode: true,
+    online: false,
+    authNotice: null,
+    userId: c.userId,
+    email: c.email,
+    isPlatformUser: c.isPlatformUser,
+    tenant: c.tenant,
+    membership: c.membership,
+    features: c.features,
+    permissions: c.permissions,
+    currency: c.currency ?? DEFAULT_CURRENCY,
+    entitledBranchIds: restoredEntitledBranchIds,
+  });
+  // A rolled-back clock locks NEW captures from the first frame (the tick re-evaluates).
+  setCaptureLock(clockRollback ? "clock_rollback" : standingLock);
+  void securityTick().catch(() => undefined);
+}
+
+/**
+ * Offline-first recovery — admit a SAVED user whose password matched their local verifier: install
+ * their parked session + entitlement as the active slots, then require exactly what a cold-start
+ * restore requires (7-day window at the guarded clock, and — where enforced — their verified,
+ * device-bound signed entitlement, whose claims replace the cached role / OU / permissions). Returns
+ * null on success, else the controlled message; a refused unlock leaves the device exactly as it was.
+ */
+async function activateLocalUser(u: vault.VaultUser, password: string): Promise<string | null> {
+  const clock = await observeDeviceClock();
+  const base = decideOfflineAuthority(u.context, clock.effectiveNowMs);
+  if (base.kind !== "restore") return REAUTH_MESSAGE;
+  const parked = await vault.unparkUser(u.userId);
+  if (parked.session) await sealedAuthStorage.setItem(AUTH_STORAGE_KEY, parked.session).catch(() => undefined);
+  else await sealedAuthStorage.removeItem(AUTH_STORAGE_KEY).catch(() => undefined);
+  await installEntitlementSlot(parked.entitlement, parked.entitlementReceivedAtMs).catch(() => undefined);
+  const decision = await gateOfflineRestore(base, clock);
+  if (decision.kind !== "restore") {
+    await vault.parkUser(u.userId, { session: parked.session, entitlement: parked.entitlement, entitlementReceivedAtMs: parked.entitlementReceivedAtMs }).catch(() => undefined);
+    await sealedAuthStorage.removeItem(AUTH_STORAGE_KEY).catch(() => undefined);
+    await installEntitlementSlot(null, null).catch(() => undefined);
+    return REAUTH_MESSAGE;
+  }
+  // The active authority = this user's own snapshot (its 7-day anchor unchanged).
+  await writeAuthorityCache(u.context);
+  standingLock = null;
+  pendingSecret = parked.session ? null : { userId: u.userId, email: u.email, password };
+  applyRestore(decision.cache, clock.rollback);
+  return null;
+}
+
+/** Reset every in-memory POS store that may hold the previous user's working state (cart, selected
+ *  table / bill, customer, shift view, receipt). Durable work (op log, drafts) is never touched. */
+async function resetUserScopedStores(): Promise<void> {
+  const [cart, shift, shiftOrders, customers, tables, receipt, kitchen] = await Promise.all([
+    import("@/state/cart"),
+    import("@/state/shift"),
+    import("@/state/shiftOrders"),
+    import("@/state/customers"),
+    import("@/state/tables"),
+    import("@/state/receipt"),
+    import("@/state/kitchenTicket"),
+  ]);
+  cart.useCart.getState().reset();
+  shift.useShift.getState().clear();
+  shiftOrders.useShiftOrders.getState().reset();
+  customers.useCustomers.getState().reset();
+  tables.useTables.getState().reset();
+  receipt.useReceipt.getState().clear();
+  kitchen.useKitchenTicket.getState().clear();
+}
 
 /** Offline restore needs a VERIFIED, device-bound, unexpired entitlement for the cached
  *  user + tenant; the restored role / OU / permissions / features come from its signed
@@ -165,7 +328,8 @@ export async function securityReconnect(): Promise<void> {
   if (standing === "device_revoked" || standing === "access_revoked") {
     standingLock = standing;
     await clearEntitlement();
-  } else if (standing === "ok" || standing === "unregistered") {
+  } else if ((standing === "ok" || standing === "unregistered") && standingLock !== "reauth_required") {
+    // A reauth_required lock is lifted only by a successful online context load (loadContextOnline).
     standingLock = null;
   }
   await securityTick().catch(() => undefined);
@@ -208,10 +372,21 @@ type SessionState = {
   captureLock: CaptureLockReason | null;
   /** Final Foundation — OUs the VERIFIED offline entitlement allows (null = online / not enforced). */
   entitledBranchIds: string[] | null;
+  /** Offline-first recovery — users who signed in online on this device (sign-in screen list). */
+  savedUsers: vault.SavedUser[];
   init: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signInWithGoogle: () => Promise<{ error: string | null }>;
+  /** Offline-first recovery — park this user on the DEVICE (they can sign in again offline, and their
+   *  recorded work keeps its own identity) and return to the sign-in screen. No network, no data loss. */
+  switchUser: () => Promise<void>;
+  /** Sign out AND remove this user's offline sign-in from the device. */
   signOut: () => Promise<void>;
+  /** Remove a saved (parked) user from this device. */
+  forgetUser: (userId: string) => Promise<void>;
+  loadSavedUsers: () => Promise<void>;
+  /** Leave offline mode through the canonical online path (reconnect). Rejects when still offline. */
+  goOnline: () => Promise<void>;
   loadContextOnline: () => Promise<void>;
   /** Re-fetch ONLY features + permissions for the current tenant, in place, without a
    *  full context reload. Lets a web-side role change reach a running till on focus/online. */
@@ -238,8 +413,10 @@ export const useSession = create<SessionState>((set, get) => ({
   authNotice: null,
   captureLock: null,
   entitledBranchIds: null,
+  savedUsers: [],
 
   init: async () => {
+    const t0 = markStart();
     getDeviceIdentity(); // ensure device identity exists early
     set({ online: navigator.onLine });
     startSecurityLoop();
@@ -254,26 +431,7 @@ export const useSession = create<SessionState>((set, get) => ({
     const decision = await gateOfflineRestore(decideOfflineAuthority(await readAuthorityCache().catch(() => null), clock.effectiveNowMs), clock);
     const apply = (d: OfflineAuthDecision, offline: boolean) => {
       if (d.kind === "restore") {
-        const c = d.cache as unknown as CachedContext;
-        grantedPermissions = c.permissions ?? {};
-        set({
-          loading: false,
-          offlineMode: true,
-          online: false,
-          authNotice: null,
-          userId: c.userId,
-          email: c.email,
-          isPlatformUser: c.isPlatformUser,
-          tenant: c.tenant,
-          membership: c.membership,
-          features: c.features,
-          permissions: c.permissions,
-          currency: c.currency ?? DEFAULT_CURRENCY,
-          entitledBranchIds: restoredEntitledBranchIds,
-        });
-        // A rolled-back clock locks NEW captures from the first frame (the tick re-evaluates).
-        setCaptureLock(clock.rollback ? "clock_rollback" : standingLock);
-        void securityTick().catch(() => undefined);
+        applyRestore(d.cache, clock.rollback);
         return;
       }
       set({
@@ -283,6 +441,17 @@ export const useSession = create<SessionState>((set, get) => ({
         authNotice: d.kind === "expired" ? REAUTH_MESSAGE : offline ? OFFLINE_SIGNIN_MESSAGE : null,
       });
     };
+    void get().loadSavedUsers();
+    // Offline-first recovery — LOCAL FIRST. A usable local authority renders the authorized workspace
+    // at once; the network is consulted only in the BACKGROUND (revalidateActiveSession), never on the
+    // start-up path. Through 1.0.38 a valid authority still waited for the reachability probe (≤2.5 s)
+    // and, when anything answered it, for a token refresh plus four sequential context reads.
+    if (decision.kind === "restore") {
+      apply(decision, true);
+      recordSince("startup.authority_restore", t0);
+      void revalidateActiveSession();
+      return;
+    }
     if (!(await isBackendReachable().catch(() => false))) {
       apply(decision, true);
       return;
@@ -354,6 +523,10 @@ export const useSession = create<SessionState>((set, get) => ({
     const { data: userRes } = await supabase.auth.getUser();
     const user = userRes.user;
     if (!user) throw new Error("no user");
+    // Offline-first recovery — the live session must belong to the user who is authorized on screen;
+    // a session of anyone else is never adopted under their identity.
+    const shown = get().userId;
+    if (shown && shown !== user.id) throw new Error("identity_mismatch");
 
     const [{ data: platformUser, error: platformErr }, { data: selfProfile }] = await Promise.all([
       supabase.from("platform_users").select("*").eq("user_id", user.id).maybeSingle(),
@@ -379,7 +552,7 @@ export const useSession = create<SessionState>((set, get) => ({
     let permissions: Record<string, boolean> = {};
     let currency: CurrencySettings = DEFAULT_CURRENCY;
     if (membership?.tenant_id) {
-      const [{ data: t, error: tErr }, { data: feat, error: fErr }, { data: perms, error: pErr }, { data: cur }] = await Promise.all([
+      const [{ data: t, error: tErr }, { data: feat, error: fErr }, { data: perms, error: pErr }, { data: cur, error: curErr }] = await Promise.all([
         supabase.from("tenants").select("id, business_name, tenant_status, verification_status, selected_plan_id, main_branch_id").eq("id", membership.tenant_id).maybeSingle(),
         supabase.rpc("get_tenant_effective_features", { p_tenant: membership.tenant_id }),
         supabase.rpc("current_user_permissions", { p_tenant: membership.tenant_id }),
@@ -392,19 +565,22 @@ export const useSession = create<SessionState>((set, get) => ({
       features = (feat as unknown as FeatureMap) ?? {};
       permissions = (perms as Record<string, boolean>) ?? {};
       const curRow = cur as { primary_currency?: unknown; usd_to_lbp_rate?: unknown } | null;
-      currency = {
-        primary: isCurrencyCode(curRow?.primary_currency) ? curRow.primary_currency : "USD",
-        rate: typeof curRow?.usd_to_lbp_rate === "number" ? curRow.usd_to_lbp_rate : null,
-      };
+      if (curErr) {
+        // Offline-first recovery — a FAILED currency read keeps this user's last known settings;
+        // through 1.0.38 it wrote USD / no rate over a good LBP rate into the 7-day authority.
+        const known = (await vault.getVaultUser(user.id).catch(() => null))?.context.currency as CurrencySettings | undefined;
+        currency = known && isCurrencyCode(known.primary) ? known : get().userId === user.id ? get().currency : DEFAULT_CURRENCY;
+      } else {
+        currency = {
+          primary: isCurrencyCode(curRow?.primary_currency) ? curRow.primary_currency : "USD",
+          rate: typeof curRow?.usd_to_lbp_rate === "number" ? curRow.usd_to_lbp_rate : null,
+        };
+      }
     }
 
-    // Cache-scope hardening: drop any cached snapshots that don't belong to this
-    // tenant/branch before continuing, so a previous session's cache can't leak.
-    await purgeForeignSnapshots(tenant?.id ?? null, (membership as Membership)?.branch_id ?? null).catch(() => {});
-    // Same hardening for the delivery customer cache (phones/addresses): a
-    // previous session's callers must never surface for a different tenant/branch.
-    // (1.0.38: offline-created customers still needed by unsettled offline work are kept.)
-    await dropCachedCustomersKeepingUnsettled({ tenantId: tenant?.id ?? null, branchId: (membership as Membership)?.branch_id ?? null }).catch(() => {});
+    // Cache-scope hardening: drop cached POS data (snapshots + customers) of tenants no saved user of
+    // this device belongs to (offline-created customers still needed by unsettled work are kept).
+    await purgeTenantsWithoutSavedUsers(tenant?.id ?? null).catch(() => {});
 
     const next = {
       userId: user.id,
@@ -419,7 +595,12 @@ export const useSession = create<SessionState>((set, get) => ({
     grantedPermissions = permissions;
     set({ ...next, permissions: applyCaptureLock(permissions, get().captureLock), offlineMode: false, online: true, authNotice: null, entitledBranchIds: null });
     // The authority timestamp = this FULL online authorization (getUser + every context read OK).
-    await writeCache({ ...next, cachedAt: Date.now() });
+    const authorizedAt = Date.now();
+    await writeCache({ ...next, cachedAt: authorizedAt });
+    // Offline-first recovery — and this user's own record in the per-user offline vault.
+    await vault.recordOnlineAuthorization({ context: { ...next, cachedAt: authorizedAt } as unknown as AuthorityCache, email: next.email }).catch(() => undefined);
+    if (standingLock === "reauth_required") standingLock = null;
+    void get().loadSavedUsers();
     // Final Foundation — online and server-validated: obtain / renew the device-bound signed
     // entitlement and re-evaluate the capture lock. Background only; never blocks sign-in.
     void securityTick().catch(() => undefined);
@@ -429,7 +610,14 @@ export const useSession = create<SessionState>((set, get) => ({
     const { membership, offlineMode, userId } = get();
     // Only a live, online, signed-in tenant session refreshes. Offline mode keeps its
     // cached snapshot untouched; no membership means there is nothing to refresh.
-    if (!navigator.onLine || offlineMode || !membership?.tenant_id) return;
+    if (!navigator.onLine) return;
+    // Offline-first recovery — a locally authorized session leaves offline mode through the
+    // canonical revalidation (background, bounded by reachability), never by a bare refresh.
+    if (offlineMode) {
+      void revalidateActiveSession();
+      return;
+    }
+    if (!membership?.tenant_id) return;
     if (permissionRefreshInFlight) return permissionRefreshInFlight;
     const tenantId = membership.tenant_id;
     permissionRefreshInFlight = (async () => {
@@ -475,28 +663,64 @@ export const useSession = create<SessionState>((set, get) => ({
     return permissionRefreshInFlight;
   },
 
-  signIn: async (email, password) => {
+  signIn: async (rawEmail, password) => {
+    const t0 = markStart();
+    const email = rawEmail.trim();
+    // Offline-first recovery — LOCAL FIRST. A user who has signed in online on this device before is
+    // verified against their sealed local verifier and admitted at once from their own authority; the
+    // network only revalidates afterwards, in the background. No remote call, timeout or retry sits
+    // between the cashier and the POS.
+    const saved = await vault.findVaultUserByEmail(email).catch(() => null);
+    if (saved?.verifier) {
+      const locked = vault.lockRemainingMs(saved);
+      if (locked > 0) return { error: `Too many incorrect attempts. Try again in ${Math.ceil(locked / 1000)} s.` };
+      if (await vault.checkVerifier(saved.verifier, password).catch(() => false)) {
+        const refused = await activateLocalUser(saved, password);
+        if (refused === null) {
+          await vault.resetFailedAttempts(saved.userId).catch(() => undefined);
+          recordSince("auth.local_signin", t0);
+          void revalidateActiveSession();
+          return { error: null };
+        }
+        // The local authority is expired / unverifiable: only the server can re-authorize this user.
+        if (!(await isBackendReachable().catch(() => false))) return { error: refused };
+      } else if (!(await isBackendReachable().catch(() => false))) {
+        const lock = await vault.recordFailedAttempt(saved.userId).catch(() => 0);
+        return { error: lock > 0 ? `${WRONG_PASSWORD_MESSAGE} Too many attempts — try again in ${Math.ceil(lock / 1000)} s.` : WRONG_PASSWORD_MESSAGE };
+      }
+      // Reachable and the verifier did not match: the password may have changed on the server — ask it.
+    }
     // rc.10 — a NETWORK failure is a controlled message, never the raw "Failed to fetch".
-    const offlineMsg = async () => {
-      const d = decideOfflineAuthority(await readAuthorityCache().catch(() => null), Date.now());
-      return d.kind === "expired" ? REAUTH_MESSAGE : OFFLINE_SIGNIN_MESSAGE;
-    };
+    const offlineMsg = () => (saved ? REAUTH_MESSAGE : FIRST_SIGNIN_MESSAGE);
+    // No usable local authority and no backend: say so at once, without attempting the network.
+    if (!(await isBackendReachable().catch(() => false))) return { error: offlineMsg() };
     let error: { message: string } | null = null;
+    let signedInUserId: string | null = null;
     try {
       const r = await supabase.auth.signInWithPassword({ email, password });
       error = r.error;
-      if (error && isAuthTransportError(error)) return { error: await offlineMsg() };
+      signedInUserId = r.data?.user?.id ?? null;
+      if (error && isAuthTransportError(error)) return { error: offlineMsg() };
     } catch (e) {
-      if (isAuthTransportError(e)) return { error: await offlineMsg() };
+      if (isAuthTransportError(e)) return { error: offlineMsg() };
       return { error: e instanceof Error ? e.message : "Could not sign in." };
     }
     if (error) return { error: error.message };
+    // A new server session supersedes any parked copy of this user's old one.
+    if (signedInUserId) await vault.unparkUser(signedInUserId).catch(() => undefined);
     try {
       await get().loadContextOnline();
     } catch (e) {
-      if (isAuthTransportError(e)) return { error: await offlineMsg() };
+      if (isAuthTransportError(e)) return { error: offlineMsg() };
       return { error: e instanceof Error ? e.message : "Could not load your account." };
     }
+    // The password was just proven to the server: it becomes this user's local verifier, so the next
+    // sign-in on this device works without a connection.
+    const uid = get().userId;
+    if (uid) await vault.setVerifier(uid, await vault.createVerifier(password)).catch(() => undefined);
+    pendingSecret = null;
+    recordSince("auth.online_signin", t0);
+    void get().loadSavedUsers();
     return { error: null };
   },
 
@@ -507,7 +731,57 @@ export const useSession = create<SessionState>((set, get) => ({
     return { error: error?.message ?? null };
   },
 
+  switchUser: async () => {
+    const { userId, email, tenant, offlineMode } = get();
+    if (userId) {
+      // A user switching out right after their FIRST online sign-in may not hold their signed
+      // entitlement yet (it is obtained in the background): finish obtaining it first (bounded), or they
+      // could not sign in offline later on this device.
+      if (!offlineMode && entitlementEnforced()) {
+        const held = await verifyStoredEntitlement({ userId, tenantId: tenant?.id ?? null }).catch(() => null);
+        if (!held?.ok) await Promise.race([refreshEntitlementForSession().catch(() => undefined), new Promise((r) => setTimeout(r, 8_000))]);
+      }
+      // Park this user's live session + entitlement in THEIR vault record: they can sign in again
+      // offline, and their captured work keeps replaying under their own identity.
+      const session = await sealedAuthStorage.getItem(AUTH_STORAGE_KEY).catch(() => null);
+      const ent = await readEntitlementSlot().catch(() => ({ jws: null, receivedAtMs: null }));
+      if (!(await vault.getVaultUser(userId).catch(() => null))) {
+        // A user restored from an older build has no vault record yet: create it from the active
+        // authority (no verifier — their next sign-in must be online once).
+        const cache = await readAuthorityCache().catch(() => null);
+        if (cache && cache.userId === userId) await vault.recordOnlineAuthorization({ context: cache, email }).catch(() => undefined);
+      }
+      await vault.parkUser(userId, { session, entitlement: ent.jws, entitlementReceivedAtMs: ent.receivedAtMs }).catch(() => undefined);
+    }
+    pendingSecret = null;
+    await sealedAuthStorage.removeItem(AUTH_STORAGE_KEY).catch(() => undefined);
+    await installEntitlementSlot(null, null).catch(() => undefined);
+    grantedPermissions = {};
+    standingLock = null;
+    // Only the ACTIVE authority goes; the user's own record stays in the vault.
+    await clearAuthorityCache();
+    await resetUserScopedStores().catch(() => undefined);
+    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false, captureLock: null, entitledBranchIds: null, authNotice: null });
+    await get().loadSavedUsers();
+  },
+
+  forgetUser: async (userId) => {
+    if (get().userId === userId) return get().signOut();
+    await vault.forgetVaultUser(userId).catch(() => undefined);
+    await get().loadSavedUsers();
+  },
+
+  loadSavedUsers: async () => {
+    set({ savedUsers: await vault.listSavedUsers().catch(() => []) });
+  },
+
+  goOnline: async () => {
+    await revalidateActiveSession();
+    if (get().offlineMode) throw new Error("still_offline");
+  },
+
   signOut: async () => {
+    const leaving = get().userId;
     await supabase.auth.signOut().catch(() => undefined);
     // Final Foundation — a global sign-out that could not reach the server keeps the local
     // session; drop it locally too (this removes the SEALED session via the storage adapter).
@@ -519,6 +793,17 @@ export const useSession = create<SessionState>((set, get) => ({
     standingLock = null;
     // rc.10 — the offline authority must not survive in EITHER store (localStorage + IndexedDB mirror).
     await clearAuthorityCache();
+    // Offline-first recovery — Sign Out also removes this user's offline sign-in from the device.
+    pendingSecret = null;
+    if (leaving) await vault.forgetVaultUser(leaving).catch(() => undefined);
+    await resetUserScopedStores().catch(() => undefined);
+    // Other users saved on this device still need the business's cached POS data offline: the
+    // device-wide caches below are dropped only when nobody else can sign in here.
+    if ((await vault.listSavedUsers().catch(() => [])).length > 0) {
+      set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false, captureLock: null, entitledBranchIds: null });
+      await get().loadSavedUsers();
+      return;
+    }
     // Drop the durable POS-session snapshot too: the branch name + open shift it
     // holds belong to the user who just signed out and must never be restored for
     // whoever logs in next on this terminal.
@@ -534,6 +819,7 @@ export const useSession = create<SessionState>((set, get) => ({
     // offline-created customers that unsynced offline work still needs (1.0.38).
     await dropCachedCustomersKeepingUnsettled().catch(() => {});
     set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false, captureLock: null, entitledBranchIds: null });
+    await get().loadSavedUsers();
   },
 
   can: (perm) => Boolean(get().permissions[perm]),

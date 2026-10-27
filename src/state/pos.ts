@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "@/state/session";
-import { loadBranchContext, resolveBranchId, UNKNOWN_BRANCH, type BranchContext } from "@/lib/branch";
+import { cacheActiveBranches, cachedBranchName, loadBranchContext, readCachedActiveBranches, resolveBranchId, UNKNOWN_BRANCH, type BranchContext } from "@/lib/branch";
 import { filterToEntitledScope, useOperationalBranch } from "@/state/operationalBranch";
 import { findOpenShift } from "@/lib/pos/shifts";
 import { loadOperatorName } from "@/lib/operator";
@@ -131,6 +131,7 @@ export function usePosContext(): PosContext {
           if (!error) {
             activeBranches = ((data as { id: string; name: string }[] | null) ?? []).map((x) => ({ id: x.id, name: x.name }));
             branchesKnown = true;
+            cacheActiveBranches(tenantId, activeBranches);
           }
         } catch {
           /* offline: cannot validate; trust the last-good pin below (server re-validates on sync) */
@@ -178,14 +179,17 @@ export function usePosContext(): PosContext {
         const early = await raceBootRead(branchP, POS_BOOT_READ_TIMEOUT_MS);
         if (!active) return;
         const placeholderId = resolveBranchId(session.tenant, session.membership, effectiveSelected);
-        setBranch(early ?? (placeholderId ? { id: placeholderId, name: "Branch unavailable", pinned: !allBranches } : UNKNOWN_BRANCH));
+        // Offline-first recovery — the cached NAME of the resolved branch (never "Branch unavailable" when
+        // this device has named it before), and the cached active-branch list for the picker.
+        const cachedName = placeholderId && tenantId ? cachedBranchName(placeholderId, tenantId) : null;
+        setBranch(early ?? (placeholderId ? { id: placeholderId, name: cachedName ?? "Branch unavailable", pinned: !allBranches } : UNKNOWN_BRANCH));
         if (!early) {
           void branchP.then((late) => {
-            if (active) setBranch(late);
+            if (active && late.id) setBranch(late);
           });
         }
         setOperatorName(email?.trim() || "Cashier");
-        setBranchOptions(allBranches ? filterToEntitledScope(activeBranches) : []);
+        setBranchOptions(allBranches && tenantId ? filterToEntitledScope(readCachedActiveBranches(tenantId)) : []);
         return;
       }
 

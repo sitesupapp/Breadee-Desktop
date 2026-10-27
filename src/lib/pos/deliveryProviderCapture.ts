@@ -53,10 +53,10 @@ function toOperationalProvider(raw: unknown): OperationalProvider | null {
 // calls are cast (the same pattern the WS5 provider-settings module uses) rather
 // than loosening the typed client. Supabase is imported lazily so a test that only
 // exercises the pure builders/guard never drags a build-time environment in.
-type UntypedRpc = (name: string, args: Record<string, unknown>) => Promise<{ data: unknown; error: { message: string } | null }>;
-async function rpcCall(name: string, args: Record<string, unknown>): Promise<unknown> {
-  const { supabase } = await import("@/lib/supabase");
-  const rpc = supabase.rpc.bind(supabase) as unknown as UntypedRpc;
+type UntypedRpc = (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+async function rpcCall(name: string, args: Record<string, unknown>, client?: { rpc: UntypedRpc }): Promise<unknown> {
+  const target = client ?? ((await import("@/lib/supabase")).supabase as unknown as { rpc: UntypedRpc });
+  const rpc = target.rpc.bind(target) as UntypedRpc;
   const { data, error } = await rpc(name, args);
   if (error) throw new Error(error.message);
   return data;
@@ -69,6 +69,9 @@ async function rpcCall(name: string, args: Record<string, unknown>): Promise<unk
  */
 export async function loadOperationalProviders(branchId: string): Promise<OperationalProvider[]> {
   const data = await rpcCall("delivery_providers_operational", { p_branch: branchId });
+  // Offline-first recovery — a non-array answer is a failed read, never "no providers" (it would be
+  // cached over the branch's real catalog).
+  if (data != null && !Array.isArray(data)) throw new Error("The delivery providers could not be read.");
   return (Array.isArray(data) ? data : []).map(toOperationalProvider).filter((p): p is OperationalProvider => p !== null);
 }
 
@@ -164,8 +167,8 @@ export async function setDeliveryProviderReplay(input: {
   providerId: string;
   cost: { value: number | null; provided: boolean };
   clientOpId: string;
-}): Promise<{ idempotent: boolean }> {
-  const data = await rpcCall("pos_delivery_set_provider", { ...buildSetProviderArgs(input), p_client_op_id: input.clientOpId });
+}, client?: { rpc: UntypedRpc }): Promise<{ idempotent: boolean }> {
+  const data = await rpcCall("pos_delivery_set_provider", { ...buildSetProviderArgs(input), p_client_op_id: input.clientOpId }, client);
   const r = asRecord(data);
   return { idempotent: r.idempotent === true || r.result_code === "DUPLICATE_REPLAY_RETURNED" };
 }

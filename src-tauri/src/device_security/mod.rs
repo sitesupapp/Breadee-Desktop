@@ -74,7 +74,7 @@ pub async fn device_sign(
 #[tauri::command]
 pub async fn seal_secret(app: tauri::AppHandle, name: String, value: String) -> Result<(), String> {
     let path = secret_path(&app, &name)?;
-    format::validate_seal_value(&value)?;
+    format::validate_seal_value_for(&name, &value)?;
     let entropy = format::seal_entropy(&identifier(&app), &name);
     blocking(move || {
         let sealed = platform::protect(value.as_bytes(), &entropy)?;

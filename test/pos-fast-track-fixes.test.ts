@@ -341,9 +341,13 @@ test("the drawer figure is the existing authoritative value, unchanged", () => {
 });
 
 test("viewing the drawer mutates nothing", () => {
-  for (const token of ["callPosRpc", ".rpc(", ".insert(", ".update(", ".upsert(", ".delete(", "pos_end_shift", "pos_open_shift", "refreshCashBox", "cashIn", "cashOut"]) {
+  // Offline-first recovery (Bug 12): the status bar may RENDER the provisional offline figures it is
+  // handed (cashInUsd / cashOutUsd from lib/pos/offlineDrawer, computed read-only from the local op log)
+  // but never computes, writes or calls anything itself.
+  for (const token of ["callPosRpc", ".rpc(", ".insert(", ".update(", ".upsert(", ".delete(", "pos_end_shift", "pos_open_shift", "refreshCashBox", "localdb", "operations.", "cashIn =", "cashOut ="]) {
     assert.equal(statusBar.includes(token), false, `${token} must not be reachable from the status bar`);
   }
+  assert.match(statusBar, /loadOfflineDrawer\(\)/, "the offline figure is LOADED through the prop, not computed here");
 });
 
 // --- Item 2: fullscreen ------------------------------------------------------

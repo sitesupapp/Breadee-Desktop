@@ -34,8 +34,11 @@ test("refreshPermissions is de-duped and fetches only perms + features (no full 
 
 test("refreshPermissions no-ops offline / in offline-mode / with no tenant", () => {
   const s = code("state/session.ts");
-  // The early-return guard covers all three.
-  assert.match(s, /if \(!navigator\.onLine \|\| offlineMode \|\| !membership\?\.tenant_id\) return/);
+  // The early returns cover all three. Offline-first recovery: in offline mode the refresh hands over to
+  // the canonical background revalidation instead of doing nothing (it never reads permissions directly).
+  assert.match(s, /if \(!navigator\.onLine\) return;/);
+  assert.match(s, /if \(offlineMode\) \{\s*void revalidateActiveSession\(\);\s*return;\s*\}/);
+  assert.match(s, /if \(!membership\?\.tenant_id\) return;/);
 });
 
 test("a refresh never blanks a working session and keeps the offline cache coherent", () => {

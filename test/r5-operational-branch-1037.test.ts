@@ -11,7 +11,8 @@ const workspace = readFileSync(new URL("../src/screens/pos/PosWorkspace.tsx", im
 
 test("R5 PostgREST { error } handling: the active-branch list is KNOWN only when the query returned no error", () => {
   assert.match(posState, /const \{ data, error \} = await supabase\.from\("branches"\)\.select\("id, name"\)\.eq\("tenant_id", tenantId\)\.eq\("status", "active"\)/);
-  assert.match(posState, /if \(!error\) \{\s*activeBranches = [^\n]+\n\s*branchesKnown = true;\s*\}/);
+  // Offline-first recovery: a KNOWN list is also cached for the offline branch picker (only then).
+  assert.match(posState, /if \(!error\) \{\s*activeBranches = [^\n]+\n\s*branchesKnown = true;\s*cacheActiveBranches\(tenantId, activeBranches\);\s*\}/);
 });
 
 test("R5 offline last-good pin: an unknown branch list trusts the persisted pin as-is (never falls back to Main)", () => {

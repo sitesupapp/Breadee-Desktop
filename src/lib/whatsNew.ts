@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.38";
+export const WHATS_NEW_VERSION = "1.0.39";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -28,6 +28,15 @@ export const WHATS_NEW_PAGES: WhatsNewPage[] = [
       "Ready Desktop now supports a broader end-to-end offline lifecycle, including improved Dine-In Merge and Move handling, offline shift transitions, safer offline payments, stronger reconnect reconciliation, improved order history, and clearer Sync Center dependency and conflict status. Offline operations remain protected against duplicate financial effects and reconcile automatically when connectivity returns.",
     bodyAr:
       "أصبح Ready Desktop يدعم دورة عمل أوسع دون اتصال، بما في ذلك تحسين عمليات الدمج والنقل في Dine-In، والانتقال بين الورديات دون اتصال، وحماية أكبر لعمليات الدفع، وتحسين المزامنة بعد عودة الاتصال، وسجل الطلبات، وحالات التعارض والانتظار في Sync Center. تتم مزامنة العمليات تلقائياً عند عودة الاتصال مع الحماية من تكرار التأثيرات المالية.",
+  },
+  {
+    glyph: "sync",
+    title: "Offline-First Sign-In and Instant Start",
+    titleAr: "تسجيل دخول دون اتصال وتشغيل فوري",
+    body:
+      "Every user who has signed in online on this device can now sign in again without a connection, each with only their own access. Switch User keeps everyone's work safe, the POS opens straight from the data saved on this device, and the Drawer, menu, floor map, customers and printing settings stay available offline. Work is saved on the device first and synchronises automatically, exactly once, when the connection returns.",
+    bodyAr:
+      "يمكن الآن لكل مستخدم سبق أن سجّل الدخول عبر الإنترنت على هذا الجهاز أن يسجّل الدخول مجدداً دون اتصال، وبصلاحياته فقط. يحافظ خيار تبديل المستخدم على عمل الجميع، ويفتح نظام نقاط البيع مباشرةً من البيانات المحفوظة على الجهاز، وتبقى الدرج وقائمة الطعام ومخطط الطاولات والعملاء وإعدادات الطباعة متاحة دون اتصال. يُحفظ العمل على الجهاز أولاً ثم تتم مزامنته تلقائياً ولمرة واحدة فقط عند عودة الاتصال.",
   },
 ];
 

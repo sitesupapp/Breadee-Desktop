@@ -18,7 +18,7 @@ import { create } from "zustand";
 import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftReport } from "@/types/pos";
 import { endShift, findOpenShift, getCashBox, openShift } from "@/lib/pos/shifts";
 import { getDeviceIdentity } from "@/lib/device";
-import { clearPosSessionSnapshot, readPosSessionSnapshot, restoreShiftFromSnapshot } from "@/lib/offline/posSession";
+import { clearPosSessionSnapshot, readAllPosSessionSnapshots, readPosSessionSnapshot, restoreShiftFromSnapshot } from "@/lib/offline/posSession";
 import { getActivePendingShift, type PendingShift } from "@/lib/offline/db";
 import {
   cacheEndShiftApprovalRequired,
@@ -29,7 +29,17 @@ import {
   readCachedEndShiftApprovalRequired,
 } from "@/lib/offline/pendingShift";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
-import { isBackendReachable } from "@/lib/offline/reachability";
+import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
+import { cacheServerCashBox } from "@/lib/pos/offlineDrawer";
+
+/** Offline-first recovery — the shift read was skipped / abandoned because the backend is known to be
+ *  unreachable; the refresh restores the local shift at once instead of waiting out a timeout. */
+class ShiftReadOffline extends Error {
+  constructor() {
+    super("backend unreachable");
+    this.name = "ShiftReadOffline";
+  }
+}
 import { isTransportFailure } from "@/lib/offline/posTxnSync";
 import { createLatestGate } from "@/lib/offline/latestGate";
 import { captureEndShiftOffline, endShiftOpForShift, unsyncedEndShiftOp, unsyncedEndShiftOps } from "@/lib/offline/endShiftOffline";
@@ -221,7 +231,31 @@ export const shiftNet = {
    *  (server truth for a chained offline open). Browser runtime only (null outside it, e.g. node tests,
    *  which inject a fake); best-effort, never awaited by the refresh and never affects its result. */
   endShiftApprovalRequired: (typeof window === "undefined" ? null : isEndShiftApprovalRequired) as ((branchId: string) => Promise<boolean>) | null,
+  /** Offline-first recovery — resolves true when the shared reachability verdict is "unreachable" (browser
+   *  runtime only; null in node tests, which inject deterministic fakes). */
+  becameUnreachable: (typeof window === "undefined" ? null : () => isBackendReachable().then((r) => !r)) as (() => Promise<boolean>) | null,
 };
+
+/**
+ * Offline-first recovery — the live shift read, but never on a known-dead link: a backend already known
+ * to be unreachable skips it entirely, and a read in flight is abandoned the moment the shared
+ * reachability store reports the backend unreachable (lie-fi: through 1.0.38 the POS showed "no shift"
+ * for up to the 15 s read timeout before restoring the local shift). Browser runtime only for the
+ * watcher; node tests inject their own `shiftNet` and are unaffected.
+ */
+async function findOpenShiftUnlessOffline(tenantId: string, userId: string): Promise<ActiveShift | null> {
+  if (lastKnownReachable() === false) throw new ShiftReadOffline();
+  const read = shiftNet.findOpenShift(tenantId, userId);
+  const watch = shiftNet.becameUnreachable;
+  if (!watch) return read;
+  return Promise.race([
+    read,
+    watch().then((offline) => {
+      if (offline) throw new ShiftReadOffline();
+      return read;
+    }),
+  ]);
+}
 
 function primeEndShiftApprovalCache(tenantId: string, branchId: string | null): void {
   const read = shiftNet.endShiftApprovalRequired;
@@ -273,7 +307,7 @@ export const useShift = create<ShiftState>((set, get) => ({
     set({ loading: true, error: null });
     const deviceId = getDeviceIdentity().device_id;
     try {
-      const shift = await shiftNet.findOpenShift(tenantId, userId);
+      const shift = await findOpenShiftUnlessOffline(tenantId, userId);
       if (superseded()) return;
       primeEndShiftApprovalCache(tenantId, branchId);
       // rc.12 — a REFUSED offline close of a shift the server no longer has open (closed / force-ended
@@ -293,7 +327,7 @@ export const useShift = create<ShiftState>((set, get) => ({
         const cs = closeStateOf(ended);
         if (cs === "closing") {
           const endedInfo = { operationId: ended!.operation_id, shiftId: shift.id, dependencyCount: ended!.dependency_ids.length };
-          clearPosSessionSnapshot();
+          clearPosSessionSnapshot(userId);
           // 1.0.38 (Bug 3) — N is CLOSED_LOCAL_PENDING_SYNC; the next shift this device opened offline after
           // that close (chained) is the active one. Through 1.0.37 this branch returned "no shift" and hid it.
           const next = await chainedNextShift(tenantId, userId, branchId, deviceId);
@@ -362,13 +396,13 @@ export const useShift = create<ShiftState>((set, get) => ({
       // Genuinely no shift. Drop any stale Case-1 snapshot so a restart can never
       // restore a shift that has since been closed.
       set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null });
-      clearPosSessionSnapshot();
+      clearPosSessionSnapshot(userId);
     } catch (e) {
       if (superseded()) return;
       // Restore offline state ONLY for a confirmed transport/unreachable condition.
       // A definitive server authorization/validation refusal must NOT reactivate a
       // stale snapshot or pending shift - it surfaces as an error instead.
-      const transport = isTransportFailure(e) || (typeof navigator !== "undefined" && navigator.onLine === false);
+      const transport = e instanceof ShiftReadOffline || isTransportFailure(e) || (typeof navigator !== "undefined" && navigator.onLine === false);
       if (!transport) {
         set({
           shift: null,
@@ -381,7 +415,7 @@ export const useShift = create<ShiftState>((set, get) => ({
         return;
       }
       // 1) a previously-hydrated server open shift (Case 1), for THIS branch/OU only.
-      let restored = restoreShiftFromSnapshot(readPosSessionSnapshot(), {
+      let restored = restoreShiftFromSnapshot(readPosSessionSnapshot(userId), {
         deviceId,
         tenantId,
         cashierUserId: userId,
@@ -401,7 +435,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       const restoredEnded = restored ? await endShiftOpForShift(restored.id).catch(() => undefined) : undefined;
       if (restored && restoredEnded) {
         if (superseded()) return;
-        clearPosSessionSnapshot();
+        clearPosSessionSnapshot(userId);
         const endedInfo = { operationId: restoredEnded.operation_id, shiftId: restored.id, dependencyCount: restoredEnded.dependency_ids.length };
         // 1.0.38 (Bug 3) — restart between shifts: the chained next shift opened offline is the active one.
         const next = await chainedNextShift(tenantId, userId, branchId, deviceId);
@@ -465,6 +499,9 @@ export const useShift = create<ShiftState>((set, get) => ({
     try {
       const box = await shiftNet.getCashBox(forShiftId);
       if (!stillCurrent()) return;
+      // Offline-first recovery (Bug 12) — the last server-confirmed drawer of this shift is the base of
+      // the provisional offline Drawer view.
+      cacheServerCashBox(forShiftId, box);
       set({ cashBox: box });
     } catch (e) {
       if (!stillCurrent()) return;
@@ -576,8 +613,8 @@ export const useShift = create<ShiftState>((set, get) => ({
     const report = await endShift({ shiftId: shift.id, actualCashCounted, notes, deliveryFeeCashTreatment });
     // The shift is now pending_manager_review - it is no longer usable for orders,
     // so the durable snapshot must go too or a later offline restart would restore
-    // a closed shift.
-    clearPosSessionSnapshot();
+    // a closed shift. (Only the snapshot of THIS shift — other cashiers' snapshots are theirs.)
+    for (const snap of readAllPosSessionSnapshots()) if (snap.shift.id === shift.id) clearPosSessionSnapshot(snap.cashier_user_id);
     set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: report, endedPendingSync: null });
     return report;
   },
@@ -641,7 +678,7 @@ async function closeOfflineCapture({ scope, actualCashCounted, notes, deliveryFe
     });
     // Operationally CLOSED on this device: no restart may restore it (snapshot cleared; refresh()
     // also refuses any shift with a captured end_shift op).
-    clearPosSessionSnapshot();
+    clearPosSessionSnapshot(scope.cashierUserId);
     const ended: EndedPendingSync = { operationId: r.operationId, shiftId: pendingLocalId ?? shift.id, dependencyCount: r.dependencyCount };
     set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: ended, error: null });
     return ended;

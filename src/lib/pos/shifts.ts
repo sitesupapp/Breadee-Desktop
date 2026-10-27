@@ -15,7 +15,7 @@
 // can never disagree with the shift report.
 
 import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftExpected, ShiftPayBreakdown, ShiftPayMethod, ShiftReport, ShiftStatus } from "@/types/pos";
-import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull } from "@/lib/pos/rpc";
+import { asRecord, bool, callPosRpc, num, numOrNull, requireId, str, strOrNull, type RpcClient } from "@/lib/pos/rpc";
 
 const SHIFT_STATUSES: ShiftStatus[] = ["open", "ended_by_cashier", "pending_manager_review", "approved", "rejected"];
 
@@ -91,15 +91,19 @@ export async function openShiftWithOp(input: {
    *  adopt one: the server then refuses with SHIFT_ALREADY_OPEN instead of returning `reused`. Sent only
    *  when true (an older server ignores the key; the client still refuses a `reused` result). */
   requireNew?: boolean;
-}): Promise<{ shiftId: string; reused: boolean }> {
-  const data = await callPosRpc("pos_open_shift", {
-    p_payload: {
-      branch_id: input.branchId,
-      opening_cash_amount: Number(input.openingCash) || 0,
-      client_op_id: input.clientOpId,
-      ...(input.requireNew ? { require_new: true } : {}),
+}, client?: RpcClient): Promise<{ shiftId: string; reused: boolean }> {
+  const data = await callPosRpc(
+    "pos_open_shift",
+    {
+      p_payload: {
+        branch_id: input.branchId,
+        opening_cash_amount: Number(input.openingCash) || 0,
+        client_op_id: input.clientOpId,
+        ...(input.requireNew ? { require_new: true } : {}),
+      },
     },
-  });
+    client,
+  );
   const row = asRecord(data);
   return { shiftId: requireId(row.shift_id, "pos_open_shift", "shift_id"), reused: bool(row.reused) };
 }

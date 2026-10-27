@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSession, resolvePostLoginPath } from "@/state/session";
 import { Button, Card, Input } from "@/components/ui";
@@ -10,11 +10,21 @@ export function Login() {
   const signIn = useSession((s) => s.signIn);
   // rc.10 — a controlled notice from the cold start (e.g. expired offline authority on this device).
   const authNotice = useSession((s) => s.authNotice);
+  // Offline-first recovery — everyone who has signed in online on this device can sign in again
+  // here, with or without a connection. Picking a name only fills the email; the password is always
+  // required and is checked against that user's own sealed verifier.
+  const savedUsers = useSession((s) => s.savedUsers);
+  const loadSavedUsers = useSession((s) => s.loadSavedUsers);
+  const forgetUser = useSession((s) => s.forgetUser);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [show, setShow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    void loadSavedUsers();
+  }, [loadSavedUsers]);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -23,6 +33,7 @@ export function Login() {
     const { error } = await signIn(email.trim(), password);
     setLoading(false);
     if (error) return setError(error);
+    setPassword("");
     navigate(resolvePostLoginPath(useSession.getState()), { replace: true });
   }
 
@@ -39,6 +50,39 @@ export function Login() {
           <p className="mt-1 text-sm text-sub">Sign in to your Breadee account</p>
           {authNotice && !error && (
             <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">{authNotice}</p>
+          )}
+          {savedUsers.length > 0 && (
+            <div className="mt-4">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">Users on this device</p>
+              <ul className="mt-1.5 space-y-1">
+                {savedUsers.map((u) => (
+                  <li key={u.userId} className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEmail(u.email);
+                        setPassword("");
+                        setError(null);
+                      }}
+                      className={`flex min-h-[40px] flex-1 items-center justify-between rounded-lg border px-3 text-left text-sm ${
+                        email.trim().toLowerCase() === u.email ? "border-brand bg-brand-soft" : "border-line hover:bg-slate-50"
+                      }`}
+                    >
+                      <span className="truncate font-semibold text-ink">{u.email}</span>
+                      <span className="ml-2 shrink-0 text-[11px] text-sub">{u.offlineReady ? u.tenantName ?? "" : "needs online sign-in"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      title="Remove this user's sign-in from this device"
+                      onClick={() => void forgetUser(u.userId)}
+                      className="shrink-0 px-1 text-[11px] font-semibold text-sub hover:text-red-600"
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           <form onSubmit={onSubmit} className="mt-5 space-y-3">
             <Input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />

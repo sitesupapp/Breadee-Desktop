@@ -20,6 +20,8 @@ import { TopBarPopover } from "@/components/pos/TopBarPopover";
 import { SyncCenter } from "@/components/pos/SyncCenter";
 import { orderLifecycleLabel, orderLifecycleTone, orderRouteLabel, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { ActiveShift, CashBox } from "@/types/pos";
+import type { OfflineDrawerView } from "@/lib/pos/offlineDrawer";
+import { markStart, recordSince } from "@/lib/perf/timings";
 import type { LayoutSpec } from "@/lib/layout";
 
 export type PosStatusBarProps = {
@@ -37,6 +39,11 @@ export type PosStatusBarProps = {
   roleLabel: string;
   shift: ActiveShift | null;
   cashBox: CashBox | null;
+  /** Offline-first recovery (Bug 12) — the Drawer control's visibility, decided from durable local state
+   *  (own open shift + the cached pos.take_payments grant), never from whether a server read succeeded. */
+  drawerVisible: boolean;
+  /** The provisional local drawer, read from the operation log (no network) when no server figure is in hand. */
+  loadOfflineDrawer: () => Promise<OfflineDrawerView>;
   currency: CurrencyCode;
   online: boolean;
   offlineMode: boolean;
@@ -73,6 +80,30 @@ export function PosStatusBar(props: PosStatusBarProps) {
   const shiftOpen = Boolean(props.shift);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
+  const [offlineDrawer, setOfflineDrawer] = useState<OfflineDrawerView | null>(null);
+  const { cashBox, loadOfflineDrawer } = props;
+
+  // Offline-first recovery (Bug 12) — no server figure in hand: show the provisional local drawer.
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const t0 = markStart();
+    if (cashBox) {
+      recordSince("drawer.open", t0);
+      return;
+    }
+    let live = true;
+    setOfflineDrawer(null);
+    void loadOfflineDrawer()
+      .then((v) => {
+        if (!live) return;
+        setOfflineDrawer(v);
+        recordSince("drawer.open", t0);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [drawerOpen, cashBox, loadOfflineDrawer]);
 
   // A shift that closes takes both popovers with it - neither should be left
   // hanging over a till that no longer has the state they were describing.
@@ -132,7 +163,7 @@ export function PosStatusBar(props: PosStatusBarProps) {
           {/* DRAWER - neutral label, no amount. The figure exists only inside
               the popover below, so a casual observer sees the word and nothing
               else. No amount in the label, no badge, no title tooltip. */}
-          {props.cashBox && (
+          {(props.cashBox || props.drawerVisible) && (
             <TopBarPopover
               open={drawerOpen}
               onOpenChange={setDrawerOpen}
@@ -145,16 +176,42 @@ export function PosStatusBar(props: PosStatusBarProps) {
               }
             >
               <p className="text-[11px] font-semibold uppercase tracking-wide text-sub">Current drawer</p>
-              {/* USD, not the tenant's primary currency. `expected_cash` is a
-                  USD-normalised aggregate; rendering it with the LBP formatter
-                  turned 113.56 into "114 LBP" on a shift that had taken
-                  10,220,000 LBP. See CASH_CONTRACT_CURRENCY. */}
-              <p className="mt-1 text-xl font-extrabold text-ink">
-                {formatMoney(props.cashBox.expected_cash, CASH_CONTRACT_CURRENCY)}
-              </p>
-              <p className="mt-1 text-[11px] text-sub">
-                Expected cash: opening float plus cash taken this shift. Read from the server, in USD.
-              </p>
+              {props.cashBox ? (
+                <>
+                  {/* USD, not the tenant's primary currency. `expected_cash` is a
+                      USD-normalised aggregate; rendering it with the LBP formatter
+                      turned 113.56 into "114 LBP" on a shift that had taken
+                      10,220,000 LBP. See CASH_CONTRACT_CURRENCY. */}
+                  <p className="mt-1 text-xl font-extrabold text-ink">
+                    {formatMoney(props.cashBox.expected_cash, CASH_CONTRACT_CURRENCY)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-sub">
+                    Expected cash: opening float plus cash taken this shift. Read from the server, in USD.
+                  </p>
+                </>
+              ) : offlineDrawer === null ? (
+                <p className="mt-1 text-[12px] text-sub">Reading this device's records…</p>
+              ) : (
+                <>
+                  <p className="mt-1 text-xl font-extrabold text-ink">
+                    {offlineDrawer.projectedUsd == null ? "—" : formatMoney(offlineDrawer.projectedUsd, CASH_CONTRACT_CURRENCY)}
+                  </p>
+                  <p className="mt-1 text-[11px] font-semibold text-amber-700">Provisional — offline, not yet confirmed by the server.</p>
+                  <p className="mt-1 text-[11px] text-sub">
+                    {offlineDrawer.baseSource === "server"
+                      ? `Last server figure ${formatMoney(offlineDrawer.baseUsd ?? 0, CASH_CONTRACT_CURRENCY)}`
+                      : offlineDrawer.baseSource === "opening_float"
+                        ? `Opening float ${formatMoney(offlineDrawer.baseUsd ?? 0, CASH_CONTRACT_CURRENCY)}`
+                        : "Opening float not known in USD on this device"}
+                    {` · cash in ${formatMoney(offlineDrawer.cashInUsd, CASH_CONTRACT_CURRENCY)} · cash out ${formatMoney(offlineDrawer.cashOutUsd, CASH_CONTRACT_CURRENCY)} recorded offline.`}
+                  </p>
+                  {offlineDrawer.unknownAmountCount > 0 && (
+                    <p className="mt-1 text-[11px] text-sub">
+                      {offlineDrawer.unknownAmountCount} cash movement{offlineDrawer.unknownAmountCount === 1 ? "" : "s"} will be counted after sync.
+                    </p>
+                  )}
+                </>
+              )}
             </TopBarPopover>
           )}
 

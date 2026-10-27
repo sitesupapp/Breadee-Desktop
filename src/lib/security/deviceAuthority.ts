@@ -192,6 +192,22 @@ export async function clearEntitlement(): Promise<void> {
   }
 }
 
+/** Offline-first recovery — the ACTIVE user's entitlement slot (jws + when it was received), so a user
+ *  switch can park it in the per-user vault and restore it unchanged later. */
+export async function readEntitlementSlot(): Promise<{ jws: string | null; receivedAtMs: number | null }> {
+  const g = await loadGuard(Date.now());
+  return { jws: await readStoredEntitlement(), receivedAtMs: g.entitlementReceivedAtMs };
+}
+
+/** Install a (parked) user's entitlement as the active slot. It is still fully verified before use. */
+export async function installEntitlementSlot(jws: string | null, receivedAtMs: number | null): Promise<void> {
+  if (jws) await storeSet("entitlement", jws).catch(() => undefined);
+  else await storeClear("entitlement").catch(() => undefined);
+  const g = await loadGuard(Date.now());
+  guard = { ...g, entitlementReceivedAtMs: jws ? receivedAtMs : null };
+  await persistGuard(true);
+}
+
 /** Verify the stored entitlement for this device + user (+ tenant) at the effective now. */
 export async function verifyStoredEntitlement(ids: { userId: string | null; tenantId: string | null }, clock?: DeviceClock): Promise<EntitlementCheck> {
   const c = clock ?? (await observeDeviceClock());

@@ -21,7 +21,7 @@ import {
   __resetReachabilityForTests,
   __reachabilityProbeCountForTests,
 } from "@/lib/offline/reachability";
-import { createTimeoutFetch, requestTimeoutMs, READ_TIMEOUT_MS } from "@/lib/net/timeoutFetch";
+import { createTimeoutFetch, requestTimeoutMs, READ_TIMEOUT_MS, AUTH_TOKEN_TIMEOUT_MS } from "@/lib/net/timeoutFetch";
 import { resolvePrintRouteCached, UNRESOLVED, type ResolvedRoute } from "@/lib/pos/printRouteResolver";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -125,7 +125,10 @@ test("timeout policy: GET/HEAD and allow-listed read RPCs are bounded; writes an
   assert.equal(requestTimeoutMs("POST", `${base}/rest/v1/orders`), null);
   assert.equal(requestTimeoutMs("PATCH", `${base}/rest/v1/orders?id=eq.1`), null);
   assert.equal(requestTimeoutMs("DELETE", `${base}/rest/v1/orders?id=eq.1`), null);
-  assert.equal(requestTimeoutMs("POST", `${base}/auth/v1/token?grant_type=refresh_token`), null);
+  // Offline-first recovery — the auth token endpoint is bounded (a hung refresh held the auth lock
+  // every PostgREST call awaits); it is never shortened below the read ceiling.
+  assert.equal(requestTimeoutMs("POST", `${base}/auth/v1/token?grant_type=refresh_token`), AUTH_TOKEN_TIMEOUT_MS);
+  assert.ok(AUTH_TOKEN_TIMEOUT_MS >= READ_TIMEOUT_MS);
   assert.ok(READ_TIMEOUT_MS >= 10_000 && READ_TIMEOUT_MS <= 20_000);
 });
 

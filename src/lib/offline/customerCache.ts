@@ -125,6 +125,69 @@ export async function cacheCustomerProfile(profile: CustomerProfile, scope: Cust
   ]);
 }
 
+/** Upper bound of the provisioning hydrate (most recently active first). */
+export const CUSTOMER_HYDRATE_LIMIT = 2000;
+const hydratedScopes = new Set<string>();
+
+/**
+ * Offline-first recovery (Bug 11) — PROVISIONING HYDRATE of the branch's customers + addresses, so an
+ * EXISTING customer is findable and selectable offline even if nobody searched for them online on this
+ * device (through 1.0.38 the cache only held customers searched / opened online). Same tables, same RLS
+ * scope as the online search (the server decides who is visible), most recently active first, bounded.
+ * Once per tenant+branch per run; a failure caches nothing and never touches what is already cached.
+ */
+export async function hydrateBranchCustomers(scope: CustomerScope): Promise<number> {
+  if (!scope.tenantId) return 0;
+  const key = `${scope.tenantId}|${scope.branchId ?? ""}`;
+  if (hydratedScopes.has(key)) return 0;
+  hydratedScopes.add(key);
+  try {
+    const { supabase } = await import("@/lib/supabase");
+    const loose = supabase as unknown as {
+      from: (t: string) => {
+        select: (c: string) => {
+          order: (col: string, o: { ascending: boolean; nullsFirst?: boolean }) => { limit: (n: number) => Promise<{ data: unknown; error: { message: string } | null }> };
+          in: (col: string, vals: string[]) => Promise<{ data: unknown; error: { message: string } | null }>;
+        };
+      };
+    };
+    const cRes = await loose.from("pos_customers").select("id, name, phone, phone_e164, notes").order("last_activity_at", { ascending: false, nullsFirst: false }).limit(CUSTOMER_HYDRATE_LIMIT);
+    if (cRes.error || !Array.isArray(cRes.data)) throw new Error(cRes.error?.message ?? "customers unreadable");
+    const rows = cRes.data as { id: string; name: string | null; phone: string | null; phone_e164: string | null; notes: string | null }[];
+    const addresses = new Map<string, unknown[]>();
+    for (let i = 0; i < rows.length; i += 200) {
+      const ids = rows.slice(i, i + 200).map((r) => r.id);
+      const aRes = await loose.from("pos_customer_addresses").select("id, customer_id, address_label, area, street, building, floor, notes, location_url, is_default").in("customer_id", ids);
+      if (aRes.error || !Array.isArray(aRes.data)) throw new Error(aRes.error?.message ?? "addresses unreadable");
+      for (const a of aRes.data as ({ customer_id: string; is_default?: boolean } & Record<string, unknown>)[]) {
+        const list = addresses.get(a.customer_id) ?? [];
+        const { customer_id: _owner, ...addr } = a;
+        void _owner;
+        list.push(addr);
+        addresses.set(a.customer_id, list);
+      }
+    }
+    const now = new Date().toISOString();
+    const records: CachedCustomer[] = rows.map((r) => ({
+      id: r.id,
+      tenant_id: scope.tenantId as string,
+      branch_id: scope.branchId,
+      name: r.name,
+      phone: r.phone,
+      phone_e164: r.phone_e164,
+      addresses: (addresses.get(r.id) ?? []).sort((x, y) => Number((y as { is_default?: boolean }).is_default === true) - Number((x as { is_default?: boolean }).is_default === true)),
+      notes: r.notes,
+      has_profile: true,
+      cached_at: now,
+    }));
+    if (records.length > 0) await cacheCustomers(records);
+    return records.length;
+  } catch {
+    hydratedScopes.delete(key); // retried on the next online pass
+    return 0;
+  }
+}
+
 // --- local search (offline reads) --------------------------------------------
 
 /** Search the local cache by normalized phone, raw phone, or name. Pure over the
@@ -285,9 +348,16 @@ export async function upsertCustomerOfflineAware(
 export async function loadCustomerProfileOfflineAware(customerId: string): Promise<CustomerProfile> {
   const scope = await currentCustomerScope();
   if (await isBackendReachable()) {
-    const profile = await loadCustomerProfile(customerId);
-    void cacheCustomerProfile(profile, scope).catch(() => {});
-    return profile;
+    try {
+      const profile = await loadCustomerProfile(customerId);
+      void cacheCustomerProfile(profile, scope).catch(() => {});
+      return profile;
+    } catch (e) {
+      // Offline-first recovery — the probe passed but the read failed (half-open link / timeout): use
+      // the cached profile; only a customer never cached surfaces the original error.
+      const cachedNow = await getCachedCustomer(customerId, scope.tenantId, scope.branchId).catch(() => undefined);
+      if (!cachedNow || !cachedNow.has_profile) throw e;
+    }
   }
   const c = await getCachedCustomer(customerId, scope.tenantId, scope.branchId).catch(() => undefined);
   if (!c || !c.has_profile) throw new CustomerOfflineUnavailableError();

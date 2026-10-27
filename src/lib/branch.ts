@@ -11,7 +11,7 @@
 
 import { supabase } from "@/lib/supabase";
 import { getDeviceIdentity } from "@/lib/device";
-import { readPosSessionSnapshot, restoreBranchNameFromSnapshot } from "@/lib/offline/posSession";
+import { readAllPosSessionSnapshots, restoreBranchNameFromSnapshot } from "@/lib/offline/posSession";
 import { restoreBranchName, saveBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant } from "@/lib/types";
 
@@ -23,6 +23,28 @@ export type BranchContext = {
 };
 
 export const UNKNOWN_BRANCH: BranchContext = { id: null, name: "No branch", pinned: false };
+
+const BRANCH_LIST_PREFIX = "breadee-desktop-branches:";
+
+/** Offline-first recovery — the tenant's ACTIVE branch list as last read online (the all-branches
+ *  operator's picker offline). The picker is still bounded by the user's verified entitlement scope. */
+export function cacheActiveBranches(tenantId: string, branches: { id: string; name: string }[]): void {
+  try {
+    localStorage.setItem(BRANCH_LIST_PREFIX + tenantId, JSON.stringify(branches.map((b) => ({ id: b.id, name: b.name }))));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export function readCachedActiveBranches(tenantId: string): { id: string; name: string }[] {
+  try {
+    const raw = localStorage.getItem(BRANCH_LIST_PREFIX + tenantId);
+    const list = raw ? (JSON.parse(raw) as { id: string; name: string }[]) : [];
+    return Array.isArray(list) ? list.filter((b) => b && typeof b.id === "string" && typeof b.name === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 /** The branch id this session operates in. Pure - no I/O.
  *  R5 policy: an ALL-BRANCHES operator (owner/admin, branch_id NULL) is no longer hard-pinned to Main — a
@@ -45,10 +67,10 @@ export function resolveBranchId(
  * open-shift POS-session snapshot. Both are identity-gated (device+tenant+branch);
  * the id is always the authority, so this can never widen, rename or invent access.
  */
-function cachedBranchName(branchId: string, tenantId: string, deviceId: string): string | null {
+export function cachedBranchName(branchId: string, tenantId: string, deviceId: string = getDeviceIdentity().device_id): string | null {
   return (
     restoreBranchName({ deviceId, tenantId, branchId }) ??
-    restoreBranchNameFromSnapshot(readPosSessionSnapshot(), { branchId, tenantId, deviceId })
+    readAllPosSessionSnapshots().map((snap) => restoreBranchNameFromSnapshot(snap, { branchId, tenantId, deviceId })).find((n) => n !== null) ?? null
   );
 }
 

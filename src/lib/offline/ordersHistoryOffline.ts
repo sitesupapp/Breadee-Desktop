@@ -60,10 +60,17 @@ export async function loadOrdersHistoryOfflineAware(scope: OrdersHistoryScope, d
     // 1.0.38 (BUG 3) — the read-START time is this canonical snapshot's freshness (a settle synced during
     // the read is NOT in it), and ONLINE rows get the SAME local overlay as offline ones (one rule).
     const readAt = Date.now();
-    const rows =
-      scope.kind === "shift"
-        ? await (deps.loadShift ?? loadShiftOrders)({ tenantId: scope.tenantId, shiftId: scope.shiftId })
-        : await (deps.loadDay ?? loadOrdersForDay)({ tenantId: scope.tenantId, branchId: scope.branchId, day: scope.day });
+    let rows: ShiftOpenOrder[];
+    try {
+      rows =
+        scope.kind === "shift"
+          ? await (deps.loadShift ?? loadShiftOrders)({ tenantId: scope.tenantId, shiftId: scope.shiftId })
+          : await (deps.loadDay ?? loadOrdersForDay)({ tenantId: scope.tenantId, branchId: scope.branchId, day: scope.day });
+    } catch {
+      // Offline-first recovery — the probe passed but the read failed (half-open link / timeout): the
+      // local view, never an error screen.
+      return readOrdersHistoryLocal(scope);
+    }
     const key = keyOf(scope);
     if (key) {
       await localdb.snapshots

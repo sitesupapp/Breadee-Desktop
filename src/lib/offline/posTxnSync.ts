@@ -16,6 +16,7 @@
 
 import { updatePosOfflineTxn } from "@/lib/offline/db";
 import type { SubmitOrderPayload } from "@/lib/pos/orders";
+import type { PosRpcName, RpcClient } from "@/lib/pos/rpc";
 import type { CurrencyCode } from "@/lib/currency";
 
 export type PosTxnSyncContext = {
@@ -423,35 +424,46 @@ export type PosTxnSyncDeps = {
   refreshSession?: () => Promise<boolean>;
 };
 
-export const defaultDeps: PosTxnSyncDeps = {
+/** Offline-first recovery — a PARKED user's own client (their own session): replay of their captured work
+ *  never runs on the active user's session. `rpc` for POS RPCs; `auth` for the session checks. */
+export type ReplayClient = RpcClient & {
+  auth: {
+    getSession(): Promise<{ data: { session: unknown } }>;
+    refreshSession(): Promise<{ data: { session: unknown }; error: unknown }>;
+  };
+};
+
+/** The replay deps over an explicit client (a parked user's), or the live session's client (null). */
+export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps {
+  const rc = client ?? undefined;
+  const callPosRpc = async (name: PosRpcName, args: Record<string, unknown>) => (await import("@/lib/pos/rpc")).callPosRpc(name, args, rc);
+  return {
   // The network modules are imported LAZILY (they transitively load the Supabase
   // client / Vite env). Tests inject their own deps and never reach these, so the
   // module graph stays importable without a browser env.
   submit: async (payload) => {
     const { submitOrder } = await import("@/lib/pos/orders");
-    const saved = await submitOrder(payload);
+    const saved = await submitOrder(payload, rc);
     return { order_id: saved.order_id, order_number: saved.order_number };
   },
   pay: async (args) => {
     const { payOrder } = await import("@/lib/pos/payments");
-    return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount });
+    return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount }, rc);
   },
   openShift: async (args) => {
     const { openShiftWithOp } = await import("@/lib/pos/shifts");
-    return openShiftWithOp(args);
+    return openShiftWithOp(args, rc);
   },
   openTable: async (payload) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_open_table", { p_payload: payload })) as Record<string, unknown>;
     return { table_id: String(row.table_id), pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
   },
   submitRound: async (payload) => {
     const { submitOrder } = await import("@/lib/pos/orders");
-    const r = await submitOrder(payload);
+    const r = await submitOrder(payload, rc);
     return { order_id: r.order_id, order_number: r.order_number, batch_no: r.batch_no ?? 1, appended: r.appended ?? true, idempotent: r.idempotent ?? false };
   },
   orderItemMap: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const rows = (await callPosRpc("pos_order_item_map", { p_order: args.orderId, p_batch: args.batchNo })) as unknown;
     if (!Array.isArray(rows)) return [];
     return (rows as Record<string, unknown>[])
@@ -459,7 +471,6 @@ export const defaultDeps: PosTxnSyncDeps = {
       .map((r) => ({ client_line_id: String(r.client_line_id), order_item_id: String(r.order_item_id) }));
   },
   voidRefund: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_void_order", {
       p_order: args.orderId,
       p_reason: args.reason,
@@ -483,7 +494,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   payTable: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const payload: Record<string, unknown> = {
       table_id: args.tableId,
       method: args.method,
@@ -501,7 +511,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     return { ok: row.ok === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent, pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
   },
   payOrderOp: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_pay_order", {
       p_payload: {
         order_id: args.orderId,
@@ -516,7 +525,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     return { order_id: String(row.order_id ?? args.orderId), paid: row.paid === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent };
   },
   onAccountTable: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const payload: Record<string, unknown> = { table_id: args.tableId, customer_id: args.customerId, amount: args.amount, method: args.method, client_op_id: args.clientOpId };
     if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
@@ -527,7 +535,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     return { ok: true, idempotent };
   },
   onAccountOrder: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const payload: Record<string, unknown> = { order_id: args.orderId, customer_id: args.customerId, amount: args.amount, method: args.method, client_op_id: args.clientOpId };
     if (args.discount?.discount_type !== undefined) payload.discount_type = args.discount.discount_type;
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
@@ -538,7 +545,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     return { ok: true, idempotent };
   },
   endShiftOp: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_end_shift", {
       p_payload: {
         shift_id: args.shiftId,
@@ -553,7 +559,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     return { shift_id: String(row.shift_id ?? args.shiftId), idempotent, approval_required: typeof row.approval_required === "boolean" ? row.approval_required : null };
   },
   splitSettle: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_split_settle", {
       p_payload: {
         order_id: args.orderId,
@@ -574,7 +579,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   payout: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const { buildPayoutCreatePayload } = await import("@/lib/pos/payouts");
     const row = (await callPosRpc("pos_payout_create", {
       p_payload: buildPayoutCreatePayload({
@@ -595,7 +599,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   upsertCustomer: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_upsert_customer", {
       p_payload: { ...args.payload, client_op_id: args.clientOpId },
     })) as Record<string, unknown>;
@@ -611,7 +614,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   editOrderLine: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_edit_order_line", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return {
@@ -622,7 +624,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   addOrderItems: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_add_order_items", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok !== false, idempotent, pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
@@ -635,11 +636,10 @@ export const defaultDeps: PosTxnSyncDeps = {
       providerId: String(p.provider_id),
       cost: { value: p.cost == null ? null : Number(p.cost), provided: p.cost_provided === true },
       clientOpId: String(p.client_op_id),
-    });
+    }, rc);
     return { ok: true, idempotent: r.idempotent };
   },
   setDeliveryOps: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const p = args.payload;
     const row = (await callPosRpc("pos_set_delivery_ops", {
       p_order_id: p.order_id,
@@ -653,16 +653,14 @@ export const defaultDeps: PosTxnSyncDeps = {
     return { ok: row.ok !== false, idempotent };
   },
   editOrder: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_edit_order", { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok !== false, idempotent };
   },
   moveTableV2: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     // REQUEST (rpc.ts, not owned here): add "pos_move_table_v2" to PosRpcName. Until then the name is
     // asserted at this one call site; the wire call is identical.
-    const row = (await callPosRpc("pos_move_table_v2" as Parameters<typeof callPosRpc>[0], { p_payload: args.payload })) as Record<string, unknown>;
+    const row = (await callPosRpc("pos_move_table_v2" as PosRpcName, { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return {
       ok: row.ok !== false,
@@ -673,9 +671,8 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   mergeTablesV4: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     // REQUEST (rpc.ts): add "pos_merge_tables_v4" to PosRpcName (see moveTableV2).
-    const row = (await callPosRpc("pos_merge_tables_v4" as Parameters<typeof callPosRpc>[0], { p_payload: args.payload })) as Record<string, unknown>;
+    const row = (await callPosRpc("pos_merge_tables_v4" as PosRpcName, { p_payload: args.payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return {
       ok: row.ok !== false,
@@ -688,7 +685,6 @@ export const defaultDeps: PosTxnSyncDeps = {
     };
   },
   receivableCollect: async (args) => {
-    const { callPosRpc } = await import("@/lib/pos/rpc");
     const row = (await callPosRpc("pos_receivable_collect", {
       p_payload: { order_id: args.orderId, amount: args.amount, method: args.method, client_op_id: args.clientOpId },
     })) as Record<string, unknown>;
@@ -702,20 +698,24 @@ export const defaultDeps: PosTxnSyncDeps = {
   },
   isTransport: isTransportFailure,
   hasSession: async () => {
-    const { supabase } = await import("@/lib/supabase");
-    const { data } = await supabase.auth.getSession();
+    const auth = client ? client.auth : (await import("@/lib/supabase")).supabase.auth;
+    const { data } = await auth.getSession();
     return Boolean(data.session);
   },
   refreshSession: async () => {
     try {
-      const { supabase } = await import("@/lib/supabase");
-      const { data, error } = await supabase.auth.refreshSession();
+      const auth = client ? client.auth : (await import("@/lib/supabase")).supabase.auth;
+      const { data, error } = await auth.refreshSession();
       return !error && Boolean(data.session);
     } catch {
       return false;
     }
   },
-};
+  };
+}
+
+export const defaultDeps: PosTxnSyncDeps = makePosTxnSyncDeps(null);
+
 
 /**
  * Replay all offline work that belongs to the LIVE session. ADAPTER over the single

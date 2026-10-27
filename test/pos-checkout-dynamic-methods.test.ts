@@ -34,7 +34,10 @@ test("PaymentMethod is widened to a catalog key (string)", () => {
 // --- hook reuses the Phase B loader (NO second implementation) ---------------
 test("useActivePaymentMethods reuses loadSplitPaymentMethods and never re-queries the catalog", () => {
   const s = read("lib/pos/useActivePaymentMethods.ts");
-  assert.match(s, /loadSplitPaymentMethods/);
+  // Offline-first recovery — the strict form of the SAME split.ts read (loadSplitPaymentMethods wraps it):
+  // a failed read throws instead of answering Cash-only, so it can never be cached over the real catalog.
+  assert.match(s, /loadActivePaymentMethodsStrict/);
+  assert.match(read("lib/pos/split.ts"), /loadSplitPaymentMethods[\s\S]*await loadActivePaymentMethodsStrict\(tenantId\)/);
   // It must NOT open its own catalog query — one canonical source.
   assert.doesNotMatch(s, /pos_payment_methods/);
 });

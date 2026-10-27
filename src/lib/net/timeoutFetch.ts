@@ -32,7 +32,42 @@ export const READ_ONLY_RPCS: ReadonlySet<string> = new Set([
   "resolve_print_route",
   "get_tenant_effective_features",
   "current_user_permissions",
+  // Offline-first recovery — every remaining POS READ the desktop calls. Verified on staging
+  // (2026-10-27): each is declared STABLE (PostgreSQL forbids writes in a STABLE function), so an abort
+  // can never leave a half-applied effect. Without a ceiling these hung indefinitely on a half-open
+  // link (menu / floor / table-map skeletons, the End Shift dialog, payout list).
+  "pos_menu",
+  "pos_table_map",
+  "floor_service_layout",
+  "floor_history",
+  "floor_unplaced_tables",
+  "pos_shift_expected",
+  "pos_cash_box_shift",
+  "pos_payout_list",
+  "pos_split_state",
+  "pos_shift_unresolved_orders",
+  "pos_end_shift_approval_required",
+  "pos_transfer_force_enabled",
+  "delivery_providers_operational",
+  "pos_order_item_map",
+  "pos_delivery_report",
+  "pos_analytics_summary",
+  "pos_deletion_reason_report",
+  "pos_order_transfers_for_recipient",
+  "pos_order_transfers_list",
+  "pos_order_transfer_detail",
+  "pos_order_transfer_eligible_recipients",
+  "pos_force_end_eligible_recipients",
+  "pos_shifts_list",
+  "pos_payment_methods_manage_list",
+  "desktop_device_status",
 ]);
+
+/** Offline-first recovery — ceiling for the auth TOKEN endpoint (sign-in / refresh). supabase-js holds its
+ *  auth lock across a refresh and every PostgREST call awaits that lock, so an unbounded refresh on a
+ *  half-open link stalled every read behind it. A refresh is safe to bound: supabase-js retries a
+ *  transport failure, and the server's refresh-token reuse window covers a lost response. */
+export const AUTH_TOKEN_TIMEOUT_MS = 20_000;
 
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
@@ -52,6 +87,7 @@ export function requestTimeoutMs(method: string, url: string): number | null {
   if (m === "POST") {
     const match = /\/rest\/v1\/rpc\/([A-Za-z0-9_]+)(?:[/?#]|$)/.exec(url);
     if (match && READ_ONLY_RPCS.has(match[1])) return READ_TIMEOUT_MS;
+    if (/\/auth\/v1\/token(?:[?#]|$)/.test(url)) return AUTH_TOKEN_TIMEOUT_MS;
   }
   return null;
 }

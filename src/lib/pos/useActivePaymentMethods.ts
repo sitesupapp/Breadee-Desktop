@@ -13,7 +13,7 @@
 // Cash-only when there is no cache.
 
 import { useEffect, useState } from "react";
-import { loadSplitPaymentMethods, type SplitPaymentMethod } from "@/lib/pos/split";
+import { loadActivePaymentMethodsStrict, type SplitPaymentMethod } from "@/lib/pos/split";
 import { cachePaymentMethods, readCachedPaymentMethods } from "@/lib/offline/db";
 import { offlineCapableMethods } from "@/lib/offline/paymentMethodClass";
 
@@ -36,30 +36,32 @@ export function useActivePaymentMethods(
       setMethods(CASH_ONLY);
       return;
     }
-    if (!online) {
-      // Offline: offer the cached catalog's offline-capable (local-recording) subset.
+    // Offline-first recovery: the cached catalog's offline-capable subset when offline, and as the
+    // fallback when a live read fails (a failed read never caches Cash-only over the real catalog).
+    const fromCache = () =>
       readCachedPaymentMethods(tenantId)
         .then((c) => {
           if (cancelled) return;
-          const cached = (c?.methods ?? []) as SplitPaymentMethod[];
-          const usable = offlineCapableMethods(cached);
+          const usable = offlineCapableMethods((c?.methods ?? []) as SplitPaymentMethod[]);
           setMethods(usable.length ? usable : CASH_ONLY);
         })
         .catch(() => {
           if (!cancelled) setMethods(CASH_ONLY);
         });
+    if (!online) {
+      void fromCache();
       return () => {
         cancelled = true;
       };
     }
-    loadSplitPaymentMethods(tenantId)
+    loadActivePaymentMethodsStrict(tenantId)
       .then((m) => {
         if (!cancelled) setMethods(m.length ? m : CASH_ONLY);
         // Mirror the live catalog so the next offline till has the real tenders.
         void cachePaymentMethods(tenantId, m).catch(() => {});
       })
       .catch(() => {
-        if (!cancelled) setMethods(CASH_ONLY);
+        if (!cancelled) void fromCache();
       });
     return () => {
       cancelled = true;

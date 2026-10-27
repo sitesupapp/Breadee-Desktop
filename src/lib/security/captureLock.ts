@@ -9,7 +9,7 @@
 // payment, refunds, payouts, shift open/close, transfers and table operations at
 // once, while history / reports / reprints stay readable.
 
-export type CaptureLockReason = "clock_rollback" | "entitlement_expired" | "entitlement_invalid" | "device_revoked" | "access_revoked";
+export type CaptureLockReason = "clock_rollback" | "entitlement_expired" | "entitlement_invalid" | "device_revoked" | "access_revoked" | "reauth_required";
 
 /** Read-only grants that survive a capture lock. Everything else is forced false. */
 export const VIEW_ONLY_PERMISSIONS: readonly string[] = [
@@ -31,6 +31,7 @@ export const CAPTURE_LOCK_MESSAGE: Readonly<Record<CaptureLockReason, string>> =
   entitlement_invalid: "This device could not verify its offline access. Connect and sign in to continue. Nothing already recorded was lost.",
   device_revoked: "This device's access was revoked. New sales are paused; recorded work will still sync if the server accepts it.",
   access_revoked: "Your access to this business changed. New sales are paused; recorded work will still sync if the server accepts it.",
+  reauth_required: "Your sign-in is no longer accepted by the server. Switch user and sign in again online to keep selling and to sync. Nothing already recorded was lost.",
 };
 
 /** PURE - the permission map the UI may see under `lock`. */

@@ -12,7 +12,7 @@
 // Tendered / change are a cash-handling aid computed locally from the server's
 // amount. They are never sent and never posted.
 
-import { callPosRpc, asRecord, bool, num, numOrNull, requireId, str } from "@/lib/pos/rpc";
+import { callPosRpc, asRecord, bool, num, numOrNull, requireId, str, type RpcClient } from "@/lib/pos/rpc";
 import { hasValidRate, roundForCurrency, type CurrencyCode } from "@/lib/currency";
 import type { PayOrderResult } from "@/types/pos";
 
@@ -49,17 +49,14 @@ export function paymentBlockedReason(currency: CurrencyCode, rate: number | null
   return null;
 }
 
-export async function payOrder(input: PayOrderInput): Promise<PayOrderResult> {
-  const row = asRecord(
-    await callPosRpc("pos_pay_order", {
-      p_payload: {
-        order_id: input.orderId,
-        method: input.method,
-        currency_code: input.currency,
-        ...(input.discount ?? {}),
-      },
-    }),
-  );
+export async function payOrder(input: PayOrderInput, client?: RpcClient): Promise<PayOrderResult> {
+  const payload = {
+    order_id: input.orderId,
+    method: input.method,
+    currency_code: input.currency,
+    ...(input.discount ?? {}),
+  };
+  const row = asRecord(await callPosRpc("pos_pay_order", { p_payload: payload }, client));
   const currency = str(row.currency_code, "USD");
   return {
     order_id: requireId(row.order_id, "pos_pay_order", "order_id"),

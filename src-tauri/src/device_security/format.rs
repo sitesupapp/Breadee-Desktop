@@ -28,10 +28,14 @@ pub const SIGN_PURPOSES: [&str; 2] = ["register", "entitlement"];
 /// The only names `seal_secret` / `unseal_secret` / `clear_secret` accept.
 /// A closed list on purpose: the sealed store is not a general key-value store
 /// the frontend can grow, it holds exactly these small secrets.
-pub const SEAL_NAMES: [&str; 3] = ["auth-session", "time-guard", "entitlement"];
+pub const SEAL_NAMES: [&str; 4] = ["auth-session", "time-guard", "entitlement", "offline-vault"];
 
 /// Upper bound for a sealed value (a Supabase session JSON is ~2-6 KiB).
 pub const MAX_SEAL_BYTES: usize = 64 * 1024;
+
+/// Upper bound for the per-user offline sign-in vault (one small record per user who has signed in
+/// online on this device: verifier, parked session, entitlement, authority snapshot).
+pub const MAX_VAULT_BYTES: usize = 512 * 1024;
 
 /// Upper bound for a terminal id inside a signed message.
 pub const MAX_TERMINAL_LEN: usize = 64;
@@ -155,7 +159,13 @@ pub fn validate_seal_name(name: &str) -> Result<(), String> {
 }
 
 pub fn validate_seal_value(value: &str) -> Result<(), String> {
-    if value.len() > MAX_SEAL_BYTES {
+    validate_seal_value_for("", value)
+}
+
+/// The size bound depends on the (already allowlisted) name: only the vault may be larger.
+pub fn validate_seal_value_for(name: &str, value: &str) -> Result<(), String> {
+    let max = if name == "offline-vault" { MAX_VAULT_BYTES } else { MAX_SEAL_BYTES };
+    if value.len() > max {
         Err("secret_too_large".into())
     } else {
         Ok(())
@@ -311,6 +321,10 @@ mod tests {
         assert!(validate_seal_name("anything").is_err());
         assert!(validate_seal_value(&"x".repeat(MAX_SEAL_BYTES)).is_ok());
         assert!(validate_seal_value(&"x".repeat(MAX_SEAL_BYTES + 1)).is_err());
+        assert!(validate_seal_name("offline-vault").is_ok());
+        assert!(validate_seal_value_for("offline-vault", &"x".repeat(MAX_VAULT_BYTES)).is_ok());
+        assert!(validate_seal_value_for("offline-vault", &"x".repeat(MAX_VAULT_BYTES + 1)).is_err());
+        assert!(validate_seal_value_for("auth-session", &"x".repeat(MAX_SEAL_BYTES + 1)).is_err());
     }
 
     #[test]

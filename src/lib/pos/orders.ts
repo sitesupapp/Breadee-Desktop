@@ -18,7 +18,7 @@
 //    group/option ids and price deltas (m241) and kitchen notes. Anything the
 //    server does not parse is NOT sent.
 
-import { asRecord, bool, callPosRpc, num, requireId, str } from "@/lib/pos/rpc";
+import { asRecord, bool, callPosRpc, num, requireId, str, type RpcClient } from "@/lib/pos/rpc";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { buildCustomization, type LineCustomization } from "@/lib/pos/itemOptions";
 import type { CartLine, OrderType, SubmitOrderResult } from "@/types/pos";
@@ -258,8 +258,8 @@ export function submitPayloadToCartLines(items: SubmitOrderItem[]): CartLine[] {
   }));
 }
 
-export async function submitOrder(payload: SubmitOrderPayload): Promise<SubmitOrderResult> {
-  const row = asRecord(await callPosRpc("pos_submit_order", { p_payload: payload }));
+export async function submitOrder(payload: SubmitOrderPayload, client?: RpcClient): Promise<SubmitOrderResult> {
+  const row = asRecord(await callPosRpc("pos_submit_order", { p_payload: payload }, client));
   return {
     order_id: requireId(row.order_id, "pos_submit_order", "order_id"),
     order_number: str(row.order_number),

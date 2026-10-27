@@ -82,16 +82,21 @@ export function savePosSessionSnapshot(s: PosSessionSnapshot): void {
   if (!s.shift || s.shift.status !== "open" || !s.shift.id) return;
   if (!s.tenant_id || !s.cashier_user_id || !s.device_id) return;
   try {
-    localStorage.setItem(KEY, JSON.stringify(s));
+    // Offline-first recovery — ONE snapshot PER CASHIER: through 1.0.38 a single key meant the next
+    // user's shift overwrote the previous user's, so switching back offline lost their open shift.
+    localStorage.setItem(cashierKey(s.cashier_user_id), JSON.stringify(s));
+    writeIndex([...readIndex(), s.cashier_user_id]);
+    const legacy = parseSnapshot(localStorage.getItem(KEY));
+    if (legacy && legacy.cashier_user_id === s.cashier_user_id) localStorage.removeItem(KEY);
   } catch {
     /* storage full/unavailable: the online path still works, offline just won't restore */
   }
 }
 
-/** Read the snapshot, or null when absent, malformed, expired, or not a server-open shift. */
-export function readPosSessionSnapshot(): PosSessionSnapshot | null {
+const cashierKey = (cashierUserId: string) => `${KEY}:${cashierUserId}`;
+
+function parseSnapshot(raw: string | null): PosSessionSnapshot | null {
   try {
-    const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const s = JSON.parse(raw) as PosSessionSnapshot;
     if (!s || s.version !== 1 || s.source !== "server") return null;
@@ -104,9 +109,87 @@ export function readPosSessionSnapshot(): PosSessionSnapshot | null {
   }
 }
 
-export function clearPosSessionSnapshot(): void {
+// The cashiers holding a snapshot on this device: an explicit index (no Storage enumeration needed).
+const INDEX_KEY = `${KEY}.cashiers`;
+
+function readIndex(): string[] {
   try {
-    localStorage.removeItem(KEY);
+    const list = JSON.parse(localStorage.getItem(INDEX_KEY) ?? "[]") as unknown;
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string" && x !== "") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeIndex(list: string[]): void {
+  try {
+    if (list.length === 0) localStorage.removeItem(INDEX_KEY);
+    else localStorage.setItem(INDEX_KEY, JSON.stringify([...new Set(list)]));
+  } catch {
+    /* unavailable */
+  }
+}
+
+/** Every snapshot key on this device: each indexed cashier's, plus a pre-recovery single-key snapshot. */
+function snapshotKeys(): string[] {
+  return [KEY, ...readIndex().map(cashierKey)];
+}
+
+/**
+ * Read the snapshot, or null when absent, malformed, expired, or not a server-open shift. With a
+ * cashier: THAT cashier's snapshot (incl. a pre-recovery single-key snapshot of theirs). Without one:
+ * the most recent of all.
+ */
+export function readPosSessionSnapshot(cashierUserId?: string | null): PosSessionSnapshot | null {
+  try {
+    if (cashierUserId) {
+      const own = parseSnapshot(localStorage.getItem(cashierKey(cashierUserId)));
+      if (own) return own;
+      const legacy = parseSnapshot(localStorage.getItem(KEY));
+      return legacy && legacy.cashier_user_id === cashierUserId ? legacy : null;
+    }
+    // No cashier: a single-key snapshot (only older builds write it) is the latest single-slot write;
+    // otherwise the most recently saved per-cashier snapshot.
+    const legacyRaw = localStorage.getItem(KEY);
+    if (legacyRaw !== null) return parseSnapshot(legacyRaw);
+    return readAllPosSessionSnapshots().sort((a, b) => b.savedAt - a.savedAt)[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every valid snapshot on this device (one per cashier). */
+export function readAllPosSessionSnapshots(): PosSessionSnapshot[] {
+  const out: PosSessionSnapshot[] = [];
+  try {
+    for (const k of snapshotKeys()) {
+      const s = parseSnapshot(localStorage.getItem(k));
+      if (s) out.push(s);
+    }
+  } catch {
+    /* unavailable */
+  }
+  return out;
+}
+
+/** Clear one cashier's snapshot, or (no argument) every snapshot on the device. */
+export function clearPosSessionSnapshot(cashierUserId?: string | null): void {
+  try {
+    if (cashierUserId) {
+      localStorage.removeItem(cashierKey(cashierUserId));
+      writeIndex(readIndex().filter((c) => c !== cashierUserId));
+      const raw = localStorage.getItem(KEY);
+      let legacyOwner: string | null = null;
+      try {
+        legacyOwner = raw ? ((JSON.parse(raw) as { cashier_user_id?: string }).cashier_user_id ?? null) : null;
+      } catch {
+        legacyOwner = null;
+      }
+      if (raw !== null && (legacyOwner === null || legacyOwner === cashierUserId)) localStorage.removeItem(KEY);
+      return;
+    }
+    for (const k of snapshotKeys()) localStorage.removeItem(k);
+    writeIndex([]);
   } catch {
     /* ignore */
   }

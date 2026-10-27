@@ -111,6 +111,10 @@ import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPo
 import { isBackendReachable, lastKnownReachable, subscribeReachability } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
+import { canSeeDrawer, loadOfflineDrawerView } from "@/lib/pos/offlineDrawer";
+import { currentCustomerScope, hydrateBranchCustomers } from "@/lib/offline/customerCache";
+import { drainParkedUsers } from "@/lib/offline/parkedDrain";
+import { markStart, recordSince } from "@/lib/perf/timings";
 import { isLocalShiftId, resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { syncPosTxns } from "@/lib/offline/posTxnSync";
 import { getDeviceIdentity } from "@/lib/device";
@@ -190,30 +194,59 @@ function PosWorkspaceInner() {
   // active methods instead of Cash-only.
   const activePaymentMethods = useActivePaymentMethods(tenantId, online);
 
+  // Offline-first recovery — which tenant|OU menu is on screen, and the latest request (a late reply for
+  // an older OU must never replace the current OU's menu).
+  const menuShownKey = useRef<string | null>(null);
+  const menuRequest = useRef(0);
   const fetchMenu = useCallback(async () => {
     if (!tenantId) return;
-    setMenuState("loading");
-    setMenuError(null);
+    const key = `${tenantId}|${pos.branch.id ?? ""}`;
+    const req = ++menuRequest.current;
+    const t0 = markStart();
+    // LOCAL FIRST: the cached menu (tenant + OU scoped) renders before any network call. A refresh of a
+    // menu already on screen (focus / Menu Builder save) never blanks it into a skeleton.
+    if (menuShownKey.current !== key) {
+      const cached = pos.branch.id ? await readCachedMenu(tenantId, pos.branch.id).catch(() => null) : null;
+      if (req !== menuRequest.current) return;
+      if (cached) {
+        setMenu(cached.menu);
+        setMenuStale(cached.cachedAt);
+        setMenuError(null);
+        setMenuState("ready");
+        menuShownKey.current = key;
+        recordSince("menu.render", t0);
+      } else {
+        setMenuError(null);
+        setMenuState("loading");
+      }
+    }
+    // A backend already known to be unreachable is not asked at all.
+    if (lastKnownReachable() === false) {
+      if (menuShownKey.current !== key) {
+        setMenuError("This menu has not been downloaded to this device yet. Connect once to load it.");
+        setMenuState("error");
+      }
+      return;
+    }
     try {
       // The SELL surface reads the authoritative OU projection (pos_menu) for the
       // operator's branch, so the till only ever offers items this OU can sell.
       const data = await loadPosMenu(pos.branch.id);
+      if (req !== menuRequest.current) return;
+      const first = menuShownKey.current !== key;
       setMenu(data);
       setMenuStale(null);
+      setMenuError(null);
       setMenuState("ready");
-      void cacheMenu(data, tenantId, pos.branch.id);
+      menuShownKey.current = key;
+      if (first) recordSince("menu.render", t0);
+      if (pos.branch.id) void cacheMenu(data, tenantId, pos.branch.id);
     } catch (e) {
-      // A cached menu is still worth showing - the cashier can see prices even
-      // though ordering is blocked while offline. The cache is tenant+OU scoped.
-      const cached = await readCachedMenu(tenantId, pos.branch.id).catch(() => null);
-      if (cached) {
-        setMenu(cached.menu);
-        setMenuStale(cached.cachedAt);
-        setMenuState("ready");
-      } else {
-        setMenuError(classifyError(e).message);
-        setMenuState("error");
-      }
+      if (req !== menuRequest.current) return;
+      // The cached menu stays on screen; only a till with nothing to show reports the failure.
+      if (menuShownKey.current === key) return;
+      setMenuError(classifyError(e).message);
+      setMenuState("error");
     }
   }, [tenantId, pos.branch.id]);
 
@@ -293,12 +326,30 @@ function PosWorkspaceInner() {
   useEffect(() => {
     // Pass the live branch/OU so a pending offline-opened shift is restored on mount
     // ONLY for this exact context (never a sibling branch/OU's pending shift).
-    if (pos.allowed && tenantId && userId) void shiftStore.refresh(tenantId, userId, pos.branch.id);
+    if (pos.allowed && tenantId && userId) {
+      const t0 = markStart();
+      void shiftStore.refresh(tenantId, userId, pos.branch.id).then(() => recordSince("shift.restore", t0));
+    }
     // The store is a stable zustand reference; re-running on it would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pos.allowed, tenantId, userId, pos.branch.id]);
 
   const shiftId = requireOpenShiftId(shiftStore.shift);
+
+  // Offline-first recovery (Bug 12) — the provisional local drawer of the ACTIVE shift (no network).
+  const loadOfflineDrawer = useCallback(async () => {
+    const s = useShift.getState();
+    const dev = getDeviceIdentity();
+    return loadOfflineDrawerView({
+      shiftId: s.shift?.id ?? "",
+      pendingLocal: Boolean(s.pendingLocalId),
+      openingCashAmount: Number(s.shift?.opening_cash_amount ?? 0),
+      openingCurrency: currency,
+      openedAt: s.shift?.opened_at ?? null,
+      scope: { tenantId: tenantId ?? "", branchId: pos.branch.id, cashierUserId: userId ?? "", deviceId: dev.device_id, terminalId: dev.terminal_id ?? null },
+      usdRate: rate,
+    });
+  }, [currency, tenantId, pos.branch.id, userId, rate]);
 
   // Pre-hydrate the Delivery ORDERS queue during normal online POS use, so Delivery → Orders is
   // offline-ready WITHOUT the operator opening it online first. MUST use the SAME shiftId the Orders
@@ -306,6 +357,9 @@ function PosWorkspaceInner() {
   // Online-only, write-through to the durable snapshot; a no-op offline.
   useEffect(() => {
     if (!pos.allowed || !tenantId || !pos.branch.id || !online) return;
+    // Offline-first recovery (Bug 11) — provision the branch's existing customers + addresses for
+    // offline search / selection (bounded, once per OU per run, RLS-scoped like the online search).
+    void currentCustomerScope().then((scope) => hydrateBranchCustomers(scope)).catch(() => undefined);
     if (!canViewOrders(pos.access).allowed) return;
     void prewarmDeliveryQueue({ tenantId, branchId: pos.branch.id, shiftId, now: new Date() });
     // rc.9 — mirror the branch's AUTHORIZED operational provider catalog (server-gated by feature +
@@ -424,7 +478,9 @@ function PosWorkspaceInner() {
       // context, never a render-time closure.
       await runReconnectDrain({
         isOfflineMode: () => useSession.getState().offlineMode,
-        loadContextOnline: () => useSession.getState().loadContextOnline(),
+        // Offline-first recovery — leave offline mode through the canonical revalidation (adopts the
+        // user's own session, or their one-time in-memory credential after a local sign-in).
+        loadContextOnline: () => useSession.getState().goOnline(),
         readContext: () => {
           const s = useSession.getState();
           const t = s.tenant?.id ?? null;
@@ -455,6 +511,11 @@ function PosWorkspaceInner() {
         // a revocation locks NEW captures only, captured work still drains server-authoritatively).
         securityCheck: () => securityReconnect(),
       });
+      // Offline-first recovery — then the work captured by users PARKED on this device (switch user),
+      // each under their own sealed session, never the active user's. Only once online again.
+      if (!useSession.getState().offlineMode && (await isBackendReachable().catch(() => false))) {
+        await drainParkedUsers(useSession.getState().userId, trigger).catch(() => []);
+      }
     },
     [],
   );
@@ -2821,6 +2882,8 @@ function PosWorkspaceInner() {
             roleLabel={roleLabel(pos.role)}
             shift={shiftStore.shift}
             cashBox={shiftStore.cashBox}
+            drawerVisible={canSeeDrawer(session.permissions, shiftStore.shift?.status === "open")}
+            loadOfflineDrawer={loadOfflineDrawer}
             currency={currency}
             online={online}
             offlineMode={session.offlineMode || shiftStore.offlineRestored || !backendReachable}
