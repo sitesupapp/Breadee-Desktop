@@ -32,7 +32,21 @@ import { clearBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
 import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
-import { isBackendReachable } from "@/lib/offline/reachability";
+import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
+import { applyCaptureLock, type CaptureLockReason } from "@/lib/security/captureLock";
+import { setEntitledBranchScope } from "@/state/operationalBranch";
+import { overlayAuthorityWithEntitlement } from "@/lib/security/entitlement";
+import {
+  checkDeviceStanding,
+  clearEntitlement,
+  entitlementEnforced,
+  entitlementRefreshDue,
+  observeDeviceClock,
+  refreshEntitlement,
+  resetClockAfterOnlineAuth,
+  verifyStoredEntitlement,
+  type DeviceClock,
+} from "@/lib/security/deviceAuthority";
 import {
   OFFLINE_SIGNIN_MESSAGE,
   REAUTH_MESSAGE,
@@ -61,6 +75,109 @@ const DEFAULT_CURRENCY: CurrencySettings = { primary: "USD", rate: null };
 // can fire together, and we never want two overlapping RPC round-trips for the same thing.
 let permissionRefreshInFlight: Promise<void> | null = null;
 
+// ---- Final Foundation (SEC): device-bound offline authority ---------------------------
+// `grantedPermissions` is the UNLOCKED map (server / signed entitlement). The store's
+// `permissions` is the view the UI gates on: identical, unless a CAPTURE LOCK is active,
+// in which case lib/security/captureLock keeps only read-only grants. Nothing here ever
+// deletes or rewrites an operation, shift, draft or history entry.
+let grantedPermissions: Record<string, boolean> = {};
+/** A revocation learned from the server on reconnect (sticky until the server says ok). */
+let standingLock: CaptureLockReason | null = null;
+let securityStarted = false;
+/** OU list of the entitlement verified for the current offline restore (null otherwise). */
+let restoredEntitledBranchIds: string[] | null = null;
+export const SECURITY_TICK_MS = 60_000;
+
+/** Offline restore needs a VERIFIED, device-bound, unexpired entitlement for the cached
+ *  user + tenant; the restored role / OU / permissions / features come from its signed
+ *  claims. Without one the device must re-authorize online (fresh devices and never-
+ *  authorized users were already online-only). Non-enforced builds: unchanged. */
+async function gateOfflineRestore(d: OfflineAuthDecision, clock: DeviceClock): Promise<OfflineAuthDecision> {
+  restoredEntitledBranchIds = null;
+  if (d.kind !== "restore" || !entitlementEnforced()) return d;
+  const c = d.cache as unknown as CachedContext;
+  const check = await verifyStoredEntitlement({ userId: c.userId, tenantId: c.tenant?.id ?? null }, clock).catch(() => null);
+  if (!check || !check.ok) return { kind: "expired", cache: d.cache };
+  restoredEntitledBranchIds = [...check.claims.branch_ids];
+  return { kind: "restore", cache: overlayAuthorityWithEntitlement(c, check.claims) as unknown as AuthorityCache };
+}
+
+/** Apply (or lift) the capture lock over the granted permissions. */
+function setCaptureLock(lock: CaptureLockReason | null): void {
+  useSession.setState({ captureLock: lock, permissions: applyCaptureLock(grantedPermissions, lock) });
+}
+
+function backendLooksOffline(offlineMode: boolean): boolean {
+  return offlineMode || (typeof navigator !== "undefined" && navigator.onLine === false) || lastKnownReachable() === false;
+}
+
+/** Online: obtain / renew the signed entitlement for this device (never blocks the UI). */
+async function refreshEntitlementForSession(): Promise<void> {
+  const s = useSession.getState();
+  if (!s.userId || !s.tenant?.id || s.offlineMode) return;
+  const r = await refreshEntitlement({ userId: s.userId, tenantId: s.tenant.id, terminalId: getDeviceIdentity().terminal_id });
+  if (!r.ok && (r.reason === "device_revoked" || r.reason === "access_revoked")) {
+    standingLock = r.reason;
+    await clearEntitlement();
+  }
+}
+
+/**
+ * The in-session check (every SECURITY_TICK_MS, on reconnect, after restore): clock
+ * rollback, revocation, and - while the backend is unreachable - entitlement expiry. A
+ * running offline session therefore expires on time, not only at cold start.
+ */
+export async function securityTick(): Promise<void> {
+  let clock = await observeDeviceClock();
+  const s = useSession.getState();
+  if (!s.userId) return;
+  const offline = backendLooksOffline(s.offlineMode);
+  if (!offline && !standingLock) {
+    if (entitlementEnforced()) {
+      const check = await verifyStoredEntitlement({ userId: s.userId, tenantId: s.tenant?.id ?? null }, clock).catch(() => null);
+      if (clock.rollback || !check || entitlementRefreshDue(check, clock.effectiveNowMs)) {
+        await refreshEntitlementForSession().catch(() => undefined);
+        clock = await observeDeviceClock();
+      }
+    } else if (clock.rollback && !s.offlineMode) {
+      // No server clock in a non-enforced build: an online, server-validated session
+      // is the re-authorization that resets the baseline.
+      await resetClockAfterOnlineAuth().catch(() => undefined);
+      clock = await observeDeviceClock();
+    }
+  }
+  let lock: CaptureLockReason | null = null;
+  if (clock.rollback) lock = "clock_rollback";
+  else if (standingLock) lock = standingLock;
+  else if (offline && entitlementEnforced()) {
+    const check = await verifyStoredEntitlement({ userId: s.userId, tenantId: s.tenant?.id ?? null }, clock).catch(() => null);
+    if (!check || !check.ok) lock = check?.reason === "expired" ? "entitlement_expired" : "entitlement_invalid";
+  }
+  if (lock !== useSession.getState().captureLock) setCaptureLock(lock);
+}
+
+/** Reconnect: check device / user standing with the server BEFORE trusting the
+ *  offline authority again. A revoked device or user stops NEW captures; already-
+ *  captured work keeps draining and the server decides (never deleted locally). */
+export async function securityReconnect(): Promise<void> {
+  if (!useSession.getState().userId) return;
+  const standing = await checkDeviceStanding();
+  if (standing === "device_revoked" || standing === "access_revoked") {
+    standingLock = standing;
+    await clearEntitlement();
+  } else if (standing === "ok" || standing === "unregistered") {
+    standingLock = null;
+  }
+  await securityTick().catch(() => undefined);
+}
+
+function startSecurityLoop(): void {
+  if (securityStarted || typeof window === "undefined") return;
+  securityStarted = true;
+  window.setInterval(() => void securityTick().catch(() => undefined), SECURITY_TICK_MS);
+  window.addEventListener("online", () => void securityReconnect().catch(() => undefined));
+}
+
 type CachedContext = {
   userId: string;
   email: string | null;
@@ -87,6 +204,10 @@ type SessionState = {
   currency: CurrencySettings;
   /** rc.10 — a controlled sign-in notice (e.g. expired offline authority), shown on the login screen. */
   authNotice: string | null;
+  /** Final Foundation — non-null while NEW financial captures are locked (see lib/security/captureLock). */
+  captureLock: CaptureLockReason | null;
+  /** Final Foundation — OUs the VERIFIED offline entitlement allows (null = online / not enforced). */
+  entitledBranchIds: string[] | null;
   init: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signInWithGoogle: () => Promise<{ error: string | null }>;
@@ -115,18 +236,26 @@ export const useSession = create<SessionState>((set, get) => ({
   permissions: {},
   currency: DEFAULT_CURRENCY,
   authNotice: null,
+  captureLock: null,
+  entitledBranchIds: null,
 
   init: async () => {
     getDeviceIdentity(); // ensure device identity exists early
     set({ online: navigator.onLine });
+    startSecurityLoop();
     // rc.10 — OFFLINE COLD-START CONTRACT. Read the durable authority FIRST and decide reachability
     // BEFORE any auth network call: when the backend is unreachable a still-valid authority restores
     // the shell immediately (no token-refresh stall, no network dependency at all), an expired one
     // shows a controlled re-authorization message, and nothing ever renders "Failed to fetch".
-    const decision = decideOfflineAuthority(await readAuthorityCache().catch(() => null), Date.now());
+    // Final Foundation — the age check uses the clock guard's EFFECTIVE now (a rolled-back clock
+    // cannot make the authority younger), and a restore additionally needs the verified,
+    // device-bound signed entitlement whose claims replace the editable cached authority.
+    const clock = await observeDeviceClock();
+    const decision = await gateOfflineRestore(decideOfflineAuthority(await readAuthorityCache().catch(() => null), clock.effectiveNowMs), clock);
     const apply = (d: OfflineAuthDecision, offline: boolean) => {
       if (d.kind === "restore") {
         const c = d.cache as unknown as CachedContext;
+        grantedPermissions = c.permissions ?? {};
         set({
           loading: false,
           offlineMode: true,
@@ -140,7 +269,11 @@ export const useSession = create<SessionState>((set, get) => ({
           features: c.features,
           permissions: c.permissions,
           currency: c.currency ?? DEFAULT_CURRENCY,
+          entitledBranchIds: restoredEntitledBranchIds,
         });
+        // A rolled-back clock locks NEW captures from the first frame (the tick re-evaluates).
+        setCaptureLock(clock.rollback ? "clock_rollback" : standingLock);
+        void securityTick().catch(() => undefined);
         return;
       }
       set({
@@ -283,9 +416,13 @@ export const useSession = create<SessionState>((set, get) => ({
       permissions,
       currency,
     };
-    set({ ...next, offlineMode: false, online: true, authNotice: null });
+    grantedPermissions = permissions;
+    set({ ...next, permissions: applyCaptureLock(permissions, get().captureLock), offlineMode: false, online: true, authNotice: null, entitledBranchIds: null });
     // The authority timestamp = this FULL online authorization (getUser + every context read OK).
     await writeCache({ ...next, cachedAt: Date.now() });
+    // Final Foundation — online and server-validated: obtain / renew the device-bound signed
+    // entitlement and re-evaluate the capture lock. Background only; never blocks sign-in.
+    void securityTick().catch(() => undefined);
   },
 
   refreshPermissions: async () => {
@@ -309,9 +446,13 @@ export const useSession = create<SessionState>((set, get) => ({
         const permsMap = perms as Record<string, boolean> | null;
         // A valid member returns the FULL catalog map; an empty object means "no active
         // membership resolved" — never clobber a working permission set with that.
-        const permissions =
+        const fetched =
           permsMap && typeof permsMap === "object" && Object.keys(permsMap).length > 0 ? permsMap : cur.permissions;
-        set({ features, permissions, online: true });
+        // Final Foundation — `cur.permissions` may be the capture-LOCKED view; the unlocked grant
+        // that it stands for is `grantedPermissions`.
+        const permissions = fetched === cur.permissions ? grantedPermissions : fetched;
+        grantedPermissions = permissions;
+        set({ features, permissions: applyCaptureLock(permissions, cur.captureLock), online: true });
         // Keep the offline cache coherent so a later offline launch restores the fresh grants. rc.10 —
         // WITHOUT extending the authority lifetime (cachedAt stays the last full online authorization):
         // a permission refresh is not a re-authentication.
@@ -328,6 +469,8 @@ export const useSession = create<SessionState>((set, get) => ({
       } finally {
         permissionRefreshInFlight = null;
       }
+      // Final Foundation — focus / reconnect is also when device + user standing is re-checked.
+      await securityReconnect().catch(() => undefined);
     })();
     return permissionRefreshInFlight;
   },
@@ -366,6 +509,14 @@ export const useSession = create<SessionState>((set, get) => ({
 
   signOut: async () => {
     await supabase.auth.signOut().catch(() => undefined);
+    // Final Foundation — a global sign-out that could not reach the server keeps the local
+    // session; drop it locally too (this removes the SEALED session via the storage adapter).
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    // The signed entitlement belongs to the signed-out user. (The clock guard is device state
+    // and deliberately survives sign-out.)
+    await clearEntitlement().catch(() => undefined);
+    grantedPermissions = {};
+    standingLock = null;
     // rc.10 — the offline authority must not survive in EITHER store (localStorage + IndexedDB mirror).
     await clearAuthorityCache();
     // Drop the durable POS-session snapshot too: the branch name + open shift it
@@ -382,11 +533,16 @@ export const useSession = create<SessionState>((set, get) => ({
     // drop it on sign-out so it never outlives the session that cached it — EXCEPT
     // offline-created customers that unsynced offline work still needs (1.0.38).
     await dropCachedCustomersKeepingUnsettled().catch(() => {});
-    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false });
+    set({ userId: null, email: null, isPlatformUser: false, tenant: null, membership: null, features: {}, permissions: {}, currency: DEFAULT_CURRENCY, offlineMode: false, captureLock: null, entitledBranchIds: null });
   },
 
   can: (perm) => Boolean(get().permissions[perm]),
 }));
+
+// Keep the operational-branch pin/picker inside the VERIFIED entitlement scope whenever it changes.
+useSession.subscribe((s, prev) => {
+  if (s.entitledBranchIds !== prev.entitledBranchIds) setEntitledBranchScope(s.entitledBranchIds);
+});
 
 // Web app's routing rule, ported verbatim.
 export function resolvePostLoginPath(s: {

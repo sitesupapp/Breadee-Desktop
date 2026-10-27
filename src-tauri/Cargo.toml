@@ -47,6 +47,10 @@ tauri-plugin-process = "2"
 #   Win32_Security          - PRINTER_INFO_2W embeds a security descriptor, so
 #                             the struct will not compile without it
 #   Win32_Foundation        - RECT, used to lay each line out
+#   Win32_Security_Cryptography - (Final Foundation, Track 4) NCrypt device key
+#                             (TPM / software KSP, non-exportable), BCryptHash
+#                             SHA-256, and DPAPI CryptProtectData for the
+#                             sealed refresh token. Same crate, same version.
 #
 # Deliberately absent: anything for shell, filesystem, sockets or process
 # control. This crate is enormous and feature-gated for exactly this reason -
@@ -57,5 +61,6 @@ windows = { version = "0.61.3", features = [
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Printing",
   "Win32_Security",
+  "Win32_Security_Cryptography",
   "Win32_Storage_Xps",
 ] }

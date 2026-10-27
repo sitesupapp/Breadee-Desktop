@@ -14,6 +14,7 @@
 // So the second launch must not become a second till. It hands focus back to
 // the instance that already exists and exits.
 
+pub mod device_security;
 pub mod printing;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,7 +46,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // THE APP'S ONLY IPC SURFACE (Level 3E-A onwards).
         //
-        // Four commands, all in `printing`. Deliberately listed here in full
+        // The printing commands plus (Final Foundation) the device-security
+        // commands. App commands are ACL-gated: build.rs declares them and
+        // capabilities/default.json grants each one by name. Deliberately listed here in full
         // rather than behind a generated macro over a module, so that widening
         // the surface is a visible edit to this file and shows up in review as
         // one. No command reads or writes an order, a payment, a shift or any
@@ -63,7 +66,17 @@ pub fn run() {
             printing::print_kitchen_ticket,
             // POS operations. The end-of-shift report - one document for the
             // whole shift, composed from figures already shown on screen.
-            printing::print_report
+            printing::print_report,
+            // Final Foundation (Tracks 4/6). Device identity + sealed secrets.
+            // Five narrow commands, each granted explicitly in
+            // capabilities/default.json - see `device_security/mod.rs` for what
+            // they deliberately cannot do (no private-key export, no arbitrary
+            // signing, no free-form secret names).
+            device_security::device_public_key,
+            device_security::device_sign,
+            device_security::seal_secret,
+            device_security::unseal_secret,
+            device_security::clear_secret
         ])
         .run(tauri::generate_context!())
         .expect("error while running Breadee desktop application");
