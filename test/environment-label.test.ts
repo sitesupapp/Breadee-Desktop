@@ -99,6 +99,11 @@ test("NO source states an environment name as a user-facing literal", () => {
   // and `paymentQr.ts` re-exports it. Exactly one file may still name an
   // environment, which is the property this test exists to keep.
   ALLOWED.add("src/lib/site.ts");
+  // RETARGETED (Final Foundation, Track 5): the embedded entitlement PUBLIC KEYS are
+  // per-environment key material exactly like site.ts's per-environment origin - a
+  // key id is "<env>-<hash>" by construction, and nothing in that file is shown to a
+  // person. Every other security module reads the environment through env.ts types.
+  ALLOWED.add("src/lib/security/entitlementKeys.ts");
 
   const offenders: string[] = [];
   for (const file of sources("src")) {

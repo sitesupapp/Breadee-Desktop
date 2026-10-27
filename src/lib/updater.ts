@@ -12,9 +12,15 @@
 // 1. STAGING MUST NEVER CONSUME THE PRODUCTION CHANNEL. This repository has
 //    already published a release tagged `desktop-v1.0.0-rc1-staging`. A generic
 //    "latest release" endpoint would happily serve that to a production till, so
-//    the endpoint is a dedicated production-only manifest AND every entry point
-//    here refuses to run unless `env.IS_PRODUCTION`. Two independent guards,
-//    because either one alone is a single point of failure.
+//    each environment reads its OWN dedicated manifest: production builds the
+//    production channel + production public key (tauri.conf.json), staging builds
+//    the staging channel + staging public key (tauri.staging.conf.json, applied
+//    only by the Staging-environment workflow, which fails closed unless the
+//    endpoint is the staging channel). The endpoint and key are compiled into the
+//    binary, NOT chosen here, and the two keys differ - so even a misrouted
+//    staging app would refuse a production artifact, and vice versa. Every entry
+//    point here still refuses to run outside a declared production or staging
+//    build (dev / browser stay off).
 //
 // 2. AN UPDATE OUTAGE MUST NEVER STOP A TILL OPENING. GitHub being unreachable,
 //    a malformed manifest, a rejected signature, a failed download - none of
@@ -78,23 +84,57 @@ export type UpdateState =
 /**
  * Is the updater usable in this build at all?
  *
- * False in dev, in the browser, and in every staging build. Staging is excluded
- * on purpose and not as an oversight: the production manifest describes
- * production binaries, and a staging terminal that "updated" itself onto one
- * would silently change which database it talks to.
+ * True only in the installed production app and the installed STAGING app;
+ * false in dev and in the browser. Staging is allowed deliberately (PO decision,
+ * 2026-10-27): it is how staging testers receive staging builds. That is safe
+ * only because a staging build never sees the production manifest - its updater
+ * endpoint and public key are the STAGING ones, compiled in from
+ * tauri.staging.conf.json by the Staging workflow, and a production artifact is
+ * signed with a different key that a staging app cannot verify. (Until 1.0.35
+ * this gate was production-only, which left staging testers unable to update.)
  */
 export function isUpdaterAvailable(): boolean {
-  if (!env.IS_PRODUCTION) return false;
+  if (!(env.IS_PRODUCTION || env.APP_ENV === "staging")) return false;
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 /** Why the updater is unavailable, in words a support technician can act on. */
 export function unavailableReason(): string | null {
   if (!isUpdaterAvailable()) {
-    if (!env.IS_PRODUCTION) return `Updates are delivered to production builds only (this is ${env.APP_ENV}).`;
+    if (!(env.IS_PRODUCTION || env.APP_ENV === "staging")) {
+      return `Updates are delivered to installed production and staging builds only (this is ${env.APP_ENV}).`;
+    }
     return "Updates are available only in the installed Desktop app.";
   }
   return null;
+}
+
+/** The production app identifier; every other environment's is `<this>.<APP_ENV>`. */
+export const APP_IDENTIFIER_ROOT = "app.breadee.desktop";
+
+/**
+ * The app identity a STAGING build must carry before it may ask its channel:
+ * `app.breadee.desktop.staging`.
+ *
+ * The identifier, the updater endpoint and the public key all come from the same
+ * overlay (src-tauri/tauri.staging.conf.json). A staging-labelled build with any
+ * other identity was packaged WITHOUT that overlay - e.g. a plain unsigned
+ * acceptance installer - so the endpoint and key compiled into it are the
+ * PRODUCTION ones, and asking them could install production Breadee over a
+ * staging till. Such a build stays off. Production builds skip this check, so
+ * their gate and behaviour are unchanged.
+ */
+async function stagingChannelMismatch(): Promise<string | null> {
+  if (env.IS_PRODUCTION) return null;
+  const expected = `${APP_IDENTIFIER_ROOT}.${env.APP_ENV}`;
+  try {
+    const { getIdentifier } = await import("@tauri-apps/api/app");
+    const id = (await getIdentifier()).trim();
+    if (id === expected) return null;
+    return `This ${env.APP_ENV} build (${id || "unknown identity"}) is not packaged as ${expected}, so it does not receive updates.`;
+  } catch {
+    return `This ${env.APP_ENV} build could not confirm its update channel, so updates are off.`;
+  }
 }
 
 /** True only when `candidate` is a well-formed version strictly newer than ours. */
@@ -130,7 +170,8 @@ export function hasPendingUpdate(): boolean {
 }
 
 /**
- * Ask the production channel whether there is a newer version.
+ * Ask this build's own channel (production or staging, compiled in) whether
+ * there is a newer version.
  *
  * `silent` marks the automatic startup check, whose failures are not worth
  * interrupting anyone over.
@@ -138,6 +179,8 @@ export function hasPendingUpdate(): boolean {
 export async function checkForUpdate(options: { silent: boolean }): Promise<UpdateState> {
   const reason = unavailableReason();
   if (reason) return { kind: "error", message: reason, silent: true };
+  const mismatch = await stagingChannelMismatch();
+  if (mismatch) return { kind: "error", message: mismatch, silent: true };
 
   try {
     const { check } = await import("@tauri-apps/plugin-updater");

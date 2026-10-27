@@ -22,12 +22,12 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titl
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
     glyph: "sync",
-    title: "More Reliable Offline Mode",
-    titleAr: "وضع عدم اتصال أكثر موثوقية",
+    title: "Expanded Full Offline POS",
+    titleAr: "توسعة وضع العمل الكامل دون اتصال",
     body:
-      "Offline Mode is now more reliable. Tables you settle offline stay settled after reconnecting, paid orders show as paid everywhere, Delivery orders and their payments sync exactly once, and pending work keeps syncing on its own without getting stuck. You can now Move and Merge tables while offline, including merging a partly paid bill: payments already taken stay recorded and only the remaining amount moves. Settings and POS now show the same Sync Center. Your existing data, orders and settings are preserved.",
+      "Ready Desktop now supports a broader end-to-end offline lifecycle, including improved Dine-In Merge and Move handling, offline shift transitions, safer offline payments, stronger reconnect reconciliation, improved order history, and clearer Sync Center dependency and conflict status. Offline operations remain protected against duplicate financial effects and reconcile automatically when connectivity returns.",
     bodyAr:
-      "أصبح وضع عدم الاتصال أكثر موثوقية. تبقى الطاولات التي تمت تسويتها دون اتصال مسوّاة بعد عودة الاتصال، وتظهر الطلبات المدفوعة كمدفوعة في كل مكان، وتتم مزامنة طلبات التوصيل ومدفوعاتها مرة واحدة فقط، وتستمر العمليات المعلّقة بالمزامنة تلقائياً دون أن تتوقف. يمكنك الآن نقل الطاولات ودمجها دون اتصال، بما في ذلك دمج فاتورة مدفوعة جزئياً: تبقى المدفوعات السابقة مسجّلة وينتقل المبلغ المتبقي فقط. تعرض الإعدادات ونقطة البيع الآن مركز المزامنة نفسه. يتم الحفاظ على بياناتك الحالية وطلباتك وإعداداتك.",
+      "أصبح Ready Desktop يدعم دورة عمل أوسع دون اتصال، بما في ذلك تحسين عمليات الدمج والنقل في Dine-In، والانتقال بين الورديات دون اتصال، وحماية أكبر لعمليات الدفع، وتحسين المزامنة بعد عودة الاتصال، وسجل الطلبات، وحالات التعارض والانتظار في Sync Center. تتم مزامنة العمليات تلقائياً عند عودة الاتصال مع الحماية من تكرار التأثيرات المالية.",
   },
 ];
 

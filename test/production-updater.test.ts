@@ -96,10 +96,28 @@ test("an unparseable version is never treated as newer", () => {
 
 // --- staging can never use the production channel -----------------------------
 
-test("the updater refuses to run outside a production build", () => {
-  assert.match(updaterTs, /if \(!env\.IS_PRODUCTION\) return false;/);
+test("the updater runs only in a declared production or staging build", () => {
+  // INTENTIONAL CHANGE (PO decision 2026-10-27, staging parity): this gate was
+  // production-only from 1.0.35, which left Breadee Staging testers unable to
+  // update in-app. Staging builds are now allowed BECAUSE channel isolation does
+  // not live here: each environment's endpoint + public key are compiled in from
+  // its own config (see test/staging-updater.test.ts), and the two keys differ.
+  assert.match(updaterTs, /if \(!\(env\.IS_PRODUCTION \|\| env\.APP_ENV === "staging"\)\) return false;/);
+  // Nothing broader: no other environment label opens the gate.
+  assert.equal(/APP_ENV !==|APP_ENV\s*!=\s*"production"/.test(updaterTs), false);
   // And the reason is explicit rather than a silent no-op.
-  assert.match(updaterTs, /Updates are delivered to production builds only/);
+  assert.match(updaterTs, /Updates are delivered to installed production and staging builds only/);
+  // A staging-labelled build must ALSO carry the staging identity (the one the
+  // staging overlay compiles the staging endpoint/key with) before it may check;
+  // a staging build packaged without the overlay carries the PRODUCTION
+  // endpoint/key and must stay off. Production keeps its unchanged path.
+  assert.match(updaterTs, /export const APP_IDENTIFIER_ROOT = "app\.breadee\.desktop";/);
+  assert.match(updaterTs, /async function stagingChannelMismatch\(\): Promise<string \| null> \{\s*if \(env\.IS_PRODUCTION\) return null;\s*const expected = `\$\{APP_IDENTIFIER_ROOT\}\.\$\{env\.APP_ENV\}`;/);
+  assert.match(updaterTs, /if \(id === expected\) return null;/);
+  assert.match(updaterTs, /const mismatch = await stagingChannelMismatch\(\);\s*if \(mismatch\) return \{ kind: "error", message: mismatch, silent: true \};/);
+  // The identity check fails CLOSED when the identity cannot be read.
+  const fn = updaterTs.slice(updaterTs.indexOf("async function stagingChannelMismatch"), updaterTs.indexOf("export function isNewerThanCurrent"));
+  assert.match(fn, /catch \{\s*return `This \$\{env\.APP_ENV\} build could not confirm its update channel/);
 });
 
 test("every entry point goes through the availability gate", () => {

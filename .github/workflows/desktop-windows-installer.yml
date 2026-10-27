@@ -129,11 +129,20 @@ jobs:
       #    tauri:build re-runs `npm run build` (beforeBuildCommand), so the same
       #    STAGING Supabase env must be present here too, or the packaged app
       #    ships a blank window. Secrets only — never a committed .env.
-      #    The staging overlay gives the app its OWN identity ("Breadee Staging",
-      #    app.breadee.desktop.staging1038, breadee-staging.exe) so installing it can never
-      #    overwrite or stop a real production "Breadee" install or touch its data folder.
+      #    The staging overlay gives the app the ONE Breadee Staging identity
+      #    (app.breadee.desktop.staging, "Breadee Staging", breadee-desktop.exe) plus the
+      #    STAGING updater endpoint + key - the same identity staging testers run - so
+      #    installing it can never overwrite or stop a real production "Breadee" install
+      #    or touch its data folder, and an installed acceptance build updates only from
+      #    the staging channel. (The separate staging1038 identity is retired.) This
+      #    workflow holds no signing key, so the second, generated override turns updater
+      #    ARTIFACTS off: the installer is unsigned and is never a channel candidate -
+      #    signed staging builds come only from desktop-staging-release.yml.
       - name: Build Tauri installer
-        run: npm run tauri:build -- --config src-tauri/tauri.staging.conf.json
+        shell: bash
+        run: |
+          printf '%s' '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/no-updater-artifacts.json"
+          npm run tauri:build -- --config src-tauri/tauri.staging.conf.json --config "$RUNNER_TEMP/no-updater-artifacts.json"
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
@@ -154,7 +163,10 @@ jobs:
           ls -la src-tauri/target/release/bundle/nsis/
           exe=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe | head -n 1)
           case "$(basename "$exe")" in "Breadee Staging_"*) ;; *) echo "::error::unexpected installer name $exe"; exit 1;; esac
-          test -f "src-tauri/target/release/breadee-staging.exe" || { echo "::error::main binary is not breadee-staging.exe"; exit 1; }
+          test -f "src-tauri/target/release/breadee-desktop.exe" || { echo "::error::main binary is not breadee-desktop.exe (Breadee Staging exe name)"; exit 1; }
+          id=$(node -p "require('./src-tauri/tauri.staging.conf.json').identifier")
+          [ "$id" = "app.breadee.desktop.staging" ] || { echo "::error::installer identity is '$id', not app.breadee.desktop.staging"; exit 1; }
+          if ls src-tauri/target/release/bundle/nsis/*.sig >/dev/null 2>&1; then echo "::error::unexpected updater signature in an unsigned acceptance build"; exit 1; fi
           grep -rlq azjxprewycygsocusxjn dist/assets || { echo "::error::final bundle is not STAGING"; exit 1; }
           sha256sum "$exe"
 
