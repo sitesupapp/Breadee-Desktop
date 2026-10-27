@@ -43,7 +43,33 @@ export type ReconnectDrainDeps = {
    * on invocation order.
    */
   refreshShift: (ctx: DrainContext, isCurrent: () => boolean) => Promise<void>;
+  /**
+   * Final Foundation (SEC) — device / user standing check run BEFORE each drain
+   * (session.securityReconnect). It applies a capture lock itself when the server
+   * reports revocation, which stops NEW captures only; already-captured work still
+   * drains and the server stays authoritative over it. Bounded by
+   * SECURITY_PRECHECK_TIMEOUT_MS and never blocks or aborts the drain on failure.
+   */
+  securityCheck?: () => Promise<void>;
 };
+
+export const SECURITY_PRECHECK_TIMEOUT_MS = 8_000;
+
+/** Run the pre-drain security check, bounded; a rejection or timeout is swallowed. */
+export async function runSecurityPrecheck(check: (() => Promise<void>) | undefined, timeoutMs = SECURITY_PRECHECK_TIMEOUT_MS): Promise<void> {
+  if (!check) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      check().catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export async function runReconnectDrain(d: ReconnectDrainDeps): Promise<void> {
   if (d.isOfflineMode()) {
@@ -53,6 +79,8 @@ export async function runReconnectDrain(d: ReconnectDrainDeps): Promise<void> {
       return; // a failed authoritative refresh must NOT replay under stale context
     }
   }
+  // After rehydration (the standing check needs the live auth session), before replay.
+  await runSecurityPrecheck(d.securityCheck);
   await runFreshContextPasses(
     () => d.readContext(),
     drainContextKey,

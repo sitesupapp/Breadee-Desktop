@@ -57,13 +57,14 @@ import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import { buildReceipt } from "@/lib/receipt";
 import { readOrderReceiptLines, readSettledOrder } from "@/lib/pos/deliverySettlement";
 import { isNativeAvailable, listPrinters, printReport } from "@/lib/nativePrinting";
-import { resolvePrintRoute } from "@/lib/pos/printRouteResolver";
+import { resolvePrintRouteCached } from "@/lib/pos/printRouteResolver";
 import { resolveRouteTarget } from "@/lib/pos/printTarget";
 import { formatMoney } from "@/lib/currency";
 import type { VoidAction } from "@/lib/pos/deliveryOrderManagement";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { Input, Button } from "@/components/ui";
-import { useSession } from "@/state/session";
+import { securityReconnect, useSession } from "@/state/session";
+import { CAPTURE_LOCK_MESSAGE } from "@/lib/security/captureLock";
 import { resolveBranchId } from "@/lib/branch";
 import { runReconnectDrain } from "@/lib/offline/reconnectDrain";
 import { usePosContext } from "@/state/pos";
@@ -107,7 +108,7 @@ import { readCachedFloor } from "@/lib/offline/db";
 import { onDrainRequested, summarizeOperations } from "@/lib/offline/operationLog";
 import { useOperationalBranch } from "@/state/operationalBranch";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, listResumablePosTxns, pendingPosTxnCount, updatePosOfflineTxn, type PosOfflineTxn } from "@/lib/offline/db";
-import { isBackendReachable } from "@/lib/offline/reachability";
+import { isBackendReachable, lastKnownReachable, subscribeReachability } from "@/lib/offline/reachability";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { isPersistableBranchName, savePosSessionSnapshot } from "@/lib/offline/posSession";
 import { isLocalShiftId, resolveOperationalShift } from "@/lib/offline/shiftIdentity";
@@ -330,6 +331,12 @@ function PosWorkspaceInner() {
         if (live) setBackendReachable(r);
       });
     };
+    // 1.0.38 (PERF R1) — the poll feeds the SHARED reachability store, and every verdict CHANGE the store
+    // publishes (a per-action re-check, a transport error or answer seen by the Supabase client, a browser
+    // offline event) reaches the badge and Dine-In's `input.online` at once, not up to one poll later.
+    const unsubscribe = subscribeReachability((r) => {
+      if (live) setBackendReachable(r);
+    });
     probe();
     const id = window.setInterval(probe, 20_000);
     const onOnline = () => probe();
@@ -340,6 +347,7 @@ function PosWorkspaceInner() {
     window.addEventListener("offline", onOffline);
     return () => {
       live = false;
+      unsubscribe();
       window.clearInterval(id);
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
@@ -443,6 +451,9 @@ function PosWorkspaceInner() {
           setResumable(list);
         },
         refreshShift: (c, isCurrent) => useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent),
+        // Final Foundation (SEC) — device / user standing before replay (bounded, never blocks the drain;
+        // a revocation locks NEW captures only, captured work still drains server-authoritatively).
+        securityCheck: () => securityReconnect(),
       });
     },
     [],
@@ -772,6 +783,25 @@ function PosWorkspaceInner() {
    */
   const printShiftOrder = useCallback(
     async (order: ShiftOpenOrder) => {
+      // Phase F (GAP 1): a durable local snapshot of this transaction's receipt (a device-created/settled
+      // order), so a locally-known receipt still reprints offline + after restart.
+      const presentSnapshot = async (): Promise<boolean> => {
+        try {
+          const { readReceiptSnapshot } = await import("@/lib/offline/db");
+          const snap = (await readReceiptSnapshot(order.order_number ?? order.id.slice(0, 8))) ?? (await readReceiptSnapshot(order.id));
+          if (snap?.data) {
+            receiptStore.present(snap.data as ReceiptData);
+            return true;
+          }
+        } catch {
+          /* fall through */
+        }
+        return false;
+      };
+      // 1.0.38 (PERF C4) — offline-first: when the shared reachability store already knows the backend is
+      // unreachable, the local snapshot is read FIRST (no request that could hang the reprint). Online is
+      // unchanged: the server's rows first, the snapshot only when that read fails.
+      if (lastKnownReachable() === false && (await presentSnapshot())) return;
       try {
         const lines = await readOrderReceiptLines(order.id);
         const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
@@ -804,21 +834,10 @@ function PosWorkspaceInner() {
             customerName: order.order_type === "delivery" ? order.customer_name : null,
           }),
         );
-      } catch (e) {
-        // Phase F (GAP 1): the server read failed (offline). Fall back to a durable local snapshot of
-        // this transaction's receipt if one was persisted (a device-created/settled order), so a
-        // locally-known receipt still reprints offline + after restart. Only a server-only historical
-        // order with no local snapshot asks for a reconnect.
-        try {
-          const { readReceiptSnapshot } = await import("@/lib/offline/db");
-          const snap = (await readReceiptSnapshot(order.order_number ?? order.id.slice(0, 8))) ?? (await readReceiptSnapshot(order.id));
-          if (snap?.data) {
-            receiptStore.present(snap.data as ReceiptData);
-            return;
-          }
-        } catch {
-          /* fall through to the friendly message */
-        }
+      } catch {
+        // Phase F (GAP 1): the server read failed (offline). Fall back to the durable local snapshot.
+        // Only a server-only historical order with no local snapshot asks for a reconnect.
+        if (await presentSnapshot()) return;
         toast.push({ tone: "warning", message: "This receipt isn't available offline.", detail: "Reconnect to reprint an order that wasn't created on this device." });
       }
     },
@@ -846,7 +865,8 @@ function PosWorkspaceInner() {
       }
       const [installed, route] = await Promise.all([
         listPrinters(),
-        resolvePrintRoute({ branchId: pos.branch.id, purpose: "receipt", orderSource: "takeaway" }).catch(() => null),
+        // 1.0.38 (PERF C2) — cache-backed, so the End-Shift report still prints after an OFFLINE close.
+        resolvePrintRouteCached({ branchId: pos.branch.id, purpose: "receipt", orderSource: "takeaway" }),
       ]);
       const resolution = route
         ? resolveRouteTarget({ route, installed: installed.ok ? installed.value : [] })
@@ -3375,6 +3395,12 @@ function PosWorkspaceInner() {
           Fixed, top-centered, below modals; self-hides when there is no open shift or nothing pending. */}
       <div className="pointer-events-none fixed inset-x-0 top-2 z-40 flex justify-center px-4">
         <div className="pointer-events-auto w-full max-w-2xl space-y-2">
+          {/* Final Foundation (SEC) — capture lock: new sales paused, recorded work still syncs. */}
+          {session.captureLock && (
+            <div role="alert" data-testid="capture-lock-banner" className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              {CAPTURE_LOCK_MESSAGE[session.captureLock]}
+            </div>
+          )}
           <PendingTransfersBanner
             openShiftId={shiftId}
             onApproved={() => {
