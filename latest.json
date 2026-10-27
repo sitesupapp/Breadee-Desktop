@@ -1,11 +1,11 @@
 {
-  "version": "1.0.37",
-  "notes": "Full Offline Mode · وضع عدم الاتصال الكامل\n\nFull Offline Mode is now expanded across Ready Desktop. You can keep working during internet or backend interruptions with broader offline support for Takeaway, Dine-In and Delivery, including locally supported order editing, payments, customers, table operations, printing and automatic synchronization when the connection returns. Your existing data, orders and settings are preserved. Breadee safely reconciles offline work after reconnecting and protects against duplicate transactions. Some operations that require live server authorization remain connection-required for safety.\n\nتم توسيع وضع عدم الاتصال الكامل في Ready Desktop. يمكنك متابعة العمل عند انقطاع الإنترنت أو تعذر الوصول إلى الخادم، مع دعم أوسع للطلبات في Takeaway وDine-In وDelivery، بما في ذلك تعديل الطلبات، وعمليات الدفع المدعومة، والعملاء، والطاولات، والطباعة، والمزامنة التلقائية عند عودة الاتصال. يتم الحفاظ على بياناتك الحالية وطلباتك وإعداداتك، وتقوم Breadee بمطابقة العمليات التي تمت دون اتصال بشكل آمن بعد عودة الاتصال مع الحماية من تكرار العمليات. بعض العمليات التي تحتاج إلى تحقق مباشر من الخادم ستبقى بحاجة إلى اتصال حفاظاً على الأمان.",
-  "pub_date": "2026-10-26T23:17:30Z",
+  "version": "1.0.38",
+  "notes": "Expanded Full Offline POS · توسعة وضع العمل الكامل دون اتصال\n\nReady Desktop now supports a broader end-to-end offline lifecycle, including improved Dine-In Merge and Move handling, offline shift transitions, safer offline payments, stronger reconnect reconciliation, improved order history, and clearer Sync Center dependency and conflict status. Offline operations remain protected against duplicate financial effects and reconcile automatically when connectivity returns.\n\nأصبح Ready Desktop يدعم دورة عمل أوسع دون اتصال، بما في ذلك تحسين عمليات الدمج والنقل في Dine-In، والانتقال بين الورديات دون اتصال، وحماية أكبر لعمليات الدفع، وتحسين المزامنة بعد عودة الاتصال، وسجل الطلبات، وحالات التعارض والانتظار في Sync Center. تتم مزامنة العمليات تلقائياً عند عودة الاتصال مع الحماية من تكرار التأثيرات المالية.",
+  "pub_date": "2026-10-27T13:46:53Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNW01TlVBS2FrQWxncG9OV2JVR2VKRFZ4OWtpWGlvZEYwS2tQMWdabm5ScG1YenUrV3VaR1Yyd0FEU0hhK0Fuc05DaDRqdFppdjh5dzNBM09VZ0V4OGdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDU2NjQwCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC4zN194NjQtc2V0dXAuZXhlCmI2aU0ybjVLM0d1WGhVWEMrc2lrUTVjdmJVYkJOZjNIYmFxbnkrUTVLaFNHNTZ1bDZxempPcFFOK1ZSWHl3NnpPVzZYbytQcXAzRUVSRmpPM2l2cENBPT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.37/Breadee_Staging_1.0.37_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNXFVekkydjVrMGZTc2ZPcEJjTUNiR2tpSGxNdmtOdnovaEhGV1A1S2xPMTVKR21sd092djFWOFc2VWtpdTV4UUZuaHNNaHJMTEZMVnNTNUJCa1lxaGdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTA4ODA2CWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC4zOF94NjQtc2V0dXAuZXhlCjAwbm9XWndHT3podnBaUTJnK0szaGduOElzemNsK25KT3VKR3BnUjRqZzVPOGhKdmlQUUE0aHZyVlU3Szh5eFFJTGYvT2ltcDV2QXlHc1BTVWllYkJBPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.38/Breadee_Staging_1.0.38_x64-setup.exe"
     }
   }
 }
