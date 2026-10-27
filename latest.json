@@ -1,11 +1,11 @@
 {
-  "version": "1.0.38",
+  "version": "1.0.39",
   "notes": "Expanded Full Offline POS · توسعة وضع العمل الكامل دون اتصال\n\nReady Desktop now supports a broader end-to-end offline lifecycle, including improved Dine-In Merge and Move handling, offline shift transitions, safer offline payments, stronger reconnect reconciliation, improved order history, and clearer Sync Center dependency and conflict status. Offline operations remain protected against duplicate financial effects and reconcile automatically when connectivity returns.\n\nأصبح Ready Desktop يدعم دورة عمل أوسع دون اتصال، بما في ذلك تحسين عمليات الدمج والنقل في Dine-In، والانتقال بين الورديات دون اتصال، وحماية أكبر لعمليات الدفع، وتحسين المزامنة بعد عودة الاتصال، وسجل الطلبات، وحالات التعارض والانتظار في Sync Center. تتم مزامنة العمليات تلقائياً عند عودة الاتصال مع الحماية من تكرار التأثيرات المالية.",
-  "pub_date": "2026-10-27T07:24:08Z",
+  "pub_date": "2026-10-27T13:07:22Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNWx5TWRLUWhTS2RyenVqMHJUeXh6b2MxS2d5OUhtSWNNb0YvZWJoTlZwZnloaGpMZjljWmJvbTNYY2xiQ2lYd1BKOTlWaWYvQVhVMzZpbkJmU0UvemcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDg1ODM5CWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC4zOF94NjQtc2V0dXAuZXhlCmlodHNhUnB0RE9LVWlMWEk4TTR3Vjl1SVo1d3VDalFGUFlWNnFES3FlM0drQmtRMVZ4ZVFqZnh4WmZFMFlhTHJMOC9ndHEvZmRSWlVYUkVkd0NoMURRPT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.38/Breadee_Staging_1.0.38_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNWlRZy9YR3BLT2kvMGxxYlBmbWwxL3JyYWdBMGtxdlBCMjhOSmllU2tCZjlSdWFPaEhpeFFGaHhVZmVSL0thWkF1aHQ0RUVjbGYxUTFMQWlWU1d3M1FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTA2NDMyCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC4zOV94NjQtc2V0dXAuZXhlCkZzVVRzcWE1c0F3Z1lqc21mUEJ6dVZZdU9jbkRmeVg1ekN3Y2lHd21tcXNocVhpODErbGZ5ZWl6QVlqbHlrVkhJcGRnU2FQM3VLT3BhVnVrNXZDL0F3PT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.39/Breadee_Staging_1.0.39_x64-setup.exe"
     }
   }
 }
