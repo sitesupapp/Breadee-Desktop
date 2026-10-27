@@ -1,0 +1,11 @@
+{
+  "version": "1.0.38",
+  "notes": "Full Offline POS improvements: reliable offline sign-in and Switch User, faster local-first startup, improved Dine-In Open Table and Open Tables, safer Merge/Move reconciliation and quantity changes, stronger Sync Center recovery, and protection against duplicate effects after reconnect.",
+  "pub_date": "2026-10-27T19:24:44Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dDlpbUQ5d1JGb21UbE9NbkNOaUtwbE1sdW1idWxwK01ySndlM05GZ3pNUUIwcW1tNStmOThqR05ESWVkajU3RWxiSXJQN1pjSGNJODdSd2VTY01JaWdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTI5MDc5CWZpbGU6QnJlYWRlZV8xLjAuMzhfeDY0LXNldHVwLmV4ZQpjcVBTQ0o0VDNTbkI5bXhtTmZ0eG9TZ0NxMEEzOGZTejQ5ZHMzS2pxSityaDk2eDF5ejVaZm5MdFRLN3pTOEg4WEkvaWNqei9oNXplQ3FQQzV4RXVEdz09Cg==",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.38/Breadee_1.0.38_x64-setup.exe"
+    }
+  }
+}
