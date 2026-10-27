@@ -116,6 +116,7 @@ import {
   type DineinScope,
   openTableOffline,
   stageUnsentDraftLines,
+  additionalRoundLineFor,
   sendRoundOffline,
   draftLineFromCart,
   getDineDraftForTable,
@@ -167,6 +168,8 @@ export type DineInWorkspace = {
   /** Drawer summary for the sub-1024 tier. */
   summary: { itemCount: number; subtotal: number };
   selected: TableSummary | null;
+  /** 1.0.38 — the effective floor rows (cached map + this device's operational projection). */
+  effectiveTables: TableSummary[];
   /** True while an unsent round is buffered for the selected table. */
   hasUnsentRound: boolean;
   /** Ask to leave Add Items; may open a confirmation instead of leaving. */
@@ -577,6 +580,9 @@ export function useDineInWorkspace(input: {
   const [offlineBill, setOfflineBill] = useState<TableBill | null>(null);
   /** rc.9 — the selected table's full operational projection (edit targets, outstanding, settle state). */
   const [offlineProj, setOfflineProj] = useState<OperationalTableBill | null>(null);
+  /** 1.0.38 (Bug 7) — the table whose projection could not be derived (the panel shows an error, never an
+   *  endless loading state). */
+  const [offlineProjFailed, setOfflineProjFailed] = useState<string | null>(null);
   /** The bill the settle path acts on: the local provisional bill when capturing offline, else
    *  the authoritative server bill. */
   const settleBill = offlineCapture ? offlineBill : tables.bill;
@@ -979,16 +985,19 @@ export function useDineInWorkspace(input: {
     // settle legs), not the draft alone: the sidebar, Add Items, payment, split and print all read it.
     // The RAW cached map row (never the overlaid one — its total already includes the local delta).
     const raw = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
+    const tableId = selected.id;
     void getOperationalTableBill(input.offlineScope, raw)
       .then((p) => {
         if (!live) return;
         setOfflineProj(p);
+        setOfflineProjFailed(null);
         setOfflineBill(p.bill.orders.length > 0 ? p.bill : null);
       })
       .catch(() => {
         if (live) {
           setOfflineBill(null);
           setOfflineProj(null);
+          setOfflineProjFailed(tableId);
         }
       });
     return () => {
@@ -1072,6 +1081,32 @@ export function useDineInWorkspace(input: {
    * the same logical round and m224 replays rather than duplicating. It is
    * cleared only by `cart.reset()` after the server has definitively accepted.
    */
+  /** The selected table's local Dine-In session for an OFFLINE round: its open session, else a new one —
+   *  bound to the table's cached canonical bill when it has one (rc.9: round 1 pins expected_order_id, so
+   *  the rounds append to the SAME bill, never a second one). Re-derives the ONE projection at send time. */
+  const offlineSessionForSelected = useCallback(async () => {
+    if (!input.offlineScope || !selected) return null;
+    const existing = await getDineDraftForTable(input.offlineScope, selected.id);
+    if (existing) return existing;
+    const raw = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
+    const proj = await getOperationalTableBill(input.offlineScope, raw);
+    const canonicalOrderId =
+      proj.bill.orders.length > 0 && !proj.summaryOnly
+        ? (proj.orders.find((o) => o.orderId && !o.orderLocal)?.orderId ?? null)
+        : null;
+    return openTableOffline({
+      scope: input.offlineScope,
+      tableId: selected.id,
+      tableName: selected.name,
+      seats: selected.seats ?? null,
+      currency: proj.currency ?? input.currency,
+      baseOrderVersion: raw.pos_entity_version ?? null,
+      canonicalOrderId,
+      // rc.10 — a table reused after a local settle: the new bill's open replays after it.
+      afterSettleOpId: canonicalOrderId ? null : (proj.freedByOpId ?? proj.settlingOpId),
+    });
+  }, [input.offlineScope, input.currency, selected, tables.map]);
+
   const sendRound = useCallback(async () => {
     if (roundInFlight.current || !selected) return;
     if (!submitGate.allowed) return;
@@ -1083,30 +1118,8 @@ export function useDineInWorkspace(input: {
       // the durable capture succeeded. The online branch below is unchanged.
       if (offlineCapture && input.offlineScope) {
         const submitted = useCart.getState().lines;
-        let draft = await getDineDraftForTable(input.offlineScope, selected.id);
-        if (!draft) {
-          // rc.9 — an OCCUPIED table with a cached canonical bill: bind this local session to that open
-          // order (round 1 pins expected_order_id; the open op adopts the occupied table), so the rounds
-          // append to the SAME bill and the projection merges them — never a second bill.
-          // Re-derive the ONE projection at send time (never a stale panel copy).
-          const raw = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
-          const proj = await getOperationalTableBill(input.offlineScope, raw);
-          const canonicalOrderId =
-            proj.bill.orders.length > 0 && !proj.summaryOnly
-              ? (proj.orders.find((o) => o.orderId && !o.orderLocal)?.orderId ?? null)
-              : null;
-          draft = await openTableOffline({
-            scope: input.offlineScope,
-            tableId: selected.id,
-            tableName: selected.name,
-            seats: selected.seats ?? null,
-            currency: proj.currency ?? input.currency,
-            baseOrderVersion: raw.pos_entity_version ?? null,
-            canonicalOrderId,
-            // rc.10 — a table reused after a local settle: the new bill's open replays after it.
-            afterSettleOpId: canonicalOrderId ? null : (proj.freedByOpId ?? proj.settlingOpId),
-          });
-        }
+        const draft = await offlineSessionForSelected();
+        if (!draft) return;
         // 1.0.38 — STAGE (replace the unsent lines), never append: a retried Send after a failure that
         // followed staging must not send the same cart lines twice.
         await stageUnsentDraftLines(draft.local_session_id, submitted.map(draftLineFromCart));
@@ -1215,7 +1228,63 @@ export function useDineInWorkspace(input: {
       setRoundBusy(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch, tables.map, bumpProj, serverPathLost]);
+  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch, tables.map, bumpProj, serverPathLost, offlineSessionForSelected]);
+
+  /**
+   * 1.0.38 (native Bug 5) — OFFLINE quantity INCREASE of a sent line = a NEW round with the extra quantity
+   * (lib/offline/dineinOffline additionalRoundLineFor): the sent round stays immutable, the extra is new
+   * kitchen + inventory demand captured exactly once (the round's own client_op_id), and no bill version is
+   * needed — so it works on any table Add Items works on (incl. after an unsynced Move / Merge). Same gate
+   * as Add Items; one click = one round (in-flight latch shared with Send), never a toast storm.
+   */
+  const sendExtraQuantityOffline = useCallback(
+    async (line: BillLine, extra: number) => {
+      if (!input.offlineScope || !selected || roundInFlight.current) return;
+      if (!addItemsGate.allowed) {
+        toast.push({ tone: "warning", message: addItemsGate.reason ?? "Items can't be added to this bill right now." });
+        return;
+      }
+      roundInFlight.current = true;
+      setEditingLineId(line.id);
+      try {
+        const draft = await offlineSessionForSelected();
+        if (!draft) return;
+        const sentLocal = draft.lines.find((l) => l.line_id === line.id && l.sent_round !== null) ?? null;
+        const extraLine = additionalRoundLineFor(line, extra, sentLocal);
+        if (!extraLine) {
+          toast.push({ tone: "warning", message: "This item was sent before this device went offline. Add it again from the menu, or reconnect to change it." });
+          return;
+        }
+        await stageUnsentDraftLines(draft.local_session_id, [extraLine]);
+        const liveShift = useShift.getState().shift;
+        const updated = await sendRoundOffline(draft.local_session_id, {
+          currentShift: liveShift && input.shiftId === liveShift.id ? { id: liveShift.id, openedAt: liveShift.opened_at ?? null } : null,
+        });
+        const round = updated.rounds[updated.rounds.length - 1];
+        try {
+          await input.onKitchenBatch({
+            source: "dine_in",
+            orderId: updated.canonical_order_id ?? draft.local_session_id,
+            orderNumber: round ? `Round ${round.seq}` : "OFFLINE",
+            batchNo: round?.seq ?? null,
+            tableName: selected.name,
+            lines: [{ name: line.name, qty: extra, modifiers: line.modifiers.map((m) => ({ name: m.name, quantity: m.quantity })), note: line.kitchen_note, menuItemId: line.menu_item_id }],
+          });
+          if (round) await setRoundPrintState(updated.local_session_id, round.round_local_id, "printed");
+        } catch {
+          if (round) await setRoundPrintState(updated.local_session_id, round.round_local_id, "print_failed");
+        }
+        bumpProj();
+        toast.push({ tone: "success", message: `Added ${extra} more ${line.name} (offline)`, detail: "Sent to the kitchen as a new round — it syncs when you reconnect." });
+      } catch (e) {
+        toast.push({ tone: "warning", message: "The extra quantity could not be saved offline.", detail: classifyError(e).message });
+      } finally {
+        roundInFlight.current = false;
+        setEditingLineId(null);
+      }
+    },
+    [input.offlineScope, input.shiftId, input.onKitchenBatch, selected, addItemsGate, toast, offlineSessionForSelected, bumpProj],
+  );
 
   // --- Level 2D: settlement ---------------------------------------------------
 
@@ -1622,6 +1691,12 @@ export function useDineInWorkspace(input: {
   const editSentLine = useCallback(
     async (line: BillLine, newQuantity: number, reason: string | null = null) => {
       if (offlineCapture) {
+        // 1.0.38 (native Bug 5) — an INCREASE is new demand in a new round (never a rewrite of the sent
+        // round); a decrease / removal stays the audited line edit through the version chain.
+        if (newQuantity > line.quantity) {
+          await sendExtraQuantityOffline(line, newQuantity - line.quantity);
+          return;
+        }
         await captureSentEditOffline(
           line,
           (orderId, expectedVersion, clientOpId) =>
@@ -1697,7 +1772,7 @@ export function useDineInWorkspace(input: {
         setEditingLineId(null);
       }
     },
-    [tables, ctx, toast, pos, selected, input, offlineCapture, captureSentEditOffline, serverPathLost],
+    [tables, ctx, toast, pos, selected, input, offlineCapture, captureSentEditOffline, serverPathLost, sendExtraQuantityOffline],
   );
 
   const onEditSentQty = useCallback(
@@ -2480,13 +2555,19 @@ export function useDineInWorkspace(input: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [printingBill, readTableState, input, pos.tenantName, pos.branch.name, pos.userName, offlineCapture, offlineBill, selected]);
 
+  // 1.0.38 (native Bug 7) — OFFLINE the panel shows the selected table's OWN operational projection, an
+  // EMPTY one included (a free table: "No open bill" + Open table, by the approved workflow). Through the first
+  // 1.0.38 build an empty projection became `null` and fell back to the server bill — null offline, or another
+  // table's stale bill — so the panel rendered neither the Open table action nor its reason. While the
+  // projection of the newly selected table is being derived the panel shows its loading state, never blank.
+  const selectedProj = offlineCapture && offlineProj && selected && offlineProj.tableId === selected.id ? offlineProj : null;
   const bill = useCallback(
     () => (
       <TableBillPanel
         table={selected}
-        bill={offlineCapture ? (offlineBill ?? tables.bill) : tables.bill}
-        loading={offlineCapture ? false : tables.billLoading}
-        error={offlineCapture ? null : tables.billError}
+        bill={offlineCapture ? (selectedProj ? selectedProj.bill : null) : tables.bill}
+        loading={offlineCapture ? selected != null && selectedProj == null && offlineProjFailed !== selected.id : tables.billLoading}
+        error={offlineCapture ? (selected != null && selectedProj == null && offlineProjFailed === selected.id ? "This table's bill could not be read on this device." : null) : tables.billError}
         openGate={openGate}
         addItemsGate={addItemsGate}
         shiftOpen={hasOpenShift}
@@ -2510,7 +2591,7 @@ export function useDineInWorkspace(input: {
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, offlineBill, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
+    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, selectedProj, offlineProjFailed, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
   );
 
   const roundPanel = useCallback(
@@ -2789,5 +2870,9 @@ export function useDineInWorkspace(input: {
       subtotal: tables.bill?.total ?? 0,
     },
     selected,
+    /** 1.0.38 (native Bug 6) — the EFFECTIVE floor: the cached / canonical map overlaid with this device's
+     *  operational projection (local bills, settles, moves, merges). Open Tables + its rail count read THIS,
+     *  the same rows the Floor renders — never a second calculation over the raw map. */
+    effectiveTables: displayMap.tables,
   };
 }

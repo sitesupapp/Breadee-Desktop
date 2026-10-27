@@ -76,8 +76,11 @@ test("the rail entry is gated exactly like Dine-in, badges a COUNT, and opens th
     "open_tables is gated on canViewTables (tablesGate) and carries the count badge",
   );
   assert.match(pw, /<OpenTablesModal/, "the modal is rendered");
-  // The count comes from the already-loaded shared map, not a fetch of its own.
-  assert.match(pw, /openTablesCount\s*=\s*useMemo\(\s*\(\)\s*=>\s*selectOpenTables\(tableStore\.map\.tables\)\.length/);
+  // The count comes from state already in memory, not a fetch of its own. 1.0.38 (native Bug 6) — and from
+  // the EFFECTIVE floor the Dine-in map renders (cached map + this device's projection), never the raw map
+  // (which showed "All tables are settled" next to an occupied table opened offline).
+  assert.match(pw, /openTablesCount\s*=\s*useMemo\(\s*\(\)\s*=>\s*selectOpenTables\(effectiveTables\)\.length/);
+  assert.match(pw, /const effectiveTables = dineIn\.effectiveTables;/);
 });
 
 test("a row drills into the canonical Dine-in workspace with the table selected", () => {

@@ -270,8 +270,11 @@ async function defaultServer(): Promise<EntitlementServer> {
   };
 }
 
-let refreshInFlight: Promise<RefreshOutcome> | null = null;
-let lastRefreshFailureAt = 0;
+// 1.0.38 (native Bug 1/2) — PER USER: one user's failed / in-flight issuance never blocks or answers
+// another's. Through 1.0.38 one device-wide 5-minute backoff (and one shared in-flight promise) meant a
+// single failed attempt left every user signing in during the next 5 minutes without offline access.
+const refreshInFlight = new Map<string, Promise<RefreshOutcome>>();
+const lastRefreshFailureAt = new Map<string, number>();
 
 /**
  * Online only: register this device if needed, prove possession of its key with a
@@ -281,12 +284,23 @@ let lastRefreshFailureAt = 0;
  */
 export function refreshEntitlement(
   ids: { userId: string; tenantId: string; terminalId: string },
-  opts?: { server?: EntitlementServer; force?: boolean; nowMs?: () => number },
+  opts?: {
+    server?: EntitlementServer;
+    force?: boolean;
+    nowMs?: () => number;
+    /** 1.0.38 — is `ids.userId` still the ACTIVE user? Only then does the issued entitlement become the
+     *  active slot (a late answer for a user who switched out never lands on the next user). Default: yes. */
+    isActive?: () => boolean;
+    /** 1.0.38 — every verified issuance, for the per-user offline vault (that user's own copy). */
+    onIssued?: (jws: string, receivedAtMs: number) => Promise<void> | void;
+  },
 ): Promise<RefreshOutcome> {
-  if (refreshInFlight) return refreshInFlight;
+  const key = `${ids.userId}|${ids.tenantId}`;
+  const inFlight = refreshInFlight.get(key);
+  if (inFlight) return inFlight;
   const now = opts?.nowMs ?? Date.now;
-  if (!opts?.force && now() - lastRefreshFailureAt < REFRESH_FAILURE_BACKOFF_MS) return Promise.resolve({ ok: false, reason: "backoff" });
-  refreshInFlight = (async (): Promise<RefreshOutcome> => {
+  if (!opts?.force && now() - (lastRefreshFailureAt.get(key) ?? 0) < REFRESH_FAILURE_BACKOFF_MS) return Promise.resolve({ ok: false, reason: "backoff" });
+  const run = (async (): Promise<RefreshOutcome> => {
     const native = securityNative();
     const e = appEnv();
     if (!native.available() || !e) return { ok: false, reason: "no_device_key" };
@@ -323,20 +337,28 @@ export function refreshEntitlement(
       effectiveNowMs: res.server_time_ms,
     });
     if (!check.ok) return { ok: false, reason: `issued_${check.reason}` };
-    await storeSet("entitlement", res.entitlement);
-    guard = { ...trustServerTime(await loadGuard(localNow), res.server_time_ms, localNow), counter, entitlementReceivedAtMs: localNow };
+    // The user's OWN copy first (per-user vault): it survives a switch / sign-out / app close.
+    if (opts?.onIssued) await Promise.resolve(opts.onIssued(res.entitlement, localNow)).catch(() => undefined);
+    const active = opts?.isActive ? opts.isActive() : true;
+    if (active) await storeSet("entitlement", res.entitlement);
+    // The server clock + device counter are DEVICE state (always advanced); the active slot's receipt
+    // time only when this entitlement became the active slot.
+    const trusted = trustServerTime(await loadGuard(localNow), res.server_time_ms, localNow);
+    guard = { ...trusted, counter, entitlementReceivedAtMs: active ? localNow : trusted.entitlementReceivedAtMs };
     await persistGuard(true);
     return { ok: true, claims: check.claims, counterRegressed: res.counter_regressed === true };
   })()
     .catch((e: unknown): RefreshOutcome => ({ ok: false, reason: e instanceof Error ? e.message.slice(0, 80) : "refresh_failed" }))
     .then((r) => {
-      if (!r.ok) lastRefreshFailureAt = now();
+      if (!r.ok) lastRefreshFailureAt.set(key, now());
+      else lastRefreshFailureAt.delete(key);
       return r;
     })
     .finally(() => {
-      refreshInFlight = null;
+      refreshInFlight.delete(key);
     });
-  return refreshInFlight;
+  refreshInFlight.set(key, run);
+  return run;
 }
 
 export type DeviceStanding = "ok" | "device_revoked" | "access_revoked" | "unregistered" | "unknown";
@@ -362,8 +384,8 @@ export function __resetDeviceAuthorityForTests(): void {
   guard = null;
   guardPersistedSeen = 0;
   fingerprintCache = null;
-  refreshInFlight = null;
-  lastRefreshFailureAt = 0;
+  refreshInFlight.clear();
+  lastRefreshFailureAt.clear();
 }
 
 export { ENTITLEMENT_MAX_TTL_MS };

@@ -41,6 +41,10 @@ export type VaultUser = {
   verifier: VaultVerifier | null;
   /** Supabase session JSON, present only while this user is parked (not the active user). */
   parkedSession: string | null;
+  /** 1.0.38 (native Bug 1/2) — this user's OWN signed entitlement (+ when it was received), kept while the
+   *  user is active too (written at every issuance, never cleared by activation), so an app close, a
+   *  switch or a sign-out right after the first online sign-in can never leave them without offline access.
+   *  (Name kept for vault-format compatibility with the first 1.0.38 build.) */
   parkedEntitlement: string | null;
   parkedEntitlementReceivedAtMs: number | null;
   failedAttempts: number;
@@ -54,7 +58,7 @@ export type SavedUser = {
   userId: string;
   email: string;
   tenantName: string | null;
-  /** The user has a verifier, i.e. can sign in with a password offline. */
+  /** The user can sign in offline here: a password verifier AND their signed entitlement are on the device. */
   offlineReady: boolean;
 };
 
@@ -163,7 +167,7 @@ export async function listSavedUsers(): Promise<SavedUser[]> {
   const doc = await load();
   return Object.values(doc.users)
     .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((u) => ({ userId: u.userId, email: u.email, tenantName: u.tenantName, offlineReady: u.verifier !== null }));
+    .map((u) => ({ userId: u.userId, email: u.email, tenantName: u.tenantName, offlineReady: u.verifier !== null && !!u.parkedEntitlement }));
 }
 
 export async function getVaultUser(userId: string): Promise<VaultUser | null> {
@@ -233,30 +237,44 @@ export async function updateVaultContext(userId: string, patch: Partial<Authorit
   });
 }
 
-/** Park a user (switch user): keep their session + entitlement sealed in the vault. */
+/** Park a user (switch user): keep their session + entitlement sealed in the vault. 1.0.38 — an absent
+ *  entitlement (the active slot was empty) never erases the user's own kept copy. */
 export async function parkUser(userId: string, parked: { session: string | null; entitlement: string | null; entitlementReceivedAtMs: number | null }): Promise<void> {
   await mutate((doc) => {
     const u = doc.users[userId];
     if (!u) return;
     u.parkedSession = parked.session;
-    u.parkedEntitlement = parked.entitlement;
-    u.parkedEntitlementReceivedAtMs = parked.entitlementReceivedAtMs;
+    if (parked.entitlement) {
+      u.parkedEntitlement = parked.entitlement;
+      u.parkedEntitlementReceivedAtMs = parked.entitlementReceivedAtMs;
+    }
     u.updatedAt = Date.now();
   });
 }
 
-/** Activate a parked user: hand back their parked session + entitlement and clear the parked copy. */
+/** Activate a parked user: hand back their parked session + entitlement and clear the parked SESSION (the
+ *  active one is the live copy now). 1.0.38 — their entitlement copy STAYS: it is their offline authority
+ *  for a later sign-in on this device (through the first 1.0.38 build it was cleared here, and an app close
+ *  before the next switch left the user without offline access). */
 export async function unparkUser(userId: string): Promise<{ session: string | null; entitlement: string | null; entitlementReceivedAtMs: number | null }> {
   return mutate((doc) => {
     const u = doc.users[userId];
     const out = { session: u?.parkedSession ?? null, entitlement: u?.parkedEntitlement ?? null, entitlementReceivedAtMs: u?.parkedEntitlementReceivedAtMs ?? null };
     if (u) {
       u.parkedSession = null;
-      u.parkedEntitlement = null;
-      u.parkedEntitlementReceivedAtMs = null;
       u.updatedAt = Date.now();
     }
     return out;
+  });
+}
+
+/** 1.0.38 — a signed entitlement was issued (and verified) for this user: keep their own copy. */
+export async function storeUserEntitlement(userId: string, jws: string, receivedAtMs: number): Promise<void> {
+  await mutate((doc) => {
+    const u = doc.users[userId];
+    if (!u) return;
+    u.parkedEntitlement = jws;
+    u.parkedEntitlementReceivedAtMs = receivedAtMs;
   });
 }
 

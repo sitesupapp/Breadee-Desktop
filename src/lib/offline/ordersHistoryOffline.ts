@@ -16,7 +16,7 @@
 import { isBackendReachable } from "@/lib/offline/reachability";
 import Dexie from "dexie";
 import { localdb, revisionCached, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
-import { settleCoveredIds, settlePrecedence, settleStillCovers } from "@/lib/offline/operationalProjection";
+import { isStructuralOp, settleCoveredIds, settlePrecedence, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { UNSETTLED_STATUSES, operationsWithStatus, type OfflineOperation } from "@/lib/offline/operationLog";
 import { loadOrdersForDay, loadShiftOrders, toDayKey, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
@@ -79,8 +79,9 @@ export async function loadOrdersHistoryOfflineAware(scope: OrdersHistoryScope, d
     }
     const locals = await projectLocalOrders(scope).catch(() => [] as ShiftOpenOrder[]);
     const payOverlay = await localPaymentOverlay(scope.tenantId, scope.branchId, readAt).catch(() => new Map<string, string>());
+    const merges = await localMergeOverlay(scope.tenantId, scope.branchId).catch(() => [] as LocalMerge[]);
     // Online, only local rows the server does not have yet (still pending sync) join the canonical list.
-    return { orders: mergeOrdersHistory(rows, locals.filter((l) => l.local_pending), payOverlay), offline: false, limited: false, cachedAt: null };
+    return { orders: mergeOrdersHistory(rows, locals.filter((l) => l.local_pending), payOverlay, merges), offline: false, limited: false, cachedAt: null };
   }
   return readOrdersHistoryLocal(scope);
 }
@@ -94,8 +95,9 @@ export async function readOrdersHistoryLocal(scope: OrdersHistoryScope): Promise
   const snapAt = ok ? Date.parse(snap.cached_at) : NaN;
   const locals = await projectLocalOrders(scope).catch(() => [] as ShiftOpenOrder[]);
   const payOverlay = await localPaymentOverlay(scope.tenantId, scope.branchId, Number.isFinite(snapAt) ? snapAt : null).catch(() => new Map<string, string>());
+  const merges = await localMergeOverlay(scope.tenantId, scope.branchId).catch(() => [] as LocalMerge[]);
   return {
-    orders: mergeOrdersHistory(cached, locals, payOverlay),
+    orders: mergeOrdersHistory(cached, locals, payOverlay, merges),
     offline: true,
     limited: !ok,
     cachedAt: ok ? snap.cached_at : null,
@@ -110,7 +112,7 @@ export const PAYMENT_REFUSED = "refused";
  *  `payOverlay` comes from the ONE precedence rule (settlePrecedence): "paid" / "on_account" = a local
  *  settlement the snapshot does not show yet (it wins); PAYMENT_REFUSED = the server refused it — a LOCAL
  *  row never claims Paid for it (a canonical row is the server's own word and stands). */
-export function mergeOrdersHistory(cached: ShiftOpenOrder[], locals: ShiftOpenOrder[], payOverlay: Map<string, string>): ShiftOpenOrder[] {
+export function mergeOrdersHistory(cached: ShiftOpenOrder[], locals: ShiftOpenOrder[], payOverlay: Map<string, string>, merges: LocalMerge[] = []): ShiftOpenOrder[] {
   const byId = new Map<string, ShiftOpenOrder>();
   const canonical = new Set<string>();
   for (const o of cached) {
@@ -118,6 +120,27 @@ export function mergeOrdersHistory(cached: ShiftOpenOrder[], locals: ShiftOpenOr
     canonical.add(o.id);
   }
   for (const l of locals) if (!byId.has(l.id)) byId.set(l.id, l);
+  // 1.0.38 (native Bug 4) — a merge captured on this device (pending, or synced but not in this snapshot yet):
+  // its SOURCE bill moved into the primary. It shows the server's merged disposition ("Merged into #…",
+  // never Open / collectible, never a fake Paid or a plain Voided) — a clean source exactly as the server
+  // stores it (voided + merge provenance), a part-paid source completed for what it paid.
+  for (const m of merges) {
+    const primary = m.primaryIds.map((id) => byId.get(id)).find((o) => o != null) ?? null;
+    const into = primary?.id ?? m.primaryIds[0] ?? null;
+    if (!into) continue;
+    for (const sid of m.sourceIds) {
+      const o = byId.get(sid);
+      if (!o || o.id === into) continue;
+      if (o.merged_into_order_id || o.status === "refunded") continue; // the server's own word stands
+      byId.set(sid, {
+        ...o,
+        ...(m.partPaid.has(sid) ? { status: "completed", payment_status: "paid" } : { status: "voided" }),
+        merged_into_order_id: into,
+        merged_into_order_number: primary?.order_number ?? null,
+        local_pending: o.local_pending || m.pending,
+      });
+    }
+  }
   for (const [id, status] of payOverlay) {
     const o = byId.get(id);
     if (!o || o.status === "voided" || o.status === "refunded") continue;
@@ -129,6 +152,64 @@ export function mergeOrdersHistory(cached: ShiftOpenOrder[], locals: ShiftOpenOr
     if (o.payment_status !== "paid") byId.set(id, { ...o, payment_status: status, ...(status === "on_account" ? { status: "completed" } : {}), local_pending: true });
   }
   return [...byId.values()].sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
+}
+
+/** 1.0.38 (native Bug 4) — one merge this device captured: every id its source bills may appear under
+ *  (canonical order id, local session, local → canonical), the primary's ids, and the part-paid sources. */
+export type LocalMerge = { sourceIds: string[]; primaryIds: string[]; partPaid: Set<string>; pending: boolean };
+
+/**
+ * The merges captured on this device that a canonical snapshot may not show yet (a cancelled merge and one
+ * the SERVER refused merged nothing and are skipped). Bounded: the operation_type index, merges only.
+ */
+async function localMergeOverlay(tenantId: string | null, branchId: string | null): Promise<LocalMerge[]> {
+  if (!tenantId) return [];
+  const ops = (await localdb.operations.where("operation_type").equals("merge_tables").toArray()).filter(
+    (o) => isStructuralOp(o) && o.scope.tenant_id === tenantId && (o.scope.branch_id ?? null) === (branchId ?? null) && o.status !== "cancelled" && !structuralRefusedByServer(o),
+  );
+  if (ops.length === 0) return [];
+  const locals = new Set<string>();
+  for (const o of ops) {
+    const p = rec(o.payload);
+    for (const ref of Object.values(rec(p.orders))) {
+      const l = rec(ref).order_local;
+      if (typeof l === "string" && l !== "") locals.add(l);
+    }
+    for (const s of Object.values(rec(p.session_locals))) if (typeof s === "string" && s !== "") locals.add(s);
+  }
+  const ids = [...locals];
+  const maps = ids.length > 0 ? await localdb.entityMap.bulkGet(ids).catch(() => []) : [];
+  const canonicalOf = new Map<string, string>();
+  maps.forEach((m) => {
+    if (m && m.tenant_id === tenantId && m.canonical_id) canonicalOf.set(m.local_entity_id, m.canonical_id);
+  });
+  return ops.map((o) => buildLocalMerge(o, (l) => canonicalOf.get(l) ?? null));
+}
+
+/** PURE — the ids of one merge op's sources / primary (exported for tests). */
+export function buildLocalMerge(o: OfflineOperation, resolve: (local: string) => string | null): LocalMerge {
+  const p = rec(o.payload);
+  const orders = rec(p.orders);
+  const sessions = rec(p.session_locals);
+  const preview = rec(p.preview);
+  // Canonical ids first (the server's order, as the Orders list shows it once its round synced), then locals.
+  const idsOf = (tableId: string): string[] => {
+    const ref = rec(orders[tableId]);
+    const locals = [ref.order_local, sessions[tableId]].filter((v): v is string => typeof v === "string" && v !== "");
+    const canon = [typeof ref.order_id === "string" && ref.order_id !== "" ? ref.order_id : null, ...locals.map(resolve)].filter((v): v is string => !!v);
+    return [...new Set([...canon, ...locals])];
+  };
+  const primaryTable = typeof p.primary_table_id === "string" ? p.primary_table_id : "";
+  const sourceTables = Array.isArray(p.source_table_ids) ? (p.source_table_ids as unknown[]).filter((x): x is string => typeof x === "string") : [];
+  const sourceIds: string[] = [];
+  const partPaid = new Set<string>();
+  for (const t of sourceTables) {
+    const ids = idsOf(t);
+    sourceIds.push(...ids);
+    const retained = rec(preview[t]).retained_line_ids;
+    if (Array.isArray(retained) && retained.length > 0) for (const id of ids) partPaid.add(id);
+  }
+  return { sourceIds, primaryIds: idsOf(primaryTable), partPaid, pending: o.status !== "synced" };
 }
 
 /** The shift ids equivalent to `shiftId` on this device: itself + its offline-local ↔ canonical twin. */

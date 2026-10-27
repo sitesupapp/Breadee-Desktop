@@ -121,6 +121,10 @@ let revalidating: Promise<void> | null = null;
 
 export const FIRST_SIGNIN_MESSAGE = "FIRST SECURE SIGN-IN REQUIRES AN INTERNET CONNECTION. This user has not signed in online on this device yet.";
 export const WRONG_PASSWORD_MESSAGE = "Incorrect password.";
+/** 1.0.38 — a saved user whose signed offline access never reached this device (an older build, or the app
+ *  closed during the very first online sign-in): honest, and only the server can fix it. */
+export const OFFLINE_ACCESS_MISSING_MESSAGE =
+  "Offline sign-in isn't set up for this user on this device yet. Sign in once with an internet connection.";
 
 /** The server refused this identity (revoked / deleted / banned / password changed): stop NEW captures
  *  and stop future OFFLINE sign-ins for it. Recorded work is untouched and still syncs if accepted. */
@@ -198,6 +202,8 @@ function applyRestore(cache: AuthorityCache, clockRollback: boolean): void {
   // A rolled-back clock locks NEW captures from the first frame (the tick re-evaluates).
   setCaptureLock(clockRollback ? "clock_rollback" : standingLock);
   void securityTick().catch(() => undefined);
+  // 1.0.38 — the restored user's verified entitlement also becomes their own vault copy (background).
+  void keepActiveEntitlementInVault(c.userId, c.tenant?.id ?? null).catch(() => undefined);
 }
 
 /**
@@ -220,7 +226,7 @@ async function activateLocalUser(u: vault.VaultUser, password: string): Promise<
     await vault.parkUser(u.userId, { session: parked.session, entitlement: parked.entitlement, entitlementReceivedAtMs: parked.entitlementReceivedAtMs }).catch(() => undefined);
     await sealedAuthStorage.removeItem(AUTH_STORAGE_KEY).catch(() => undefined);
     await installEntitlementSlot(null, null).catch(() => undefined);
-    return REAUTH_MESSAGE;
+    return parked.entitlement ? REAUTH_MESSAGE : OFFLINE_ACCESS_MISSING_MESSAGE;
   }
   // The active authority = this user's own snapshot (its 7-day anchor unchanged).
   await writeAuthorityCache(u.context);
@@ -275,14 +281,55 @@ function backendLooksOffline(offlineMode: boolean): boolean {
 }
 
 /** Online: obtain / renew the signed entitlement for this device (never blocks the UI). */
-async function refreshEntitlementForSession(): Promise<void> {
+async function refreshEntitlementForSession(force = false): Promise<void> {
   const s = useSession.getState();
   if (!s.userId || !s.tenant?.id || s.offlineMode) return;
-  const r = await refreshEntitlement({ userId: s.userId, tenantId: s.tenant.id, terminalId: getDeviceIdentity().terminal_id });
+  const userId = s.userId;
+  const r = await refreshEntitlement(
+    { userId, tenantId: s.tenant.id, terminalId: getDeviceIdentity().terminal_id },
+    {
+      force,
+      // 1.0.38 (native Bug 1/2) — the issuance is this user's OWN offline authority (vault), and becomes the
+      // active slot only while they are still the active user (a late answer never lands on the next user).
+      isActive: () => useSession.getState().userId === userId,
+      onIssued: (jws, at) => vault.storeUserEntitlement(userId, jws, at),
+    },
+  );
   if (!r.ok && (r.reason === "device_revoked" || r.reason === "access_revoked")) {
     standingLock = r.reason;
     await clearEntitlement();
   }
+}
+
+/** Upper bound on how long a FIRST online sign-in waits for this device's offline access (entitlement). */
+export const PROVISION_WAIT_MS = 10_000;
+
+/**
+ * 1.0.38 (native Bug 1/2) — make an ONLINE sign-in a complete OFFLINE PROVISIONING of this user on this
+ * device. Through the first 1.0.38 build the signed entitlement was requested in the background AFTER the
+ * sign-in returned (≈4–6 s on staging); closing the app or losing the link inside that window left a user
+ * whose next offline sign-in could only answer "re-authorize". Now the sign-in waits (bounded) until the
+ * user's entitlement is verified on the device — immediately when a valid one is already held.
+ */
+async function provisionOfflineAccess(userId: string, tenantId: string | null): Promise<void> {
+  if (!entitlementEnforced()) return;
+  const held = await verifyStoredEntitlement({ userId, tenantId }).catch(() => null);
+  if (held?.ok) {
+    await keepActiveEntitlementInVault(userId, tenantId);
+    return;
+  }
+  await Promise.race([refreshEntitlementForSession(true).catch(() => undefined), new Promise((r) => setTimeout(r, PROVISION_WAIT_MS))]);
+}
+
+/** 1.0.38 — the ACTIVE slot holds a VERIFIED entitlement of this user that the vault does not have yet
+ *  (an install upgraded from the first 1.0.38 build, or an issuance before this change): copy it. */
+async function keepActiveEntitlementInVault(userId: string, tenantId: string | null): Promise<void> {
+  const u = await vault.getVaultUser(userId).catch(() => null);
+  if (!u) return;
+  const slot = await readEntitlementSlot().catch(() => ({ jws: null, receivedAtMs: null }));
+  if (!slot.jws || slot.jws === u.parkedEntitlement) return;
+  const check = await verifyStoredEntitlement({ userId, tenantId }).catch(() => null);
+  if (check?.ok) await vault.storeUserEntitlement(userId, slot.jws, slot.receivedAtMs ?? Date.now()).catch(() => undefined);
 }
 
 /**
@@ -706,8 +753,12 @@ export const useSession = create<SessionState>((set, get) => ({
       return { error: e instanceof Error ? e.message : "Could not sign in." };
     }
     if (error) return { error: error.message };
-    // A new server session supersedes any parked copy of this user's old one.
-    if (signedInUserId) await vault.unparkUser(signedInUserId).catch(() => undefined);
+    // A new server session supersedes any parked copy of this user's old one. 1.0.38 — their own (kept)
+    // entitlement becomes the active slot again, so provisioning below is instant when it is still valid.
+    if (signedInUserId) {
+      const parked = await vault.unparkUser(signedInUserId).catch(() => null);
+      if (parked?.entitlement) await installEntitlementSlot(parked.entitlement, parked.entitlementReceivedAtMs).catch(() => undefined);
+    }
     try {
       await get().loadContextOnline();
     } catch (e) {
@@ -719,6 +770,13 @@ export const useSession = create<SessionState>((set, get) => ({
     const uid = get().userId;
     if (uid) await vault.setVerifier(uid, await vault.createVerifier(password)).catch(() => undefined);
     pendingSecret = null;
+    // 1.0.38 (native Bug 1/2) — and its signed, device-bound entitlement (bounded wait): the sign-in returns
+    // with this user provisioned for offline sign-in on this device, not "soon, in the background".
+    if (uid) {
+      const tp = markStart();
+      await provisionOfflineAccess(uid, get().tenant?.id ?? null).catch(() => undefined);
+      recordSince("auth.offline_provision", tp);
+    }
     recordSince("auth.online_signin", t0);
     void get().loadSavedUsers();
     return { error: null };
@@ -744,7 +802,9 @@ export const useSession = create<SessionState>((set, get) => ({
       // Park this user's live session + entitlement in THEIR vault record: they can sign in again
       // offline, and their captured work keeps replaying under their own identity.
       const session = await sealedAuthStorage.getItem(AUTH_STORAGE_KEY).catch(() => null);
-      const ent = await readEntitlementSlot().catch(() => ({ jws: null, receivedAtMs: null }));
+      // 1.0.38 — park the active slot only when it verifiably belongs to THIS user (never another's).
+      const own = entitlementEnforced() ? (await verifyStoredEntitlement({ userId, tenantId: tenant?.id ?? null }).catch(() => null))?.ok === true : true;
+      const ent = own ? await readEntitlementSlot().catch(() => ({ jws: null, receivedAtMs: null })) : { jws: null, receivedAtMs: null };
       if (!(await vault.getVaultUser(userId).catch(() => null))) {
         // A user restored from an older build has no vault record yet: create it from the active
         // authority (no verifier — their next sign-in must be online once).
@@ -766,8 +826,9 @@ export const useSession = create<SessionState>((set, get) => ({
   },
 
   forgetUser: async (userId) => {
-    if (get().userId === userId) return get().signOut();
     await vault.forgetVaultUser(userId).catch(() => undefined);
+    // Removed FIRST, so the sign-out below keeps nothing of this user (its park is a no-op).
+    if (get().userId === userId) return get().signOut();
     await get().loadSavedUsers();
   },
 
@@ -782,6 +843,17 @@ export const useSession = create<SessionState>((set, get) => ({
 
   signOut: async () => {
     const leaving = get().userId;
+    const leavingTenant = get().tenant?.id ?? null;
+    // 1.0.38 (native Bug 1/2) — Sign Out ends the SERVER session but keeps this user's own offline sign-in
+    // on the device (password verifier + signed entitlement, bounded by its 7-day window): a cashier who
+    // signed out can sign in again offline with their password. "Remove" on the sign-in screen
+    // (forgetUser) is the one action that deletes it. Through the first 1.0.38 build Sign Out deleted it,
+    // and the next offline sign-in answered "first secure sign-in requires an internet connection".
+    if (leaving) {
+      const own = entitlementEnforced() ? (await verifyStoredEntitlement({ userId: leaving, tenantId: leavingTenant }).catch(() => null))?.ok === true : false;
+      const ent = own ? await readEntitlementSlot().catch(() => ({ jws: null, receivedAtMs: null })) : { jws: null, receivedAtMs: null };
+      await vault.parkUser(leaving, { session: null, entitlement: ent.jws, entitlementReceivedAtMs: ent.receivedAtMs }).catch(() => undefined);
+    }
     await supabase.auth.signOut().catch(() => undefined);
     // Final Foundation — a global sign-out that could not reach the server keeps the local
     // session; drop it locally too (this removes the SEALED session via the storage adapter).
@@ -793,9 +865,7 @@ export const useSession = create<SessionState>((set, get) => ({
     standingLock = null;
     // rc.10 — the offline authority must not survive in EITHER store (localStorage + IndexedDB mirror).
     await clearAuthorityCache();
-    // Offline-first recovery — Sign Out also removes this user's offline sign-in from the device.
     pendingSecret = null;
-    if (leaving) await vault.forgetVaultUser(leaving).catch(() => undefined);
     await resetUserScopedStores().catch(() => undefined);
     // Other users saved on this device still need the business's cached POS data offline: the
     // device-wide caches below are dropped only when nobody else can sign in here.

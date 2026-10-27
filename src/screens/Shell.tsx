@@ -98,7 +98,8 @@ export function Shell() {
               <Badge tone="red">No internet</Badge>
             )}
             {/* Offline-first recovery — Switch user keeps this user's offline sign-in on the device (works
-                without a connection); Sign out also removes it. Neither touches recorded work. */}
+                without a connection); 1.0.38 — so does Sign out (it ends the server session only; "Remove" on
+                the sign-in screen deletes a user's offline sign-in). Neither touches recorded work. */}
             <button
               onClick={async () => {
                 await s.switchUser();
@@ -115,7 +116,7 @@ export function Shell() {
                 navigate("/login", { replace: true });
               }}
               className="font-semibold text-sub hover:text-ink"
-              title="Sign out and remove your offline sign-in from this device"
+              title="Sign out. You can sign in again on this device, also offline (Remove it on the sign-in screen)."
             >
               Sign out
             </button>

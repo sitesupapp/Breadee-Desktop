@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "@/App";
 import { bootTheme } from "@/lib/theme/apply";
 import { rcLogStartup } from "@/lib/rcDiagnostics";
-import { setCaptureBuild } from "@/lib/offline/operationLog";
+import { captureBuildStamp, setCaptureBuild } from "@/lib/offline/operationLog";
 import { env } from "@/env";
 import "@/index.css";
 
@@ -17,7 +17,7 @@ bootTheme();
 rcLogStartup();
 
 // rc.10 — stamp every captured offline operation with the running build (queue forensics).
-setCaptureBuild(env.BUILD_SHA);
+setCaptureBuild(captureBuildStamp(env.BUILD_SHA, env.APP_VERSION));
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

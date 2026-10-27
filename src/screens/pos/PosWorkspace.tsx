@@ -1268,12 +1268,6 @@ function PosWorkspaceInner() {
   }, [online, rcSnapshot]);
 
   const tableStore = useTables();
-  // Open Tables is a lens over the SAME shared map the Dine-in workspace loads.
-  // The rail count is derived from state already in memory - no fetch of its own.
-  const openTablesCount = useMemo(
-    () => selectOpenTables(tableStore.map.tables).length,
-    [tableStore.map.tables],
-  );
   const refreshTables = useCallback(
     () => void useTables.getState().refresh({ tenantId, branchId: pos.branch.id }),
     [tenantId, pos.branch.id],
@@ -1417,6 +1411,12 @@ function PosWorkspaceInner() {
     // makes; the desktop never adds the cash to the drawer itself.
     refreshCashBox: () => shiftStore.refreshCashBox(),
   });
+  // Open Tables is a lens over the SAME effective floor the Dine-in workspace renders (1.0.38 native Bug 6:
+  // through the first 1.0.38 build it read the RAW cached map, so a bill opened / moved / merged on this
+  // device showed occupied on the Floor and "All tables are settled" here). The rail count is derived from
+  // state already in memory - no fetch of its own.
+  const effectiveTables = dineIn.effectiveTables;
+  const openTablesCount = useMemo(() => selectOpenTables(effectiveTables).length, [effectiveTables]);
   /** Add Items borrows the menu; the cart buffer then belongs to that table. */
   const addingToTable = dineInActive && dineIn.view === "add_items";
 
@@ -3176,7 +3176,7 @@ function PosWorkspaceInner() {
       <OpenTablesModal
         open={openTablesOpen}
         onClose={() => setOpenTablesOpen(false)}
-        tables={tableStore.map.tables}
+        tables={effectiveTables}
         loading={tableStore.loading}
         error={tableStore.error}
         onRetry={refreshTables}

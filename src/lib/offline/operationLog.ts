@@ -173,6 +173,18 @@ export function setCaptureBuild(build: string | null | undefined): void {
 export function currentCaptureBuild(): string | null {
   return captureBuild;
 }
+/**
+ * 1.0.38 (native Bug 3) — the stamp for this build: its git SHA, else its app version. The staging release
+ * workflow never injected VITE_BUILD_SHA, so every operation a Staging build captured carried NO stamp and the
+ * Sync Center filed current work as "earlier test build (rc.8/9)". A version stamp can never be mistaken for
+ * an unstamped pre-rc.10 capture.
+ */
+export function captureBuildStamp(sha: string | null | undefined, appVersion: string | null | undefined): string | null {
+  const s = (sha ?? "").trim();
+  if (s !== "") return s;
+  const v = (appVersion ?? "").trim();
+  return v !== "" && v !== "0.0.0" ? `v${v}` : null;
+}
 localdb.operations.hook("creating", (_pk, obj) => {
   const o = obj as OfflineOperation;
   if (o.captured_build == null && captureBuild) o.captured_build = captureBuild;

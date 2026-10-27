@@ -172,9 +172,13 @@ test("cold start with an active, valid authority restores the workspace without 
   assert.equal(t.length, 1);
 });
 
-test("Sign Out removes only that user's offline sign-in; the other saved user keeps theirs", async () => {
+test("1.0.38 (native Bug 1) — Sign Out KEEPS the user's offline sign-in; Remove (forgetUser) deletes only that user's", async () => {
   await useSession.getState().signIn("user-a@example.test", "pass-A-1");
   await useSession.getState().signOut();
+  assert.ok((await vault.getVaultUser("user-a"))?.verifier, "Sign Out keeps A's offline sign-in");
+  assert.equal((await useSession.getState().signIn("user-a@example.test", "pass-A-1")).error, null, "A signs in again offline");
+  await useSession.getState().switchUser();
+  await useSession.getState().forgetUser("user-a");
   assert.equal(await vault.getVaultUser("user-a"), null);
   assert.ok(await vault.getVaultUser("user-b"));
   assert.equal((await useSession.getState().signIn("user-a@example.test", "pass-A-1")).error, FIRST_SIGNIN_MESSAGE);

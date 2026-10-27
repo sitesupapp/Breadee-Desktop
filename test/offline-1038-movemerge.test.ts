@@ -55,6 +55,11 @@ import {
 import { captureEndShiftOffline, CLOSE_RELEVANT_TYPES } from "@/lib/offline/endShiftOffline";
 import { getDeviceIdentity } from "@/lib/device";
 import { mergeableSources, moveDestinations } from "@/lib/pos/tableOps";
+import { additionalRoundLineFor, stageUnsentDraftLines } from "@/lib/offline/dineinOffline";
+import { editTargetFor } from "@/lib/offline/operationalProjection";
+import { readOrdersHistoryLocal, mergeOrdersHistory } from "@/lib/offline/ordersHistoryOffline";
+import { selectOpenTables } from "@/lib/pos/openTables";
+import { isMergedSource, orderLifecycleLabel } from "@/lib/pos/shiftOrderSummary";
 import type { TableBill, TableSummary, BillOrder } from "@/types/tables";
 
 const DEV = getDeviceIdentity();
@@ -690,4 +695,108 @@ test("CLASSES: shift busy / deadlock → retryable; occupied / version / shift c
   assert.equal(posErrorCode({ message: "x", details: '{"pos_error_code":"MOVE_SOURCE_CHANGED"}' }), "MOVE_SOURCE_CHANGED");
   // ops the scope can see are the only ones projected
   assert.equal((await scopedOperations(SCOPE)).length, 0);
+});
+
+// ================================================================ 1.0.38 NATIVE DEFECTS 4 / 5 / 6 (PO: Table 8 + VIP22)
+
+const SHIFT_SCOPE = { kind: "shift" as const, tenantId: "t1", branchId: "b1", shiftId: "SRV-SHIFT-1" };
+
+test("NATIVE BUG 4: Merge VIP22 into Table 8 offline → Orders shows the source MERGED (not Open / Paid / plain Voided), never collectible; Floor agrees; after replay + Pay destination still merged; second drain 0", async () => {
+  const T8 = row("T8"), V22 = row("V22");
+  await offlineSession("T8", [{ name: "Burger", price: 300, qty: 1 }]);
+  const v = await offlineSession("V22", [{ name: "Soda", price: 50, qty: 2 }]);
+  const cap = await captureMergeTablesOffline({ scope: SCOPE, primary: T8, sources: [V22], mapLoadedAt: MAP_AT });
+  assert.ok(cap.ok);
+
+  const before = (await readOrdersHistoryLocal(SHIFT_SCOPE)).orders;
+  const src = before.find((o) => o.table_id === "V22" || o.id === v.local_session_id)!;
+  assert.ok(src, "the merged source is still listed (its history is kept)");
+  assert.equal(isMergedSource(src), true, `source disposition = merged (got ${src.status}/${src.payment_status})`);
+  assert.match(orderLifecycleLabel(src), /^Merged into #/);
+  assert.notEqual(src.payment_status, "paid", "never a fake Paid");
+  const dest = before.find((o) => o.table_id === "T8")!;
+  assert.equal(dest.status, "sent_to_kitchen", "the destination is the one open bill");
+  // Floor: source vacated, destination carries both bills' items (one projection).
+  const floor = overlayTableTotals([T8, V22], await getOperationalTableTotals(SCOPE, [T8, V22], undefined, MAP_AT));
+  assert.deepEqual(selectOpenTables(floor).map((t) => [t.id, t.total]), [["T8", 400]]);
+
+  // Pay the destination offline, then reconnect.
+  const d8 = (await getDineDraftForTable(SCOPE, "T8"))!;
+  const p8 = await proj(T8);
+  const settle = await settleTableOffline({ sessionId: d8.local_session_id, method: "cash", extraDependencyIds: p8.pendingMutationOpIds, covers: { orderIds: [], summary: false } });
+  assert.ok((await getOperation(settle.operationId))!.dependency_ids.includes(cap.operationId), "the payment replays after the merge");
+  const srv = new FakeServer([["T8", 1], ["V22", 1]]);
+  await drain(srv);
+  assert.equal(srv.names().filter((n) => n === "merge_v4").length, 1, "one merge effect");
+  assert.equal(srv.names().filter((n) => n === "pay_table").length, 1, "one payment call");
+  const [o8, o22] = [...srv.orders.values()];
+  assert.equal(o22.status, "voided");
+  assert.equal(o22.merged_into, o8.id);
+  assert.equal(o8.payment_status, "paid");
+  assert.deepEqual(srv.payments.map((p) => [p.order_id, p.amount]), [[o8.id, 400]], "exactly one payment, on the destination, for both bills");
+  const after = (await readOrdersHistoryLocal(SHIFT_SCOPE)).orders;
+  const srcAfter = after.find((o) => o.table_id === "V22")!;
+  assert.equal(isMergedSource(srcAfter), true, "still merged after reconnect");
+  const again = new FakeServer([["T8", 1], ["V22", 1]]);
+  await drain(again);
+  assert.equal(again.calls.length, 0, "second reconnect: zero new effects");
+});
+
+test("NATIVE BUG 4: a canonical snapshot that already holds the server's merged source keeps the server's word; a PART-PAID source completes (not voided)", () => {
+  const snap = [
+    { id: "S1", order_number: "0006", status: "voided", payment_status: "unpaid", merged_into_order_id: "P1", table_id: "V22", created_at: "1" },
+    { id: "P1", order_number: "0005", status: "completed", payment_status: "paid", table_id: "T8", created_at: "0" },
+  ] as never[];
+  const merged = mergeOrdersHistory(snap, [], new Map(), [{ sourceIds: ["S1"], primaryIds: ["P1"], partPaid: new Set(), pending: false }]);
+  assert.equal(merged.find((o) => o.id === "S1")?.merged_into_order_id, "P1");
+  const pp = mergeOrdersHistory([{ id: "S2", order_number: "0007", status: "sent_to_kitchen", payment_status: "partial", table_id: "A", created_at: "2" }, { id: "P2", order_number: "0008", status: "sent_to_kitchen", payment_status: "unpaid", table_id: "B", created_at: "3" }] as never[], [], new Map(), [{ sourceIds: ["S2"], primaryIds: ["P2"], partPaid: new Set(["S2"]), pending: true }]);
+  const s2 = pp.find((o) => o.id === "S2")!;
+  assert.equal(s2.status, "completed");
+  assert.equal(s2.payment_status, "paid");
+  assert.equal(s2.merged_into_order_number, "0008");
+});
+
+test("NATIVE BUG 5: after an unsynced MERGE the version-checked edit is (correctly) unavailable, and an INCREASE is a NEW round — replayed exactly once, no duplicate demand, second drain 0", async () => {
+  const T8 = row("T8"), V22 = row("V22");
+  const d8 = await offlineSession("T8", [{ name: "Burger", price: 300, qty: 1 }]);
+  await offlineSession("V22", [{ name: "Soda", price: 50, qty: 1 }]);
+  assert.ok((await captureMergeTablesOffline({ scope: SCOPE, primary: T8, sources: [V22], mapLoadedAt: MAP_AT })).ok);
+  const p = await proj(T8);
+  const burger = p.bill.orders[0].lines.find((l) => l.name === "Burger")!;
+  const edit = editTargetFor(p, burger.id);
+  assert.equal(edit.ok, false, "the root cause: no bill version is known after an unsynced merge");
+  // The fix: the extra quantity as a new round (same item, price snapshot, modifiers).
+  const sent = (await localdb.dineDrafts.get(d8.local_session_id))!.lines.find((l) => l.line_id === burger.id) ?? null;
+  const extra = additionalRoundLineFor(burger, 2, sent)!;
+  assert.equal(extra.quantity, 2);
+  assert.equal(extra.base_price, 300);
+  assert.notEqual(extra.line_id, burger.id, "a new line — the sent round is never rewritten");
+  const draft = (await getDineDraftForTable(SCOPE, "T8"))!;
+  await stageUnsentDraftLines(draft.local_session_id, [extra]);
+  await sendRoundOffline(draft.local_session_id);
+  const p2 = await proj(T8);
+  assert.equal(p2.gross, 300 + 50 + 600, "Floor / panel / payment total include the extra round");
+  assert.equal(additionalRoundLineFor({ ...burger, menu_item_id: null }, 1), null, "a pre-offline summary line cannot be re-ordered");
+  assert.equal(additionalRoundLineFor(burger, 0), null);
+
+  const srv = new FakeServer([["T8", 1], ["V22", 1]]);
+  await drain(srv);
+  const rounds = srv.calls.filter((c) => c.name === "round");
+  assert.equal(rounds.length, 3, "T8 round 1, V22 round 1, the extra-quantity round");
+  const o8 = [...srv.orders.values()].find((o) => o.table_id === "T8" && o.status === "open")!;
+  assert.deepEqual(o8.items.map((i) => [i.name, i.qty]).sort(), [["Burger", 1], ["Burger", 2], ["Soda", 1]], "original round + new round + merged item; nothing rewritten, nothing doubled");
+  assert.equal(srv.total(o8), 950);
+  const again = new FakeServer([["T8", 1], ["V22", 1]]);
+  await drain(again);
+  assert.equal(again.calls.length, 0, "second reconnect: zero new effects");
+});
+
+test("NATIVE BUG 6: Open Tables reads the effective floor — a bill opened offline is open there (Floor: occupied ⇔ Open Tables: listed); settled → removed; partial → remaining outstanding", async () => {
+  const T8 = row("T8"), T9 = row("T9");
+  await offlineSession("T8", [{ name: "Burger", price: 300, qty: 1 }]);
+  assert.equal(selectOpenTables([T8, T9]).length, 0, "the RAW cached map (what Open Tables read) says 0 — the PO's defect");
+  const floor = overlayTableTotals([T8, T9], await getOperationalTableTotals(SCOPE, [T8, T9], undefined, MAP_AT));
+  const open = selectOpenTables(floor);
+  assert.deepEqual(open.map((t) => [t.id, t.total, t.outstanding]), [["T8", 300, 300]]);
+  assert.equal(floor.find((t) => t.id === "T8")?.occupied, true);
 });

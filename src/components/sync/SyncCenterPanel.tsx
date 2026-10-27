@@ -336,7 +336,9 @@ export function SyncCenterPanel({
 /** Which build captured an operation, in operator words. */
 function eraLabel(era: SyncCenterRow["era"]): string {
   switch (era) {
-    case "HISTORICAL_RC8_RC9": return "earlier test build (rc.8/9)";
+    // 1.0.38 (native Bug 3) — an UNSTAMPED capture: rc.8/9, or a test build released without its build
+    // stamp (every pre-release build up to this one). Honest: it is not provably rc.8/9.
+    case "HISTORICAL_RC8_RC9": return "earlier build without a build stamp (rc.8/9 or an earlier test build)";
     case "HISTORICAL_RC10": return "rc.10";
     case "RC11": return "rc.11";
     case "RC12": return "rc.12";

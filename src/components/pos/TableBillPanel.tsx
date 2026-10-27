@@ -64,6 +64,10 @@ function submittedAt(iso: string | null): string | null {
 
 export function TableBillPanel(props: TableBillPanelProps) {
   const { table, bill } = props;
+  // 1.0.38 (native Bug 7) — a selected table with NO open bill known (an empty bill, or none at all once
+  // nothing is loading / failed) always shows the approved "No open bill" state with its Open table action
+  // (or the open gate's reason). Through the first 1.0.38 build a null bill rendered neither.
+  const noOpenBill = table != null && (bill ? bill.orders.length === 0 : !props.loading && !props.error);
 
   return (
     <section className="flex h-full min-h-0 flex-col border-l border-line bg-white" aria-label="Table bill">
@@ -112,7 +116,7 @@ export function TableBillPanel(props: TableBillPanelProps) {
           </div>
         )}
 
-        {table && !props.loading && !props.error && bill && bill.orders.length === 0 && (
+        {table && !props.loading && !props.error && noOpenBill && (
           <EmptyState
             title="No open bill"
             hint={
@@ -203,12 +207,12 @@ export function TableBillPanel(props: TableBillPanelProps) {
           </div>
         )}
 
-        {table && bill && bill.orders.length === 0 && props.openGate.allowed && (
+        {noOpenBill && props.openGate.allowed && (
           <Button size="lg" className="mb-2 w-full" onClick={props.onOpenTable}>
             Open table
           </Button>
         )}
-        {table && bill && bill.orders.length === 0 && !props.openGate.allowed && props.openGate.reason && (
+        {noOpenBill && !props.openGate.allowed && props.openGate.reason && (
           <p className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
             {props.openGate.reason}
           </p>

@@ -185,6 +185,10 @@ jobs:
           # 1.0.38: the 1.0.38 server contracts are live on STAGING (remainder
           # settlement R = T - P, move_v2 / merge_v4, bill pins, require_new).
           VITE_SERVER_1038_CONTRACTS: "1"
+          # 1.0.38 (native Bug 3): the build that CAPTURED each offline operation
+          # (Sync Center provenance). Missing here, staging work read as "rc.8/9".
+          VITE_BUILD_SHA: ${{ github.sha }}
+          VITE_BUILD_RUN: ${{ github.run_id }}
 
       # Vite inlines the URL into the bundle - read what was actually compiled.
       - name: Verify built bundle targets staging (not production)
@@ -229,6 +233,8 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: staging
           VITE_SERVER_1038_CONTRACTS: "1"
+          VITE_BUILD_SHA: ${{ github.sha }}
+          VITE_BUILD_RUN: ${{ github.run_id }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
 

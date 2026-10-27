@@ -1353,9 +1353,9 @@ export async function getOperationalTableTotals(
   onlyTables?: Set<string>,
   /** 1.0.38 — when `tables` was read (read START); omitted → the cached map's stamp. */
   mapLoadedAt?: number | null,
-): Promise<Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>> {
+): Promise<Map<string, OperationalTableTotal>> {
   if (onlyTables) tables = tables.filter((t) => onlyTables.has(t.id));
-  const out = new Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; pending: boolean }>();
+  const out = new Map<string, OperationalTableTotal>();
   if (!scope.tenantId) return out;
   // rc.12 — ONE read of the ops and ONE of the sessions for the whole floor (was one sessions read per
   // table), and a free table with no local session is skipped without any read: it can have no bill
@@ -1380,16 +1380,35 @@ export async function getOperationalTableTotals(
       if (p.settledLocally || p.vacatedLocally) out.set(t.id, { total: null, currency: t.currency, orders: 0, pending: true });
       continue;
     }
-    out.set(t.id, { total: p.gross, currency: p.currency, orders: Math.max(t.orders, 1), pending: p.mutationOpIds.length > 0 });
+    out.set(t.id, {
+      total: p.gross,
+      currency: p.currency,
+      orders: Math.max(t.orders, 1),
+      pending: p.mutationOpIds.length > 0,
+      // 1.0.38 (native Bug 6) — the SAME remaining-outstanding the bill panel / payment use (part payments
+      // collected on the server + captured here), so every surface reading the floor rows agrees.
+      collected: p.gross == null ? null : Math.round((p.collected + p.paidPending) * 100) / 100,
+      outstanding: p.outstanding,
+    });
   }
   return out;
 }
+
+/** One table's operational figures for the floor rows (card / list / Open Tables / Merge dialog). */
+export type OperationalTableTotal = {
+  total: number | null;
+  currency: CurrencyCode | null;
+  orders: number;
+  pending: boolean;
+  collected?: number | null;
+  outstanding?: number | null;
+};
 
 /** Overlay the operational totals onto the cached map rows (offline). Pure. A row with `orders: 0`
  *  is a table whose bill was settled locally: it renders (and gates) as AVAILABLE for a new order. */
 export function overlayTableTotals(
   tables: TableSummary[],
-  totals: Map<string, { total: number | null; currency: CurrencyCode | null; orders: number }>,
+  totals: Map<string, { total: number | null; currency: CurrencyCode | null; orders: number; collected?: number | null; outstanding?: number | null }>,
 ): TableSummary[] {
   if (totals.size === 0) return tables;
   return tables.map((t) => {
@@ -1400,7 +1419,8 @@ export function overlayTableTotals(
     }
     // 1.0.38 — a table whose bill exists only on this device (opened / moved / merged offline) is OCCUPIED on
     // the projected floor, so the Merge picker (mergeableSources) offers it and Move never targets it.
-    return { ...t, total: o.total, currency: o.currency ?? t.currency, orders: o.orders, occupied: true, ...(t.status === "available" ? { status: "occupied" as const } : {}) };
+    const amounts = o.outstanding !== undefined ? { collected: o.collected ?? null, outstanding: o.outstanding } : {};
+    return { ...t, total: o.total, currency: o.currency ?? t.currency, orders: o.orders, occupied: true, ...amounts, ...(t.status === "available" ? { status: "occupied" as const } : {}) };
   });
 }
 

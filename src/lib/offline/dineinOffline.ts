@@ -1057,6 +1057,39 @@ export async function retireClosedSessions(only?: { tenantId: string | null; bra
 // ---------------------------------------------------------------------------
 
 /** Map a live cart line to a draft line (captured prices preserved). */
+/**
+ * 1.0.38 (native Bug 5) — an offline quantity INCREASE of an already-sent line is a NEW kitchen round of the
+ * extra quantity: the sent round is immutable (the kitchen already has it), so the extra is new demand with
+ * the SAME item, price snapshot, modifiers, note (and, for a line this device sent, its ingredient
+ * customization). It needs no bill version (a round append never bumps it), so it works after an unsynced
+ * Move / Merge too — through the first 1.0.38 build the increase went through the version-checked line edit
+ * and was refused with "This bill's latest version isn't known on this device". Returns null when the line
+ * cannot be re-ordered (no menu item: a pre-offline summary line) or the delta is not a positive integer.
+ */
+export function additionalRoundLineFor(
+  line: { menu_item_id: string | null; name: string; base_price: number; kitchen_note: string | null; modifiers: SelectedModifier[] },
+  extra: number,
+  sentDraftLine?: Pick<DineDraftLine, "customization_json"> | null,
+): (Omit<DineDraftLine, "line_id" | "sent_round"> & { line_id: string }) | null {
+  if (!line.menu_item_id || !Number.isInteger(extra) || extra <= 0) return null;
+  return {
+    line_id: nid(),
+    menu_item_id: line.menu_item_id,
+    name: line.name,
+    base_price: line.base_price,
+    quantity: extra,
+    kitchen_note: line.kitchen_note,
+    modifiers: (line.modifiers as SelectedModifier[]).map((m) => ({
+      group_id: (m as { group_id?: string | null }).group_id ?? null,
+      option_id: (m as { option_id?: string | null }).option_id ?? null,
+      name: m.name,
+      price_delta: (m as { price_delta?: number }).price_delta ?? 0,
+      quantity: (m as { quantity?: number }).quantity ?? 1,
+    })),
+    ...(sentDraftLine?.customization_json ? { customization_json: sentDraftLine.customization_json } : {}),
+  };
+}
+
 export function draftLineFromCart(c: CartLine): Omit<DineDraftLine, "line_id" | "sent_round"> & { line_id: string } {
   return {
     // rc.9 — a fresh uuid, NEVER the cart key: cart keys are a per-process counter ("line-N") that
