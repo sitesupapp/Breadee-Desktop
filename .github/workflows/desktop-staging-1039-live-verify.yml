@@ -1,0 +1,122 @@
+name: desktop-staging-1039-live-verify
+
+# POST-PUBLISH proof for Breadee STAGING 1.0.39 (offline-first recovery) against the REAL staging channel
+# (read-only): on an EPHEMERAL Windows runner, install the published Breadee Staging 1.0.38, plant data
+# markers (localStorage, printer config, device identity, IndexedDB incl. a 'pending' and a
+# 'needs_attention' operation in the app's own Dexie log, a data-folder file), let the installed app's OWN
+# updater plugin read the live desktop-staging-channel/latest.json and download + install the real GitHub
+# Release asset, relaunch, launch a SECOND time, and GATE on version 1.0.39 + identity + every marker
+# preserved + Dexie verno 12 + getIdentifier allowed + asset SHA256 = SHA256SUMS. Then, on the updated
+# NATIVE app: the new sealed `offline-vault` round-trips through DPAPI (and an unlisted name is still
+# refused), and with the WebView network cut (CDP offline) a never-provisioned user's sign-in answers
+# "FIRST SECURE SIGN-IN REQUIRES AN INTERNET CONNECTION" at once with ZERO fetch attempts; native timings
+# recorded. Writes nothing anywhere (the vault probe restores what it found); production never involved.
+on:
+  push:
+    branches: [ "ci/desktop-staging-1039-live-verify" ]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download published Staging 1.0.38 + the published 1.0.39 assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ev, v138, v139 | Out-Null
+          gh release download desktop-staging-v1.0.38 -R sitesupapp/Breadee-Desktop -p "Breadee_Staging_1.0.38_x64-setup.exe" -D v138
+          gh release download desktop-staging-v1.0.39 -R sitesupapp/Breadee-Desktop -D v139
+          Get-ChildItem -Recurse v138, v139 | Select-Object FullName,Length | Format-Table -Auto
+          python -m pip install --quiet websocket-client
+          $m = Invoke-RestMethod "https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-staging-channel/latest.json"
+          $m | ConvertTo-Json -Depth 5 | Set-Content ev\live_latest.json -Encoding utf8
+          $m.notes | Set-Content v139\notes.txt -Encoding utf8 -NoNewline
+          $sum = ((Get-Content v139\SHA256SUMS.txt -Raw) -split '\s+')[0].ToLower()
+          $h = (Get-FileHash v139\Breadee_Staging_1.0.39_x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+          @{ version = $m.version; url = $m.platforms.'windows-x86_64'.url; sum = $sum; asset = $h; sigmatch = ((Get-Content v139\Breadee_Staging_1.0.39_x64-setup.exe.sig -Raw).Trim() -eq $m.platforms.'windows-x86_64'.signature.Trim()) } | ConvertTo-Json | Set-Content ev\live_channel.json -Encoding utf8
+          Get-Content ev\live_channel.json
+      - name: Install UNMODIFIED Breadee Staging 1.0.38 + launch + plant markers
+        shell: pwsh
+        run: |
+          Start-Process (Resolve-Path v138\Breadee_Staging_1.0.38_x64-setup.exe) -ArgumentList '/S' -Wait
+          Start-Sleep 5
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Breadee Staging" -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'setup|uninstall' } | Select-Object -First 1
+          if(-not $exe){ throw "installed staging exe not found" }
+          $exe.FullName | Set-Content pre_exe.txt
+          $exe.VersionInfo.FileVersion | Set-Content ev\pre_fileversion.txt -NoNewline
+          (Get-FileHash $exe.FullName -Algorithm SHA256).Hash | Set-Content ev\pre_exe_sha256.txt -NoNewline
+          Get-Process | Where-Object { $_.Path -eq $exe.FullName } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 5
+          foreach($root in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments','HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'){
+            New-Item -Path $root -Force | Out-Null
+            New-ItemProperty -Path $root -Name $exe.Name -Value '--remote-debugging-port=9222' -PropertyType String -Force | Out-Null
+          }
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
+          Start-Process $exe.FullName
+          Start-Sleep 15
+          python ci\desktop-staging-1039\cdp.py seed ev\seed.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop.staging"
+          New-Item -ItemType Directory -Force $dd | Out-Null
+          $marker = "qa-staging-1039-live marker $(New-Guid)"
+          $marker | Set-Content "$dd\qa-staging-marker.txt" -NoNewline
+          $marker | Set-Content ev\marker_pre.txt -NoNewline
+      - name: In-app update from the REAL staging channel (check -> download_and_install)
+        shell: pwsh
+        run: |
+          python ci\desktop-staging-1039\cdp.py update ev\update.json
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $deadline = (Get-Date).AddMinutes(6)
+          do { Start-Sleep 5; $v = (Get-Item $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion; "fileversion now: $v" } while(($v -notlike '1.0.39*') -and (Get-Date) -lt $deadline)
+          Start-Sleep 20
+      - name: Relaunch + post snapshot + recheck, then a SECOND launch + snapshot + native offline-first checks
+        shell: pwsh
+        run: |
+          $p = (Get-Content pre_exe.txt -Raw).Trim()
+          $cdp = $false; try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json -TimeoutSec 3 | Out-Null; $cdp = $true } catch {}
+          if(-not $cdp){ Get-Process | Where-Object { $_.Path -eq $p } | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 5; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'; Start-Process $p; Start-Sleep 10 }
+          python ci\desktop-staging-1039\cdp.py post ev\post.json ev\seed.json
+          python ci\desktop-staging-1039\cdp.py recheck ev\recheck.json
+          # Second launch: a clean process start of the updated app (graceful close, then start).
+          Get-Process | Where-Object { $_.Path -eq $p } | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+          Start-Sleep 8
+          Get-Process | Where-Object { $_.Path -eq $p } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep 5
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
+          Start-Process $p
+          Start-Sleep 10
+          python ci\desktop-staging-1039\cdp.py post ev\post2.json ev\seed.json
+          python ci\desktop-staging-1039\cdp.py vault ev\vault.json
+          python ci\desktop-staging-1039\cdp.py offline ev\offline.json
+          $dd = "$env:LOCALAPPDATA\app.breadee.desktop.staging"
+          $exes = @(Get-ChildItem "$env:LOCALAPPDATA\Breadee Staging" -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'setup|uninstall' })
+          $exe = $exes | Select-Object -First 1
+          $lc = Get-Content ev\live_channel.json -Raw | ConvertFrom-Json
+          $facts = [ordered]@{
+            live = $true
+            pre_exe = $p; post_exe = $exe.FullName; post_fileversion = $exe.VersionInfo.FileVersion; staging_exe_count = $exes.Count
+            pre_fileversion = (Get-Content ev\pre_fileversion.txt -Raw -ErrorAction SilentlyContinue)
+            pre_exe_sha256 = (Get-Content ev\pre_exe_sha256.txt -Raw); post_exe_sha256 = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash
+            prod_install_present = (Test-Path "$env:LOCALAPPDATA\Breadee") -or (Test-Path "$env:LOCALAPPDATA\app.breadee.desktop")
+            datadir = $dd; datadir_exists_post = (Test-Path $dd)
+            marker_pre = (Get-Content ev\marker_pre.txt -Raw -ErrorAction SilentlyContinue); marker_post = (Get-Content "$dd\qa-staging-marker.txt" -Raw -ErrorAction SilentlyContinue)
+            live_channel_version = $lc.version; live_channel_url = $lc.url
+            asset_sha256 = $lc.asset; asset_sha256_ok = (($lc.asset -eq $lc.sum) -and $lc.sigmatch)
+          }
+          $facts | ConvertTo-Json | Set-Content ev\facts.json -Encoding utf8
+          Get-Content ev\facts.json
+      - name: GATE - live update-in-place + zero data loss + staging identity + native offline-first checks
+        shell: pwsh
+        run: python ci\desktop-staging-1039\gate.py ev v139\notes.txt
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-staging-1039-live-verify-evidence
+          path: ev/**
+          if-no-files-found: ignore
