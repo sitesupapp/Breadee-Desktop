@@ -121,10 +121,33 @@ function terminalClass(message: string, e?: unknown): { retryClass: RetryClass; 
   const replayKind = classifyReplayError(e ?? new Error(message));
   if (replayKind === "transient") return { retryClass: "SERVER_RETRYABLE", code: "server_transient" };
   if (replayKind === "auth") return { retryClass: "SERVER_RETRYABLE", code: "auth_expired" };
+  // Final Foundation (PRICE) — a server price refusal is a visible CONFLICT for review, never "validation"
+  // or "permission" (the override refusal mentions permission) and never a retry: nothing was written.
+  const price = priceRefusalCode(message, e);
+  if (price) return { retryClass: "CONFLICT", code: price };
   const kind = terminalKind(message);
   if (kind === "permission") return { retryClass: "AUTHORITY_REFUSED", code: "permission" };
   if (kind === "shift_closed") return { retryClass: "CONFLICT", code: "shift_closed" };
   return { retryClass: "VALIDATION_TERMINAL", code: kind ?? "validation" };
+}
+
+/** Final Foundation (PRICE) — the server's line price check (_pos_assert_line_prices / _pos_assert_line_signs):
+ *  PRICE_CHANGED (a menu line's captured price is no longer the menu price), INVALID_LINE_QUANTITY /
+ *  INVALID_LINE_PRICE (quantity <= 0, negative price or option delta), PRICE_OVERRIDE_NOT_PERMITTED (custom
+ *  price without pos.price_override). The whole submit rolled back and the client_op_id was NOT recorded, so a
+ *  reviewed retry is still exactly-once. The structured code (details.pos_error_code) wins; the server's fixed
+ *  wording is the fallback for call sites that only keep the message. Returns the lower-case op code or null. */
+const PRICE_REFUSAL_CODES = new Set(["PRICE_CHANGED", "INVALID_LINE_QUANTITY", "INVALID_LINE_PRICE", "PRICE_OVERRIDE_NOT_PERMITTED"]);
+export function priceRefusalCode(message: string, e?: unknown): string | null {
+  const code = e !== undefined ? posErrorCode(e) : null;
+  if (code && PRICE_REFUSAL_CODES.has(code)) return code.toLowerCase();
+  const named = /\b(PRICE_CHANGED|INVALID_LINE_QUANTITY|INVALID_LINE_PRICE|PRICE_OVERRIDE_NOT_PERMITTED)\b/.exec(message);
+  if (named) return named[1].toLowerCase();
+  if (/changed since this order was taken/i.test(message)) return "price_changed";
+  if (/custom-priced item|has a custom price/i.test(message)) return "price_override_not_permitted";
+  if (/^Line \d+ \(.*\): (?:the quantity must be greater than zero|option ".*" must have a quantity greater than zero)/.test(message)) return "invalid_line_quantity";
+  if (/^Line \d+ \(.*\): (?:the price cannot be negative|option ".*" cannot have a negative price)/.test(message)) return "invalid_line_price";
+  return null;
 }
 
 /** open_shift — open (or adopt) the canonical server shift for a Case-2 offline-opened
@@ -264,7 +287,7 @@ export const takeawaySaleHandler: OperationHandler = {
         if (ctx.deps.isTransport(e)) {
           return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "order: transport", message: errMsg(e) };
         }
-        const t = terminalClass(errMsg(e));
+        const t = terminalClass(errMsg(e), e);
         return { ok: false, retryClass: t.retryClass, code: t.code, message: errMsg(e) };
       }
     }
@@ -428,7 +451,7 @@ export const dineinSendRoundHandler: OperationHandler = {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "send_round: transport", message: msg };
       if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "expected_order_mismatch", message: msg };
-      const t = terminalClass(msg);
+      const t = terminalClass(msg, e);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
     }
   },
@@ -1169,7 +1192,7 @@ export const editOrderLineHandler: OperationHandler = {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "edit_order_line: transport", message: msg };
       if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "edit_conflict", message: msg };
-      const t = terminalClass(msg);
+      const t = terminalClass(msg, e);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
     }
   },
@@ -1196,7 +1219,7 @@ export const addOrderItemsHandler: OperationHandler = {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "add_order_items: transport", message: msg };
       if (isConflictMessage(msg)) return { ok: false, retryClass: "CONFLICT", code: "add_conflict", message: msg };
-      const t = terminalClass(msg);
+      const t = terminalClass(msg, e);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };
     }
   },

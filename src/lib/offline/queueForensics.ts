@@ -13,7 +13,7 @@
 //
 // Every other parked op is left untouched (operator-driven Retry in the Sync Center).
 
-import { localdb } from "@/lib/offline/db";
+import { localdb, readAllOperationsMirrored } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import { closeEffectiveDependencies } from "@/lib/offline/endShiftOffline";
 import { canonicalIdFor } from "@/lib/offline/entityMap";
@@ -26,6 +26,7 @@ export type ForensicCategory =
   | "SHIFT_MAPPING_MISSING" // a sale whose offline-opened shift has no known canonical id — parked, nothing sent (manual review)
   | "SERVER_COORDINATION_REQUIRED" // pre-rc.12 offline table move/merge (now online-only)
   | "STALE_BILL_ROUND" // 1.0.38 (G1) — a round captured on a bill already closed elsewhere (EXPECTED_ORDER_MISMATCH)
+  | "PRICE_CONFLICT" // Final Foundation (PRICE) — the server's line price check refused the captured lines (nothing written)
   | "HISTORICAL_DEPENDENT" // parked only because a prerequisite failed
   | "EXPECTED_CONFLICT" // the server state changed elsewhere (version / settled / identity …)
   | "AUTHORITY_REFUSED" // permission refusal at replay
@@ -73,6 +74,16 @@ const CONFLICT_CODES = new Set([
 export const STALE_BILL_ROUND_REASON = "Round captured on a bill that was already closed — needs manager review";
 const STALE_ROUND = /expected_order_mismatch|bill changed|changed since it was opened offline/i;
 
+/** Final Foundation (PRICE) — the operator wording for a sale / round / line edit the server's price check
+ *  refused (handlers.priceRefusalCode). Deterministic: never auto-retried, never silently repriced. */
+export const PRICE_CONFLICT_REASON = "Price changed since this order was taken offline — needs review";
+const PRICE_CONFLICT_REASONS: Record<string, string> = {
+  price_changed: PRICE_CONFLICT_REASON,
+  price_override_not_permitted: "Custom price needs the price-override permission — needs manager review",
+  invalid_line_quantity: "A line has a zero or negative quantity — needs review",
+  invalid_line_price: "A line has a negative price — needs review",
+};
+
 /** PURE — classify one operation. */
 export function classifyOperation(op: OfflineOperation): { category: ForensicCategory; reason: string } {
   if (op.status === "synced") return { category: "SYNCED", reason: "synced" };
@@ -85,6 +96,7 @@ export function classifyOperation(op: OfflineOperation): { category: ForensicCat
   if (op.operation_type === "dinein_send_round" && (code === "expected_order_mismatch" || STALE_ROUND.test(msg))) {
     return { category: "STALE_BILL_ROUND", reason: STALE_BILL_ROUND_REASON };
   }
+  if (PRICE_CONFLICT_REASONS[code]) return { category: "PRICE_CONFLICT", reason: PRICE_CONFLICT_REASONS[code] };
   if (op.operation_type === "dinein_send_round" && LINE_ID_BUG.test(msg)) {
     return { category: "HISTORICAL_LINE_ID_BUG", reason: "pre-rc.10 round sent a non-uuid line id (22P02); nothing applied server-side" };
   }
@@ -284,6 +296,7 @@ export function dispositionOf(o: OfflineOperation, category: ForensicCategory, c
     case "HISTORICAL_SHIFTLESS_DINEIN":
     case "SERVER_COORDINATION_REQUIRED":
     case "STALE_BILL_ROUND":
+    case "PRICE_CONFLICT":
     case "HISTORICAL_DEPENDENT":
     case "SHIFT_MAPPING_MISSING":
       return "MANUAL_REVIEW";
@@ -340,7 +353,8 @@ function blockedBy(o: OfflineOperation, byId: Map<string, OfflineOperation>): st
       const next = (d.last_error_message ?? "").split(",").map((s) => s.trim()).map((id) => byId.get(id)).find((x): x is OfflineOperation => x != null && x.status === "needs_attention");
       if (next) return `${opLabel(d)}, itself blocked by ${describe(next, depth + 1)}`;
     }
-    const why = classifyOperation(d).category === "STALE_BILL_ROUND" ? STALE_BILL_ROUND_REASON : (d.last_error_message ?? d.last_error_code ?? "refused").slice(0, 100);
+    const dc = classifyOperation(d);
+    const why = dc.category === "STALE_BILL_ROUND" || dc.category === "PRICE_CONFLICT" ? dc.reason : (d.last_error_message ?? d.last_error_code ?? "refused").slice(0, 100);
     return `${opLabel(d)} (${why})`;
   };
   return `Blocked by ${failed.map((d) => describe(d, 0)).join("; ")}`;
@@ -434,8 +448,10 @@ export async function loadSyncCenterRows(input: {
 }): Promise<SyncCenterRow[]> {
   if (!input.tenantId) return [];
   const inScope = (o: OfflineOperation) => o.scope.tenant_id === input.tenantId && (input.branchId == null || (o.scope.branch_id ?? null) === input.branchId);
-  // ONE bulk read (measured faster than index cursors), then bounded in memory.
-  const all = await localdb.operations.toArray();
+  // Final Foundation (PERF) — the SAME whole-log algorithm as before, run over the shared, incrementally
+  // maintained in-memory mirror (db.ts readAllOperationsMirrored) instead of re-reading the store every tick:
+  // after a write only the touched rows are re-read. Read-only use (buildDiagnostic never mutates an op).
+  const all = await readAllOperationsMirrored();
   const scoped = all.filter(inScope);
   const unsettled = scoped.filter((o) => UNSETTLED.includes(o.status));
   const synced = scoped
