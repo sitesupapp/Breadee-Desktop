@@ -541,7 +541,183 @@ class BreadeeDB extends Dexie {
     this.version(11).stores({
       receipts: "ref, tenant_id, branch_id, created_at",
     });
+    // Version 12 - Final Foundation (PERF), ADDITIVE INDEXES ONLY. No store is added, removed or renamed,
+    // no primary key changes and there is NO upgrade callback: IndexedDB builds the new indexes over the
+    // existing rows in place (every v1..v11 index is restated, so none is dropped). The indexes turn the
+    // hot full-table scans into bounded indexed reads: recent synced ops ([status+synced_at]), reverse
+    // entity-map lookups (canonical_id), retention by age (entityMap.resolved_at), per-tenant open drafts /
+    // unsynced legacy sales ([tenant_id+status]) and scoped customer search ([tenant_id+branch_id]).
+    // (A compound index skips rows whose key part is null — callers fall back for null branches.)
+    this.version(12).stores({
+      operations: "operation_id, status, operation_type, created_at, client_op_id, local_entity_id, [status+synced_at]",
+      entityMap: "local_entity_id, entity_type, tenant_id, canonical_id, resolved_at",
+      posOfflineTxns: "local_txn_id, client_op_id, tenant_id, branch_id, status, created_at, cashier_user_id, [tenant_id+status]",
+      dineDrafts: "local_session_id, tenant_id, branch_id, table_id, status, cashier_user_id, device_id, updated_at, [tenant_id+status]",
+      posCustomers: "id, tenant_id, branch_id, phone_e164, name, [tenant_id+branch_id]",
+    });
+    // A (re)open — incl. after a delete / recreate — invalidates every revision-keyed read cache.
+    this.on(
+      "ready",
+      () => {
+        operationsRev++;
+        customersRev++;
+        for (const k of Object.keys(storeRevs)) storeRevs[k]++;
+        opsMirrorBroken = true;
+      },
+      true,
+    );
+    // Final Foundation (PERF) — a cheap change counter per hot store. Every mutation (add / put / update /
+    // delete, from any module, in any transaction) bumps it BEFORE and AFTER the write, so a read cache keyed
+    // on the revision observed at read START can never serve rows older than a completed write.
+    this.use({
+      stack: "dbcore",
+      name: "breadee-ops-revision",
+      create: (down) => ({
+        ...down,
+        table: (name) => {
+          const t = down.table(name);
+          const bump =
+            name === "operations"
+              ? () => void operationsRev++
+              : name === "posCustomers"
+                ? () => void customersRev++
+                : name in storeRevs
+                  ? () => void storeRevs[name]++
+                  : null;
+          if (!bump) return t;
+          // The operations mirror (readAllOperationsMirrored) learns WHICH rows a write touched — marked dirty
+          // before AND after the write, so a refresh overlapping the write still re-reads them afterwards.
+          const touch =
+            name === "operations"
+              ? (req: { type: string; keys?: readonly unknown[]; values?: readonly unknown[] }) => {
+                  if (req.type === "add" || req.type === "put" || req.type === "delete") {
+                    let n = 0;
+                    for (const k of req.keys ?? []) {
+                      if (typeof k === "string") (opsMirrorDirty.add(k), n++);
+                      else opsMirrorBroken = true;
+                    }
+                    if (req.type !== "delete") {
+                      for (const v of req.values ?? []) {
+                        const id = (v as { operation_id?: unknown } | null)?.operation_id;
+                        if (typeof id === "string") (opsMirrorDirty.add(id), n++);
+                        else opsMirrorBroken = true;
+                      }
+                    }
+                    if (n === 0) opsMirrorBroken = true; // nothing attributable: full re-read
+                  } else opsMirrorBroken = true; // deleteRange / clear / anything else: full re-read
+                }
+              : null;
+          return {
+            ...t,
+            mutate: (req) => {
+              bump();
+              touch?.(req);
+              return t.mutate(req).then((res) => {
+                bump();
+                touch?.(req);
+                return res;
+              });
+            },
+          };
+        },
+      }),
+    });
   }
+}
+
+let operationsRev = 0;
+let customersRev = 0;
+
+// Final Foundation (PERF) — a read-only, INCREMENTALLY maintained mirror of the whole operations store for the
+// projections (floor / table bill / delivery overlay). Profiled at the steady-state profile: re-reading the
+// whole log after every write (getAll + deserialise of every op) was ~90 % of a cold floor refresh, while
+// the projection itself is a few ms. Writes mark the touched ids dirty (middleware above); the next read
+// re-reads ONLY those rows (bulkGet — the committed truth, after any hook, honouring an aborted transaction)
+// instead of the whole store. Anything the middleware cannot attribute to ids (deleteRange / clear / a
+// reopen) forces one full re-read. Rows are returned in primary-key order, exactly like toArray().
+let opsMirror: Map<string, OfflineOperation> | null = null;
+let opsMirrorSorted: OfflineOperation[] | null = null;
+let opsMirrorBroken = true;
+const opsMirrorDirty = new Set<string>();
+const byOpId = (a: OfflineOperation, b: OfflineOperation) => (a.operation_id < b.operation_id ? -1 : a.operation_id > b.operation_id ? 1 : 0);
+
+/** Every operation, primary-key order (= localdb.operations.toArray()), from the incremental mirror. The
+ *  array and its rows are SHARED and must be treated as read-only (never mutate an op from it). */
+let opsMirrorInFlight: Promise<OfflineOperation[]> | null = null;
+export async function readAllOperationsMirrored(): Promise<OfflineOperation[]> {
+  // One refresh at a time: a caller arriving during a refresh waits for it, then re-checks (never a stale copy).
+  while (opsMirrorInFlight) await opsMirrorInFlight.catch(() => undefined);
+  if (opsMirror && !opsMirrorBroken && opsMirrorDirty.size === 0 && opsMirrorSorted) return opsMirrorSorted;
+  const p = refreshOpsMirror();
+  opsMirrorInFlight = p;
+  try {
+    return await p;
+  } finally {
+    if (opsMirrorInFlight === p) opsMirrorInFlight = null;
+  }
+}
+
+async function refreshOpsMirror(): Promise<OfflineOperation[]> {
+  if (!opsMirror || opsMirrorBroken) {
+    opsMirrorBroken = false;
+    opsMirrorDirty.clear();
+    const all = await localdb.operations.toArray();
+    opsMirror = new Map(all.map((o) => [o.operation_id, o]));
+    opsMirrorSorted = all;
+    return all;
+  }
+  if (opsMirrorDirty.size > 0) {
+    const ids = [...opsMirrorDirty];
+    opsMirrorDirty.clear();
+    const rows = await localdb.operations.bulkGet(ids);
+    if (opsMirrorBroken || !opsMirror) {
+      // Invalidated meanwhile (a range write / reopen): one full re-read.
+      opsMirror = null;
+      return refreshOpsMirror();
+    }
+    rows.forEach((r, i) => {
+      if (r) opsMirror!.set(ids[i], r);
+      else opsMirror!.delete(ids[i]);
+    });
+    opsMirrorSorted = null;
+  }
+  if (!opsMirrorSorted) opsMirrorSorted = [...opsMirror.values()].sort(byOpId);
+  return opsMirrorSorted;
+}
+const storeRevs: Record<string, number> = { posOfflineTxns: 0, dineDrafts: 0, pendingShifts: 0, snapshots: 0, entityMap: 0 };
+/** Monotonic revision of the `operations` store (bumped around every mutation). Read caches compare it. */
+export function operationsRevision(): number {
+  return operationsRev;
+}
+/** Monotonic revision of a tracked store (posOfflineTxns / dineDrafts / pendingShifts / snapshots / entityMap). */
+export function storeRevision(name: "posOfflineTxns" | "dineDrafts" | "pendingShifts" | "snapshots" | "entityMap"): number {
+  return storeRevs[name];
+}
+
+/**
+ * Final Foundation (PERF) — memoise an async read on the revisions of the stores it reads: served from memory
+ * while none of them changed since a COMPLETED read, re-read otherwise (a read overlapped by a write is not
+ * cached). The value is shared: callers must treat it as read-only.
+ */
+export function revisionCached<A extends unknown[], R>(
+  stores: ("operations" | "posOfflineTxns" | "dineDrafts" | "pendingShifts" | "snapshots" | "entityMap")[],
+  keyOf: (...a: A) => string,
+  read: (...a: A) => Promise<R>,
+): (...a: A) => Promise<R> {
+  const cache = new Map<string, { sig: string; value: R }>();
+  const sig = () => stores.map((s) => (s === "operations" ? operationsRev : storeRevs[s])).join(".");
+  return async (...a: A) => {
+    const key = keyOf(...a);
+    const s = sig();
+    const hit = cache.get(key);
+    if (hit && hit.sig === s) return hit.value;
+    const value = await read(...a);
+    if (sig() === s) {
+      if (cache.size > 16) cache.clear();
+      cache.set(key, { sig: s, value });
+    }
+    return value;
+  };
 }
 
 export const localdb = new BreadeeDB();
@@ -627,11 +803,22 @@ export async function cacheCustomers(records: CachedCustomer[]): Promise<void> {
   await localdb.posCustomers.bulkPut(records);
 }
 
-/** Every cached customer for a tenant+branch scope (for local search). */
+/** Every cached customer for a tenant+branch scope (for local search). Final Foundation (PERF): one
+ *  [tenant_id+branch_id] indexed read (a null branch is not in that index → the tenant read), memoised per
+ *  scope until the customer store changes, so a debounced keystroke search does not re-read 20k rows. The
+ *  returned array is shared: callers must not mutate it. */
+let customerScopeCache: { tenantId: string; branchId: string | null; rev: number; rows: CachedCustomer[] } | null = null;
 export async function listCachedCustomers(tenantId: string | null, branchId: string | null): Promise<CachedCustomer[]> {
   if (!tenantId) return [];
-  const all = await localdb.posCustomers.where("tenant_id").equals(tenantId).toArray();
-  return all.filter((c) => (c.branch_id ?? null) === (branchId ?? null));
+  const rev = customersRev;
+  const c = customerScopeCache;
+  if (c && c.rev === rev && c.tenantId === tenantId && c.branchId === (branchId ?? null)) return c.rows;
+  const rows =
+    branchId != null
+      ? await localdb.posCustomers.where("[tenant_id+branch_id]").equals([tenantId, branchId]).toArray()
+      : (await localdb.posCustomers.where("tenant_id").equals(tenantId).toArray()).filter((x) => (x.branch_id ?? null) === null);
+  if (customersRev === rev) customerScopeCache = { tenantId, branchId: branchId ?? null, rev, rows };
+  return rows;
 }
 
 /** rc.12 — cached customers with this exact normalised phone, via the phone_e164 INDEX (no table scan),
@@ -804,7 +991,9 @@ export async function listResumablePosTxns(
   branchId: string | null,
   cashierUserId: string | null,
 ): Promise<PosOfflineTxn[]> {
-  const all = await localdb.posOfflineTxns.toArray();
+  if (!tenantId) return [];
+  // Final Foundation (PERF): only this tenant's QUEUED rows ([tenant_id+status] index), never the whole store.
+  const all = await localdb.posOfflineTxns.where("[tenant_id+status]").equals([tenantId, "queued"]).toArray();
   return all
     .filter(
       (t) =>
@@ -1026,6 +1215,24 @@ export async function readCachedDeliveryProviders(tenantId: string | null, branc
   return { providers: Array.isArray(row.data) ? (row.data as unknown[]) : [], cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() };
 }
 
+/** Final Foundation (PERF) — many tables' cached bills in ONE read (bulkGet), scope-checked like
+ *  readCachedBill; keyed by table id (absent = no usable snapshot). */
+export async function readCachedBillsMany(
+  tableIds: string[],
+  tenantId: string | null,
+  branchId: string | null,
+): Promise<Map<string, { bill: unknown; cachedAt: number }>> {
+  const out = new Map<string, { bill: unknown; cachedAt: number }>();
+  if (!tenantId || tableIds.length === 0) return out;
+  const rows = await localdb.snapshots.bulkGet(tableIds.map((t) => billKey(branchId, t)));
+  rows.forEach((row, i) => {
+    if (!row || row.tenant_id !== tenantId || (row.branch_id ?? null) !== (branchId ?? null)) return;
+    const cachedAt = Date.parse(row.cached_at);
+    out.set(tableIds[i], { bill: row.data, cachedAt: Number.isFinite(cachedAt) ? cachedAt : Date.now() });
+  });
+  return out;
+}
+
 /** The cached open bill for a table, or null. Scope-checked. */
 export async function readCachedBill(tableId: string, tenantId: string | null, branchId: string | null): Promise<{ bill: unknown; cachedAt: number } | null> {
   if (!tenantId || !tableId) return null;
@@ -1118,7 +1325,8 @@ export async function listDineDrafts(scope: {
   terminalId?: string | null;
 }): Promise<DineDraft[]> {
   if (!scope.tenantId || !scope.cashierUserId || !scope.deviceId) return [];
-  const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
+  // Final Foundation (PERF): only the tenant's OPEN sessions ([tenant_id+status]), not its whole history.
+  const all = await localdb.dineDrafts.where("[tenant_id+status]").equals([scope.tenantId, "open"]).toArray();
   return all
     .filter(
       (d) =>
@@ -1438,8 +1646,13 @@ export async function readReceiptSnapshot(ref: string): Promise<CachedReceipt | 
 /** The most recent persisted receipt (optionally scoped to tenant), for a post-restart Ctrl+P
  *  reprint of the last transaction. */
 export async function readLatestReceiptSnapshot(tenantId?: string | null): Promise<CachedReceipt | null> {
-  const rows = await localdb.receipts.orderBy("created_at").reverse().toArray().catch(() => []);
-  const match = rows.find((r) => tenantId == null || r.tenant_id == null || r.tenant_id === tenantId);
+  // Final Foundation (PERF): newest-first cursor that stops at the first match (was: materialise every receipt).
+  const match = await localdb.receipts
+    .orderBy("created_at")
+    .reverse()
+    .filter((r) => tenantId == null || r.tenant_id == null || r.tenant_id === tenantId)
+    .first()
+    .catch(() => undefined);
   return match ?? null;
 }
 

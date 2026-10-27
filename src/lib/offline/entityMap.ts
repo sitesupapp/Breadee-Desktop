@@ -78,8 +78,12 @@ export async function canonicalIdForInScope(
 
 /** Bulk lookup of canonical ids for a set of local entity ids. */
 export async function canonicalIds(localEntityIds: string[]): Promise<Record<string, string | null>> {
+  // Final Foundation (PERF): ONE bulkGet (was one keyed read per id).
   const out: Record<string, string | null> = {};
-  for (const id of localEntityIds) out[id] = await canonicalIdFor(id);
+  const rows = localEntityIds.length > 0 ? await localdb.entityMap.bulkGet(localEntityIds) : [];
+  localEntityIds.forEach((id, i) => {
+    out[id] = rows[i] ? (rows[i] as EntityMapping).canonical_id : null;
+  });
   return out;
 }
 
@@ -108,8 +112,10 @@ export function evaluateDependencies(
     goneSynced?: ReadonlySet<string>;
   },
 ): DependencyState {
-  // 1. Circular-dependency detection over the operation dependency graph (DFS).
-  const cycle = findCycle(op.operation_id, byId);
+  // 1. Circular-dependency detection over the operation dependency graph (DFS). Final Foundation (PERF):
+  //    memoised per operation-set map — dependency_ids are immutable, so the verdict for a start node never
+  //    changes within a drain pass (was one DFS per op per fixpoint iteration).
+  const cycle = cycleFrom(op.operation_id, byId);
   if (cycle) return { ready: false, reason: "circular", cycle };
 
   // 2. Missing declared operation dependencies. (1.0.38: one proven synced-then-GC'd is not missing.)
@@ -186,6 +192,20 @@ function producerIndex(byId: Map<string, OfflineOperation>): Map<string, Offline
   }
   producerCache.set(byId, { size: byId.size, index });
   return index;
+}
+
+/** findCycle, memoised per (operation-set map, start) — same identity/size rule as producerIndex. */
+const cycleCache = new WeakMap<Map<string, OfflineOperation>, { size: number; memo: Map<string, string[] | null> }>();
+function cycleFrom(start: string, byId: Map<string, OfflineOperation>): string[] | null {
+  let c = cycleCache.get(byId);
+  if (!c || c.size !== byId.size) {
+    c = { size: byId.size, memo: new Map() };
+    cycleCache.set(byId, c);
+  }
+  if (c.memo.has(start)) return c.memo.get(start) as string[] | null;
+  const found = findCycle(start, byId);
+  c.memo.set(start, found);
+  return found;
 }
 
 /** DFS cycle detection starting from `start` over dependency_ids edges. Returns the cycle path or null. */

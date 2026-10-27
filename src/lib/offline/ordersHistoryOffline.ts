@@ -14,10 +14,10 @@
 // order, a payment or a shift.
 
 import { isBackendReachable } from "@/lib/offline/reachability";
-import { localdb, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
-import { canonicalIdFor } from "@/lib/offline/entityMap";
+import Dexie from "dexie";
+import { localdb, revisionCached, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
 import { settleCoveredIds, settlePrecedence, settleStillCovers } from "@/lib/offline/operationalProjection";
-import type { OfflineOperation } from "@/lib/offline/operationLog";
+import { UNSETTLED_STATUSES, operationsWithStatus, type OfflineOperation } from "@/lib/offline/operationLog";
 import { loadOrdersForDay, loadShiftOrders, toDayKey, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 export type OrdersHistoryScope =
@@ -128,8 +128,16 @@ export function mergeOrdersHistory(cached: ShiftOpenOrder[], locals: ShiftOpenOr
 async function shiftAliases(shiftId: string): Promise<Set<string>> {
   const out = new Set([shiftId]);
   const pend = await localdb.pendingShifts.toArray().catch(() => []);
+  // Final Foundation (PERF): ONE bulkGet of the still-unknown canonical ids (was one get per pending shift).
+  const need = pend.filter((p) => !p.server_shift_id).map((p) => p.local_shift_id);
+  const maps = need.length > 0 ? await localdb.entityMap.bulkGet(need).catch(() => []) : [];
+  const mapped = new Map<string, string>();
+  need.forEach((id, i) => {
+    const m = maps[i];
+    if (m?.canonical_id) mapped.set(id, m.canonical_id);
+  });
   for (const p of pend) {
-    const canonical = p.server_shift_id ?? (await canonicalIdFor(p.local_shift_id).catch(() => null));
+    const canonical = p.server_shift_id ?? mapped.get(p.local_shift_id) ?? null;
     if (p.local_shift_id === shiftId && canonical) out.add(canonical);
     if (canonical === shiftId) out.add(p.local_shift_id);
   }
@@ -142,6 +150,12 @@ function inDay(iso: string | null | undefined, day: string): boolean {
   return Number.isFinite(d.getTime()) && toDayKey(d) === day;
 }
 
+// Final Foundation (PERF) — profiled: the tenant's legacy sales + dine-in sessions reads were ~75 % of an
+// Orders-history refresh, which runs after every sale (12 call sites). Memoised on those stores' revisions
+// (db.ts revisionCached): re-read only after a write to them. Shared rows, read-only here.
+const tenantTxns = revisionCached(["posOfflineTxns"], (t: string) => t, (t: string) => localdb.posOfflineTxns.where("tenant_id").equals(t).toArray());
+const tenantDrafts = revisionCached(["dineDrafts"], (t: string) => t, (t: string) => localdb.dineDrafts.where("tenant_id").equals(t).toArray());
+
 /** Local orders of this scope (indexed by tenant; bounded by branch + shift/day). */
 async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenOrder[]> {
   const tenantId = scope.tenantId as string;
@@ -151,8 +165,8 @@ async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenO
     (shifts ? shift.some((s) => !!s && shifts.has(s)) : scope.kind === "day" ? inDay(created, scope.day) : false);
 
   const [txns, drafts] = await Promise.all([
-    localdb.posOfflineTxns.where("tenant_id").equals(tenantId).toArray().catch(() => [] as PosOfflineTxn[]),
-    localdb.dineDrafts.where("tenant_id").equals(tenantId).toArray().catch(() => [] as DineDraft[]),
+    tenantTxns(tenantId).catch(() => [] as PosOfflineTxn[]),
+    tenantDrafts(tenantId).catch(() => [] as DineDraft[]),
   ]);
   const out: ShiftOpenOrder[] = [];
   const scopedTxns = txns.filter((t) => inScope(t.branch_id, [t.shift_id, t.pending_shift_local_id, rec(t.order_payload).shift_id as string | undefined], t.created_at));
@@ -239,12 +253,42 @@ async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenO
 async function localPaymentOverlay(tenantId: string | null, branchId: string | null, snapshotAt: number | null): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!tenantId) return out;
-  const PAY_TYPES = ["pay_order", "on_account_order", "pay_table", "on_account_table", "takeaway_sale"];
-  const [ops, maps] = await Promise.all([
-    localdb.operations.where("operation_type").anyOf(PAY_TYPES).toArray(),
-    localdb.entityMap.where("tenant_id").equals(tenantId).toArray().catch(() => []),
+  const PAY_TYPES = new Set(["pay_order", "on_account_order", "pay_table", "on_account_table", "takeaway_sale"]);
+  // Final Foundation (PERF) — BOUNDED: a SYNCED settle at/before the snapshot read is "reflected" by
+  // settlePrecedence (skipped below), so only the unsettled / cancelled pay ops (status index) and the synced
+  // ones AFTER the snapshot ([status+synced_at] range) are read — never every pay op ever captured. With no
+  // snapshot (snapshotAt null) every synced one still counts ("confirmed"), as before.
+  const isPay = (o: OfflineOperation) => PAY_TYPES.has(String(o.operation_type));
+  const [open, synced] = await Promise.all([
+    operationsWithStatus([...UNSETTLED_STATUSES, "cancelled"], isPay),
+    (snapshotAt == null
+      ? localdb.operations.where("status").equals("synced").toArray()
+      : localdb.operations
+          .where("[status+synced_at]")
+          .between(["synced", new Date(snapshotAt).toISOString()], ["synced", Dexie.maxKey], false, true)
+          .toArray()
+    ).then((rows) => rows.filter(isPay)),
   ]);
-  const canonicalOf = new Map(maps.map((m) => [m.local_entity_id, m.canonical_id]));
+  // The old operation_type-index order (type, then id): a later op of the same order keeps winning.
+  const ops = [...open, ...synced].sort((a, b) => {
+    const ta = String(a.operation_type), tb = String(b.operation_type);
+    return ta < tb ? -1 : ta > tb ? 1 : a.operation_id < b.operation_id ? -1 : a.operation_id > b.operation_id ? 1 : 0;
+  });
+  // Only the mappings these ops can resolve (bulkGet; tenant-checked as the old tenant-wide read was).
+  const locals = new Set<string>();
+  for (const o of ops) {
+    const p = rec(o.payload);
+    if (o.local_entity_id) locals.add(o.local_entity_id);
+    if (typeof p.order_local === "string") locals.add(p.order_local);
+    const sl = rec(p.covers).session_local;
+    if (typeof sl === "string" && sl !== "") locals.add(sl);
+  }
+  const localIds = [...locals];
+  const maps = localIds.length > 0 ? await localdb.entityMap.bulkGet(localIds).catch(() => []) : [];
+  const canonicalOf = new Map<string, string>();
+  maps.forEach((m) => {
+    if (m && m.tenant_id === tenantId) canonicalOf.set(m.local_entity_id, m.canonical_id);
+  });
   const resolve = (local: string) => canonicalOf.get(local) ?? null;
   const refused = new Set<string>();
   for (const o of ops) {

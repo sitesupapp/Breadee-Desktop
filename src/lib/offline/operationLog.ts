@@ -19,7 +19,7 @@
 //     (type, schema_version) has no registered handler is QUARANTINED
 //     (`needs_attention`, reason `unknown_handler`) and never executed.
 
-import { localdb } from "@/lib/offline/db";
+import { localdb, operationsRevision } from "@/lib/offline/db";
 
 /** The business operation types Phase B knows. Compat handlers only — Phase B adds NO
  *  new offline business capability. Future phases register new types here. */
@@ -191,6 +191,20 @@ export const UNSETTLED_STATUSES: OperationStatus[] = [
 ];
 
 /**
+ * Final Foundation (PERF) — every op whose status is in `statuses`, in EXACTLY the order `where("status")
+ * .anyOf(statuses)` returns (status ascending, then operation_id), but as one equality range per status
+ * read in parallel with a bulk getAll (no JS filter inside the query: a filtered or multi-range anyOf read
+ * becomes a key-by-key cursor, which is the slow path — rc.12 measured cursor steps ~35x slower). The
+ * optional `filter` is applied in memory afterwards.
+ */
+export async function operationsWithStatus(statuses: readonly OperationStatus[], filter?: (o: OfflineOperation) => boolean): Promise<OfflineOperation[]> {
+  const sorted = [...new Set(statuses)].sort();
+  const parts = await Promise.all(sorted.map((s) => localdb.operations.where("status").equals(s).toArray()));
+  const all = parts.flat();
+  return filter ? all.filter(filter) : all;
+}
+
+/**
  * rc.10 — normalize a customer reference for an offline capture. A customer CREATED offline is selected
  * in the UI by its LOCAL id (the customer_upsert op's local_entity_id); sending that as `customer_id`
  * would replay a non-canonical id (the handlers only remap `customer_local`). Any id minted by an
@@ -339,6 +353,11 @@ export function onDrainRequested(listener: DrainListener): () => void {
   };
 }
 
+/** Test-only (long-run leak check): how many drain-request listeners are subscribed. */
+export function __drainListenerCountForTests(): number {
+  return drainListeners.size;
+}
+
 /** Ask the live POS (if mounted) to run a drain now. Never throws. */
 export function requestDrain(reason: string): void {
   for (const l of [...drainListeners]) {
@@ -351,7 +370,9 @@ export function requestDrain(reason: string): void {
 }
 
 /**
- * Phase F — garbage-collect SYNCED operations older than `olderThanMs` (default 7 days). NEVER
+ * Phase F — garbage-collect SYNCED operations older than `olderThanMs` (default 7 days). (Final Foundation:
+ * the production path is the bounded retention pass in retention.ts — 30-day window, legacy-row aware, run
+ * by drainOffline under the lock; this standalone helper is kept for direct callers.) NEVER
  * touches an unsettled op (pending/blocked/syncing/retryable/needs_attention) or a cancelled one
  * that is younger than the window — durable work is never dropped. Returns the count removed. The
  * entity map + sync history are intentionally retained (audit/remap continuity). Safe to call on
@@ -421,24 +442,42 @@ function matchesScope(s: OperationSummaryScope, row: { tenant_id: string; branch
 
 /**
  * 1.0.38 — per-state counts for UI badges (POS status bar, Sync Center chip). Every read goes through
- * the `status` INDEX (one cursor per state) — never a full-history scan. The synced cursor is NOT bounded:
- * the drain runs with `assumeLocked`, so the 7-day GC never executes (unchanged from 1.0.37, deliberately —
- * no synced history is deleted in this release). Hot paths that only need unsettled counts must pass
- * `includeSynced: false` to skip that cursor.
+ * the `status` INDEX (one cursor per state) — never a full-history scan. The synced cursor is bounded by
+ * the local retention window (Final Foundation: retention.ts, run by drainOffline). Hot paths that only
+ * need unsettled counts must pass `includeSynced: false` to skip that cursor.
  */
+const summaryCache = new Map<string, { rev: number; counts: Partial<OperationSummary> }>();
 export async function summarizeOperations(scope: OperationSummaryScope, opts?: { includeSynced?: boolean }): Promise<OperationSummary> {
   const out: OperationSummary = { pending: 0, syncing: 0, retryable: 0, waiting_dependency: 0, needs_attention: 0, synced: 0, legacy_pending: 0, unsettled: 0 };
   if (!scope.tenantId) return out;
   const m = (o: OfflineOperation) => matchesScope(scope, o.scope);
-  const count = (s: OperationStatus) => localdb.operations.where("status").equals(s).filter(m).count();
-  [out.pending, out.syncing, out.retryable, out.waiting_dependency, out.needs_attention] = await Promise.all([
-    count("pending"),
-    count("syncing"),
-    count("retryable"),
-    count("blocked_dependency"),
-    count("needs_attention"),
-  ]);
-  if (opts?.includeSynced !== false) out.synced = await count("synced");
+  // Final Foundation (PERF): one bulk getAll per status range + an in-memory scope filter (a filtered count()
+  // walks a cursor key by key — rc.12 measured cursor steps ~35x slower than a bulk read), and the op-log
+  // counts are memoised on the operations-store revision: the 15 s badge, the 10 s Sync Center tick and the
+  // chip re-read nothing while no op changed. (The legacy-row count below is always re-read.)
+  const includeSynced = opts?.includeSynced !== false;
+  // (null and undefined mean different filters for some dimensions — keep them distinct in the key)
+  const k = (v: string | null | undefined) => (v === undefined ? "\u0000u" : v === null ? "\u0000n" : v);
+  const key = [k(scope.tenantId), k(scope.branchId), k(scope.cashierUserId), k(scope.deviceId), k(scope.terminalId), String(includeSynced)].join("\u0001");
+  const rev = operationsRevision();
+  const hit = summaryCache.get(key);
+  if (hit && hit.rev === rev) {
+    Object.assign(out, hit.counts);
+  } else {
+    const count = async (s: OperationStatus) => (await localdb.operations.where("status").equals(s).toArray()).filter(m).length;
+    [out.pending, out.syncing, out.retryable, out.waiting_dependency, out.needs_attention] = await Promise.all([
+      count("pending"),
+      count("syncing"),
+      count("retryable"),
+      count("blocked_dependency"),
+      count("needs_attention"),
+    ]);
+    if (includeSynced) out.synced = await count("synced");
+    if (operationsRevision() === rev) {
+      if (summaryCache.size > 32) summaryCache.clear();
+      summaryCache.set(key, { rev, counts: { pending: out.pending, syncing: out.syncing, retryable: out.retryable, waiting_dependency: out.waiting_dependency, needs_attention: out.needs_attention, synced: out.synced } });
+    }
+  }
   out.legacy_pending = await countUnstagedLegacy(scope);
   out.unsettled = out.pending + out.syncing + out.retryable + out.waiting_dependency + out.needs_attention + out.legacy_pending;
   return out;
@@ -506,10 +545,7 @@ export async function claimableOperations(scope: {
   cashierUserId: string | null;
   deviceId: string | null;
 }): Promise<OfflineOperation[]> {
-  const rows = await localdb.operations
-    .where("status")
-    .anyOf(["pending", "blocked_dependency", "retryable", "syncing"])
-    .toArray();
+  const rows = await operationsWithStatus(["pending", "blocked_dependency", "retryable", "syncing"]);
   return rows
     .filter(
       (o) =>

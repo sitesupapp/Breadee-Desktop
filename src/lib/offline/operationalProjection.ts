@@ -17,7 +17,7 @@
 // go through the existing op-log engines; the server stays authoritative after sync. The ONLY totals
 // calculator is `foldBill` (lib/pos/tableBill) over captured line prices.
 
-import { localdb, readCachedBill, readCachedTableMap, readCachedDeliveryLines, readCachedDeliveryLinesMany, type DineDraft, type DineDraftLine, type PosOfflineTxn } from "@/lib/offline/db";
+import { localdb, readAllOperationsMirrored, readCachedBill, readCachedBillsMany, readCachedTableMap, readCachedDeliveryLines, readCachedDeliveryLinesMany, type DineDraft, type DineDraftLine, type PosOfflineTxn } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import type { EditTargetRef } from "@/lib/offline/handlers";
 import { foldBill } from "@/lib/pos/tableBill";
@@ -474,6 +474,15 @@ export function projectTableBill(input: {
    *  before it is inside the canonical floor and is no longer projected. Defaults to the snapshot time. */
   mapAt?: number | null;
 }): OperationalTableBill {
+  // Final Foundation (PERF) — only the op types this projection ever examines (dine-in open / round /
+  // settle / split / move / merge / item edits; every rule below tests one of them). Takeaway sales,
+  // payouts, customers, delivery edits … never change a table bill, so dropping them first is EXACT and
+  // keeps the per-table cost proportional to dine-in work instead of the whole log.
+  // The filtered set and its status-INDEPENDENT orderings (capture order, id lookups) are built once per
+  // ops array and shared by every table of a floor pass (see indexTableOps); everything status-dependent is
+  // still evaluated per call.
+  const ix = indexTableOps(input.ops);
+  if (ix.ops !== input.ops) input = { ...input, ops: ix.ops };
   const { tableId, mapRow } = input;
   const fetchedAt = input.canonical?.fetchedAt ?? input.freeMapAt ?? null;
   const structAt = input.mapAt !== undefined ? input.mapAt : fetchedAt;
@@ -485,7 +494,7 @@ export function projectTableBill(input: {
   // 0b — 1.0.38 OFFLINE MOVE / MERGE that took (part of) this table's bill AWAY: those canonical orders
   // leave this table's active bill (the table is free locally). A REFUSED / parked one moved nothing —
   // the bill stays here, with an attention badge (never silently re-applied).
-  const structural = [...input.ops].filter(isStructuralOp).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const structural = ix.structural; // = [...ops].filter(isStructuralOp).sort(by created_at) (stable)
   const vacatedOrders = new Set<string>();
   let vacatedByOpId: string | null = null;
   let vacatedAt = "";
@@ -506,7 +515,7 @@ export function projectTableBill(input: {
     vacatedAt = s.created_at;
   }
   // A move/merge that brought this session's bill HERE and is still unsynced: the bill's barrier.
-  const carrier = input.draft?.carried_op_id ? input.ops.find((o) => o.operation_id === input.draft?.carried_op_id) : undefined;
+  const carrier = input.draft?.carried_op_id ? ix.firstById.get(input.draft.carried_op_id) : undefined;
   const carriedActive = !!carrier && structuralProjected(carrier, structAt) && Array.isArray(input.draft?.carried_orders) && structuralTables(carrier).fills === tableId;
   const structuralOpIds = structural
     .filter((s) => structuralProjected(s, structAt) && structuralTables(s).fills === tableId)
@@ -518,9 +527,7 @@ export function projectTableBill(input: {
   // history (the draft + op are durable). Ops captured before rc.10 carry no `covers`: they close the
   // session they depend on and every canonical order already in a snapshot fetched before they were
   // captured (and the summary) — exactly the bill that was on screen when they were taken.
-  const tableSettles = [...input.ops]
-    .filter((o) => isTableSettleOp(o) && live(o) && !reflectedIn(o, fetchedAt) && rec(o.payload).table_id === tableId)
-    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const tableSettles = (ix.settlesByTable.get(tableId) ?? []).filter((o) => live(o) && !reflectedIn(o, fetchedAt)); // = sorted ∩ isTableSettleOp ∩ table_id === tableId
   // 1.0.38 (G1) — a payment captured AFTER an offline move / merge that the server then REFUSED: the bill
   // that op would have taken off this table never left it server-side, but the cashier already collected it
   // inside that payment (parked behind the refusal, never sent). It is HELD by that payment here too — never
@@ -558,10 +565,10 @@ export function projectTableBill(input: {
   }
   // 1.0.38 (G1) — an order a split leg PAID IN FULL (server: parent_completed) is closed for good: never
   // this table's open bill again, whatever an older snapshot / map summary still shows (closure is monotonic).
-  const completedLegs = input.ops.filter((o) => splitCompletedOrder(o) != null);
+  const completedLegs = ix.splitsInput.filter((o) => splitCompletedOrder(o) != null); // only a split leg can qualify
   const completedOrders = new Set(completedLegs.map((o) => splitCompletedOrder(o) as string));
   const completedNumbers = new Map<string, string>();
-  for (const o of input.ops) {
+  for (const o of completedOrders.size > 0 ? ix.roundsInput : []) {
     const num = o.result_meta?.order_number;
     if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && completedOrders.has(o.canonical_entity_id) && typeof num === "string" && num !== "") {
       completedNumbers.set(num, o.canonical_entity_id);
@@ -586,7 +593,7 @@ export function projectTableBill(input: {
   if (coveredSessions.size > 0) {
     const sessionOrder = new Map<string, string>();
     const coveredNumbers = new Set<string>();
-    for (const o of input.ops) {
+    for (const o of ix.roundsInput) {
       if (o.operation_type === "dinein_send_round" && o.canonical_entity_id && o.local_entity_id && coveredSessions.has(o.local_entity_id)) {
         sessionOrder.set(o.local_entity_id, o.canonical_entity_id);
         const num = o.result_meta?.order_number;
@@ -616,7 +623,7 @@ export function projectTableBill(input: {
   if (!coveredSummary && mapRow && mapRow.orders === 1 && typeof mapRow.order_number === "string" && completedNumbers.has(mapRow.order_number)) coveredSummary = true;
   // 1.0.38 (G1) — a session whose order a split leg paid in full is closed too — unless it holds work still
   // replaying after that (then it is the active bill and stays, with that work's own outcome).
-  const opById = (id: string) => input.ops.find((o) => o.operation_id === id);
+  const opById = (id: string) => ix.firstById.get(id);
   const draftCompleted =
     input.draft != null &&
     completedLegs.some((l) => l.canonical_entity_id === input.draft?.canonical_order_id || rec(l.payload).order_local === input.draft?.local_session_id) &&
@@ -711,7 +718,7 @@ export function projectTableBill(input: {
     meta.set(key, { ref: { kind: "summary" }, orderKey: key, creatorOpId: null, paidQty: 0 });
   }
 
-  const opsById = new Map(input.ops.map((o) => [o.operation_id, o]));
+  const opsById = ix.lastById; // = new Map(ops.map((o) => [o.operation_id, o])) (last wins)
   const mutationOpIds: string[] = [];
   const pendingMutationOpIds: string[] = [];
   const attentionOpIds: string[] = [];
@@ -819,10 +826,10 @@ export function projectTableBill(input: {
   };
 
   // 3 — item mutations, in capture order.
-  const sorted = [...input.ops].sort((a, b) => a.created_at.localeCompare(b.created_at));
-  for (const op of sorted) {
-    if (!live(op) || reflectedIn(op, fetchedAt)) continue;
+  for (const op of ix.mutationsSorted) {
+    // (type test first: the same verdict, without a Date.parse per op per table — profiled)
     if (op.operation_type !== "edit_order_line" && op.operation_type !== "add_order_items" && op.operation_type !== "edit_order") continue;
+    if (!live(op) || reflectedIn(op, fetchedAt)) continue;
     const key = keyOfOp(op);
     if (!key) continue;
     const po = porders.find((x) => x.key === key)!;
@@ -835,7 +842,7 @@ export function projectTableBill(input: {
 
   // 4 — split legs (unsynced) → paid quantities + amount captured.
   let paidPending = 0;
-  for (const op of sorted) {
+  for (const op of ix.splitsSorted) {
     if (op.operation_type !== "split_settle" || !live(op) || reflectedIn(op, fetchedAt)) continue;
     const key = keyOfOp(op);
     if (!key) continue;
@@ -944,10 +951,91 @@ export function historicalShiftlessNotice(orders: { order_number: string }[]): s
 export const SUMMARY_ONLY_SETTLE_MESSAGE =
   "Part of this bill was sent before this device went offline, so it can't be confirmed as settleable offline. Reconnect to settle it.";
 
-/** Load this scope's operations once (the projection filters by entity itself). */
+/** Final Foundation (PERF) — the op types the table-bill projection reads (see projectTableBill). */
+const TABLE_PROJECTION_TYPES = new Set([
+  "dinein_open_table",
+  "dinein_send_round",
+  "pay_table",
+  "on_account_table",
+  "split_settle",
+  "move_table",
+  "merge_tables",
+  "edit_order_line",
+  "add_order_items",
+  "edit_order",
+]);
+function isTableProjectionOp(o: OfflineOperation): boolean {
+  return TABLE_PROJECTION_TYPES.has(String(o.operation_type));
+}
+
+/** Final Foundation (PERF) — per ops-ARRAY (identity + length) derived data of the table projection that
+ *  does not depend on any op's mutable status: the table-type subset, its capture-order sort and its id maps.
+ *  Profiled (90-day profile, 45 projected tables): re-sorting the whole op set with localeCompare for every
+ *  table was the dominant floor cost. Built once, shared by every table of one floor pass, read-only. */
+type TableOpsIndex = {
+  len: number;
+  ops: OfflineOperation[];
+  sorted: OfflineOperation[];
+  structural: OfflineOperation[];
+  firstById: Map<string, OfflineOperation>;
+  lastById: Map<string, OfflineOperation>;
+  /** Table settle ops (isTableSettleOp) by payload.table_id, capture order. (type + payload are immutable) */
+  settlesByTable: Map<unknown, OfflineOperation[]>;
+  /** Item mutations (edit_order_line / add_order_items / edit_order) and split legs, capture order. */
+  mutationsSorted: OfflineOperation[];
+  splitsSorted: OfflineOperation[];
+  /** Split legs and rounds in INPUT order (the order the per-table loops iterated before). */
+  splitsInput: OfflineOperation[];
+  roundsInput: OfflineOperation[];
+};
+const tableOpsIndexCache = new WeakMap<OfflineOperation[], TableOpsIndex>();
+function indexTableOps(raw: OfflineOperation[]): TableOpsIndex {
+  const hit = tableOpsIndexCache.get(raw);
+  if (hit && hit.len === raw.length) return hit;
+  const ops = raw.some((o) => !isTableProjectionOp(o)) ? raw.filter(isTableProjectionOp) : raw;
+  const sorted = [...ops].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const firstById = new Map<string, OfflineOperation>();
+  const lastById = new Map<string, OfflineOperation>();
+  for (const o of ops) {
+    if (!firstById.has(o.operation_id)) firstById.set(o.operation_id, o);
+    lastById.set(o.operation_id, o);
+  }
+  // Stable sort: filtering the sorted list == sorting the filtered list.
+  const settlesByTable = new Map<unknown, OfflineOperation[]>();
+  for (const o of sorted) {
+    if (!isTableSettleOp(o)) continue;
+    const t = rec(o.payload).table_id;
+    const list = settlesByTable.get(t);
+    if (list) list.push(o);
+    else settlesByTable.set(t, [o]);
+  }
+  const isMutation = (o: OfflineOperation) => o.operation_type === "edit_order_line" || o.operation_type === "add_order_items" || o.operation_type === "edit_order";
+  const ix: TableOpsIndex = {
+    len: raw.length,
+    ops,
+    sorted,
+    structural: sorted.filter(isStructuralOp),
+    firstById,
+    lastById,
+    settlesByTable,
+    mutationsSorted: sorted.filter(isMutation),
+    splitsSorted: sorted.filter((o) => o.operation_type === "split_settle"),
+    splitsInput: ops.filter((o) => o.operation_type === "split_settle"),
+    roundsInput: ops.filter((o) => o.operation_type === "dinein_send_round"),
+  };
+  tableOpsIndexCache.set(raw, ix);
+  return ix;
+}
+
+/** Load this scope's operations once (the projection filters by entity itself). Final Foundation (PERF):
+ *  served from the incremental operations mirror (db.ts readAllOperationsMirrored — invalidated per touched
+ *  row by EVERY write), so the floor's two passes, a table detail and the delivery overlay share one copy
+ *  and a write costs a re-read of only the rows it touched. A fresh filtered array is returned each call;
+ *  the op objects are shared and are treated as read-only by every projection (they never were mutated here). */
 export async function scopedOperations(scope: ProjectionScope): Promise<OfflineOperation[]> {
   if (!scope.tenantId) return [];
-  const all = await localdb.operations.toArray();
+  // The incrementally maintained mirror (db.ts): after a capture only the touched rows are re-read.
+  const all = await readAllOperationsMirrored();
   return all.filter((o) => opInScope(o, scope));
 }
 
@@ -955,7 +1043,8 @@ export async function scopedOperations(scope: ProjectionScope): Promise<OfflineO
  *  `find` always picks the table's latest session (an older one is never its bill: see sessionClosure). */
 export async function openDraftsInScope(scope: ProjectionScope): Promise<DineDraft[]> {
   if (!scope.tenantId) return [];
-  const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
+  // Final Foundation (PERF): the tenant's OPEN sessions only ([tenant_id+status]), not its closed history.
+  const all = await localdb.dineDrafts.where("[tenant_id+status]").equals([scope.tenantId, "open"]).toArray();
   return all
     .filter(
       (d) =>
@@ -1067,10 +1156,12 @@ export async function getOperationalTableBill(
   preloadedDrafts?: DineDraft[],
   /** 1.0.38 — when the map holding `table` was read (read START). Omitted → the cached map's stamp. */
   mapLoadedAt?: number | null,
+  /** Final Foundation (PERF) — the table's cached bill, read in bulk by a whole-floor caller (null = none). */
+  preloadedBill?: { bill: unknown; cachedAt: number } | null,
 ): Promise<OperationalTableBill> {
   const free = table.orders === 0;
   const [cached, draft, ops, mapAt] = await Promise.all([
-    readCachedBill(table.id, scope.tenantId, scope.branchId).catch(() => null),
+    preloadedBill !== undefined ? Promise.resolve(preloadedBill) : readCachedBill(table.id, scope.tenantId, scope.branchId).catch(() => null),
     preloadedDrafts ? Promise.resolve(preloadedDrafts.find((d) => d.table_id === table.id) ?? null) : openDraftForTable(scope, table.id),
     preloadedOps ? Promise.resolve(preloadedOps) : scopedOperations(scope),
     mapLoadedAt !== undefined
@@ -1126,13 +1217,16 @@ export async function tablesWithUnreflectedWork(
   const attentionSettle = new Set<string>();
   const refusedSettle = new Map<string, string>();
   const structuralHold = new Set<string>();
-  const ops = (await scopedOperations(scope)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  // Final Foundation (PERF): only ops that act on a table, sorted (the same relative order as sorting all of
+  // them first), and one reflectedIn per op.
+  const ops = (await scopedOperations(scope)).filter((o) => o.status !== "cancelled" && tablesOfOp(o).length > 0).sort((a, b) => a.created_at.localeCompare(b.created_at));
   for (const o of ops) {
     if (o.status === "cancelled") continue;
     const ts = tablesOfOp(o);
     if (ts.length === 0) continue;
-    if (!reflectedIn(o, mapLoadedAt)) for (const x of ts) touched.add(x);
-    if (!reflectedIn(o, mapLoadedAt) && workStillReplays(o)) for (const x of ts) structuralHold.add(x);
+    const unreflected = !reflectedIn(o, mapLoadedAt);
+    if (unreflected) for (const x of ts) touched.add(x);
+    if (unreflected && workStillReplays(o)) for (const x of ts) structuralHold.add(x);
     const t = ts[0];
     const settle = isTableSettleOp(o);
     if (!settle) continue;
@@ -1272,9 +1366,13 @@ export async function getOperationalTableTotals(
     mapLoadedAt !== undefined ? Promise.resolve(mapLoadedAt) : readCachedTableMap(scope.tenantId, scope.branchId).then((m) => m?.cachedAt ?? null).catch(() => null),
   ]);
   const withSession = new Set(drafts.map((d) => d.table_id));
-  for (const t of tables) {
-    if (t.orders === 0 && !withSession.has(t.id)) continue;
-    const p = await getOperationalTableBill(scope, t, ops, drafts, mapAt);
+  // Final Foundation (PERF) — filter to the table-projection op types ONCE for the whole floor (exact: the
+  // per-table projection ignores every other type), and the projected tables' cached bills in ONE bulk read.
+  const floorOps = ops.filter(isTableProjectionOp);
+  const projected = tables.filter((t) => !(t.orders === 0 && !withSession.has(t.id)));
+  const bills = await readCachedBillsMany(projected.map((t) => t.id), scope.tenantId, scope.branchId).catch(() => null);
+  for (const t of projected) {
+    const p = await getOperationalTableBill(scope, t, floorOps, drafts, mapAt, bills ? (bills.get(t.id) ?? null) : undefined);
     if (p.bill.orders.length === 0 && t.orders === 0) continue;
     if (p.bill.orders.length === 0) {
       // rc.10 — the canonical bill the map still shows was SETTLED locally: the table is available.
@@ -1632,7 +1730,8 @@ export function txnInScope(txn: PosOfflineTxn | null | undefined, scope: Project
 
 /** rc.11 — the local ids (offline-created order / txn) that resolved to this canonical order. */
 export async function localAliasesOf(canonicalId: string): Promise<string[]> {
-  const rows = await localdb.entityMap.filter((m) => m.canonical_id === canonicalId).toArray().catch(() => []);
+  // Final Foundation (PERF): the v12 canonical_id INDEX (was a full entity-map scan per call).
+  const rows = await localdb.entityMap.where("canonical_id").equals(canonicalId).toArray().catch(() => []);
   return rows.map((m) => m.local_entity_id);
 }
 
@@ -1654,9 +1753,15 @@ export async function overlayDeliveryQueue(
   if (ops.length === 0) return rows;
   // Reverse entity map (canonical → local ids) once, so ops captured against an offline-created order
   // still touch its canonical row after the order itself synced.
-  const maps = await localdb.entityMap.toArray().catch(() => []);
+  // Final Foundation (PERF): only the mappings of THESE rows (canonical_id index), not the whole map.
+  const rowIds = [...new Set(rows.map((r) => r.id))];
+  const maps = rowIds.length > 0 ? await localdb.entityMap.where("canonical_id").anyOf(rowIds).toArray().catch(() => []) : [];
   const aliasOf = new Map<string, string[]>();
-  for (const m of maps) aliasOf.set(m.canonical_id, [...(aliasOf.get(m.canonical_id) ?? []), m.local_entity_id]);
+  for (const m of maps) {
+    const list = aliasOf.get(m.canonical_id);
+    if (list) list.push(m.local_entity_id);
+    else aliasOf.set(m.canonical_id, [m.local_entity_id]);
+  }
   // rc.12 — index the ops by the order they reference ONCE (measured: rows × all-ops re-scan + re-sort
   // took 1.75 s median for 200 rows / 900 ops — the slow Delivery Orders open). Each row's projection
   // then receives only ITS ops; projectDeliveryOrder only ever applies ops that reference the row, so the
@@ -1666,7 +1771,13 @@ export async function overlayDeliveryQueue(
     return [p.order_local, p.order_id, rec(p.payload).order_id].filter((x): x is string => typeof x === "string" && x !== "");
   };
   const byOrder = new Map<string, OfflineOperation[]>();
-  for (const o of all) for (const k of new Set(keysOf(o))) byOrder.set(k, [...(byOrder.get(k) ?? []), o]);
+  for (const o of all) {
+    for (const k of new Set(keysOf(o))) {
+      const list = byOrder.get(k);
+      if (list) list.push(o);
+      else byOrder.set(k, [o]);
+    }
+  }
   const deciding = new Set(ops.map((o) => o.operation_id));
   const touched: { r: DeliveryQueueOrder; aliases: string[]; mine: OfflineOperation[] }[] = [];
   for (const r of rows) {

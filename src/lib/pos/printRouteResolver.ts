@@ -130,3 +130,41 @@ export async function resolvePrintRoute(input: {
   if (error) throw new ResolvePrintRouteError(error.message);
   return parseResolvedRoute(data);
 }
+
+export type ResolvePrintRouteCachedDeps = {
+  resolve?: typeof resolvePrintRoute;
+  cache?: (branchId: string, purpose: string, orderSource: string, route: unknown) => Promise<void>;
+  readCache?: (branchId: string, purpose: string, orderSource: string) => Promise<unknown | null>;
+  /** Synchronous last verdict of the shared reachability store (null = unknown). */
+  lastKnownReachable?: () => boolean | null;
+};
+
+/**
+ * 1.0.38 (PERF C1–C3) — the ONE route lookup for UI and print helpers: the server resolve with the
+ * per-branch cache autoPrintRun / KitchenTicketPreview already use.
+ *  - Online: ask the server; a resolved answer is written through to the cache (unchanged result).
+ *  - The resolve fails (backend unreachable): the cached route, so a manual reprint, the End-Shift
+ *    report or a receivable ticket still routes to where it was resolved while online.
+ *  - The shared store already KNOWS the backend is unreachable: the cache only, no request (a miss is
+ *    "no route", exactly what the failed request would have produced).
+ * Never throws; null means "no route" (the operator-visible state for an unconfigured branch).
+ */
+export async function resolvePrintRouteCached(
+  input: { branchId: string | null; purpose: PrintPurpose; orderSource: ResolverOrderSource },
+  deps: ResolvePrintRouteCachedDeps = {},
+): Promise<ResolvedRoute | null> {
+  const branchId = input.branchId;
+  if (!branchId) return null;
+  const db = deps.cache && deps.readCache ? null : await import("@/lib/offline/db");
+  const cache = deps.cache ?? db!.cachePrintRoute;
+  const readCache = deps.readCache ?? db!.readCachedPrintRoute;
+  const known = deps.lastKnownReachable ?? (await import("@/lib/offline/reachability")).lastKnownReachable;
+  const fromCache = async () => ((await readCache(branchId, input.purpose, input.orderSource).catch(() => null)) as ResolvedRoute | null) ?? null;
+  if (known() === false) return fromCache();
+  return (deps.resolve ?? resolvePrintRoute)({ branchId, purpose: input.purpose, orderSource: input.orderSource })
+    .then((r) => {
+      if (r.resolved) void cache(branchId, input.purpose, input.orderSource, r).catch(() => {});
+      return r;
+    })
+    .catch(fromCache);
+}

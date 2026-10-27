@@ -183,7 +183,7 @@ import { addressLine } from "@/components/pos/CustomerCard";
 import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
-import { isBackendReachable } from "@/lib/offline/reachability";
+import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
 import { capturePayOrderOffline, payOrderClientOpId } from "@/lib/offline/payOrderOffline";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
@@ -443,19 +443,23 @@ export function useDeliveryWorkspace(input: {
       return;
     }
     let cancelled = false;
-    void loadOperationalProviders(branchId)
-      .then((rows) => {
-        if (cancelled) return;
-        setProviders(rows);
-        setProvidersKnown(true);
-        void cacheDeliveryProviders(rows, pos.tenantId, branchId).catch(() => {});
-      })
-      .catch(async () => {
-        const cached = await readCachedDeliveryProviders(pos.tenantId, branchId).catch(() => null);
-        if (cancelled) return;
-        setProviders(cached ? (cached.providers as OperationalProvider[]) : []);
-        setProvidersKnown(cached != null);
-      });
+    const fromMirror = async () => {
+      const cached = await readCachedDeliveryProviders(pos.tenantId, branchId).catch(() => null);
+      if (cancelled) return;
+      setProviders(cached ? (cached.providers as OperationalProvider[]) : []);
+      setProvidersKnown(cached != null);
+    };
+    // 1.0.38 (PERF C7) — offline: the mirror only; the RPC is not attempted (it could only fail or hang).
+    if (!online) void fromMirror();
+    else
+      void loadOperationalProviders(branchId)
+        .then((rows) => {
+          if (cancelled) return;
+          setProviders(rows);
+          setProvidersKnown(true);
+          void cacheDeliveryProviders(rows, pos.tenantId, branchId).catch(() => {});
+        })
+        .catch(fromMirror);
     return () => {
       cancelled = true;
     };
@@ -631,6 +635,12 @@ export function useDeliveryWorkspace(input: {
       setOpenOrders([]);
       return;
     }
+    // 1.0.38 (PERF C6) — offline (or the shared store already knows the backend is unreachable): no
+    // request per customer selection; the list is empty exactly as a failed read left it. Re-read on reconnect.
+    if (!online || lastKnownReachable() === false) {
+      setOpenOrders([]);
+      return;
+    }
     let cancelled = false;
     void loadOpenDeliveryOrders({ tenantId: pos.tenantId, branchId, customerId })
       .then((rows) => {
@@ -642,7 +652,7 @@ export function useDeliveryWorkspace(input: {
     return () => {
       cancelled = true;
     };
-  }, [active, customerId, pos.tenantId, branchId, submitted?.order.id]);
+  }, [active, customerId, pos.tenantId, branchId, submitted?.order.id, online]);
 
   // --- search ----------------------------------------------------------------
 
@@ -1320,10 +1330,14 @@ export function useDeliveryWorkspace(input: {
       const scope = itemEditOfflineScopeRef.current;
       setQueue(scope ? await overlayDeliveryQueue(scope, rows, { rowFetchedAt: fetchedAt }).catch(() => rows) : rows);
       setQueueOffline(offline);
-      const [server, shifts] = await Promise.all([
-        loadOrderParties(rows).catch(() => new Map<string, OrderParty>()),
-        loadShiftOpenMap(rows.map((o) => o.shift_id)).catch(() => new Map<string, boolean>()),
-      ]);
+      // 1.0.38 (PERF C5) — the queue came from the offline snapshot: the two server reads are skipped
+      // (they could only fail soft to the same empty maps, or hang on a half-open link).
+      const [server, shifts] = offline
+        ? [new Map<string, OrderParty>(), new Map<string, boolean>()]
+        : await Promise.all([
+            loadOrderParties(rows).catch(() => new Map<string, OrderParty>()),
+            loadShiftOpenMap(rows.map((o) => o.shift_id)).catch(() => new Map<string, boolean>()),
+          ]);
       // rc.11 — the unified customer projection (canonical → local cache → remap alias → order snapshot).
       // rc.13 — + the durable order↔customer association; a refresh MERGES (a known party is never blanked
       // by a failed read) and writes through what it resolved.
@@ -2645,6 +2659,24 @@ export function useDeliveryWorkspace(input: {
    */
   const openHistoricalReceiptById = useCallback(
     async (orderId: string) => {
+      // 1.0.38 (PERF C8) — OFFLINE: no read by id. An order this device already holds (queue row /
+      // snapshot base) goes through openHistoricalReceipt's own offline path (stored receipt → projection
+      // check); otherwise the stored receipt by id; otherwise the same controlled "reconnect" message.
+      if (!online) {
+        const known = baseRows.current.get(orderId) ?? null;
+        if (known) {
+          await openHistoricalReceipt(known);
+          return;
+        }
+        const { readReceiptSnapshot } = await import("@/lib/offline/db");
+        const snap = await readReceiptSnapshot(orderId).catch(() => null);
+        if (snap) {
+          input.onPresentReceipt(snap.data as ReceiptData);
+          return;
+        }
+        toast.push({ tone: "info", message: "Reconnect to open this order's receipt", detail: "This order isn't saved on this device." });
+        return;
+      }
       setReceiptBusyId(orderId);
       try {
         const order = await readDeliveryOrder(orderId);
@@ -2659,7 +2691,7 @@ export function useDeliveryWorkspace(input: {
         setReceiptBusyId(null);
       }
     },
-    [openHistoricalReceipt, toast],
+    [openHistoricalReceipt, toast, online, input],
   );
 
   // F4 OPENS the dialog and never charges, through the same gate as the button.

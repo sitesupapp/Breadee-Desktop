@@ -311,7 +311,9 @@ export async function drainOperations(
     // actual canonical VALUE the handler remaps is additionally gated by
     // canonicalIdForInScope against the op's full immutable scope, incl. terminal.)
     const resolvedLocalEntities = new Set<string>();
-    for (const m of await localdb.entityMap.toArray()) {
+    // Final Foundation (PERF): the live tenant's mappings only (tenant_id index) — a mapping of another
+    // tenant can never match the filter below, so the result is identical without reading the whole map.
+    for (const m of await localdb.entityMap.where("tenant_id").equals(ctx.tenantId).toArray()) {
       if (
         m.tenant_id === ctx.tenantId &&
         (m.branch_id ?? null) === (ctx.branchId ?? null) &&
@@ -576,6 +578,8 @@ export async function drainOperations(
 
   // Phase F — housekeeping: GC old SYNCED ops so the log does not grow unbounded. Best-effort and
   // only on a lock-owning pass; it NEVER touches unsettled work (durable ops are never dropped).
+  // (Final Foundation: production drains go through drainOffline, which runs the bounded retention pass
+  // in retention.ts instead; this standalone path is unchanged for direct callers.)
   if (ownsLock) {
     try { await gcSyncedOperations(); } catch { /* housekeeping only — never fail a drain */ }
   }
@@ -644,6 +648,16 @@ export async function drainOffline(
       await reconcileDineDraftsFromOperations();
     } catch (e) {
       reconcileError = e instanceof Error ? e.message : String(e);
+    }
+    // Final Foundation (PERF) — bounded LOCAL RETENTION of settled history (retention.ts), under the SAME
+    // single-flight lock as migrate / replay / reconcile, AFTER reconcile (so every terminal state is mirrored
+    // before anything is judged prunable), throttled (RETENTION_MIN_INTERVAL_MS). It never touches unsettled
+    // work or anything it references. Housekeeping only: it can never fail or delay a drain report.
+    try {
+      const { runRetentionIfDue } = await import("@/lib/offline/retention");
+      await runRetentionIfDue();
+    } catch {
+      /* housekeeping only */
     }
     if (migrateError) report.migrateError = migrateError;
     if (reconcileError) report.reconcileError = reconcileError;

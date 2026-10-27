@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "@/components/toast";
+import { isBackendReachable } from "@/lib/offline/reachability";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import { TableMap } from "@/components/pos/TableMap";
 import { TableBillPanel } from "@/components/pos/TableBillPanel";
@@ -557,6 +558,19 @@ export function useDineInWorkspace(input: {
   // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
   // so both can read them; the duplicate lower-down declarations were hoisted to this point.
   const offlineCapture = !input.online && input.offlineReady === true && input.offlineScope != null;
+  // 1.0.38 (PERF R1) — `input.online` is PosWorkspace's reachability state and can lag a link drop. Every
+  // action about to take the SERVER path (open, round, move, merge, split, line edit, table pay / on
+  // account) first re-checks the SHARED reachability store (TTL-fresh, de-duplicated: at most one probe per
+  // action), as Takeaway does per action. If the backend is gone NOTHING is sent: the store's verdict flips
+  // this terminal to offline at once (PosWorkspace subscribes to it), and the operator is told to try again
+  // — which then captures on the device (offline-ready) or shows the usual reason. Never a "Failed to fetch"
+  // after the attempt, and never a silent mid-action switch onto a bill the dialog was not showing.
+  const serverPathLost = useCallback(async (): Promise<string | null> => {
+    if (await isBackendReachable().catch(() => false)) return null;
+    return input.offlineReady === true && input.offlineScope != null
+      ? "The connection just dropped, so nothing was sent. This terminal is now offline — try again to save it on this device."
+      : "The connection just dropped, so nothing was sent. Reconnect and try again.";
+  }, [input.offlineReady, input.offlineScope]);
   // The PROVISIONAL offline bill for the selected table (derived from its local draft's sent
   // rounds). Populated by the effect further down; read by the payment gate so an offline table
   // with sent rounds can be settled.
@@ -684,13 +698,18 @@ export function useDineInWorkspace(input: {
       }
       void runOp(
         "move",
-        async () => moveOutcomeMessage(await moveTable({ fromTableId: selected.id, toTableId: destinationId }), from, to),
+        async () => {
+          // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing sent if lost).
+          const lost = await serverPathLost();
+          if (lost) throw new Error(lost);
+          return moveOutcomeMessage(await moveTable({ fromTableId: selected.id, toTableId: destinationId }), from, to);
+        },
         // Follow the bill: the operator's attention belongs where the money went.
         { selectAfter: destinationId },
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, opGates.move.allowed, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, ctx, structuralHold],
+    [selected, opGates.move.allowed, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, ctx, structuralHold, serverPathLost],
   );
 
   const confirmClose = useCallback(() => {
@@ -757,6 +776,9 @@ export function useDineInWorkspace(input: {
       mergeOpId.current = stableMergeOpId(mergeOpId.current, sig);
       const clientOpId = mergeOpId.current.id;
       void runOp("merge", async () => {
+        // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing sent if lost).
+        const lost = await serverPathLost();
+        if (lost) throw new Error(lost);
         const r = await mergeTables({
           primaryTableId: selected.id,
           sourceTableIds,
@@ -769,7 +791,7 @@ export function useDineInWorkspace(input: {
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold],
+    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold, serverPathLost],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -822,6 +844,12 @@ export function useDineInWorkspace(input: {
           toast.push({ tone: "success", message: `${selected?.name ?? name} opened offline`, detail: "Saved on this device — it will sync when you reconnect." });
           return;
         }
+        // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing sent if lost).
+        const lost = await serverPathLost();
+        if (lost) {
+          setOpenError(lost);
+          return;
+        }
         const result = await openTable({ branchId: ctx.branchId, name, seats });
         setSeatOpen(false);
         setManualOpen(false);
@@ -844,7 +872,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, openGate.allowed, ctx, toast, input.online, input.offlineReady, input.offlineScope, input.currency, tables.map],
+    [selected, openGate.allowed, ctx, toast, input.online, input.offlineReady, input.offlineScope, input.currency, tables.map, serverPathLost],
   );
 
   // Phase F — refresh the branch's auto-seat setting from the canonical row when
@@ -1114,6 +1142,12 @@ export function useDineInWorkspace(input: {
         toast.push({ tone: "success", message: "Round sent (offline)", detail: "Saved on this device — it will sync when you reconnect." });
         return;
       }
+      // 1.0.38 (PERF R1) — re-check the shared store before the server path; the cart is kept untouched.
+      const lost = await serverPathLost();
+      if (lost) {
+        toast.push({ tone: "warning", message: lost, detail: "Your round is still here." });
+        return;
+      }
       const before: TableBill | null = useTables.getState().bill;
       const opId = useCart.getState().ensureOpId();
       // The round as it is about to be SENT, snapshotted before the buffer is
@@ -1181,7 +1215,7 @@ export function useDineInWorkspace(input: {
       setRoundBusy(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch, tables.map, bumpProj]);
+  }, [selected, submitGate.allowed, roundCtx, ctx, input.menu, toast, offlineCapture, input.offlineScope, input.currency, input.onKitchenBatch, tables.map, bumpProj, serverPathLost]);
 
   // --- Level 2D: settlement ---------------------------------------------------
 
@@ -1359,6 +1393,12 @@ export function useDineInWorkspace(input: {
         setSplitMethods(activePaymentMethods);
         return;
       }
+      // 1.0.38 (PERF R1) — re-check the shared store before the server path.
+      const lost = await serverPathLost();
+      if (lost) {
+        setSplitError(lost);
+        return;
+      }
       const bill = useTables.getState().bill;
       const order = bill?.orders.find((o) => o.payment_status !== "paid") ?? bill?.orders[0];
       if (!order) return;
@@ -1371,7 +1411,7 @@ export function useDineInWorkspace(input: {
       setSplitLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitGate.allowed, pos.tenantId, offlineCapture, input.offlineScope, input.currency, selected, activePaymentMethods, projectionSplit, tables.map]);
+  }, [splitGate.allowed, pos.tenantId, offlineCapture, input.offlineScope, input.currency, selected, activePaymentMethods, projectionSplit, tables.map, serverPathLost]);
 
   const paySplit = useCallback(
     async (allocations: SplitAllocationInput[], method: string) => {
@@ -1460,6 +1500,13 @@ export function useDineInWorkspace(input: {
         return;
       }
 
+      // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing charged if lost).
+      const lost = await serverPathLost();
+      if (lost) {
+        setSplitError(lost);
+        setSplitBusy(false);
+        return;
+      }
       try {
         const result = await settleSplit(
           buildSplitSettlePayload({
@@ -1487,7 +1534,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [splitState, tables, ctx, offlineCapture, input.currency, input.offlineScope, selected, projectionSplit, bumpProj],
+    [splitState, tables, ctx, offlineCapture, input.currency, input.offlineScope, selected, projectionSplit, bumpProj, serverPathLost],
   );
 
   // Phase 2: a persisted REMOVAL or REDUCTION needs an audited reason; a plain
@@ -1587,6 +1634,12 @@ export function useDineInWorkspace(input: {
       const bill = useTables.getState().bill;
       const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
       if (!order) return;
+      // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing sent if lost).
+      const lost = await serverPathLost();
+      if (lost) {
+        toast.push({ tone: "warning", message: lost, detail: null });
+        return;
+      }
       setEditingLineId(line.id);
       try {
         const result = await editOrderLine(
@@ -1644,7 +1697,7 @@ export function useDineInWorkspace(input: {
         setEditingLineId(null);
       }
     },
-    [tables, ctx, toast, pos, selected, input, offlineCapture, captureSentEditOffline],
+    [tables, ctx, toast, pos, selected, input, offlineCapture, captureSentEditOffline, serverPathLost],
   );
 
   const onEditSentQty = useCallback(
@@ -1697,6 +1750,12 @@ export function useDineInWorkspace(input: {
       const bill = useTables.getState().bill;
       const order = bill?.orders.find((o) => o.lines.some((l) => l.id === line.id)) ?? bill?.orders[0];
       if (!order) return;
+      // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing sent if lost).
+      const lost = await serverPathLost();
+      if (lost) {
+        toast.push({ tone: "warning", message: lost, detail: null });
+        return;
+      }
       setEditingLineId(line.id);
       try {
         await editOrderLine(
@@ -1718,7 +1777,7 @@ export function useDineInWorkspace(input: {
         setEditingLineId(null);
       }
     },
-    [tables, ctx, toast, offlineCapture, captureSentEditOffline],
+    [tables, ctx, toast, offlineCapture, captureSentEditOffline, serverPathLost],
   );
 
   // A modifier change that DROPS or REPLACES a component is audited (the same
@@ -1940,6 +1999,12 @@ export function useDineInWorkspace(input: {
         discount: discount.fields,
       });
 
+      // 1.0.38 (PERF R1) — re-check the shared store before the server charge (nothing charged if lost).
+      const lost = await serverPathLost();
+      if (lost) {
+        setPayError(lost);
+        return;
+      }
       completionDone.current = false;
       setPaying(true);
       setPayError(null);
@@ -2005,7 +2070,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, payGate.allowed, pos.gates.applyDiscounts, input.currency, input.rate, ctx, readTableState, runCompletion, toast, offlineCapture, input.offlineScope, settleBill, offlineSettleTarget, bumpProj],
+    [selected, payGate.allowed, pos.gates.applyDiscounts, input.currency, input.rate, ctx, readTableState, runCompletion, toast, offlineCapture, input.offlineScope, settleBill, offlineSettleTarget, bumpProj, serverPathLost],
   );
 
   /**
@@ -2092,6 +2157,12 @@ export function useDineInWorkspace(input: {
           ? { discountType: dialog.discountType as "percent" | "amount", discountValue: Number(dialog.discountValue) }
           : {};
 
+      // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing booked if lost).
+      const lost = await serverPathLost();
+      if (lost) {
+        setPayError(lost);
+        return;
+      }
       completionDone.current = false;
       setPaying(true);
       setPayError(null);
@@ -2105,6 +2176,7 @@ export function useDineInWorkspace(input: {
               amount: dialog.amountNow,
               method: dialog.method,
               ...discountFields,
+              shown: { bill: shownBill, table }, // 1.0.38 R-1 — pin the bill the cashier sees
             }),
           // Lost-response re-read: a table on-account completion frees the table,
           // so a cleared bill is proof it landed.
@@ -2187,7 +2259,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, payGate.allowed, input.online, input.currency, input.shiftId, ctx, readTableState, toast, offlineCapture, input.offlineScope, offlineSettleTarget, bumpProj],
+    [selected, payGate.allowed, input.online, input.currency, input.shiftId, ctx, readTableState, toast, offlineCapture, input.offlineScope, offlineSettleTarget, bumpProj, serverPathLost],
   );
 
   // A payment dialog left open over a table that is no longer selected would

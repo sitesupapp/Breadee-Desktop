@@ -1,6 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 import { env } from "@/env";
 import type { Database } from "@/lib/database.types";
+import { timeoutFetch } from "@/lib/net/timeoutFetch";
+import { sealedAuthStorage } from "@/lib/security/sealedAuthStorage";
 
 // Single Supabase client for the desktop SPA. Uses anon key + RLS (never service_role).
 // Typed against the STAGING schema (src/lib/database.types.ts) for end-to-end safety.
@@ -12,8 +14,14 @@ export const supabase = createClient<Database>(env.SUPABASE_URL, env.SUPABASE_AN
     autoRefreshToken: true,
     detectSessionInUrl: false,
     storageKey: "breadee-desktop-auth",
+    // Final Foundation (SEC): the session - including the refresh token - is sealed with
+    // Windows DPAPI through the Rust seal_secret command, never stored as plaintext. The
+    // 1.0.37 plaintext copy is migrated on first read and then removed.
+    storage: sealedAuthStorage,
   },
   global: {
     headers: { "x-breadee-client": "desktop" },
+    // 1.0.38 (PERF): reads abort after a bounded timeout; writes are untouched (see lib/net/timeoutFetch).
+    fetch: timeoutFetch,
   },
 });

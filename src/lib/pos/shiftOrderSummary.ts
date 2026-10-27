@@ -165,22 +165,42 @@ export function orderRouteLabel(orderType: string): string {
  * A null/absent shift returns an EMPTY list without touching the network -
  * "no active shift" is a normal state, not a reason to go looking for orders
  * that would necessarily belong to somebody else's till.
+ *
+ * Final Foundation (PERF) — the page is the NEWEST `limit` orders (read newest-first, returned oldest-first).
+ * Through 1.0.38-dev it read `created_at ASC LIMIT 200`, so a shift with more than 200 orders silently
+ * DROPPED its newest ones — exactly the order the panel selects by default. Older pages are reachable with
+ * the keyset cursor `before` (created_at of the oldest row already shown).
  */
+export const SHIFT_ORDERS_PAGE = 200;
+export const DAY_ORDERS_PAGE = 500;
+
 export async function loadShiftOrders(input: {
   tenantId: string | null;
   shiftId: string | null;
+  /** Page size (default SHIFT_ORDERS_PAGE). */
+  limit?: number;
+  /** Keyset cursor: only orders created strictly before this ISO time (an older page). */
+  before?: string | null;
 }): Promise<ShiftOpenOrder[]> {
   if (!input.tenantId || !input.shiftId) return [];
   const { supabase } = await import("@/lib/supabase");
-  const { data, error } = await supabase
+  let query = supabase
     .from("pos_orders")
     .select(ORDER_COLUMNS)
     .eq("tenant_id", input.tenantId)
-    .eq("shift_id", input.shiftId)
-    .order("created_at", { ascending: true })
-    .limit(200);
+    .eq("shift_id", input.shiftId);
+  if (input.before) query = query.lt("created_at", input.before);
+  const { data, error } = await query.order("created_at", { ascending: false }).limit(input.limit ?? SHIFT_ORDERS_PAGE);
   if (error) throw new Error(error.message);
-  return await hydrate(((data ?? []) as unknown[]).map(parseOrderRow).filter((o): o is ShiftOpenOrder => o !== null));
+  return await hydrate(newestPageOldestFirst(data));
+}
+
+/** PURE — a newest-first page as the oldest-first list the panel walks (the arrows keep their meaning). */
+export function newestPageOldestFirst(data: unknown[] | null | undefined): ShiftOpenOrder[] {
+  return ((data ?? []) as unknown[])
+    .map(parseOrderRow)
+    .filter((o): o is ShiftOpenOrder => o !== null)
+    .reverse();
 }
 
 /** One row of `pos_orders`, defensively. A malformed row is dropped, not guessed. */
@@ -264,9 +284,16 @@ export async function resolveMergeTargets(
  */
 async function hydrate(orders: ShiftOpenOrder[]): Promise<ShiftOpenOrder[]> {
   if (orders.length === 0) return orders;
-  await resolveMergeTargets(orders);
   const { supabase } = await import("@/lib/supabase");
+  // Final Foundation (PERF) — the three lookups are independent (each fills its own fields, each is
+  // best-effort and never throws), so they run in PARALLEL instead of three sequential round trips.
+  await Promise.all([resolveMergeTargets(orders), hydrateCustomers(orders, supabase), hydrateStaff(orders, supabase)]);
+  return orders;
+}
 
+type SupabaseClient = (typeof import("@/lib/supabase"))["supabase"];
+
+async function hydrateCustomers(orders: ShiftOpenOrder[], supabase: SupabaseClient): Promise<void> {
   const customerIds = [...new Set(orders.map((o) => o.customer_id).filter((c): c is string => !!c))];
   if (customerIds.length > 0) {
     try {
@@ -289,7 +316,9 @@ async function hydrate(orders: ShiftOpenOrder[]): Promise<ShiftOpenOrder[]> {
       /* names are a nicety; the list works without them */
     }
   }
+}
 
+async function hydrateStaff(orders: ShiftOpenOrder[], supabase: SupabaseClient): Promise<void> {
   const staffIds = [...new Set(orders.map((o) => o.cashier_user_id).filter((c): c is string => !!c))];
   if (staffIds.length > 0) {
     try {
@@ -309,7 +338,6 @@ async function hydrate(orders: ShiftOpenOrder[]): Promise<ShiftOpenOrder[]> {
       /* a missing staff name is a blank column, never a wrong one */
     }
   }
-  return orders;
 }
 
 /**
@@ -351,6 +379,10 @@ export async function loadOrdersForDay(input: {
   branchId: string | null;
   /** `YYYY-MM-DD`, as the date input speaks it. */
   day: string;
+  /** Page size (default DAY_ORDERS_PAGE). */
+  limit?: number;
+  /** Keyset cursor: only orders created strictly before this ISO time (an older page). */
+  before?: string | null;
 }): Promise<ShiftOpenOrder[]> {
   if (!input.tenantId || !input.day) return [];
   const [y, m, d] = input.day.split("-").map(Number);
@@ -359,18 +391,20 @@ export async function loadOrdersForDay(input: {
   const to = new Date(y, m - 1, d + 1, 0, 0, 0, 0);
 
   const { supabase } = await import("@/lib/supabase");
+  // Final Foundation (PERF) — the NEWEST page of the day (was the OLDEST 500: a busy day lost its latest
+  // orders); `before` pages back by keyset.
   let query = supabase
     .from("pos_orders")
     .select(ORDER_COLUMNS)
     .eq("tenant_id", input.tenantId)
     .gte("created_at", from.toISOString())
-    .lt("created_at", to.toISOString())
-    .order("created_at", { ascending: true })
-    .limit(500);
+    .lt("created_at", to.toISOString());
+  // (PostgREST ANDs a repeated column filter: the cursor narrows the day window.)
+  if (input.before) query = query.lt("created_at", input.before);
   if (input.branchId) query = query.eq("branch_id", input.branchId);
-  const { data, error } = await query;
+  const { data, error } = await query.order("created_at", { ascending: false }).limit(input.limit ?? DAY_ORDERS_PAGE);
   if (error) throw new Error(error.message);
-  return await hydrate(((data ?? []) as unknown[]).map(parseOrderRow).filter((o): o is ShiftOpenOrder => o !== null));
+  return await hydrate(newestPageOldestFirst(data));
 }
 
 // ----------------------------------------------------------- navigation ------
