@@ -109,7 +109,10 @@ test("C1 classification table", () => {
     [new Error("upstream connect error or disconnect/reset before headers"), "transient"],
     [rpcErr("JWT expired", 401, "PGRST301"), "auth"],
     [new Error("invalid JWT"), "auth"],
-    [rpcErr("permission denied for function pos_pay_order", 401, "42501"), "business"],
+    // RC-AUTH-1: 401 + 42501 = the request had no valid session (anonymous) → re-authenticate, not a refusal.
+    [rpcErr("permission denied for function pos_pay_order", 401, "42501"), "auth"],
+    [rpcErr("permission denied for function pos_pay_order", 403, "42501"), "business"],
+    [rpcErr("You do not have permission to take payments", 403, "42501"), "business"],
     [rpcErr("This order changed since it was loaded.", 400, "P0001", "VERSION_CONFLICT"), "business"],
     [rpcErr("Invalid discount value", 400, "22023"), "business"],
     [new Error('The refundable amount changed. {"pos_error_code":"REFUND_AMOUNT_MISMATCH"}'), "business"],

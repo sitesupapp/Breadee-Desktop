@@ -240,20 +240,18 @@ test("there is ONE staging identity: the acceptance installer uses the staging o
   assert.match(installer, /test -f "src-tauri\/target\/release\/breadee-desktop\.exe"/);
 });
 
-test("What's New: the approved bilingual text leads, plus the offline-first page, describing exactly this version", () => {
+test("What's New: the RC-AUTH-1 sign-out page leads, bilingual, describing exactly this version", () => {
   const whatsNew = read("src", "lib", "whatsNew.ts");
   assert.match(whatsNew, new RegExp(`export const WHATS_NEW_VERSION = "${base.version.replace(/\./g, "\\.")}";`));
-  assert.equal(base.version, "1.0.38");
+  assert.equal(base.version, "1.0.40");
+  // The release workflow takes the FIRST title/titleAr/body/bodyAr in the file as the release notes.
   const lit = (key: string) => JSON.parse(new RegExp(`\\b${key}:\\s*("(?:[^"\\\\]|\\\\.)*")`).exec(whatsNew)![1]);
   assert.match(whatsNew, /glyph: "sync"/);
-  assert.equal(lit("title"), "Expanded Full Offline POS");
-  assert.equal(lit("titleAr"), "توسعة وضع العمل الكامل دون اتصال");
-  assert.equal(
-    lit("body"),
-    "Ready Desktop now supports a broader end-to-end offline lifecycle, including improved Dine-In Merge and Move handling, offline shift transitions, safer offline payments, stronger reconnect reconciliation, improved order history, and clearer Sync Center dependency and conflict status. Offline operations remain protected against duplicate financial effects and reconcile automatically when connectivity returns.",
-  );
-  assert.equal(
-    lit("bodyAr"),
-    "أصبح Ready Desktop يدعم دورة عمل أوسع دون اتصال، بما في ذلك تحسين عمليات الدمج والنقل في Dine-In، والانتقال بين الورديات دون اتصال، وحماية أكبر لعمليات الدفع، وتحسين المزامنة بعد عودة الاتصال، وسجل الطلبات، وحالات التعارض والانتظار في Sync Center. تتم مزامنة العمليات تلقائياً عند عودة الاتصال مع الحماية من تكرار التأثيرات المالية.",
-  );
+  assert.equal(lit("title"), "Sign Out now affects only this device");
+  assert.equal(lit("titleAr"), "تسجيل الخروج يشمل هذا الجهاز فقط");
+  assert.match(lit("body"), /^Signing out of Ready Desktop now ends the session on this device only\. /);
+  assert.match(lit("body"), /synchronises exactly once after you sign in\.$/);
+  assert.match(lit("bodyAr"), /^أصبح تسجيل الخروج من Ready Desktop ينهي الجلسة على هذا الجهاز فقط/);
+  // Business language only in the notes.
+  assert.doesNotMatch(lit("body"), /\b(RPC|Supabase|JWT|token|scope|401|42501|auth-js)\b/i);
 });
