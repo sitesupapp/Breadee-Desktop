@@ -65,7 +65,8 @@ check(f"post-update recheck reaches the staging channel and offers nothing newer
 check("RC-AUTH-1 bundle: the running app is " + TO, bundle.get("version") == TO, bundle.get("version"))
 check("RC-AUTH-1 bundle: the app's scripts were read", isinstance(bundle.get("scanned"), int) and bundle["scanned"] > 0, bundle.get("scanned"))
 check("RC-AUTH-1 bundle: sign-out is local-scope (signOut({scope:\"local\"}) present)", (bundle.get("localSignOut") or 0) >= 1, bundle.get("localSignOut"))
-check("RC-AUTH-1 bundle: no unscoped auth.signOut() left", bundle.get("bareSignOut") == 0, bundle.get("bareSignOut"))
+check("RC-AUTH-1 bundle: no unscoped auth.signOut() left (outside supabase-js's unreachable STORAGE branch)", bundle.get("bareSignOut") == 0, json.dumps(bundle.get("bareContexts"))[:280])
+check("RC-AUTH-1 bundle: at most the one supabase-js STORAGE-source branch (caller passes CLIENT)", (bundle.get("libStorageBranch") or 0) <= 1, bundle.get("libStorageBranch"))
 check("RC-AUTH-1 bundle: replay classifier treats 42501 + 401 as auth", (bundle.get("classifier") or 0) >= 1, bundle.get("classifier"))
 
 # --- native offline-first checks (unchanged since 1.0.38) ---

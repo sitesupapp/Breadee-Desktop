@@ -28,19 +28,27 @@ BUNDLE_JS = r"""
   for (const s of document.querySelectorAll('script[src]')) urls.add(s.src);
   for (const l of document.querySelectorAll('link[rel=modulepreload]')) urls.add(l.href);
   for (const e of performance.getEntriesByType('resource')) if (/\.js(\?|$)/.test(e.name)) urls.add(e.name);
-  let localSignOut = 0, bareSignOut = 0, classifier = 0, scanned = 0;
+  // supabase-js `_handleTokenChanged` carries `if (source == "STORAGE") this.auth.signOut()`; its only caller
+  // (`_listenForAuthEvents`) passes "CLIENT", so that library branch never runs. It is counted apart
+  // (libStorageBranch); every OTHER unscoped `.auth.signOut()` counts as bare, with its context as evidence.
+  let localSignOut = 0, bareSignOut = 0, libStorageBranch = 0, classifier = 0, scanned = 0;
+  const bareContexts = [];
   for (const u of urls) {
     try {
       const t = await (await fetch(u)).text();
       scanned++;
       localSignOut += (t.match(/\.signOut\(\{scope:"local"\}\)/g) || []).length;
-      bareSignOut += (t.match(/\.auth\.signOut\(\)/g) || []).length;
+      for (const m of t.matchAll(/\.auth\.signOut\(\)/g)) {
+        const before = t.slice(Math.max(0, m.index - 40), m.index);
+        if (/[=!]=+"STORAGE"\)?(&&)?this$/.test(before)) libStorageBranch++;
+        else { bareSignOut++; bareContexts.push(t.slice(Math.max(0, m.index - 80), m.index + 40)); }
+      }
       if (/===401\?"auth":"business"/.test(t)) classifier++;
     } catch (e) {}
   }
   let version = null;
   try { version = await window.__TAURI_INTERNALS__.invoke('plugin:app|version'); } catch (e) {}
-  return { version, scanned, localSignOut, bareSignOut, classifier, assets: Array.from(urls).map((u) => u.replace(/^.*\//, '')) };
+  return { version, scanned, localSignOut, bareSignOut, bareContexts, libStorageBranch, classifier, assets: Array.from(urls).map((u) => u.replace(/^.*\//, '')) };
 })()
 """
 
