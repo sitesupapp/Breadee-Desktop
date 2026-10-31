@@ -9,7 +9,7 @@ name: desktop-staging-1040-live-verify
 # SHA256SUMS. Then, on the updated NATIVE app: the scripts it actually runs contain the local-scope sign-out and
 # the 401/42501 classifier (the intended code), the sealed `offline-vault` still round-trips, and with the WebView
 # network cut the offline sign-in path makes ZERO fetch attempts. Writes nothing anywhere; production never involved.
-# Reuses ci/desktop-staging-1038final/cdp.py unchanged.
+# Uses ci/desktop-staging-1040/cdp.py: the 1.0.38-final driver, attaching only to the app's tauri.localhost page.
 on:
   push:
     branches: [ "ci/desktop-staging-1040-verify" ]
@@ -59,7 +59,7 @@ jobs:
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
           Start-Process $exe.FullName
           Start-Sleep 15
-          python ci\desktop-staging-1038final\cdp.py seed ev\seed.json
+          python ci\desktop-staging-1040\cdp.py seed ev\seed.json
           $dd = "$env:LOCALAPPDATA\app.breadee.desktop.staging"
           New-Item -ItemType Directory -Force $dd | Out-Null
           $marker = "qa-staging-1040-live marker $(New-Guid)"
@@ -68,7 +68,7 @@ jobs:
       - name: In-app update from the REAL staging channel (check -> download_and_install)
         shell: pwsh
         run: |
-          python ci\desktop-staging-1038final\cdp.py update ev\update.json
+          python ci\desktop-staging-1040\cdp.py update ev\update.json
           $p = (Get-Content pre_exe.txt -Raw).Trim()
           $deadline = (Get-Date).AddMinutes(6)
           do { Start-Sleep 5; $v = (Get-Item $p -ErrorAction SilentlyContinue).VersionInfo.FileVersion; "fileversion now: $v" } while(($v -notlike '1.0.40*') -and (Get-Date) -lt $deadline)
@@ -79,8 +79,8 @@ jobs:
           $p = (Get-Content pre_exe.txt -Raw).Trim()
           $cdp = $false; try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json -TimeoutSec 3 | Out-Null; $cdp = $true } catch {}
           if(-not $cdp){ Get-Process | Where-Object { $_.Path -eq $p } | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 5; $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'; Start-Process $p; Start-Sleep 10 }
-          python ci\desktop-staging-1038final\cdp.py post ev\post.json ev\seed.json
-          python ci\desktop-staging-1038final\cdp.py recheck ev\recheck.json
+          python ci\desktop-staging-1040\cdp.py post ev\post.json ev\seed.json
+          python ci\desktop-staging-1040\cdp.py recheck ev\recheck.json
           python ci\desktop-staging-1040\bundle.py ev\bundle.json
           Get-Process | Where-Object { $_.Path -eq $p } | ForEach-Object { $_.CloseMainWindow() | Out-Null }
           Start-Sleep 8
@@ -89,9 +89,9 @@ jobs:
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222'
           Start-Process $p
           Start-Sleep 10
-          python ci\desktop-staging-1038final\cdp.py post ev\post2.json ev\seed.json
-          python ci\desktop-staging-1038final\cdp.py vault ev\vault.json
-          python ci\desktop-staging-1038final\cdp.py offline ev\offline.json
+          python ci\desktop-staging-1040\cdp.py post ev\post2.json ev\seed.json
+          python ci\desktop-staging-1040\cdp.py vault ev\vault.json
+          python ci\desktop-staging-1040\cdp.py offline ev\offline.json
           $dd = "$env:LOCALAPPDATA\app.breadee.desktop.staging"
           $exes = @(Get-ChildItem "$env:LOCALAPPDATA\Breadee Staging" -Filter '*.exe' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'setup|uninstall' })
           $exe = $exes | Select-Object -First 1

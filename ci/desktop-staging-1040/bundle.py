@@ -14,8 +14,9 @@ def target(wait_s=180):
         try:
             ts = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=3))
             pages = [t for t in ts if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
-            if pages:
-                return pages[0]["webSocketDebuggerUrl"]
+            app = [t for t in pages if "tauri.localhost" in str(t.get("url", ""))]
+            if app:
+                return app[0]["webSocketDebuggerUrl"]
         except Exception:
             pass
         time.sleep(2)
