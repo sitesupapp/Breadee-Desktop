@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.38";
+export const WHATS_NEW_VERSION = "1.0.40";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -20,6 +20,19 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titl
 // One short, business-worded page per shipped POS capability in this release. No
 // developer terminology; icons come from the existing Glyph set.
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
+  {
+    glyph: "sync",
+    title: "Sign Out now affects only this device",
+    titleAr: "تسجيل الخروج يشمل هذا الجهاز فقط",
+    body:
+      "Signing out of Ready Desktop now ends the session on this device only. Other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended somewhere else, for example after a password change, Ready Desktop stops taking new orders and asks you to sign in again instead of failing silently. Anything already recorded is kept and synchronises exactly once after you sign in.",
+    bodyAr:
+      "أصبح تسجيل الخروج من Ready Desktop ينهي الجلسة على هذا الجهاز فقط، وتبقى الأجهزة الأخرى ومتصفحات الويب التي تستخدم الحساب نفسه مسجّلة الدخول وتواصل البيع. وإذا أُنهيت جلسة الحساب من مكان آخر، مثل تغيير كلمة المرور، يتوقف Ready Desktop عن استقبال طلبات جديدة ويطلب تسجيل الدخول مجدداً بدلاً من الفشل بصمت. يُحفظ كل ما سُجّل مسبقاً وتتم مزامنته لمرة واحدة فقط بعد تسجيل الدخول.",
+  },
+];
+
+/** Pages of earlier releases, kept for reference (not shown). */
+export const PREVIOUS_WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
     glyph: "sync",
     title: "Expanded Full Offline POS",
