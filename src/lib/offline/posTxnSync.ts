@@ -138,8 +138,11 @@ const STRUCTURED_MSG = /pos_error_code|\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/;
 const BUSINESS_PG_CODE = /^(?:P0001|P0002|P0003|P0004|22[0-9A-Z]{3}|23[0-9A-Z]{3}|42[0-9A-Z]{3}|28[0-9A-Z]{3})$/;
 
 /**
- * Classify one replay failure. Order matters: a permission refusal (42501) is business even when
- * PostgREST answers 401/403; an expired JWT is auth; a transient code/status/wording beats any keyword
+ * Classify one replay failure. Order matters: a permission refusal (42501) is business when PostgREST
+ * answers 403 (an authenticated caller refused); answered 401 it means the request carried NO valid
+ * session (PostgREST maps 42501 to 401 only for anonymous requests), which is auth — the operation
+ * replays after the next sign-in instead of parking as a refusal (RC-AUTH-1). An expired JWT is auth; a
+ * transient code/status/wording beats any keyword
  * match ("cannot execute … in a read-only transaction" is NOT a validation refusal); only then is a
  * structured code / known wording a definitive business refusal. Pure.
  */
@@ -149,7 +152,7 @@ export function classifyReplayError(e: unknown): ReplayErrorKind {
   const code = errCode(e);
   const msg = errMsg(e);
   const details = e && typeof e === "object" ? String((e as { details?: unknown }).details ?? "") : "";
-  if (code === "42501") return "business";
+  if (code === "42501") return status === 401 ? "auth" : "business";
   if ((code && AUTH_CODES.has(code)) || AUTH_MSG.test(msg) || (status === 401 && !(code && BUSINESS_PG_CODE.test(code)))) return "auth";
   if (code && (TRANSIENT_PG_CODES.has(code) || code.startsWith("08"))) return "transient";
   if (TRANSIENT_MSG.test(msg)) return "transient";
