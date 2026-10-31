@@ -126,6 +126,28 @@ export const WRONG_PASSWORD_MESSAGE = "Incorrect password.";
 export const OFFLINE_ACCESS_MISSING_MESSAGE =
   "Offline sign-in isn't set up for this user on this device yet. Sign in once with an internet connection.";
 
+/** RC-AUTH-1 — sign-outs this device started itself (its own Sign Out). auth-js reports those as SIGNED_OUT too. */
+let expectedSignOuts = 0;
+let authWatchStarted = false;
+
+/**
+ * RC-AUTH-1 — a session ended somewhere else (a password reset, an admin action, or an older client's
+ * global sign-out on another terminal) used to leave this device looking signed in while every request
+ * went out without a token. auth-js emits SIGNED_OUT only after a DEFINITIVE refusal of the refresh token
+ * (never for a network failure), so this runs the normal background revalidation, which locks new
+ * captures with the "sign in again" notice. Recorded work is kept and replays after the next sign-in.
+ */
+function startAuthWatch(): void {
+  if (authWatchStarted) return;
+  authWatchStarted = true;
+  supabase.auth.onAuthStateChange((event) => {
+    if (event !== "SIGNED_OUT" || expectedSignOuts > 0) return;
+    if (!useSession.getState().userId) return;
+    // Outside the auth-js callback: it must not await other auth calls itself.
+    setTimeout(() => void revalidateActiveSession().catch(() => undefined), 0);
+  });
+}
+
 /** The server refused this identity (revoked / deleted / banned / password changed): stop NEW captures
  *  and stop future OFFLINE sign-ins for it. Recorded work is untouched and still syncs if accepted. */
 async function markReauthRequired(userId: string): Promise<void> {
@@ -574,6 +596,10 @@ export const useSession = create<SessionState>((set, get) => ({
     // a session of anyone else is never adopted under their identity.
     const shown = get().userId;
     if (shown && shown !== user.id) throw new Error("identity_mismatch");
+    // RC-AUTH-1 — the server answered for this user, so watching their session can start now. Never
+    // from the start-up path: registering a listener makes auth-js load (and possibly refresh) the
+    // session, which would break the offline cold-start contract.
+    startAuthWatch();
 
     const [{ data: platformUser, error: platformErr }, { data: selfProfile }] = await Promise.all([
       supabase.from("platform_users").select("*").eq("user_id", user.id).maybeSingle(),
@@ -854,10 +880,18 @@ export const useSession = create<SessionState>((set, get) => ({
       const ent = own ? await readEntitlementSlot().catch(() => ({ jws: null, receivedAtMs: null })) : { jws: null, receivedAtMs: null };
       await vault.parkUser(leaving, { session: null, entitlement: ent.jws, entitlementReceivedAtMs: ent.receivedAtMs }).catch(() => undefined);
     }
-    await supabase.auth.signOut().catch(() => undefined);
-    // Final Foundation — a global sign-out that could not reach the server keeps the local
-    // session; drop it locally too (this removes the SEALED session via the storage adapter).
-    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    // RC-AUTH-1 — end only THIS device's server session. The default global sign-out revoked every
+    // session of the account, so one cashier signing out on a shared login signed out every other
+    // terminal using it (their POS kept calling without a token and was refused).
+    expectedSignOuts += 1;
+    try {
+      await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    } finally {
+      expectedSignOuts -= 1;
+    }
+    // A sign-out that could not reach the server keeps the session in auth-js; drop the SEALED
+    // session directly so nothing of this user stays active on the device.
+    await sealedAuthStorage.removeItem(AUTH_STORAGE_KEY).catch(() => undefined);
     // The signed entitlement belongs to the signed-out user. (The clock guard is device state
     // and deliberately survives sign-out.)
     await clearEntitlement().catch(() => undefined);
