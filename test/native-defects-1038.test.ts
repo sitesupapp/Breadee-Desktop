@@ -300,9 +300,9 @@ test("BUG 6: Open Tables and its rail count read the SAME effective floor the Di
   assert.match(read("src", "screens", "pos", "DineInWorkspace.tsx"), /effectiveTables: displayMap\.tables,/);
 });
 
-test("RELEASE 1.0.38 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
+test("RELEASE 1.0.40 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
   const NOTE =
-    "Full Offline POS improvements: reliable offline sign-in and Switch User, faster local-first startup, improved Dine-In Open Table and Open Tables, safer Merge/Move reconciliation and quantity changes, stronger Sync Center recovery, and protection against duplicate effects after reconnect.";
+    "Sign Out now affects only this device: other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended elsewhere, Ready Desktop asks you to sign in again instead of failing silently, and work already recorded syncs exactly once afterwards.";
   const wf = read(".github", "workflows", "desktop-production-release.yml");
   assert.ok(wf.includes(`RELEASE_NOTE: "${NOTE}"`), "the exact customer note");
   assert.match(wf, /"notes": "\$\{RELEASE_NOTE\}",/, "latest.json notes = the customer note");
