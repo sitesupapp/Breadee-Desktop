@@ -48,7 +48,7 @@ env:
   PRODUCTION_REF: cltlqfqormkhppmbvyrv
   # The customer-facing note shown in "Breadee Update Available" (latest.json
   # `notes`) and in the GitHub release description. Business language only.
-  RELEASE_NOTE: "Full Offline POS improvements: reliable offline sign-in and Switch User, faster local-first startup, improved Dine-In Open Table and Open Tables, safer Merge/Move reconciliation and quantity changes, stronger Sync Center recovery, and protection against duplicate effects after reconnect."
+  RELEASE_NOTE: "Sign Out now affects only this device: other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended elsewhere, Ready Desktop asks you to sign in again instead of failing silently, and work already recorded syncs exactly once afterwards."
 
 jobs:
   release:
