@@ -35,7 +35,11 @@ import {
   retireClosedSessions,
 } from "@/lib/offline/dineinOffline";
 import { tablesWithUnreflectedWork, getOperationalTableTotals, overlayTableTotals, sessionRefusal, getOperationalTableBill } from "@/lib/offline/operationalProjection";
-import { listRefusedSessions, reconcileRefusedSessions, withdrawRefusedSession, WITHDRAW_NEEDS_CONNECTION, WITHDRAW_RECEIPT_FOUND, WITHDRAW_NOT_YOURS, WITHDRAW_STATE_CHANGED } from "@/lib/offline/refusedSessions";
+import {
+  listRefusedSessions, reconcileRefusedSessions, withdrawRefusedSession, makeReceiptCheck, receiptFaultKind,
+  WITHDRAW_NEEDS_CONNECTION, WITHDRAW_RECEIPT_FOUND, WITHDRAW_NOT_YOURS, WITHDRAW_STATE_CHANGED, WITHDRAW_NOT_AUTHORIZED, WITHDRAW_CHECK_FAILED, WITHDRAW_PERMISSION,
+  type ReceiptCheck, type ReceiptCheckInput, type ReceiptClient,
+} from "@/lib/offline/refusedSessions";
 import { loadSyncSummary } from "@/components/sync/syncCenterModel";
 import { isOpenable } from "@/lib/pos/tables";
 import { getDeviceIdentity } from "@/lib/device";
@@ -127,7 +131,7 @@ const opsOf = async () => {
   const all = await localdb.operations.toArray();
   return { open: all.find((o) => o.operation_type === "dinein_open_table")!, round: all.find((o) => o.operation_type === "dinein_send_round")! };
 };
-const noReceipts = async () => [] as string[];
+const noReceipts: ReceiptCheck = async () => ({ kind: "none" });
 
 // ============================================================ the incident, fixed
 
@@ -297,14 +301,15 @@ test("W1 withdrawal: listed with its figures; withdraws only after Breadee confi
   assert.equal(o.items, 2);
   assert.equal(o.total, 1000000);
   assert.match(o.refusal, /changed since it was loaded/);
-  const asked: { open: string[]; rounds: string[] }[] = [];
+  const asked: ReceiptCheckInput[] = [];
   const r = await withdrawRefusedSession({
     sessionId: d.local_session_id, scope: SCOPE, actorUserId: "u1",
-    checkReceipts: async (q) => { asked.push({ open: q.openClientOpIds, rounds: q.roundClientOpIds }); return []; },
+    checkReceipts: async (q) => { asked.push(q); return { kind: "none" }; },
   });
   assert.equal(r.ok, true);
   const { open, round } = await opsOf();
-  assert.deepEqual(asked, [{ open: [open.client_op_id], rounds: [round.client_op_id] }], "every op's server receipt was checked");
+  assert.deepEqual(asked, [{ tenantId: "t1", branchIds: ["b1"], actorUserId: "u1", openClientOpIds: [open.client_op_id], roundClientOpIds: [round.client_op_id] }], "every op's server receipt was checked, under the operator's authority in the order's tenant + branch");
+  assert.deepEqual(open.withdrawal?.verified_against, ["pos_op_submissions", `authority:${WITHDRAW_PERMISSION}`]);
   for (const x of [open, round]) {
     assert.equal(x.status, "cancelled");
     assert.equal(x.withdrawal?.by_user_id, "u1");
@@ -334,15 +339,20 @@ test("W2 withdrawal refuses — and changes NOTHING — when Breadee holds a rec
   await drainOffline(CTX, "reconnect", conflictingOpen([]));
   const before = JSON.stringify(await localdb.operations.toArray());
   const { round } = await opsOf();
-  assert.deepEqual(await withdrawRefusedSession({ sessionId: d.local_session_id, scope: SCOPE, actorUserId: "u1", checkReceipts: async () => [round.client_op_id] }), { ok: false, reason: WITHDRAW_RECEIPT_FOUND });
-  assert.deepEqual(await withdrawRefusedSession({ sessionId: d.local_session_id, scope: SCOPE, actorUserId: "u1", checkReceipts: async () => { throw new TypeError("Failed to fetch"); } }), { ok: false, reason: WITHDRAW_NEEDS_CONNECTION });
+  const w = (checkReceipts: ReceiptCheck) => withdrawRefusedSession({ sessionId: d.local_session_id, scope: SCOPE, actorUserId: "u1", checkReceipts });
+  assert.deepEqual(await w(async () => ({ kind: "found", clientOpIds: [round.client_op_id] })), { ok: false, reason: WITHDRAW_RECEIPT_FOUND });
+  assert.deepEqual(await w(async () => ({ kind: "offline", detail: "x" })), { ok: false, reason: WITHDRAW_NEEDS_CONNECTION });
+  assert.deepEqual(await w(async () => { throw new TypeError("Failed to fetch"); }), { ok: false, reason: WITHDRAW_NEEDS_CONNECTION }, "a thrown transport error is still 'needs connection'");
+  assert.deepEqual(await w(async () => ({ kind: "unauthorized", detail: "x" })), { ok: false, reason: WITHDRAW_NOT_AUTHORIZED });
+  assert.deepEqual(await w(async () => ({ kind: "failed", detail: "x" })), { ok: false, reason: WITHDRAW_CHECK_FAILED });
+  assert.deepEqual(await w(async () => { throw new Error("boom"); }), { ok: false, reason: WITHDRAW_CHECK_FAILED }, "an unknown fault is never 'no receipt'");
   assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
   assert.equal((await localdb.dineDrafts.get(d.local_session_id))?.status, "refused");
   // CAS: the open was re-queued (operator Try again) between the server check and the commit
   const { open } = await opsOf();
   const r = await withdrawRefusedSession({
     sessionId: d.local_session_id, scope: SCOPE, actorUserId: "u1",
-    checkReceipts: async () => { await requeueOperation(open.operation_id); return []; },
+    checkReceipts: async () => { await requeueOperation(open.operation_id); return { kind: "none" }; },
   });
   assert.deepEqual(r, { ok: false, reason: WITHDRAW_STATE_CHANGED });
   assert.equal((await getOperation(open.operation_id))?.status, "pending", "the operator's retry stands; nothing cancelled");
@@ -358,4 +368,127 @@ test("W3 sessionRefusal is pure and strict: a missing barrier op or a synced op 
   assert.equal(sessionRefusal(draft, ops.filter((o) => o.operation_type !== "dinein_send_round")), null, "a round GC'd from the log could have synced");
   assert.equal(sessionRefusal(draft, ops.map((o) => (o.operation_type === "dinein_send_round" ? { ...o, status: "synced" as const, synced_at: new Date().toISOString() } : o))), null);
   assert.equal(sessionRefusal(draft, ops.map((o) => (o.operation_type === "dinein_open_table" ? { ...o, last_error_message: "permission denied" } : o))), null, "only the CAS refusal proves never-applied");
+});
+
+// ============================================================ review hardening (1.0.39 integration gate)
+
+/** A fake Supabase slice: by default a signed-in u1 in t1 with access to b1 and pos.cancel_orders, and RLS
+ *  returning zero receipt rows. Every call is recorded. */
+function fakeClient(over: {
+  user?: { id: string } | null;
+  userError?: { message?: string; status?: number } | null;
+  rpc?: Record<string, (args?: Record<string, unknown>) => { data: unknown; error: { message?: string; code?: string } | null; status?: number }>;
+  read?: (table: string, ids: string[]) => Promise<{ data: unknown; error: { message?: string; code?: string } | null; status?: number }>;
+} = {}) {
+  const calls: string[] = [];
+  const rpc = {
+    current_tenant_id: () => ({ data: "t1", error: null, status: 200 }),
+    can_access_branch: (a?: Record<string, unknown>) => ({ data: a?.p_branch === "b1", error: null, status: 200 }),
+    pos_current_user_has_perm: (a?: Record<string, unknown>) => ({ data: a?.p_key === "pos.cancel_orders", error: null, status: 200 }),
+    ...over.rpc,
+  } as Record<string, (args?: Record<string, unknown>) => { data: unknown; error: { message?: string; code?: string } | null; status?: number }>;
+  const client: ReceiptClient = {
+    auth: { getUser: async () => { calls.push("getUser"); return { data: { user: over.user === undefined ? { id: "u1" } : over.user }, error: over.userError ?? null }; } },
+    rpc: async (fn, args) => { calls.push(`rpc:${fn}:${JSON.stringify(args ?? {})}`); return rpc[fn] ? rpc[fn](args) : { data: null, error: { message: "unknown fn", code: "PGRST202" }, status: 404 }; },
+    from: (t) => ({ select: () => ({ eq: (_k: string, v: string) => ({ in: (_c: string, ids: string[]) => { calls.push(`read:${t}:${v}:${ids.join(",")}`); return over.read ? over.read(t, ids) : Promise.resolve({ data: [], error: null, status: 200 }); } }) }) }),
+  };
+  return { calls, check: makeReceiptCheck(async () => client) };
+}
+const Q: ReceiptCheckInput = { tenantId: "t1", branchIds: ["b1"], actorUserId: "u1", openClientOpIds: ["OPEN-1"], roundClientOpIds: ["ROUND-1"] };
+
+test("R1 receipt check: zero rows count as 'no receipt' ONLY after sign-in, tenant, branch and permission are proven on the server", async () => {
+  const ok = fakeClient();
+  assert.deepEqual(await ok.check(Q), { kind: "none" });
+  assert.deepEqual(ok.calls, [
+    "getUser",
+    "rpc:current_tenant_id:{}",
+    'rpc:can_access_branch:{"p_branch":"b1"}',
+    `rpc:pos_current_user_has_perm:{"p_key":"${WITHDRAW_PERMISSION}"}`,
+    "read:pos_op_submissions:t1:OPEN-1",
+    "read:pos_order_submissions:t1:ROUND-1",
+  ]);
+  // Each authority gap → unauthorized, and the receipt tables are never read (an RLS-empty answer would lie).
+  const denied: [string, Parameters<typeof fakeClient>[0]][] = [
+    ["anonymous / expired session", { user: null }],
+    ["session refused by the auth server", { userError: { message: "invalid JWT", status: 401 } }],
+    ["another user signed in", { user: { id: "u2" } }],
+    ["another current tenant", { rpc: { current_tenant_id: () => ({ data: "t-other", error: null, status: 200 }) } }],
+    ["branch access revoked", { rpc: { can_access_branch: () => ({ data: false, error: null, status: 200 }) } }],
+    ["no cancel-orders permission", { rpc: { pos_current_user_has_perm: () => ({ data: false, error: null, status: 200 }) } }],
+    ["permission RPC refused (42501)", { rpc: { pos_current_user_has_perm: () => ({ data: null, error: { message: "permission denied for function", code: "42501" }, status: 403 }) } }],
+  ];
+  for (const [why, over] of denied) {
+    const c = fakeClient(over);
+    const r = await c.check(Q);
+    assert.equal(r.kind, "unauthorized", why);
+    assert.equal(c.calls.some((x) => x.startsWith("read:")), false, `${why}: receipts never read`);
+  }
+});
+
+test("R2 receipt check: absence, receipt, network failure, RLS/permission denial and query failure are distinct outcomes", async () => {
+  const found = fakeClient({ read: async (t, ids) => ({ data: t === "pos_order_submissions" ? [{ client_op_id: ids[0] }, { client_op_id: "NOT-ASKED" }] : [], error: null, status: 200 }) });
+  assert.deepEqual(await found.check(Q), { kind: "found", clientOpIds: ["ROUND-1"] }, "only asked-for ids count");
+  const cases: [string, Parameters<typeof fakeClient>[0]["read"], string][] = [
+    ["transport rejection", async () => { throw new TypeError("Failed to fetch"); }, "offline"],
+    ["postgrest transport error (status 0)", async () => ({ data: null, error: { message: "TypeError: Failed to fetch", code: "" }, status: 0 }), "offline"],
+    ["read timeout (AbortError surfaced)", async () => ({ data: null, error: { message: "AbortError: Request timed out after 15000 ms", code: "" }, status: 0 }), "offline"],
+    ["RLS / grant refusal", async () => ({ data: null, error: { message: "permission denied for table pos_order_submissions", code: "42501" }, status: 403 }), "unauthorized"],
+    ["expired JWT mid-check", async () => ({ data: null, error: { message: "JWT expired", code: "PGRST301" }, status: 401 }), "unauthorized"],
+    ["server fault", async () => ({ data: null, error: { message: "internal error", code: "XX000" }, status: 500 }), "failed"],
+    ["malformed answer (no rows array)", async () => ({ data: null, error: null, status: 200 }), "failed"],
+  ];
+  for (const [why, read, kind] of cases) assert.equal((await fakeClient({ read }).check(Q)).kind, kind, why);
+  assert.equal(receiptFaultKind(new Error("something odd")), "failed", "an unknown fault is never 'none'");
+  assert.equal(receiptFaultKind(Object.assign(new Error("x"), { name: "TimeoutError" })), "offline");
+});
+
+/** The exact records 1.0.37 wrote for the incident: a 1.0.37-shaped draft (no 1.0.38 fields) and its ops as the
+ *  1.0.37 orchestrator left them (open: version_conflict + the server's verbatim text after attempts; round:
+ *  parked dependency_failed BEFORE its handler — retry_count 0), with no build stamp. */
+async function seed1037(openMessage = VERSION_CONFLICT) {
+  const sid = "LS-1037-L41";
+  const scope = { tenant_id: "t1", branch_id: "b1", device_id: DEV.device_id, terminal_id: DEV.terminal_id ?? null, cashier_user_id: "u1" };
+  const at = new Date(Date.now() - 6 * 3_600_000).toISOString();
+  const base = { schema_version: 1, scope, created_at: at, canonical_entity_id: null, depends_on_local_entities: [], result_meta: null, synced_at: null };
+  const open = { ...base, operation_id: "OP-OPEN-37", operation_type: "dinein_open_table", client_op_id: "11111111-1111-4111-8111-111111111111", local_entity_id: sid, dependency_ids: [], payload: { table_id: "TBL-X", expected_version: 7, branch_id: "b1" }, status: "needs_attention", retry_count: 3, last_attempt_at: at, last_error_code: "version_conflict", last_error_message: openMessage };
+  const round = { ...base, operation_id: "OP-R1-37", operation_type: "dinein_send_round", client_op_id: "22222222-2222-4222-8222-222222222222", local_entity_id: sid, dependency_ids: ["OP-OPEN-37"], payload: { submit: { table_id: "TBL-X", client_op_id: "22222222-2222-4222-8222-222222222222", items: [] }, table_local: null, session_local: null, shift_local: null, table_name: "L4/1", round_seq: 1 }, status: "needs_attention", retry_count: 0, last_attempt_at: null, last_error_code: "dependency_failed", last_error_message: "OP-OPEN-37" };
+  await localdb.operations.bulkAdd([open, round] as unknown as OfflineOperation[]);
+  await localdb.dineDrafts.add({
+    local_session_id: sid, tenant_id: "t1", branch_id: "b1", cashier_user_id: "u1", device_id: DEV.device_id, terminal_id: DEV.terminal_id ?? null,
+    floor_id: null, section_id: null, table_id: "TBL-X", table_name: "L4/1", currency: "LBP", open_operation_id: "OP-OPEN-37", canonical_order_id: null,
+    origin: "offline", base_order_version: 7, status: "open", shift_id: "SRV-SHIFT-OLD", shift_local: null,
+    lines: [
+      { line_id: "L1", menu_item_id: "m1", name: "Arguile", base_price: 700000, quantity: 1, modifiers: [], kitchen_note: null, sent_round: 1 },
+      { line_id: "L2", menu_item_id: "m2", name: "Nescaffe", base_price: 300000, quantity: 1, modifiers: [], kitchen_note: null, sent_round: 1 },
+    ],
+    rounds: [{ round_local_id: "RL-1", operation_id: "OP-R1-37", seq: 1, line_ids: ["L1", "L2"], print_state: "printed", sent_at: at }],
+    draft_revision: 3, notes: null, created_at: at, updated_at: at,
+  } as never);
+  return sid;
+}
+
+test("H1 historical 1.0.37 records are recognised after the upgrade: refused, floor free, listed (printed), nothing sent, withdrawable", async () => {
+  const sid = await seed1037();
+  await reconcileDineDraftsFromOperations();
+  assert.equal((await localdb.dineDrafts.get(sid))?.status, "refused");
+  assert.equal((await floorOnline(SCOPE, freeRow())).row.occupied, false);
+  const calls: Call[] = [];
+  await drainOffline(CTX, "reconnect", deps(calls));
+  assert.equal(calls.length, 0, "the upgrade replays nothing");
+  const [o] = await listRefusedSessions(SCOPE);
+  assert.equal(o.items, 2);
+  assert.equal(o.total, 1000000);
+  assert.equal(o.kitchenPrinted, true, "the review warns it may have been served");
+  const asked: ReceiptCheckInput[] = [];
+  const r = await withdrawRefusedSession({ sessionId: sid, scope: SCOPE, actorUserId: "u1", checkReceipts: async (q) => { asked.push(q); return { kind: "none" }; } });
+  assert.equal(r.ok, true);
+  assert.deepEqual(asked[0].openClientOpIds, ["11111111-1111-4111-8111-111111111111"]);
+  assert.deepEqual(asked[0].roundClientOpIds, ["22222222-2222-4222-8222-222222222222"], "the receipt key is the client_op_id the round would have sent");
+});
+
+test("H2 a 1.0.37 refusal whose wording is NOT the proven table-version CAS keeps today's behaviour (open, visible, never refused)", async () => {
+  const sid = await seed1037("VERSION_CONFLICT");
+  await reconcileDineDraftsFromOperations();
+  assert.equal((await localdb.dineDrafts.get(sid))?.status, "open");
+  assert.equal((await listRefusedSessions(SCOPE)).length, 0);
 });

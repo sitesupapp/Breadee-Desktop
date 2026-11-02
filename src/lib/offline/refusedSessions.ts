@@ -20,7 +20,10 @@
 //     refusal from durable state, asks the SERVER for a receipt of every op's client_op_id (pos_op_submissions
 //     for the open, pos_order_submissions for the rounds — both written in the same transaction as the apply,
 //     both tenant-readable), and only when Breadee holds none cancels the ops (kept, with the refusal and a
-//     `withdrawal` audit) and marks the session `withdrawn`. Any receipt, any read failure → nothing changes.
+//     `withdrawal` audit) and marks the session `withdrawn`. RLS hides rows from a caller it does not
+//     authorise, so "none" counts only after the same session proved on the server that it is the signed-in
+//     operator, in the order's tenant, with access to its branch and pos.cancel_orders. Any receipt, any
+//     authority doubt, any read failure → nothing changes (each reported distinctly).
 
 import { localdb, type DineDraft } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
@@ -66,6 +69,10 @@ export async function reconcileRefusedSessions(only?: { tenantId: string | null;
     );
     const out = { refused: [] as string[], reopened: [] as string[] };
     if (drafts.length === 0) return out;
+    // Hot path (runs before every capture): a live session whose open is not parked can never be refused —
+    // decide that from its open op alone, and read the whole log only when some session needs the proof.
+    const opens = await localdb.operations.bulkGet(drafts.map((d) => d.open_operation_id));
+    if (drafts.every((d, i) => d.status === "open" && opens[i]?.status !== "needs_attention")) return out;
     const all = await localdb.operations.toArray();
     for (const d of drafts) {
       const ev = sessionRefusal(d, all.filter((o) => opInScope(o, draftScope(d))));
@@ -129,29 +136,119 @@ export async function listRefusedSessions(scope: Scope): Promise<RefusedOrderSum
   return out.sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
 }
 
-/** The server receipt check: every client_op_id Breadee holds a receipt for (empty = none was applied). */
-export type ReceiptCheck = (input: { tenantId: string; openClientOpIds: string[]; roundClientOpIds: string[] }) => Promise<string[]>;
+/**
+ * The server receipt check's outcome. ONLY `none` permits a withdrawal. The receipt tables are read under RLS
+ * (tenant = current_tenant_id() AND can_access_branch(branch_id)), and RLS answers a caller it does not
+ * authorise with ZERO rows, not an error — so an empty read means "no receipt" only after the same session
+ * has proved, on the server, that it would see one: a live signed-in user (the actor), the draft's tenant as
+ * its current tenant, access to every branch the ops were captured in, and the cancel-orders permission.
+ */
+export type ReceiptOutcome =
+  | { kind: "none" }
+  | { kind: "found"; clientOpIds: string[] }
+  | { kind: "unauthorized"; detail: string }
+  | { kind: "offline"; detail: string }
+  | { kind: "failed"; detail: string };
 
-/** Live receipt check against the two receipt tables (tenant RLS; read-only). Throws on any read failure. */
-type ReceiptQuery = {
-  select(c: string): { eq(k: string, v: string): { in(k: string, v: string[]): PromiseLike<{ data: unknown; error: { message: string } | null }> } };
+export type ReceiptCheckInput = {
+  tenantId: string;
+  branchIds: string[];
+  actorUserId: string;
+  openClientOpIds: string[];
+  roundClientOpIds: string[];
+};
+export type ReceiptCheck = (input: ReceiptCheckInput) => Promise<ReceiptOutcome>;
+
+/** The permission a withdrawal needs — the same authority as cancelling an order (pos.cancel_orders). */
+export const WITHDRAW_PERMISSION = "pos.cancel_orders";
+
+type PgError = { message?: string; code?: string } | null;
+type PgResult = { data: unknown; error: PgError; status?: number };
+/** The slice of the Supabase client the check uses (injectable for tests). */
+export type ReceiptClient = {
+  auth: { getUser(): PromiseLike<{ data: { user: { id: string } | null }; error: { message?: string; status?: number } | null }> };
+  rpc(fn: string, args?: Record<string, unknown>): PromiseLike<PgResult>;
+  from(t: string): { select(c: string): { eq(k: string, v: string): { in(k: string, v: string[]): PromiseLike<PgResult> } } };
 };
 
-export const verifyNoServerReceipts: ReceiptCheck = async ({ tenantId, openClientOpIds, roundClientOpIds }) => {
-  const { supabase } = await import("@/lib/supabase");
-  // The receipt tables are not in the generated types; read them untyped (RLS: tenant + branch access).
-  const db = supabase as unknown as { from(t: string): ReceiptQuery };
-  const found: string[] = [];
-  const read = async (table: string, ids: string[]) => {
-    if (ids.length === 0) return;
-    const { data, error } = await db.from(table).select("client_op_id").eq("tenant_id", tenantId).in("client_op_id", ids);
-    if (error) throw new Error(error.message);
-    for (const r of (Array.isArray(data) ? data : []) as { client_op_id: string }[]) found.push(r.client_op_id);
+const CHECK_TIMEOUT_MS = 15_000;
+const TRANSPORT = /failed to fetch|networkerror|network request failed|load failed|fetch failed|timed? ?out|timeout|aborterror|econn|enotfound|socket/i;
+const AUTH_CODES = new Set(["42501", "PGRST301", "PGRST302", "PGRST303"]);
+
+class CheckFault extends Error {
+  readonly kind: "unauthorized" | "offline" | "failed";
+  constructor(kind: "unauthorized" | "offline" | "failed", detail: string) { super(detail); this.kind = kind; }
+}
+
+/** Classify one failed server read. Pure; exported for tests. */
+export function receiptFaultKind(e: unknown, status?: number): "unauthorized" | "offline" | "failed" {
+  if (e instanceof CheckFault) return e.kind;
+  if (e instanceof TypeError || (e instanceof Error && (e.name === "AbortError" || e.name === "TimeoutError"))) return "offline";
+  const code = e && typeof e === "object" ? String((e as { code?: unknown }).code ?? "") : "";
+  const msg = e && typeof e === "object" ? String((e as { message?: unknown }).message ?? "") : String(e ?? "");
+  if (AUTH_CODES.has(code) || status === 401 || status === 403 || /jwt|not signed in|no tenant context|permission denied/i.test(msg)) return "unauthorized";
+  if (status === 0 || (!code && TRANSPORT.test(msg))) return "offline";
+  return "failed";
+}
+
+function bounded<T>(p: PromiseLike<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new CheckFault("offline", `${what}: no answer within ${CHECK_TIMEOUT_MS / 1000} s`)), CHECK_TIMEOUT_MS);
+    Promise.resolve(p).then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+/** A failed PostgREST answer → CheckFault of the right kind. */
+function fault(what: string, r: PgResult): CheckFault {
+  return new CheckFault(receiptFaultKind(r.error, r.status), `${what}: ${r.error?.message ?? `status ${r.status ?? "?"}`}`);
+}
+
+/** Build the live receipt check over a Supabase client. Read-only: three STABLE RPCs and two RLS reads. */
+export function makeReceiptCheck(client: () => Promise<ReceiptClient>): ReceiptCheck {
+  return async ({ tenantId, branchIds, actorUserId, openClientOpIds, roundClientOpIds }) => {
+    try {
+      const db = await client();
+      // 1. Authority first. Any doubt → not "none".
+      const u = await bounded(db.auth.getUser(), "sign-in check");
+      if (u.error) throw new CheckFault(receiptFaultKind(u.error, u.error.status), `sign-in check: ${u.error.message ?? "refused"}`);
+      if (!u.data.user) throw new CheckFault("unauthorized", "no signed-in user");
+      if (u.data.user.id !== actorUserId) throw new CheckFault("unauthorized", "the signed-in user is not the operator");
+      const t = await bounded(db.rpc("current_tenant_id"), "tenant check");
+      if (t.error) throw fault("tenant check", t);
+      if (t.data !== tenantId) throw new CheckFault("unauthorized", "this session's current tenant is not the order's tenant");
+      for (const b of branchIds) {
+        const a = await bounded(db.rpc("can_access_branch", { p_branch: b }), "branch check");
+        if (a.error) throw fault("branch check", a);
+        if (a.data !== true) throw new CheckFault("unauthorized", "no access to the order's branch");
+      }
+      const p = await bounded(db.rpc("pos_current_user_has_perm", { p_key: WITHDRAW_PERMISSION }), "permission check");
+      if (p.error) throw fault("permission check", p);
+      if (p.data !== true) throw new CheckFault("unauthorized", `missing ${WITHDRAW_PERMISSION}`);
+      // 2. The receipts (written in the same transaction as any apply, never garbage-collected).
+      const asked = new Set([...openClientOpIds, ...roundClientOpIds]);
+      const found: string[] = [];
+      const read = async (table: string, ids: string[]) => {
+        if (ids.length === 0) return;
+        const r = await bounded(db.from(table).select("client_op_id").eq("tenant_id", tenantId).in("client_op_id", ids), `${table} read`);
+        if (r.error) throw fault(`${table} read`, r);
+        if (!Array.isArray(r.data)) throw new CheckFault("failed", `${table} read: no rows array`);
+        for (const row of r.data as { client_op_id?: unknown }[]) if (typeof row?.client_op_id === "string" && asked.has(row.client_op_id)) found.push(row.client_op_id);
+      };
+      await read("pos_op_submissions", openClientOpIds);
+      await read("pos_order_submissions", roundClientOpIds);
+      return found.length > 0 ? { kind: "found", clientOpIds: found } : { kind: "none" };
+    } catch (e) {
+      const kind = receiptFaultKind(e);
+      return { kind, detail: e instanceof Error ? e.message : String(e) };
+    }
   };
-  await read("pos_op_submissions", openClientOpIds);
-  await read("pos_order_submissions", roundClientOpIds);
-  return found;
-};
+}
+
+/** Live check over the app's Supabase client. The receipt tables are not in the generated types (untyped). */
+export const verifyNoServerReceipts: ReceiptCheck = makeReceiptCheck(async () => {
+  const { supabase } = await import("@/lib/supabase");
+  return supabase as unknown as ReceiptClient;
+});
 
 export const WITHDRAW_NEEDS_CONNECTION =
   "Withdrawing needs a connection to Breadee, to confirm nothing of this order was applied. Try again when this terminal is online.";
@@ -159,6 +256,10 @@ export const WITHDRAW_RECEIPT_FOUND =
   "Breadee holds a record of part of this order, so it cannot be withdrawn here. Keep it and contact support with the Sync Center diagnostics.";
 export const WITHDRAW_STATE_CHANGED = "This order's sync state changed while it was being reviewed. Review it again.";
 export const WITHDRAW_NOT_YOURS = "Only the cashier who captured this order, on this terminal, can withdraw it.";
+export const WITHDRAW_NOT_AUTHORIZED =
+  "Breadee could not confirm that you may withdraw this order here (sign-in, branch access, or the Cancel orders permission). Nothing was changed. Ask your manager, or contact support with the Sync Center diagnostics.";
+export const WITHDRAW_CHECK_FAILED =
+  "Breadee could not complete the check that nothing of this order was applied. Nothing was changed. Try again; if it keeps failing, contact support with the Sync Center diagnostics.";
 
 class StaleWithdrawal extends Error {}
 
@@ -183,17 +284,23 @@ export async function withdrawRefusedSession(input: {
   if (!ev) return { ok: false, reason: WITHDRAW_STATE_CHANGED };
   const work = ev.workOpIds.map((id) => scoped.find((o) => o.operation_id === id) as OfflineOperation);
 
-  let receipts: string[];
+  let outcome: ReceiptOutcome;
   try {
-    receipts = await (input.checkReceipts ?? verifyNoServerReceipts)({
+    outcome = await (input.checkReceipts ?? verifyNoServerReceipts)({
       tenantId: d.tenant_id,
+      branchIds: [...new Set([d.branch_id, ...work.map((o) => o.scope.branch_id)].filter((b): b is string => typeof b === "string" && b.length > 0))],
+      actorUserId: input.actorUserId,
       openClientOpIds: work.filter((o) => o.operation_type === "dinein_open_table").map((o) => o.client_op_id),
       roundClientOpIds: work.filter((o) => o.operation_type !== "dinein_open_table").map((o) => o.client_op_id),
     });
-  } catch {
-    return { ok: false, reason: WITHDRAW_NEEDS_CONNECTION };
+  } catch (e) {
+    outcome = { kind: receiptFaultKind(e), detail: e instanceof Error ? e.message : String(e) };
   }
-  if (receipts.length > 0) return { ok: false, reason: WITHDRAW_RECEIPT_FOUND };
+  // Only a server-authorised "no receipt for any op" withdraws. Everything else changes nothing.
+  if (outcome.kind === "found") return { ok: false, reason: WITHDRAW_RECEIPT_FOUND };
+  if (outcome.kind === "offline") return { ok: false, reason: WITHDRAW_NEEDS_CONNECTION };
+  if (outcome.kind === "unauthorized") return { ok: false, reason: WITHDRAW_NOT_AUTHORIZED };
+  if (outcome.kind !== "none") return { ok: false, reason: WITHDRAW_CHECK_FAILED };
 
   const at = new Date().toISOString();
   try {
@@ -211,7 +318,7 @@ export async function withdrawRefusedSession(input: {
       for (const o of work) {
         await localdb.operations.update(o.operation_id, {
           status: "cancelled",
-          withdrawal: { at, by_user_id: input.actorUserId, reason: "refused_never_applied", verified_at: at, verified_against: o.operation_type === "dinein_open_table" ? ["pos_op_submissions"] : ["pos_order_submissions"] },
+          withdrawal: { at, by_user_id: input.actorUserId, reason: "refused_never_applied", verified_at: at, verified_against: [o.operation_type === "dinein_open_table" ? "pos_op_submissions" : "pos_order_submissions", `authority:${WITHDRAW_PERMISSION}`] },
         });
       }
       await localdb.dineDrafts.update(input.sessionId, { status: "withdrawn", closed_reason: "refused_withdrawn", withdrawn_at: at, withdrawn_by: input.actorUserId, updated_at: at });
