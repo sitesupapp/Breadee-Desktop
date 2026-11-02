@@ -243,9 +243,10 @@ export const shiftNet = {
  * for up to the 15 s read timeout before restoring the local shift). Browser runtime only for the
  * watcher; node tests inject their own `shiftNet` and are unaffected.
  */
-async function findOpenShiftUnlessOffline(tenantId: string, userId: string): Promise<ActiveShift | null> {
+async function findOpenShiftUnlessOffline(tenantId: string, userId: string, branchId: string | null): Promise<ActiveShift | null> {
   if (lastKnownReachable() === false) throw new ShiftReadOffline();
-  const read = shiftNet.findOpenShift(tenantId, userId);
+  // DESK-1 - THIS branch/OU's open shift, not the cashier's newest one across OUs.
+  const read = shiftNet.findOpenShift(tenantId, userId, branchId);
   const watch = shiftNet.becameUnreachable;
   if (!watch) return read;
   return Promise.race([
@@ -307,16 +308,16 @@ export const useShift = create<ShiftState>((set, get) => ({
     set({ loading: true, error: null });
     const deviceId = getDeviceIdentity().device_id;
     try {
-      const shift = await findOpenShiftUnlessOffline(tenantId, userId);
+      const shift = await findOpenShiftUnlessOffline(tenantId, userId, branchId);
       if (superseded()) return;
       primeEndShiftApprovalCache(tenantId, branchId);
       // rc.12 — a REFUSED offline close of a shift the server no longer has open (closed / force-ended
       // elsewhere) is moot: supersede it (kept, cancelled) so it can never block a later Open Shift.
       await supersedeMootRefusedCloses({ tenantId, branchId, cashierUserId: userId, deviceId, terminalId: getDeviceIdentity().terminal_id ?? null }, shift && (shift.branch_id ?? null) === (branchId ?? null) ? shift.id : null).catch(() => undefined);
       if (superseded()) return;
-      // The live open shift must be for THIS branch/OU. findOpenShift returns the
-      // cashier's most recent open shift across branches, so a shift opened in a
-      // sibling branch/OU must NOT surface as this POS context's active shift; fall
+      // The live open shift must be for THIS branch/OU. Since 1.0.41 (DESK-1) the read is
+      // branch-scoped; this equality check stays as defence in depth, so a shift from a
+      // sibling branch/OU can never surface as this POS context's active shift - it falls
       // through to the branch-scoped pending/none handling below instead.
       if (shift && (shift.branch_id ?? null) === (branchId ?? null)) {
         // rc.10 — a shift END captured offline that has not synced yet: the server still reports it
