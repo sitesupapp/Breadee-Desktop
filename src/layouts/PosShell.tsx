@@ -112,6 +112,8 @@ export type PosShellProps = {
   ready: boolean;
   online: boolean;
   pendingSync: number;
+  /** 1.0.42 (DESK-O4) — waiting on this device for OTHER branches (footer). */
+  pendingElsewhere?: number;
   /** Business identity for the rail header. */
   tenantName: string;
 };
@@ -304,7 +306,7 @@ export function PosShell(props: PosShellProps) {
           </div>
         )}
 
-        <PosFooterBar ready={props.ready} online={props.online} pendingSync={props.pendingSync} />
+        <PosFooterBar ready={props.ready} online={props.online} pendingSync={props.pendingSync} pendingElsewhere={props.pendingElsewhere} />
       </div>
 
       <Drawer
