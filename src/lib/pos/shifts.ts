@@ -33,15 +33,24 @@ function toTreatment(value: unknown): DeliveryFeeCashTreatment {
  * The operator's currently open shift, if any. Read straight from `pos_shifts`
  * under RLS - the same query the web POS uses to decide whether to prompt for a
  * shift. Returns null when nothing is open.
+ *
+ * `branchId` (1.0.41, DESK-1) scopes the read to ONE branch/OU. The server keeps one
+ * open shift per cashier PER BRANCH (`pos_open_shift_core` adopts by tenant + cashier +
+ * branch), so a cashier can hold open shifts in two OUs at once. Unscoped, this read
+ * returned only the newest of them: the POS of the other OU showed "No open shift", and
+ * Open Shift there failed ("the server opened the shift, but this device could not
+ * activate it"). Omitted (undefined) keeps the unscoped read for every other caller.
  */
-export async function findOpenShift(tenantId: string, userId: string): Promise<ActiveShift | null> {
+export async function findOpenShift(tenantId: string, userId: string, branchId?: string | null): Promise<ActiveShift | null> {
   const { supabase } = await import("@/lib/supabase");
-  const { data, error } = await supabase
+  let query = supabase
     .from("pos_shifts")
     .select("id, status, opened_at, opening_cash_amount, branch_id")
     .eq("tenant_id", tenantId)
     .eq("cashier_user_id", userId)
-    .eq("status", "open")
+    .eq("status", "open");
+  if (branchId !== undefined) query = branchId === null ? query.is("branch_id", null) : query.eq("branch_id", branchId);
+  const { data, error } = await query
     .order("opened_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -261,7 +270,29 @@ export function shiftReportFromRow(row: Record<string, unknown>, rpc: "pos_end_s
     total_delivery_fees: num(row.total_delivery_fees),
     delivery_fees_cash: num(row.delivery_fees_cash),
     delivery_fee_cash_treatment: toTreatment(row.delivery_fee_cash_treatment),
+    // DESK-3 (R7) - the server's own outcome for this close. Null on an older server.
+    shift_status: strOrNull(row.shift_status),
+    approval_required: typeof row.approval_required === "boolean" ? row.approval_required : null,
   };
+}
+
+/**
+ * DESK-3 - what the end-of-shift report says about approval, read ONLY from the server's
+ * outcome. `approved` means the branch allows a direct close (R7 switch ON) and the shift is
+ * final. Anything else - `pending_manager_review`, or no outcome at all (older server, offline
+ * report) - keeps the review wording, which is the safe reading. Through 1.0.40 the report
+ * always said "Pending manager review", even for a shift the server had already approved.
+ */
+export function shiftCloseOutcome(report: Pick<ShiftReport, "shift_status" | "approval_required">): {
+  label: string;
+  subtitle: string;
+  tone: "green" | "amber";
+} {
+  const closed =
+    report.shift_status === "approved" || (report.shift_status == null && report.approval_required === false);
+  return closed
+    ? { label: "Closed - approved", subtitle: "Shift closed. This branch does not require manager review.", tone: "green" }
+    : { label: "Pending manager review", subtitle: "Sent for manager review - it is not approved yet.", tone: "amber" };
 }
 
 /** Human label for a difference, using the same vocabulary as the web report. */
