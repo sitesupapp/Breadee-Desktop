@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { Glyph } from "@/components/Glyph";
 import { SyncCenterPanel, useCurrentShiftId, useSyncSummary } from "@/components/sync/SyncCenterPanel";
-import { chipOf } from "@/components/sync/syncCenterModel";
+import { chipOf, withOtherBranches } from "@/components/sync/syncCenterModel";
 
 const CHIP_TONE = {
   attention: "text-amber-700 bg-amber-50 border-amber-200",
@@ -22,12 +22,15 @@ const CHIP_TONE = {
 export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; branchId: string | null }) {
   const [open, setOpen] = useState(false);
   const summary = useSyncSummary(tenantId, branchId);
+  // 1.0.42 (DESK-O4) — this device's whole queue (every branch), so the chip never says "All changes synced" for
+  // this branch while work of another branch is still waiting here.
+  const device = useSyncSummary(tenantId, null);
   // The live shift (canonical or offline-opened local id), so work of an OLDER shift is
   // classified UNRELATED_OLD_SHIFT rather than mistaken for this shift's failure.
   const currentShiftId = useCurrentShiftId();
 
   // Chip text + tone. Needs-attention dominates, then in-flight, else all-synced.
-  const chip = chipOf(summary);
+  const chip = withOtherBranches(chipOf(summary), summary, branchId ? device : null);
 
   return (
     <>

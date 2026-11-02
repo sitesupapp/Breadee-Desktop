@@ -24,6 +24,9 @@ export function PosFooterBar(props: {
   online: boolean;
   /** Rows in the offline outbox waiting to be replayed. */
   pendingSync: number;
+  /** 1.0.42 (DESK-O4) — rows of OTHER branches waiting on this device: a branch with none of its own no longer
+   *  reads "nothing queued" while this terminal still holds work for another branch. */
+  pendingElsewhere?: number;
   className?: string;
 }) {
   return (
@@ -47,6 +50,10 @@ export function PosFooterBar(props: {
         {props.pendingSync > 0 ? (
           <span className="text-amber-800">
             {props.pendingSync} waiting to sync
+          </span>
+        ) : (props.pendingElsewhere ?? 0) > 0 ? (
+          <span className="text-amber-800">
+            {props.pendingElsewhere} waiting to sync on other branches
           </span>
         ) : (
           <span>{props.online ? "All changes synced" : "Offline - nothing queued"}</span>
