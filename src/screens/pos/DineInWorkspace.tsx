@@ -142,6 +142,7 @@ import {
   SETTLE_ATTENTION_HOLD_MESSAGE,
   refusedSettleNotice,
   splitCompletesBill,
+  splitItemOf,
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
@@ -1341,7 +1342,8 @@ export function useDineInWorkspace(input: {
       // prove its shift either: fail closed BEFORE any capture (full payment and On Account alike).
       if (p.summaryOnly) return { ok: false, reason: SUMMARY_ONLY_SETTLE_MESSAGE };
       // 1.0.38 G3 — the amount pin with the cashier's discount, exactly as the server computes it.
-      const pin = offlineSettlePin(amount.exactAmount, { subtotal: p.bill.subtotal, collected: p.collected }, discount);
+      // 1.0.42 — a leg captured here is a part-payment too: no discount on top of it (SPLIT_DISCOUNT_UNSUPPORTED).
+      const pin = offlineSettlePin(amount.exactAmount, { subtotal: p.bill.subtotal, collected: p.collected + p.paidPending }, discount);
       if (!pin.ok) return { ok: false, reason: pin.reason };
       const canonicalIds = p.orders.filter((o) => o.orderLocal == null).map((o) => o.orderId).filter((x): x is string => typeof x === "string" && x !== "");
       const hasCanonical = p.summaryOnly || canonicalIds.length > 0;
@@ -1402,18 +1404,26 @@ export function useDineInWorkspace(input: {
       const po = withLines[0];
       if (po.partiallyPaid) return { ok: false, reason: "Part of this bill was already paid online. Reconnect to split it." };
       const order = p.bill.orders.find((b) => b.id === po.key) as BillOrder;
-      const lines = order.lines.filter((l) => {
-        const m = p.meta.get(l.id);
-        return m && (m.ref.kind === "canonical" || m.ref.kind === "local");
-      });
+      // 1.0.42 (DESK-O2) — every line a leg can allocate, INCLUDING the ones an unsynced offline merge folded in
+      // (by their source item, splitItemOf). Through 1.0.41 those were left out: the panel called the bill "Fully
+      // paid" while the merged-in amount had never been offered for collection.
+      const unpaidQty = (l: BillLine) => l.quantity - (p.meta.get(l.id)?.paidQty ?? 0);
+      const lines = order.lines.filter((l) => splitItemOf(p.meta.get(l.id)) != null);
+      // A line that still cannot be split offline (merged in by an older build) never lets the panel claim "paid".
+      const stuck = order.lines.some((l) => splitItemOf(p.meta.get(l.id)) == null && unpaidQty(l) > 0);
+      if (stuck && lines.every((l) => unpaidQty(l) <= 0)) {
+        return { ok: false, reason: "The rest of this bill was merged in offline and can't be split until the merge syncs. Reconnect to settle it." };
+      }
+      const legs = (p.pendingSplitLegs ?? []).filter((g) => g.orderKey === po.key);
       return {
         ok: true,
         state: {
           order_id: po.key,
           order_number: order.order_number || tableName,
           status: "sent_to_kitchen",
-          payment_status: "unpaid",
-          pos_entity_version: 0,
+          payment_status: legs.length > 0 ? "partial" : "unpaid",
+          // Changes with every captured leg, so the panel clears its selection after each one.
+          pos_entity_version: legs.length,
           total_amount: lines.reduce((s, l) => s + l.line_total, 0),
           paid_amount_usd: 0,
           currency: order.currency,
@@ -1430,7 +1440,9 @@ export function useDineInWorkspace(input: {
               available_qty: Math.max(0, l.quantity - paid),
             };
           }),
-          settlements: [],
+          // 1.0.42 — the legs taken on this device (pending sync) and what each took; through 1.0.41 none were
+          // listed ("settled across 0 splits").
+          settlements: legs.map((g, i) => ({ split_no: i + 1, display_no: `Offline split ${i + 1}`, amount: g.amount, method: g.method, currency: order.currency, paid_at: null })),
         },
       };
     },
@@ -1511,7 +1523,8 @@ export function useDineInWorkspace(input: {
           for (const a of allocations) {
             const m = p.meta.get(a.order_item_id);
             const line = p.bill.orders.flatMap((o) => o.lines).find((l) => l.id === a.order_item_id);
-            if (!m || !line || (m.ref.kind !== "canonical" && m.ref.kind !== "local")) {
+            const item = splitItemOf(m);
+            if (!m || !line || !item) {
               setSplitError("A selected item can't be split offline yet. Reconnect to split it.");
               return;
             }
@@ -1520,7 +1533,8 @@ export function useDineInWorkspace(input: {
               setSplitError(`Only ${remaining} of "${line.name}" remain to split.`);
               return;
             }
-            allocs.push(m.ref.kind === "canonical" ? { order_item_id: m.ref.order_item_id, quantity: a.quantity } : { line_local: m.ref.line_local, quantity: a.quantity });
+            // 1.0.42 — a line merged in offline is allocated by its source item (replays after the merge).
+            allocs.push({ ...item, quantity: a.quantity });
             if (m.creatorOpId) creators.push(m.creatorOpId);
           }
           const draft = p.sessionId ? await getDineDraftForTable(input.offlineScope, selected.id) : null;
@@ -1560,7 +1574,9 @@ export function useDineInWorkspace(input: {
           const after = await getOperationalTableBill(input.offlineScope, raw);
           const s = projectionSplit(after, selected.name);
           if (s.ok) setSplitState(s.state);
-          setSplitLastPaid({ display_no: `${st.order_number}-offline`, amount: 0, method });
+          // 1.0.42 — what this leg took (shown as 0 through 1.0.41); the server prices the leg on replay.
+          const legAmount = allocations.reduce((sum, a) => sum + (Number(a.quantity) || 0) * (st.lines.find((l) => l.order_item_id === a.order_item_id)?.final_unit_price ?? 0), 0);
+          setSplitLastPaid({ display_no: `${st.order_number}-offline`, amount: Math.round(legAmount * 100) / 100, method });
         } catch (e) {
           setSplitError(classifyError(e).message);
         } finally {
@@ -2687,7 +2703,9 @@ export function useDineInWorkspace(input: {
            server-only tables.bill, which is null offline and rendered the total as 0. */
         /* 1.0.38 (Bug 9) — the amount due is R = T − P for a part-paid bill once the server deducts prior
            payments (settleAmountDue; T otherwise — the F1 gate then refuses a part-paid bill anyway). */
-        subtotal={settleAmountDue(settleBill?.subtotal ?? 0, offlineCapture ? offlineProj?.collected : selected?.collected)}
+        /* 1.0.42 (DESK-O1) — offline, what is still open: minus the server-held part-payment AND the legs taken on
+           this device (through 1.0.41 the dialog offered the gross bill after an offline split). */
+        subtotal={settleAmountDue(settleBill?.subtotal ?? 0, offlineCapture ? (offlineProj?.collected ?? 0) + (offlineProj?.paidPending ?? 0) : selected?.collected)}
         primaryCurrency={settleBill?.currency ?? input.currency}
         rate={input.rate}
         discountGate={pos.gates.applyDiscounts}

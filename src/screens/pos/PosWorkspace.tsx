@@ -78,7 +78,7 @@ import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/po
 import { readPosFeatures } from "@/lib/pos/posFeatures";
 import { buildSubmitPayload, cartSubtotal, submitOrder, submitPayloadToCartLines, type SubmitOrderPayload } from "@/lib/pos/orders";
 import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
-import { completePayment, completeOnAccountReceipt } from "@/lib/pos/paymentCompletion";
+import { completePayment, completeOnAccountReceipt, tenderTotalFor } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
 import { CustomerConflictDialog } from "@/components/pos/CustomerConflictDialog";
@@ -624,17 +624,26 @@ function PosWorkspaceInner() {
   // quarantined, so the badge read 0 while offline work was pending). Scoped to tenant + the operational
   // branch; counts every unsettled state incl. Needs Attention and not-yet-staged legacy captures.
   const [pending, setPending] = useState(0);
+  // 1.0.42 (DESK-O4) — work queued on this device for OTHER branches: the footer says so instead of "nothing
+  // queued" while the operator looks at a branch whose own queue is empty.
+  const [pendingElsewhere, setPendingElsewhere] = useState(0);
   const badgeBranchId = pos.branch.id;
   useEffect(() => {
     if (!tenantId) {
       setPending(0);
+      setPendingElsewhere(0);
       return;
     }
     let live = true;
     const tick = () =>
-      summarizeOperations({ tenantId, branchId: badgeBranchId ?? undefined }, { includeSynced: false })
-        .then((s) => {
-          if (live) setPending(s.unsettled);
+      Promise.all([
+        summarizeOperations({ tenantId, branchId: badgeBranchId ?? undefined }, { includeSynced: false }),
+        badgeBranchId ? summarizeOperations({ tenantId }, { includeSynced: false }) : Promise.resolve(null),
+      ])
+        .then(([s, all]) => {
+          if (!live) return;
+          setPending(s.unsettled);
+          setPendingElsewhere(all ? Math.max(0, all.unsettled - s.unsettled) : 0);
         })
         .catch(() => {});
     tick();
@@ -1901,7 +1910,13 @@ function PosWorkspaceInner() {
             at: new Date().toLocaleString(),
             paid: true,
             method: "cash",
-            currency: input.currency,
+            // 1.0.42 — the lines and totals are in the ORDER's currency; the cash was taken in the TENDER currency
+            // (converted at the tenant rate, as on the online receipt). Through 1.0.41 the order's LBP total
+            // printed under the tender's "$" sign ($320000.00 for a 320,000 LBP sale paid in USD).
+            currency,
+            tenderCurrency: input.currency,
+            tenderTotal: tenderTotalFor(total, currency, input.currency, rate ?? null),
+            exchangeRate: input.currency !== currency ? (rate ?? null) : null,
             lines: receiptLines,
             subtotal: total,
             discount: 0,
@@ -1918,7 +1933,7 @@ function PosWorkspaceInner() {
       newOrder();
       toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
     },
-    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, provisionalResult, receiptStore, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
+    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, provisionalResult, rate, receiptStore, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
 
   /** Resume an offline order that was sent to the kitchen but not yet paid. */
@@ -2836,6 +2851,7 @@ function PosWorkspaceInner() {
         ready={menuState === "ready"}
         online={online}
         pendingSync={pending}
+        pendingElsewhere={pendingElsewhere}
         cartDrawerOpen={cartDrawerOpen}
         onCartDrawerChange={setCartDrawerOpen}
         /* Left or right, in the customized layout only. The DEFAULT layout is
