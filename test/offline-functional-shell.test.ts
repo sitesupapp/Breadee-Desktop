@@ -325,7 +325,8 @@ test("DINE-IN: Add-Items round panel and the payment modal read the OFFLINE oper
   assert.match(dw, /billError=\{offlineCapture \? null : tables\.billError\}/, "round panel suppresses the server bill error offline");
   // Blocker 2 — the payment modal totals come from settleBill (offline projection), not tables.bill.
   // 1.0.38 (WS-F, Bug 9) — still settleBill's total, as R = T − P via settleAmountDue (T while the flag is off).
-  assert.match(dw, /subtotal=\{settleAmountDue\(settleBill\?\.subtotal \?\? 0, offlineCapture \? offlineProj\?\.collected : selected\?\.collected\)\}/, "payment total from settleBill");
+  // 1.0.42 (DESK-O1) — offline, P also counts the legs taken on this device (paidPending).
+  assert.match(dw, /subtotal=\{settleAmountDue\(settleBill\?\.subtotal \?\? 0, offlineCapture \? \(offlineProj\?\.collected \?\? 0\) \+ \(offlineProj\?\.paidPending \?\? 0\) : selected\?\.collected\)\}/, "payment total from settleBill");
   assert.match(dw, /orderNumber=\{settleBill\?\.orders/, "payment order number from settleBill");
   // On-account is capability-gated (online OR offline-ready), not blanket online.
   assert.match(dw, /pos\.gates\.takeOnAccount\.allowed && \(input\.online \|\| offlineCapture\)/, "on-account enabled offline when ready");
