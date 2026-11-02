@@ -821,6 +821,15 @@ async function partPaidPrimaryWithMergedLine() {
   return { A, a, b, cap };
 }
 
+/** Each op exactly once, A's leg before the merge, the merge after both bills, the final collection last. A's and
+ *  B's own ops are independent of each other, so their relative order (same-millisecond captures) is not asserted. */
+function assertMergedReplayOrder(names: string[], last: "split" | "pay_table") {
+  assert.deepEqual([...names].sort(), ["merge_v4", "open_table", "open_table", "round", "round", "split", last].sort(), "each op once");
+  const merge = names.indexOf("merge_v4");
+  assert.ok(merge > names.indexOf("split") && merge > names.lastIndexOf("round"), "the merge replays after A's leg and both bills");
+  assert.equal(names.length - 1, names.lastIndexOf(last), "the final collection replays last, after the merge");
+}
+
 test("DESK-O2 Split offers the merged-in line, pays it by its SOURCE item after the merge, and closes the bill — exactly once", async () => {
   const { A, a, b, cap } = await partPaidPrimaryWithMergedLine();
   const p = await proj(A);
@@ -848,7 +857,7 @@ test("DESK-O2 Split offers the merged-in line, pays it by its SOURCE item after 
 
   const srv = new FakeServer([["A", 1], ["B", 1]]);
   await drain(srv);
-  assert.deepEqual(srv.names(), ["open_table", "round", "split", "open_table", "round", "merge_v4", "split"]);
+  assertMergedReplayOrder(srv.names(), "split");
   const oA = [...srv.orders.values()].find((o) => o.items.some((i) => i.name === "Tuna"))!;
   assert.equal(oA.items.length, 3, "the merged Croissant is on A's order");
   assert.ok(oA.items.every((i) => i.paid_qty === i.qty), "every item paid, the merged-in one included");
@@ -874,7 +883,7 @@ test("DESK-O1/O2 Pay Full Bill of a split + merged bill asks for exactly what is
 
     const srv = new FakeServer([["A", 1], ["B", 1]]);
     await drain(srv);
-    assert.deepEqual(srv.names(), ["open_table", "round", "split", "open_table", "round", "merge_v4", "pay_table"]);
+    assertMergedReplayOrder(srv.names(), "pay_table");
     assert.equal((srv.calls.find((c) => c.name === "pay_table")!.payload as { expectedAmount: number }).expectedAmount, 500);
     assert.deepEqual(srv.payments.map((x) => x.amount), [180, 500]);
     assert.equal(srv.drawer(), 680, "no double charge, nothing left uncollected");

@@ -164,7 +164,7 @@ test("DESK-O1/O2: the Split panel and the Pay dialog read the remaining bill (so
 // ------------------------------------------------------------------------------------------------ receipt
 
 test("Receipt: an offline cash sale prints amounts in the order currency and the tender separately", () => {
-  const src = readFileSync("src/screens/pos/PosWorkspace.tsx", "utf8");
+  const src = readFileSync("src/screens/pos/PosWorkspace.tsx", "utf8").replace(/\r\n/g, "\n"); // CRLF checkouts (Windows CI)
   const at = src.indexOf("const saveOfflineCashPayment");
   const body = src.slice(at, src.indexOf("const resumeOfflineOrder", at));
   assert.match(body, /\n\s*currency,\n\s*tenderCurrency: input\.currency,/);
