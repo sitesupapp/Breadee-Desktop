@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.41";
+export const WHATS_NEW_VERSION = "1.0.42";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -37,6 +37,15 @@ export const WHATS_NEW_PAGES: WhatsNewPage[] = [
       "When the same person works in more than one branch, Ready Desktop now opens the right shift for each branch. The end-of-shift report says whether the shift is closed or still waiting for a manager. When an action is refused, for example ending a shift that still has open orders, the full reason is shown. Changing the modifier groups of a menu item now needs the Manage modifiers permission, and a change is only shown as saved when it really was.",
     bodyAr:
       "عندما يعمل الشخص نفسه في أكثر من فرع، يفتح Ready Desktop الآن الوردية الصحيحة لكل فرع. ويوضح تقرير نهاية الوردية ما إذا كانت الوردية مغلقة أو ما زالت بانتظار موافقة المدير. وعند رفض إجراء ما، مثل إنهاء وردية فيها طلبات مفتوحة، يظهر السبب كاملاً. كما أصبح تعديل مجموعات الإضافات لصنف في القائمة يتطلب صلاحية إدارة الإضافات، ولا يظهر أي تعديل على أنه محفوظ إلا إذا حُفظ فعلاً.",
+  },
+  {
+    glyph: "sync",
+    title: "Offline table payments add up",
+    titleAr: "دفع الطاولات دون اتصال أصبح دقيقاً",
+    body:
+      "While offline, items merged in from another table can now be paid with Split or Pay Full Bill, and Pay Full Bill asks only for what is still open after a split. The Split screen shows each share already taken. Each branch keeps its own open shift when you switch branches offline, the sync status also counts work waiting for other branches, and an offline cash receipt shows the amount in the currency the customer paid.",
+    bodyAr:
+      "أثناء العمل دون اتصال، أصبح بالإمكان دفع الأصناف المدموجة من طاولة أخرى عبر تقسيم الفاتورة أو دفع الفاتورة كاملة، ويطلب دفع الفاتورة كاملة المبلغ المتبقي فقط بعد التقسيم. وتعرض شاشة التقسيم كل حصة دُفعت. ويحتفظ كل فرع بورديته المفتوحة عند التبديل بين الفروع دون اتصال، وتشمل حالة المزامنة العمليات المنتظرة لفروع أخرى، ويعرض إيصال الدفع النقدي دون اتصال المبلغ بالعملة التي دفع بها الزبون.",
   },
 ];
 
