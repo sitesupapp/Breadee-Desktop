@@ -123,6 +123,19 @@ export function isReadOnly(gates: MenuBuilderGates): boolean {
 }
 
 /**
+ * DESK-4 - whether this session may change an item's modifier-group LINKS from the item drawer.
+ *
+ * ISO-1 (Production, 2026-11-01) replaced the tenant-only `menu_item_modifier_groups` write
+ * policy with `immg_write`, which requires the owner, `menu.manage_modifiers` or
+ * `cost_control.modifiers.manage`. The drawer's save gate (`menu.edit` / `menu.create`) is not
+ * enough: without `menu.manage_modifiers` an added link was refused AFTER the item row had
+ * saved, and a removed link was silently filtered while the drawer reported success.
+ */
+export function canAssignItemModifiers(ctx: MenuAccessContext): boolean {
+  return perm(ctx, MENU_PERMISSIONS.MANAGE_MODIFIERS) || perm(ctx, "cost_control.modifiers.manage");
+}
+
+/**
  * Whether the Modifiers & Extras surface is offered at all.
  *
  * The web workspace locks that tab on the `menu_builder.modifiers` sub-feature
