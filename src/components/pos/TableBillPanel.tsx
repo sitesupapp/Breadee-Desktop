@@ -52,6 +52,9 @@ export type TableBillPanelProps = {
    */
   onPrintBill: () => void;
   printBusy?: boolean;
+  /** 1.0.39 (L4/1) — offline orders for this table the server refused before any of them applied. They are
+   *  never part of the bill shown here; the operator reviews them in the Sync Center. */
+  refusedOfflineOrders?: number;
 };
 
 /** A submitted time, shown short. The server's timestamp, never a local clock. */
@@ -98,6 +101,13 @@ export function TableBillPanel(props: TableBillPanelProps) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
+        {table && (props.refusedOfflineOrders ?? 0) > 0 && (
+          <div role="note" className="mb-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900">
+            {props.refusedOfflineOrders === 1 ? "An offline order" : `${props.refusedOfflineOrders} offline orders`} for this table
+            {props.refusedOfflineOrders === 1 ? " was" : " were"} refused by Breadee and never added to any bill. If the items
+            were served, add them to this table's bill, then review the refused order in the Sync Center.
+          </div>
+        )}
         {!table && (
           <EmptyState title="Pick a table" hint="Select a table on the map to see its bill, or open a free one." />
         )}

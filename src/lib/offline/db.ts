@@ -234,7 +234,7 @@ export interface DineDraftRound {
  *  rc.10 — `settled` = a full settle / on-account was CAPTURED offline for this session: it is no
  *  longer the table's ACTIVE bill (the table is reusable locally), but it is kept durably — lines,
  *  rounds, the settle op reference — for receipt / Sync History / audit until it syncs. */
-export type DineDraftStatus = "open" | "settled" | "closed" | "merged";
+export type DineDraftStatus = "open" | "settled" | "closed" | "merged" | "refused" | "withdrawn";
 
 /** 1.0.38 (Bugs 5/6) — unpaid lines an OFFLINE merge folded into this (primary) session's bill, kept as a
  *  display snapshot until the merge op is reflected in the canonical floor. Never a payment, never
@@ -314,9 +314,16 @@ export interface DineDraft {
    *  synced no longer shows its order; "split_completed": a split leg paid the whole bill;
    *  "held_by_payment": a refused move / merge whose captured payment already covers it). Additive; the
    *  op that proves it is `closed_evidence_op_id` (null when the proof is the floor read itself). */
-  closed_reason?: "canonical_closed" | "split_completed" | "held_by_payment" | null;
+  closed_reason?: "canonical_closed" | "split_completed" | "held_by_payment" | "open_refused_unapplied" | "refused_withdrawn" | null;
   closed_evidence_op_id?: string | null;
   closed_at?: string | null;
+  /** 1.0.39 (L4/1) — `refused`: the server REFUSED this session's table open (CAS) and none of its work was
+   *  ever sent (operationalProjection.sessionRefusal). Derived from the op log on every reconcile and re-opened
+   *  if that evidence stops holding; it is never the table's active bill and never projected, but it is kept
+   *  in full for the operator's review. `withdrawn`: the operator withdrew it after Breadee confirmed it holds
+   *  no receipt of any of its operations (refusedSessions.withdrawRefusedSession). */
+  withdrawn_at?: string | null;
+  withdrawn_by?: string | null;
   lines: DineDraftLine[];
   rounds: DineDraftRound[];
   /** Monotonic; bumped on every mutation. A deterministic client_op_id input for a send. */

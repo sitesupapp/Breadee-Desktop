@@ -136,6 +136,7 @@ import {
   SUMMARY_ONLY_SETTLE_MESSAGE,
   shiftlessRefusal,
   tablesWithUnreflectedWork,
+  refusedDraftsInScope,
   structuralHoldReason,
   offlineSettleAmount,
   offlineSettlePin,
@@ -400,6 +401,9 @@ export function useDineInWorkspace(input: {
   // 1.0.38 — tables whose offline work has not reached / is not reflected in the map yet: an ONLINE Move /
   // Merge of them is held (it would race the offline replay).
   const [structuralHold, setStructuralHold] = useState<Set<string>>(new Set());
+  // 1.0.39 (L4/1) — tables with an offline order the server REFUSED before any of it applied (never projected;
+  // kept for review in the Sync Center): table → number of such orders.
+  const [refusedOrders, setRefusedOrders] = useState<Map<string, number>>(new Map());
   const projScopeKey = useRef<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -410,6 +414,7 @@ export function useDineInWorkspace(input: {
       setAttentionSettle(new Set());
       setRefusedSettle(new Map());
       setStructuralHold(new Set());
+      setRefusedOrders(new Map());
       return;
     }
     const scope = input.offlineScope;
@@ -423,17 +428,20 @@ export function useDineInWorkspace(input: {
       setAttentionSettle(new Set());
       setRefusedSettle(new Map());
       setStructuralHold(new Set());
+      setRefusedOrders(new Map());
     }
     void (async () => {
       // OFFLINE: every table through the ONE operational projection (rc.9). ONLINE (rc.13 — canonical
       // refresh is a MERGE): only tables with local dine-in work the loaded map does not reflect yet, so a
       // stale/offline-cached map can never show a bill settled on this device as unpaid again.
       const work = offlineProjOn ? null : await tablesWithUnreflectedWork(scope, tables.lastLoadedAt);
+      const refused = work?.refusedOrders ?? (await refusedDraftsInScope(scope)).reduce((m, d) => m.set(d.table_id, (m.get(d.table_id) ?? 0) + 1), new Map<string, number>());
       if (live) {
         setSyncingSettle(work?.syncingSettle ?? new Set());
         setAttentionSettle(work?.attentionSettle ?? new Set());
         setRefusedSettle(work?.refusedSettle ?? new Map());
         setStructuralHold(work?.structuralHold ?? new Set());
+        setRefusedOrders(refused);
       }
       if (work && work.touched.size === 0) {
         if (live) setOpTotals(new Map());
@@ -449,6 +457,7 @@ export function useDineInWorkspace(input: {
         setAttentionSettle(new Set());
         setRefusedSettle(new Map());
         setStructuralHold(new Set());
+        setRefusedOrders(new Map());
       }
     });
     return () => {
@@ -2606,10 +2615,11 @@ export function useDineInWorkspace(input: {
         onSplit={() => void openSplit()}
         onPrintBill={() => void printBill()}
         printBusy={printingBill}
+        refusedOfflineOrders={selected ? (refusedOrders.get(selected.id) ?? 0) : 0}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, selectedProj, offlineProjFailed, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill],
+    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, selectedProj, offlineProjFailed, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill, refusedOrders],
   );
 
   const roundPanel = useCallback(

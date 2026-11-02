@@ -162,6 +162,17 @@ export interface OfflineOperation {
    *  last success or operator retry. Bounds the retry: past the class budget the op parks
    *  (needs_attention, `retry_exhausted`) instead of looping forever. Absent on older ops (= 0). */
   server_retry_count?: number;
+  /** 1.0.39 (L4/1) — set when the operator WITHDREW a never-applied op (status `cancelled`). The refusal that
+   *  proved it (last_error_code / last_error_message) is kept as it was; this records who, when and how it
+   *  was verified against the server's receipts. */
+  withdrawal?: {
+    at: string;
+    by_user_id: string;
+    reason: "refused_never_applied";
+    verified_at: string;
+    /** Server receipt tables checked for this op's client_op_id (none held it). */
+    verified_against: string[];
+  } | null;
 }
 
 // rc.10 — build provenance: every new operation is stamped with the running build (set once at startup

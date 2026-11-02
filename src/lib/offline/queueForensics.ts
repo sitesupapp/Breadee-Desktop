@@ -154,6 +154,9 @@ export type DiagnosticRow = {
   blocking: string | null;
   /** 1.0.38 (G1, F4) — the bill identity this op was captured against + how it resolves (ids only, no PII). */
   pins: DiagnosticPins;
+  /** 1.0.39 (L4/1) — the server idempotency key (an id, never data): lets a reviewer check Breadee's receipt
+   *  tables (pos_op_submissions / pos_order_submissions) for exactly this op, read-only. */
+  client_op: string;
 };
 
 /** 1.0.38 (G1, F4) — per-op identity pins for the diagnostic: what a reviewer needs to prove WHICH bill a
@@ -424,6 +427,7 @@ export function buildDiagnostic(
         }),
         blocking: blockingOf(o, byId),
         pins: pinsOf(o, resolve),
+        client_op: o.client_op_id,
       };
     });
 }

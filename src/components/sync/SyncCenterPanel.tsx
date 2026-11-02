@@ -10,6 +10,9 @@ import { useCallback, useEffect, useState } from "react";
 import { listHistory, type SyncHistoryEvent } from "@/lib/offline/syncHistory";
 import { currentCaptureBuild, listOperations, requeueOperation } from "@/lib/offline/operationLog";
 import { buildDiagnostic, loadSyncCenterRows, type SyncCenterRow } from "@/lib/offline/queueForensics";
+import { listRefusedSessions, withdrawRefusedSession, type RefusedOrderSummary } from "@/lib/offline/refusedSessions";
+import { getDeviceIdentity } from "@/lib/device";
+import { formatMoney, isCurrencyCode } from "@/lib/currency";
 import { resolveBranchId } from "@/lib/branch";
 import { useSession } from "@/state/session";
 import { useOperationalBranch } from "@/state/operationalBranch";
@@ -109,11 +112,40 @@ export function SyncCenterPanel({
   const [rows, setRows] = useState<SyncCenterRow[]>([]);
   const [expandedOp, setExpandedOp] = useState<string | null>(null);
 
+  // 1.0.39 (L4/1) — offline orders the server refused before any of them applied, in THIS cashier's scope on
+  // this terminal. Reviewed here; withdrawn only on an explicit, server-verified confirmation.
+  const userId = useSession((s) => s.userId);
+  const [refused, setRefused] = useState<RefusedOrderSummary[]>([]);
+  const [confirmWithdraw, setConfirmWithdraw] = useState<string | null>(null);
+  const [withdrawing, setWithdrawing] = useState<string | null>(null);
+  const [withdrawNote, setWithdrawNote] = useState<{ sessionId: string; text: string } | null>(null);
+  const refusedScope = useCallback(() => {
+    const dev = getDeviceIdentity();
+    return { tenantId, branchId, cashierUserId: userId ?? null, deviceId: dev.device_id, terminalId: dev.terminal_id ?? null };
+  }, [tenantId, branchId, userId]);
+
   const refresh = useCallback(async () => {
+    setRefused(await listRefusedSessions(refusedScope()).catch(() => []));
     setSummary(await loadSyncSummary(tenantId, branchId, { includeSynced: true }).catch(() => EMPTY_SUMMARY));
     if (tab === "history") setEvents(await listHistory(tenantId, branchId, 100).catch(() => []));
     else setRows(await loadSyncCenterRows({ tenantId, branchId, currentBuild: currentCaptureBuild(), currentShiftId }).catch(() => []));
-  }, [tenantId, branchId, tab, currentShiftId]);
+  }, [tenantId, branchId, tab, currentShiftId, refusedScope]);
+
+  const withdraw = useCallback(
+    async (sessionId: string) => {
+      if (!userId) return;
+      setWithdrawing(sessionId);
+      try {
+        const r = await withdrawRefusedSession({ sessionId, scope: refusedScope(), actorUserId: userId }).catch(() => ({ ok: false as const, reason: "The order could not be withdrawn on this device." }));
+        setWithdrawNote({ sessionId, text: r.ok ? "Withdrawn. Breadee confirmed none of it was applied; the record is kept in Sync history." : r.reason });
+        setConfirmWithdraw(null);
+        await refresh();
+      } finally {
+        setWithdrawing(null);
+      }
+    },
+    [userId, refusedScope, refresh],
+  );
 
   // Conflict Center: put a parked (needs-attention) operation back in the queue. Only a
   // needs_attention op is affected; it syncs on the next connection. Never touches in-flight work.
@@ -232,6 +264,61 @@ export function SyncCenterPanel({
 
       {tab === "operations" ? (
         <div className="flex-1 overflow-auto">
+          {refused.length > 0 && (
+            <section aria-label="Refused offline orders" className="border-b border-line bg-amber-50/60 px-5 py-3">
+              <p className="text-sm font-bold text-amber-800">Refused offline order{refused.length === 1 ? "" : "s"} — review needed</p>
+              <p className="mt-0.5 text-[11px] text-amber-900">
+                Breadee refused to open the table for {refused.length === 1 ? "this order" : "these orders"}, so nothing of
+                {refused.length === 1 ? " it" : " them"} was added to a bill, charged, posted or deducted. They no longer show on
+                the floor. If the items were served, add them to the table's bill first.
+              </p>
+              <ul className="mt-2 space-y-2">
+                {refused.map((o) => (
+                  <li key={o.sessionId} className="rounded-lg border border-amber-300 bg-white px-3 py-2 text-[11px] text-sub">
+                    <p className="text-sm font-semibold text-ink">
+                      {o.tableName} · {o.items} item{o.items === 1 ? "" : "s"}
+                      {isCurrencyCode(o.currency) ? ` · ${formatMoney(o.total, o.currency)}` : ""}
+                    </p>
+                    <p>
+                      Captured {fmtTime(o.capturedAt)} · {o.rounds} round{o.rounds === 1 ? "" : "s"} ·{" "}
+                      {o.kitchenPrinted ? "kitchen ticket printed — it may have been served" : "no kitchen ticket printed"}
+                    </p>
+                    <p>Breadee said: {o.refusal.slice(0, 160)}</p>
+                    {withdrawNote?.sessionId === o.sessionId && <p className="mt-1 font-semibold text-amber-800">{withdrawNote.text}</p>}
+                    {confirmWithdraw === o.sessionId ? (
+                      <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2">
+                        <p className="font-semibold text-red-800">
+                          Withdraw this order? It is never sent. Only do this once the items are on the table's bill, or were not served.
+                          Breadee is asked first to confirm none of it was applied.
+                        </p>
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void withdraw(o.sessionId)}
+                            disabled={withdrawing === o.sessionId}
+                            className="rounded-lg border border-red-300 bg-white px-2.5 py-1 font-semibold text-red-800 hover:bg-red-100 disabled:opacity-60"
+                          >
+                            {withdrawing === o.sessionId ? "Checking with Breadee…" : "Withdraw order"}
+                          </button>
+                          <button type="button" onClick={() => setConfirmWithdraw(null)} className="rounded-lg border border-line px-2.5 py-1 font-semibold text-sub hover:bg-slate-50">
+                            Keep it
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmWithdraw(o.sessionId)}
+                        className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 font-semibold text-amber-800 hover:bg-amber-100"
+                      >
+                        Withdraw this order…
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {rows.length === 0 ? (
             <p className="px-5 py-8 text-center text-sm text-sub">No offline operations on this device.</p>
           ) : (
@@ -338,7 +425,8 @@ function eraLabel(era: SyncCenterRow["era"]): string {
   switch (era) {
     // 1.0.38 (native Bug 3) — an UNSTAMPED capture: rc.8/9, or a test build released without its build
     // stamp (every pre-release build up to this one). Honest: it is not provably rc.8/9.
-    case "HISTORICAL_RC8_RC9": return "earlier build without a build stamp (rc.8/9 or an earlier test build)";
+    // 1.0.39 — released builds through 1.0.37 carried no stamp either: not provably a test build.
+    case "HISTORICAL_RC8_RC9": return "earlier build without a build stamp (1.0.37 or earlier, or a test build)";
     case "HISTORICAL_RC10": return "rc.10";
     case "RC11": return "rc.11";
     case "RC12": return "rc.12";

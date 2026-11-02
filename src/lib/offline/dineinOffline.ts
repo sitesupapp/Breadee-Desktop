@@ -22,6 +22,7 @@ import {
 import type { OperationScope } from "@/lib/offline/operationLog";
 import { opInScope, sessionClosure, settleHeldByRefusedStructural, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
+import { reconcileRefusedSessions } from "@/lib/offline/refusedSessions";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
 import type { CartLine, SelectedModifier } from "@/types/pos";
 import type { CurrencyCode } from "@/lib/currency";
@@ -313,6 +314,7 @@ export async function sendRoundOffline(
     let pre = await localdb.dineDrafts.get(sessionId);
     // 1.0.38 (G1) — first retire the session if its bill is authoritatively closed (never a round N+1 of it).
     if (pre && pre.status === "open") {
+      await reconcileRefusedSessions({ tenantId: pre.tenant_id, branchId: pre.branch_id, tableId: pre.table_id });
       await retireClosedSessions({ tenantId: pre.tenant_id, branchId: pre.branch_id, tableId: pre.table_id });
       pre = await localdb.dineDrafts.get(sessionId);
     }
@@ -998,6 +1000,9 @@ export async function reconcileDineDraftsFromOperations(): Promise<void> {
       await localdb.dineDrafts.update(d.local_session_id, { canonical_order_id: op.canonical_entity_id, updated_at: new Date().toISOString() });
     }
   }
+  // 1.0.39 (L4/1) — sessions the server REFUSED with nothing applied leave the floor (kept for review), and
+  // come back the moment that proof stops holding.
+  await reconcileRefusedSessions();
   // 1.0.38 (G1) — sessions whose bill closed elsewhere (a completing split leg, paid online, closed remotely).
   await retireClosedSessions();
 }
@@ -1181,6 +1186,8 @@ export async function getDineDraftForTable(scope: {
   if (!scope.tenantId || !tableId) return null;
   // 1.0.38 (G1) — a session whose bill closed elsewhere is never returned as the table's active session: the
   // caller then opens a NEW one (round 1, no expected_order_id) instead of a round N+1 of the closed order.
+  // 1.0.39 (L4/1) — nor a session the server refused (its new rounds would only park behind its refusal).
+  await reconcileRefusedSessions({ tenantId: scope.tenantId, branchId: scope.branchId, tableId });
   await retireClosedSessions({ tenantId: scope.tenantId, branchId: scope.branchId, tableId });
   const all = await localdb.dineDrafts.where("tenant_id").equals(scope.tenantId).toArray();
   const open = all.filter(

@@ -1161,6 +1161,73 @@ export function sessionClosure(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 1.0.39 (L4/1) — a session the server REFUSED before any of it was applied
+// ---------------------------------------------------------------------------
+
+/** The server's table-version CAS refusal of pos_open_table (pos_open_table_core → VERSION_CONFLICT). It is
+ *  raised before any write, and a replay of a client_op_id the server ALREADY applied returns the recorded
+ *  receipt instead of re-running the CAS (pos_op_replay) — so this refusal proves the open never applied. */
+export const OPEN_TABLE_CAS_REFUSAL = /changed since it was loaded/i;
+
+export type SessionRefusal = {
+  /** The refused dinein_open_table op. */
+  openOpId: string;
+  /** Every op of the session (the open first, then its parked work), all provably never applied. */
+  workOpIds: string[];
+  /** The server's refusal text, verbatim. */
+  refusal: string;
+};
+
+const neverApplied = (o: OfflineOperation) => o.status === "needs_attention" && o.canonical_entity_id == null && o.synced_at == null;
+
+/**
+ * PURE — was this local session REFUSED by the server with NOTHING of it applied? Proven only from this
+ * device's durable op log, never from the absence of a bill on screen:
+ *   - its table open was parked on the server's table-version CAS refusal (OPEN_TABLE_CAS_REFUSAL), never
+ *     synced and never resolved to a server id;
+ *   - every other op of the session was parked by the orchestrator as `dependency_failed` WITHOUT ever being
+ *     handed to its handler (`retry_count` counts handler calls — 0 means no request ever left the device);
+ *   - every barrier op is still in the log (nothing garbage-collected that could have synced).
+ * Such a session can never become the table's bill (the server will refuse its open for as long as the table
+ * keeps moving forward), so it is not projected onto the floor — but it is NOT finished: its round may have
+ * been printed and served. It stays in full, parked, for the operator to review (refusedSessions.ts).
+ * Anything weaker (a transient fault, an op ever attempted, a retry in flight) → null: the old behaviour.
+ */
+export function sessionRefusal(d: DineDraft, ops: OfflineOperation[]): SessionRefusal | null {
+  if (d.status !== "open" && d.status !== "refused") return null;
+  const { work, missing } = sessionWorkOps(d, ops);
+  if (missing > 0) return null;
+  const open = work.find((o) => o.operation_id === d.open_operation_id);
+  if (!open || open.operation_type !== "dinein_open_table" || !neverApplied(open)) return null;
+  const code = open.last_error_code ?? "";
+  if (NOT_A_SERVER_REFUSAL.has(code) || code === "retry_exhausted" || !OPEN_TABLE_CAS_REFUSAL.test(open.last_error_message ?? "")) return null;
+  for (const o of work) {
+    if (o === open) continue;
+    if (!neverApplied(o) || o.last_error_code !== "dependency_failed" || (o.retry_count ?? 0) !== 0) return null;
+  }
+  return {
+    openOpId: open.operation_id,
+    workOpIds: [open.operation_id, ...work.filter((o) => o !== open).map((o) => o.operation_id)],
+    refusal: open.last_error_message ?? "",
+  };
+}
+
+/** 1.0.39 (L4/1) — this scope's REFUSED sessions (status `refused`), newest first. */
+export async function refusedDraftsInScope(scope: ProjectionScope): Promise<DineDraft[]> {
+  if (!scope.tenantId) return [];
+  const all = await localdb.dineDrafts.where("[tenant_id+status]").equals([scope.tenantId, "refused"]).toArray();
+  return all
+    .filter(
+      (d) =>
+        (d.branch_id ?? null) === (scope.branchId ?? null) &&
+        d.cashier_user_id === scope.cashierUserId &&
+        d.device_id === scope.deviceId &&
+        (scope.terminalId == null || (d.terminal_id ?? null) === scope.terminalId),
+    )
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
 /** PURE — does this split leg pay EVERYTHING still open on the table's (single) bill? Then it closes the bill
  *  locally exactly like a settle (the table becomes reusable; a new customer opens a NEW session). Only for a
  *  bill fully known on this device (no summary, no server-held part-payment, every line splittable). */
@@ -1245,15 +1312,25 @@ export function tablesOfOp(o: OfflineOperation): string[] {
 export async function tablesWithUnreflectedWork(
   scope: ProjectionScope,
   mapLoadedAt: number | null,
-): Promise<{ touched: Set<string>; syncingSettle: Set<string>; attentionSettle: Set<string>; refusedSettle: Map<string, string>; structuralHold: Set<string> }> {
+): Promise<{ touched: Set<string>; syncingSettle: Set<string>; attentionSettle: Set<string>; refusedSettle: Map<string, string>; structuralHold: Set<string>; refusedOrders: Map<string, number> }> {
   const touched = new Set<string>();
   const syncingSettle = new Set<string>();
   const attentionSettle = new Set<string>();
   const refusedSettle = new Map<string, string>();
   const structuralHold = new Set<string>();
+  // 1.0.39 (L4/1) — a REFUSED session's ops (sessionRefusal: nothing of it ever applied) are not unreflected
+  // work: the canonical floor is already the whole truth for its table. They stay parked for review; the table
+  // only carries a count of them (`refusedOrders`) so the bill panel can point the operator to the Sync Center.
+  const scoped = await scopedOperations(scope);
+  const refusedOrders = new Map<string, number>();
+  const refusedWork = new Set<string>();
+  for (const d of await refusedDraftsInScope(scope)) {
+    for (const o of sessionWorkOps(d, scoped).work) refusedWork.add(o.operation_id);
+    refusedOrders.set(d.table_id, (refusedOrders.get(d.table_id) ?? 0) + 1);
+  }
   // Final Foundation (PERF): only ops that act on a table, sorted (the same relative order as sorting all of
   // them first), and one reflectedIn per op.
-  const ops = (await scopedOperations(scope)).filter((o) => o.status !== "cancelled" && tablesOfOp(o).length > 0).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const ops = scoped.filter((o) => o.status !== "cancelled" && !refusedWork.has(o.operation_id) && tablesOfOp(o).length > 0).sort((a, b) => a.created_at.localeCompare(b.created_at));
   for (const o of ops) {
     if (o.status === "cancelled") continue;
     const ts = tablesOfOp(o);
@@ -1275,7 +1352,7 @@ export async function tablesWithUnreflectedWork(
       if (o.status === "needs_attention") attentionSettle.add(t);
     }
   }
-  return { touched, syncingSettle, attentionSettle, refusedSettle, structuralHold };
+  return { touched, syncingSettle, attentionSettle, refusedSettle, structuralHold, refusedOrders };
 }
 
 /** 1.0.38 — local work that WILL still reach the server (or already did, after the map was read): live,
