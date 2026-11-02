@@ -116,7 +116,7 @@ test("1.0.41 PRODUCTION identity: normal bundle, production channel, no RC ident
   assert.deepEqual(conf.plugins.updater.endpoints, ["https://raw.githubusercontent.com/sitesupapp/Breadee-Desktop/desktop-production-channel/latest.json"]);
   assert.match(conf.plugins.updater.pubkey, /^dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3Nzk5OUQ4MjFGODJGRDcK/, "the SAME production updater key (never regenerated)");
   assert.equal(JSON.parse(rawOf("package.json")).version, "1.0.41");
-  assert.match(rawOf("src-tauri/Cargo.toml"), /^version = "1\.0\.40"$/m);
+  assert.match(rawOf("src-tauri/Cargo.toml"), /^version = "1\.0\.41"$/m);
   // The RC diagnostics strip stays build-flag gated: only the staging RC/installer workflow sets it.
   const wf = rawOf(".github/workflows/desktop-windows-installer.yml");
   assert.match(wf, /VITE_RC_DIAGNOSTICS: "1"/);
