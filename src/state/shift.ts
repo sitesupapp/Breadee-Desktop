@@ -18,7 +18,7 @@ import { create } from "zustand";
 import type { ActiveShift, CashBox, DeliveryFeeCashTreatment, ShiftReport } from "@/types/pos";
 import { endShift, findOpenShift, getCashBox, openShift } from "@/lib/pos/shifts";
 import { getDeviceIdentity } from "@/lib/device";
-import { clearPosSessionSnapshot, readAllPosSessionSnapshots, readPosSessionSnapshot, restoreShiftFromSnapshot } from "@/lib/offline/posSession";
+import { clearPosSessionSnapshot, clearPosSessionSnapshotsForShift, readPosSessionSnapshot, restoreShiftFromSnapshot } from "@/lib/offline/posSession";
 import { getActivePendingShift, type PendingShift } from "@/lib/offline/db";
 import {
   cacheEndShiftApprovalRequired,
@@ -328,7 +328,7 @@ export const useShift = create<ShiftState>((set, get) => ({
         const cs = closeStateOf(ended);
         if (cs === "closing") {
           const endedInfo = { operationId: ended!.operation_id, shiftId: shift.id, dependencyCount: ended!.dependency_ids.length };
-          clearPosSessionSnapshot(userId);
+          clearPosSessionSnapshot(userId, branchId);
           // 1.0.38 (Bug 3) — N is CLOSED_LOCAL_PENDING_SYNC; the next shift this device opened offline after
           // that close (chained) is the active one. Through 1.0.37 this branch returned "no shift" and hid it.
           const next = await chainedNextShift(tenantId, userId, branchId, deviceId);
@@ -397,7 +397,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       // Genuinely no shift. Drop any stale Case-1 snapshot so a restart can never
       // restore a shift that has since been closed.
       set({ shift: null, cashBox: null, loading: false, offlineRestored: false, pendingLocalId: null });
-      clearPosSessionSnapshot(userId);
+      clearPosSessionSnapshot(userId, branchId);
     } catch (e) {
       if (superseded()) return;
       // Restore offline state ONLY for a confirmed transport/unreachable condition.
@@ -415,8 +415,9 @@ export const useShift = create<ShiftState>((set, get) => ({
         });
         return;
       }
-      // 1) a previously-hydrated server open shift (Case 1), for THIS branch/OU only.
-      let restored = restoreShiftFromSnapshot(readPosSessionSnapshot(userId), {
+      // 1) a previously-hydrated server open shift (Case 1), for THIS branch/OU only. 1.0.42 (DESK-O3) — read
+      // THIS branch's own snapshot: the cashier's latest one may be another branch's (offline OU switch).
+      let restored = restoreShiftFromSnapshot(readPosSessionSnapshot(userId, branchId), {
         deviceId,
         tenantId,
         cashierUserId: userId,
@@ -436,7 +437,7 @@ export const useShift = create<ShiftState>((set, get) => ({
       const restoredEnded = restored ? await endShiftOpForShift(restored.id).catch(() => undefined) : undefined;
       if (restored && restoredEnded) {
         if (superseded()) return;
-        clearPosSessionSnapshot(userId);
+        clearPosSessionSnapshot(userId, branchId);
         const endedInfo = { operationId: restoredEnded.operation_id, shiftId: restored.id, dependencyCount: restoredEnded.dependency_ids.length };
         // 1.0.38 (Bug 3) — restart between shifts: the chained next shift opened offline is the active one.
         const next = await chainedNextShift(tenantId, userId, branchId, deviceId);
@@ -615,7 +616,7 @@ export const useShift = create<ShiftState>((set, get) => ({
     // The shift is now pending_manager_review - it is no longer usable for orders,
     // so the durable snapshot must go too or a later offline restart would restore
     // a closed shift. (Only the snapshot of THIS shift — other cashiers' snapshots are theirs.)
-    for (const snap of readAllPosSessionSnapshots()) if (snap.shift.id === shift.id) clearPosSessionSnapshot(snap.cashier_user_id);
+    clearPosSessionSnapshotsForShift(shift.id);
     set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: report, endedPendingSync: null });
     return report;
   },
@@ -679,7 +680,7 @@ async function closeOfflineCapture({ scope, actualCashCounted, notes, deliveryFe
     });
     // Operationally CLOSED on this device: no restart may restore it (snapshot cleared; refresh()
     // also refuses any shift with a captured end_shift op).
-    clearPosSessionSnapshot(scope.cashierUserId);
+    clearPosSessionSnapshot(scope.cashierUserId, scope.branchId);
     const ended: EndedPendingSync = { operationId: r.operationId, shiftId: pendingLocalId ?? shift.id, dependencyCount: r.dependencyCount };
     set({ shift: null, cashBox: null, offlineRestored: false, pendingLocalId: null, lastReport: null, endedPendingSync: ended, error: null });
     return ended;
