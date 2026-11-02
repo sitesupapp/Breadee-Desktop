@@ -257,3 +257,18 @@ export function chipOf(s: SyncSummary): SyncChip {
   if (s.toSync > 0) return { text: `${s.toSync} pending`, kind: "pending" };
   return { text: "All changes synced", kind: "clear" };
 }
+
+/**
+ * 1.0.42 (DESK-O4) — a BRANCH chip qualified by this device's whole queue (`device`, every branch): a branch with
+ * nothing of its own to send no longer reads "All changes synced" while work of another branch still waits on
+ * this device (through 1.0.41 the QA branch's chip said all-synced over 21 pending Main-branch operations).
+ * `device` null = no qualification (a tenant-wide chip already counts everything).
+ */
+export function withOtherBranches(chip: SyncChip, branch: SyncSummary, device: SyncSummary | null): SyncChip {
+  if (chip.kind !== "clear" || !device) return chip;
+  const parked = Math.max(0, device.parked - branch.parked);
+  const toSync = Math.max(0, device.toSync - branch.toSync);
+  if (parked > 0) return { text: `This branch is synced · ${parked} needs attention on other branches`, kind: "attention" };
+  if (toSync > 0) return { text: `This branch is synced · ${toSync} pending on other branches`, kind: "pending" };
+  return chip;
+}
