@@ -300,7 +300,7 @@ test("BUG 6: Open Tables and its rail count read the SAME effective floor the Di
   assert.match(read("src", "screens", "pos", "DineInWorkspace.tsx"), /effectiveTables: displayMap\.tables,/);
 });
 
-test("RELEASE 1.0.41 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
+test("RELEASE 1.0.39 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
   const NOTE =
     "Sign Out now affects only this device: other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended elsewhere, Ready Desktop asks you to sign in again instead of failing silently, and work already recorded syncs exactly once afterwards.";
   const wf = read(".github", "workflows", "desktop-production-release.yml");
@@ -312,12 +312,12 @@ test("RELEASE 1.0.41 (production): customer note in latest.json + release body, 
   assert.equal((wf.match(/VITE_SERVER_1038_CONTRACTS: "1"/g) ?? []).length, 2, "both production build steps compile the 1.0.38 contracts ON");
   assert.match(wf, /1\.0\.38 contracts flag is NOT enabled in the bundle/);
   assert.match(wf, /tags:\s*\n\s*- 'desktop-prod-v\*'/);
-  // One version everywhere (staging candidate 1.0.41 = RC-AUTH-1 + DESK-1..4; Production ships the same source as 1.0.39; staging 1.0.39 was the withdrawn accidental build).
-  assert.equal(JSON.parse(read("package.json")).version, "1.0.41");
-  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.41");
-  assert.match(read("src-tauri", "Cargo.toml"), /^version = "1\.0\.41"$/m);
+  // One version everywhere (Production 1.0.39 = RC-AUTH-1 + DESK-1..4, the same source as staging candidate 1.0.41; the earlier staging 1.0.39 label was a withdrawn accidental build).
+  assert.equal(JSON.parse(read("package.json")).version, "1.0.39");
+  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.39");
+  assert.match(read("src-tauri", "Cargo.toml"), /^version = "1\.0\.39"$/m);
   assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).identifier, "app.breadee.desktop");
-  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.41"/);
+  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.39"/);
 });
 
 test("BUG 5: an offline quantity INCREASE of a sent line is a new round (never the version-checked line edit); decrease / remove stay audited edits", () => {
