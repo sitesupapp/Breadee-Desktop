@@ -183,11 +183,11 @@ test("clear removes the snapshot", () => {
 test("shift store: offline refresh restores the snapshot; a live 'no shift' clears it", () => {
   const src = stripComments(read("state", "shift.ts"));
   // Offline-first recovery — snapshots are per cashier: the restore reads THIS cashier's, a live 'no shift'
-  // clears only THIS cashier's.
-  assert.match(src, /catch[\s\S]*restoreShiftFromSnapshot\(readPosSessionSnapshot\(userId\)/, "offline refresh restores from this cashier's snapshot");
+  // clears only THIS cashier's. 1.0.42 (DESK-O3) — and per branch: THIS branch's of THIS cashier.
+  assert.match(src, /catch[\s\S]*restoreShiftFromSnapshot\(readPosSessionSnapshot\(userId, branchId\)/, "offline refresh restores from this cashier's snapshot of this branch");
   assert.match(src, /const deviceId = getDeviceIdentity\(\)\.device_id/, "restore is device-scoped");
   assert.match(src, /offlineRestored: true/, "an offline-restored shift is flagged, not passed off as live");
-  assert.match(src, /clearPosSessionSnapshot\(userId\)/, "server 'no shift' / close clears this cashier's snapshot");
+  assert.match(src, /clearPosSessionSnapshot\(userId, branchId\)/, "server 'no shift' / close clears this cashier's snapshot of this branch");
   assert.match(src, /offlineRestored: false/, "a successful live read clears the offline flag");
   // Case 2: an offline-opened shift is restored from the durable pending-shift store.
   assert.match(src, /getActivePendingShift\(/, "offline refresh falls back to a pending offline-opened shift");

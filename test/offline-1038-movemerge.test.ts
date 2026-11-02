@@ -40,7 +40,11 @@ import {
   settleStillCovers,
   settlePrecedence,
   scopedOperations,
+  offlineSettleAmount,
+  splitCompletesBill,
+  splitItemOf,
 } from "@/lib/offline/operationalProjection";
+import { setServerDeductsPriorPayments } from "@/lib/pos/tablePayment";
 import {
   captureMoveTableOffline,
   captureMergeTablesOffline,
@@ -799,4 +803,86 @@ test("NATIVE BUG 6: Open Tables reads the effective floor — a bill opened offl
   const open = selectOpenTables(floor);
   assert.deepEqual(open.map((t) => [t.id, t.total, t.outstanding]), [["T8", 300, 300]]);
   assert.equal(floor.find((t) => t.id === "T8")?.occupied, true);
+});
+
+// ================================================================ 1.0.42 (DESK-O2) — a merged-in line stays collectible offline
+
+/** The 1.0.41 native case: A (Croissant 180 + Tuna 320) split-pays its Croissant, then B (Croissant 180) is merged
+ *  into A. Through 1.0.41 the merged-in Croissant could be neither split nor paid in full offline. */
+async function partPaidPrimaryWithMergedLine() {
+  const A = row("A"), B = row("B");
+  const a = await offlineSession("A", [{ name: "Croissant", price: 180, qty: 1 }, { name: "Tuna", price: 320, qty: 1 }]);
+  const croissant = a.lines.find((l) => l.name === "Croissant")!;
+  const leg1 = await splitOperationalBillOffline({ scope: DSCOPE, orderId: null, orderLocal: a.local_session_id, allocations: [{ line_local: croissant.line_id, quantity: 1 }], method: "cash", currency: "LBP", tableName: "A", dependencyIds: sessionBarrier(a) });
+  assert.ok(leg1.ok);
+  const b = await offlineSession("B", [{ name: "Croissant", price: 180, qty: 1 }]);
+  const cap = await captureMergeTablesOffline({ scope: SCOPE, primary: A, sources: [B], mapLoadedAt: MAP_AT });
+  assert.ok(cap.ok);
+  return { A, a, b, cap };
+}
+
+test("DESK-O2 Split offers the merged-in line, pays it by its SOURCE item after the merge, and closes the bill — exactly once", async () => {
+  const { A, a, b, cap } = await partPaidPrimaryWithMergedLine();
+  const p = await proj(A);
+  assert.deepEqual([p.gross, p.paidPending, p.outstanding], [680, 180, 500]);
+  assert.deepEqual((p.pendingSplitLegs ?? []).map((g) => [g.amount, g.method]), [[180, "cash"]], "the leg taken before the merge is listed with its amount");
+  const merged = p.bill.orders[0].lines.find((l) => p.meta.get(l.id)?.ref.kind === "merged")!;
+  assert.deepEqual(splitItemOf(p.meta.get(merged.id)), { line_local: b.lines[0].line_id }, "allocated by the source round's line");
+  const tuna = a.lines.find((l) => l.name === "Tuna")!;
+  const po = p.orders[0];
+  assert.equal(splitCompletesBill(p, po.key, [{ order_item_id: tuna.line_id, quantity: 1 }, { order_item_id: merged.id, quantity: 1 }]), true, "the rest, merged line included, completes the bill");
+  const draft = (await getDineDraftForTable(SCOPE, "A"))!;
+  const leg2 = await splitOperationalBillOffline({
+    scope: DSCOPE,
+    orderId: null,
+    orderLocal: a.local_session_id,
+    allocations: [{ line_local: tuna.line_id, quantity: 1 }, { ...splitItemOf(p.meta.get(merged.id))!, quantity: 1 }],
+    method: "cash",
+    currency: "LBP",
+    tableName: "A",
+    dependencyIds: [...sessionBarrier(draft), ...po.bumpOps, cap.operationId, ...p.structuralOpIds],
+    completes: { tableId: "A", sessionLocal: draft.local_session_id, orderIds: [] },
+  });
+  assert.ok(leg2.ok);
+  assert.equal((await proj(A)).bill.orders.length, 0, "paid in full: the table is free locally");
+
+  const srv = new FakeServer([["A", 1], ["B", 1]]);
+  await drain(srv);
+  assert.deepEqual(srv.names(), ["open_table", "round", "split", "open_table", "round", "merge_v4", "split"]);
+  const oA = [...srv.orders.values()].find((o) => o.items.some((i) => i.name === "Tuna"))!;
+  assert.equal(oA.items.length, 3, "the merged Croissant is on A's order");
+  assert.ok(oA.items.every((i) => i.paid_qty === i.qty), "every item paid, the merged-in one included");
+  assert.deepEqual(srv.payments.map((x) => x.amount), [180, 500]);
+  assert.equal(srv.drawer(), 680, "the whole bill, once");
+  assert.equal((await getOperation(leg2.operationId))!.status, "synced");
+  const second = new FakeServer([["A", 1], ["B", 1]]);
+  await drain(second);
+  assert.equal(second.calls.length, 0, "exactly-once");
+});
+
+test("DESK-O1/O2 Pay Full Bill of a split + merged bill asks for exactly what is open, replays after the leg and the merge — exactly once", async () => {
+  setServerDeductsPriorPayments(true);
+  try {
+    const { A, a, cap } = await partPaidPrimaryWithMergedLine();
+    const p = await proj(A);
+    assert.deepEqual(offlineSettleAmount(p, true), { ok: true, exactAmount: 500 }, "R = 680 − 180, the merged Croissant included");
+    const settle = await settleTableOffline({ sessionId: a.local_session_id, method: "cash", extraDependencyIds: p.pendingMutationOpIds, covers: { orderIds: [], summary: false }, expectedAmount: 500 });
+    const sop = (await getOperation(settle.operationId))!;
+    assert.ok(sop.dependency_ids.includes(cap.operationId), "after the merge");
+    for (const id of p.orders[0].pendingSplitOps) assert.ok(sop.dependency_ids.includes(id), "after the leg");
+    assert.equal((await proj(A)).bill.orders.length, 0, "settled: the table is free locally");
+
+    const srv = new FakeServer([["A", 1], ["B", 1]]);
+    await drain(srv);
+    assert.deepEqual(srv.names(), ["open_table", "round", "split", "open_table", "round", "merge_v4", "pay_table"]);
+    assert.equal((srv.calls.find((c) => c.name === "pay_table")!.payload as { expectedAmount: number }).expectedAmount, 500);
+    assert.deepEqual(srv.payments.map((x) => x.amount), [180, 500]);
+    assert.equal(srv.drawer(), 680, "no double charge, nothing left uncollected");
+    assert.equal((await getOperation(settle.operationId))!.status, "synced");
+    const second = new FakeServer([["A", 1], ["B", 1]]);
+    await drain(second);
+    assert.equal(second.calls.length, 0, "exactly-once");
+  } finally {
+    setServerDeductsPriorPayments(null);
+  }
 });

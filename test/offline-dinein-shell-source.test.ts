@@ -82,10 +82,12 @@ test("Phase D: dine-in SETTLE is offline-capable via CAPTURE only (never a serve
   // of it is impossible by construction; the settle records exactly what it covers.
   assert.match(src, /covers: \{ orderIds: canonicalIds, summary: p\.summaryOnly \}/);
   assert.match(src, /covers: target\.covers/);
-  // 1.0.38 (WS-F, Bug 9) — the part-paid refusal is the ONE pure rule offlineSettleAmount (paidPending > 0, or
-  // a server-held collected while serverDeductsPriorPayments() is false — its release default).
+  // 1.0.38 (WS-F, Bug 9) — the part-paid refusal is the ONE pure rule offlineSettleAmount: a part-payment (a
+  // server-held collected, or — 1.0.42 DESK-O1/O2 — a leg captured here) while serverDeductsPriorPayments() is
+  // false (its release default); with it, the settle is for what is still open (R = T − P_server − P_local).
   assert.match(src, /const amount = offlineSettleAmount\(p, serverDeductsPriorPayments\(\)\);\s*if \(!amount\.ok\) return \{ ok: false, reason: amount\.reason \};/);
-  assert.match(ts("src/lib/offline/operationalProjection.ts"), /if \(p\.paidPending > 0 \|\| \(p\.collected > 0 && !serverDeductsPrior\)\)/);
+  assert.match(ts("src/lib/offline/operationalProjection.ts"), /if \(\(p\.paidPending > 0 \|\| p\.collected > 0\) && !serverDeductsPrior\)/);
+  assert.match(ts("src/lib/offline/operationalProjection.ts"), /exactAmount: Math\.max\(0, roundNumeric\(p\.gross - p\.collected - p\.paidPending, 2\)\)/);
   assert.match(src, /extraDependencyIds: target\.deps/, "settle replays after every pending edit/leg");
 });
 
