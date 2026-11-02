@@ -32,7 +32,7 @@ import { Badge, Button, Card, ErrorState, Skeleton, cn } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { useSession } from "@/state/session";
 import { useMenuBuilder } from "@/state/menuBuilder";
-import { canViewMenuBuilder, hasModifiersFeature, hasQrFeature, isReadOnly, menuBuilderDenialReason, menuBuilderGates } from "@/lib/menu/access";
+import { canAssignItemModifiers, canViewMenuBuilder, hasModifiersFeature, hasQrFeature, isReadOnly, menuBuilderDenialReason, menuBuilderGates } from "@/lib/menu/access";
 import * as ou from "@/lib/menu/ouRepository";
 import { emitMenuChanged } from "@/lib/menu/events";
 import {
@@ -512,6 +512,7 @@ function MenuBuilderInner() {
           categories={categories}
           groups={data.groups}
           showModifiers={showModifiers}
+          canAssignModifiers={canAssignItemModifiers(accessCtx)}
           primaryCurrency={currency}
           priceCurrency={priceCurrency}
           rate={rate}
