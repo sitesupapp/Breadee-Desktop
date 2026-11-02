@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.40";
+export const WHATS_NEW_VERSION = "1.0.41";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -28,6 +28,15 @@ export const WHATS_NEW_PAGES: WhatsNewPage[] = [
       "Signing out of Ready Desktop now ends the session on this device only. Other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended somewhere else, for example after a password change, Ready Desktop stops taking new orders and asks you to sign in again instead of failing silently. Anything already recorded is kept and synchronises exactly once after you sign in.",
     bodyAr:
       "أصبح تسجيل الخروج من Ready Desktop ينهي الجلسة على هذا الجهاز فقط، وتبقى الأجهزة الأخرى ومتصفحات الويب التي تستخدم الحساب نفسه مسجّلة الدخول وتواصل البيع. وإذا أُنهيت جلسة الحساب من مكان آخر، مثل تغيير كلمة المرور، يتوقف Ready Desktop عن استقبال طلبات جديدة ويطلب تسجيل الدخول مجدداً بدلاً من الفشل بصمت. يُحفظ كل ما سُجّل مسبقاً وتتم مزامنته لمرة واحدة فقط بعد تسجيل الدخول.",
+  },
+  {
+    glyph: "sync",
+    title: "Clearer shifts and safer menu changes",
+    titleAr: "ورديات أوضح وتعديلات أكثر أماناً على قائمة الطعام",
+    body:
+      "When the same person works in more than one branch, Ready Desktop now opens the right shift for each branch. The end-of-shift report says whether the shift is closed or still waiting for a manager. When an action is refused, for example ending a shift that still has open orders, the full reason is shown. Changing the modifier groups of a menu item now needs the Manage modifiers permission, and a change is only shown as saved when it really was.",
+    bodyAr:
+      "عندما يعمل الشخص نفسه في أكثر من فرع، يفتح Ready Desktop الآن الوردية الصحيحة لكل فرع. ويوضح تقرير نهاية الوردية ما إذا كانت الوردية مغلقة أو ما زالت بانتظار موافقة المدير. وعند رفض إجراء ما، مثل إنهاء وردية فيها طلبات مفتوحة، يظهر السبب كاملاً. كما أصبح تعديل مجموعات الإضافات لصنف في القائمة يتطلب صلاحية إدارة الإضافات، ولا يظهر أي تعديل على أنه محفوظ إلا إذا حُفظ فعلاً.",
   },
 ];
 
