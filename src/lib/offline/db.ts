@@ -245,6 +245,10 @@ export interface DineMergedBlock {
   source_table_id: string;
   source_table_name: string;
   lines: import("@/types/tables").BillLine[];
+  /** 1.0.42 (DESK-O2) — per folded line id, the SOURCE item an offline split leg allocates it by (a canonical
+   *  order_item id, or the source round's client line id; the server merge keeps both). Absent on blocks captured
+   *  before 1.0.42: those lines stay display-only until the merge syncs. Additive (no index, no schema bump). */
+  items?: Record<string, { order_item_id: string } | { line_local: string }>;
 }
 
 /**

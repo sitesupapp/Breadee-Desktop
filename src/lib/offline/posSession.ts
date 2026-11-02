@@ -86,6 +86,10 @@ export function savePosSessionSnapshot(s: PosSessionSnapshot): void {
     // user's shift overwrote the previous user's, so switching back offline lost their open shift.
     localStorage.setItem(cashierKey(s.cashier_user_id), JSON.stringify(s));
     writeIndex([...readIndex(), s.cashier_user_id]);
+    // 1.0.42 (DESK-O3) — and ONE PER CASHIER PER BRANCH/OU: the cashier slot holds only the LAST branch saved,
+    // so a cashier with open shifts in two OUs who switched OU offline found "No open shift" in the other one.
+    localStorage.setItem(branchKey(s.cashier_user_id, s.branch_id), JSON.stringify(s));
+    writeIndex([...readIndex(BRANCH_INDEX_KEY), branchKey(s.cashier_user_id, s.branch_id)], BRANCH_INDEX_KEY);
     const legacy = parseSnapshot(localStorage.getItem(KEY));
     if (legacy && legacy.cashier_user_id === s.cashier_user_id) localStorage.removeItem(KEY);
   } catch {
@@ -94,6 +98,7 @@ export function savePosSessionSnapshot(s: PosSessionSnapshot): void {
 }
 
 const cashierKey = (cashierUserId: string) => `${KEY}:${cashierUserId}`;
+const branchKey = (cashierUserId: string, branchId: string) => `${KEY}:${cashierUserId}@${branchId}`;
 
 function parseSnapshot(raw: string | null): PosSessionSnapshot | null {
   try {
@@ -111,23 +116,30 @@ function parseSnapshot(raw: string | null): PosSessionSnapshot | null {
 
 // The cashiers holding a snapshot on this device: an explicit index (no Storage enumeration needed).
 const INDEX_KEY = `${KEY}.cashiers`;
+// 1.0.42 (DESK-O3) — the per-branch slots on this device (their full storage keys).
+const BRANCH_INDEX_KEY = `${KEY}.branches`;
 
-function readIndex(): string[] {
+function readIndex(indexKey = INDEX_KEY): string[] {
   try {
-    const list = JSON.parse(localStorage.getItem(INDEX_KEY) ?? "[]") as unknown;
+    const list = JSON.parse(localStorage.getItem(indexKey) ?? "[]") as unknown;
     return Array.isArray(list) ? list.filter((x): x is string => typeof x === "string" && x !== "") : [];
   } catch {
     return [];
   }
 }
 
-function writeIndex(list: string[]): void {
+function writeIndex(list: string[], indexKey = INDEX_KEY): void {
   try {
-    if (list.length === 0) localStorage.removeItem(INDEX_KEY);
-    else localStorage.setItem(INDEX_KEY, JSON.stringify([...new Set(list)]));
+    if (list.length === 0) localStorage.removeItem(indexKey);
+    else localStorage.setItem(indexKey, JSON.stringify([...new Set(list)]));
   } catch {
     /* unavailable */
   }
+}
+
+function removeBranchSlots(keys: string[]): void {
+  for (const k of keys) localStorage.removeItem(k);
+  writeIndex(readIndex(BRANCH_INDEX_KEY).filter((k) => !keys.includes(k)), BRANCH_INDEX_KEY);
 }
 
 /** Every snapshot key on this device: each indexed cashier's, plus a pre-recovery single-key snapshot. */
@@ -138,15 +150,21 @@ function snapshotKeys(): string[] {
 /**
  * Read the snapshot, or null when absent, malformed, expired, or not a server-open shift. With a
  * cashier: THAT cashier's snapshot (incl. a pre-recovery single-key snapshot of theirs). Without one:
- * the most recent of all.
+ * the most recent of all. 1.0.42 (DESK-O3) — with a cashier AND a branch: THAT branch's snapshot only (its own
+ * slot, else the cashier slot / single-key snapshot when they hold that branch).
  */
-export function readPosSessionSnapshot(cashierUserId?: string | null): PosSessionSnapshot | null {
+export function readPosSessionSnapshot(cashierUserId?: string | null, branchId?: string | null): PosSessionSnapshot | null {
   try {
     if (cashierUserId) {
+      if (branchId) {
+        const forBranch = parseSnapshot(localStorage.getItem(branchKey(cashierUserId, branchId)));
+        if (forBranch && forBranch.cashier_user_id === cashierUserId && forBranch.branch_id === branchId) return forBranch;
+      }
+      const inBranch = (s: PosSessionSnapshot | null) => (s && (!branchId || (s.branch_id ?? null) === branchId) ? s : null);
       const own = parseSnapshot(localStorage.getItem(cashierKey(cashierUserId)));
-      if (own) return own;
+      if (own) return inBranch(own);
       const legacy = parseSnapshot(localStorage.getItem(KEY));
-      return legacy && legacy.cashier_user_id === cashierUserId ? legacy : null;
+      return inBranch(legacy && legacy.cashier_user_id === cashierUserId ? legacy : null);
     }
     // No cashier: a single-key snapshot (only older builds write it) is the latest single-slot write;
     // otherwise the most recently saved per-cashier snapshot.
@@ -158,11 +176,12 @@ export function readPosSessionSnapshot(cashierUserId?: string | null): PosSessio
   }
 }
 
-/** Every valid snapshot on this device (one per cashier). */
-export function readAllPosSessionSnapshots(): PosSessionSnapshot[] {
+/** Every valid snapshot on this device (one per cashier). 1.0.42 — `perBranch` adds the per-branch slots (a
+ *  snapshot then appears once per slot holding it). */
+export function readAllPosSessionSnapshots(opts: { perBranch?: boolean } = {}): PosSessionSnapshot[] {
   const out: PosSessionSnapshot[] = [];
   try {
-    for (const k of snapshotKeys()) {
+    for (const k of opts.perBranch ? [...snapshotKeys(), ...readIndex(BRANCH_INDEX_KEY)] : snapshotKeys()) {
       const s = parseSnapshot(localStorage.getItem(k));
       if (s) out.push(s);
     }
@@ -172,12 +191,33 @@ export function readAllPosSessionSnapshots(): PosSessionSnapshot[] {
   return out;
 }
 
-/** Clear one cashier's snapshot, or (no argument) every snapshot on the device. */
-export function clearPosSessionSnapshot(cashierUserId?: string | null): void {
+/** Clear one cashier's snapshot, or (no argument) every snapshot on the device. 1.0.42 (DESK-O3) — with a
+ *  branch: only that branch of that cashier (its own slot, and the cashier slot / single-key snapshot only while
+ *  they hold that branch), so another branch's open shift stays restorable offline. */
+export function clearPosSessionSnapshot(cashierUserId?: string | null, branchId?: string | null): void {
   try {
+    if (cashierUserId && branchId) {
+      removeBranchSlots([branchKey(cashierUserId, branchId)]);
+      const holdsBranch = (raw: string | null): boolean => {
+        if (raw === null) return false;
+        try {
+          const s = JSON.parse(raw) as { cashier_user_id?: string; branch_id?: string | null };
+          return (s.cashier_user_id ?? cashierUserId) === cashierUserId && (s.branch_id ?? null) === branchId;
+        } catch {
+          return true; // unreadable: never restorable anyway
+        }
+      };
+      if (holdsBranch(localStorage.getItem(cashierKey(cashierUserId)))) {
+        localStorage.removeItem(cashierKey(cashierUserId));
+        writeIndex(readIndex().filter((c) => c !== cashierUserId));
+      }
+      if (holdsBranch(localStorage.getItem(KEY))) localStorage.removeItem(KEY);
+      return;
+    }
     if (cashierUserId) {
       localStorage.removeItem(cashierKey(cashierUserId));
       writeIndex(readIndex().filter((c) => c !== cashierUserId));
+      removeBranchSlots(readIndex(BRANCH_INDEX_KEY).filter((k) => k.startsWith(`${cashierKey(cashierUserId)}@`)));
       const raw = localStorage.getItem(KEY);
       let legacyOwner: string | null = null;
       try {
@@ -188,11 +228,17 @@ export function clearPosSessionSnapshot(cashierUserId?: string | null): void {
       if (raw !== null && (legacyOwner === null || legacyOwner === cashierUserId)) localStorage.removeItem(KEY);
       return;
     }
-    for (const k of snapshotKeys()) localStorage.removeItem(k);
+    for (const k of [...snapshotKeys(), ...readIndex(BRANCH_INDEX_KEY)]) localStorage.removeItem(k);
     writeIndex([]);
+    writeIndex([], BRANCH_INDEX_KEY);
   } catch {
     /* ignore */
   }
+}
+
+/** 1.0.42 — clear every slot (cashier, per-branch, single-key) holding this shift: it was closed. */
+export function clearPosSessionSnapshotsForShift(shiftId: string): void {
+  for (const s of readAllPosSessionSnapshots({ perBranch: true })) if (s.shift.id === shiftId) clearPosSessionSnapshot(s.cashier_user_id, s.branch_id);
 }
 
 /**

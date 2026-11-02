@@ -39,8 +39,13 @@ export type ProjectionScope = {
 
 /** How a projected line maps back to the server for an edit/split. "summary" / "legacy" lines are
  *  display-only (their server ids are not known on this device). 1.0.38 — "merged" lines were folded in
- *  by an offline merge that has not synced yet: display-only until it does (their order changes). */
-export type LineRef = EditTargetRef | { kind: "summary" } | { kind: "legacy" } | { kind: "merged"; op_id: string };
+ *  by an offline merge that has not synced yet: not editable until it does (their order changes); 1.0.42 —
+ *  splittable by their SOURCE item (`item`, see splitItemOf). */
+export type LineRef = EditTargetRef | { kind: "summary" } | { kind: "legacy" } | { kind: "merged"; op_id: string; item?: SplitItemRef | null };
+
+/** 1.0.42 (DESK-O2) — the server identity an offline split leg allocates a line by: a canonical order_item
+ *  id, or the client line id of a locally-sent round (resolved through pos_order_item_map at replay). */
+export type SplitItemRef = { order_item_id: string } | { line_local: string };
 
 // ---------------------------------------------------------------------------
 // 1.0.38 (Bugs 5/6) — offline Move / Merge (schema 2 structural ops)
@@ -56,6 +61,23 @@ export const billRefKey = (r: BillRef): string => (r.order_id ? r.order_id : `L:
 
 /** 1.0.38 — a line folded in by an offline merge that has not synced yet. */
 export const MERGED_LINE_LOCKED_MESSAGE = "This item was merged in offline. Wait for the merge to sync before changing or splitting it.";
+
+/**
+ * 1.0.42 (DESK-O2) — how an offline split leg allocates a projected line, or null when the line cannot be split
+ * offline (a summary / legacy line, an edited replacement, or a line merged in by a build that did not record its
+ * source item). A line an unsynced offline MERGE folded in is allocated by its SOURCE item: the server merge
+ * re-parents the source order's items into the primary order keeping their ids and client line ids, and the leg
+ * replays after the merge (structural barrier), so by then the item is on the primary order. Through 1.0.41 such
+ * lines were display-only: the merged-in amount was never offered for collection offline (Split left it out,
+ * the full Pay of the part-paid bill was refused) and the table could not be closed.
+ */
+export function splitItemOf(m: LineMeta | undefined): SplitItemRef | null {
+  if (!m) return null;
+  if (m.ref.kind === "canonical") return { order_item_id: m.ref.order_item_id };
+  if (m.ref.kind === "local") return { line_local: m.ref.line_local };
+  if (m.ref.kind === "merged") return m.ref.item ?? null;
+  return null;
+}
 
 /** True for a schema-2 (offline-safe) move_table / merge_tables op. */
 export function isStructuralOp(o: OfflineOperation): boolean {
@@ -385,6 +407,10 @@ function recomputeOrder(o: BillOrder): void {
 // Dine-In — one projection per table
 // ---------------------------------------------------------------------------
 
+/** 1.0.42 — one unsynced split leg of a projected bill: what it took (order currency, a UI figure — the server
+ *  prices the leg on replay) and how. */
+export type PendingSplitLeg = { opId: string; orderKey: string; amount: number; method: string };
+
 export type OperationalTableBill = {
   tableId: string;
   /** The ONE bill every surface renders (sidebar, Add Items, payment, split, print). */
@@ -397,6 +423,8 @@ export type OperationalTableBill = {
   collected: number;
   /** Captured on this device in unsynced split legs. */
   paidPending: number;
+  /** 1.0.42 — those legs, in capture order (the Split panel lists what was taken offline). */
+  pendingSplitLegs?: PendingSplitLeg[];
   /** What remains to be paid: gross − collected − paidPending (0 once a settle is captured). */
   outstanding: number | null;
   currency: CurrencyCode | null;
@@ -797,8 +825,9 @@ export function projectTableBill(input: {
       if (rop) note(rop);
     }
     // 1.0.38 — the UNPAID lines an unsynced offline MERGE folded into this (primary) bill. Paid lines of a
-    // part-paid source never come here (they stay on the source with its payments). Display-only until the
-    // merge syncs (their server order changes); a refused merge folds nothing.
+    // part-paid source never come here (they stay on the source with its payments). Not editable until the
+    // merge syncs (their server order changes), but splittable by their source item (1.0.42, splitItemOf); a
+    // refused merge folds nothing.
     for (const blk of draft.merged_blocks ?? []) {
       const mop = opsById.get(blk.op_id);
       if (!mop || !structuralProjected(mop, structAt) || blk.lines.length === 0) continue;
@@ -808,7 +837,7 @@ export function projectTableBill(input: {
       for (const l of blk.lines) {
         if (meta.has(l.id)) continue;
         target.lines.push({ ...l, modifiers: [...l.modifiers], batch_no: batch });
-        meta.set(l.id, { ref: { kind: "merged", op_id: blk.op_id }, orderKey: target.id, creatorOpId: blk.op_id, paidQty: 0 });
+        meta.set(l.id, { ref: { kind: "merged", op_id: blk.op_id, item: blk.items?.[l.id] ?? null }, orderKey: target.id, creatorOpId: blk.op_id, paidQty: 0 });
       }
     }
   }
@@ -842,6 +871,7 @@ export function projectTableBill(input: {
 
   // 4 — split legs (unsynced) → paid quantities + amount captured.
   let paidPending = 0;
+  const pendingSplitLegs: PendingSplitLeg[] = [];
   for (const op of ix.splitsSorted) {
     if (op.operation_type !== "split_settle" || !live(op) || reflectedIn(op, fetchedAt)) continue;
     const key = keyOfOp(op);
@@ -853,14 +883,17 @@ export function projectTableBill(input: {
       continue;
     }
     const allocs = (rec(op.payload).allocations as { order_item_id?: string | null; line_local?: string | null; quantity: number }[] | undefined) ?? [];
+    let legAmount = 0;
     for (const a of allocs) {
       const id = a.order_item_id ?? a.line_local ?? "";
       const line = bo.lines.find((l) => l.id === id);
       const m = meta.get(id);
       if (!line || !m) continue;
       m.paidQty += Number(a.quantity) || 0;
-      paidPending += line.final_unit_price * (Number(a.quantity) || 0);
+      legAmount += line.final_unit_price * (Number(a.quantity) || 0);
     }
+    paidPending += legAmount;
+    pendingSplitLegs.push({ opId: op.operation_id, orderKey: key, amount: roundNumeric(legAmount, 2), method: String(rec(op.payload).method ?? "") });
     po.pendingSplitOps.push(op.operation_id);
     po.bumpOps.push(op.operation_id);
     note(op);
@@ -898,6 +931,7 @@ export function projectTableBill(input: {
     gross,
     collected: activeCollected,
     paidPending,
+    pendingSplitLegs,
     outstanding,
     currency: bill.currency,
     mutationOpIds,
@@ -1138,7 +1172,7 @@ export function splitCompletesBill(p: OperationalTableBill, orderKey: string, al
   for (const a of allocations) alloc.set(a.order_item_id, (alloc.get(a.order_item_id) ?? 0) + (Number(a.quantity) || 0));
   return order.lines.every((l) => {
     const m = p.meta.get(l.id);
-    if (!m || (m.ref.kind !== "canonical" && m.ref.kind !== "local")) return false;
+    if (!m || !splitItemOf(m)) return false;
     return l.quantity - m.paidQty - (alloc.get(l.id) ?? 0) <= 0;
   });
 }
@@ -1271,9 +1305,9 @@ export const PART_PAID_OFFLINE_SETTLE_MESSAGE = "Part of this bill is already pa
 
 /**
  * 1.0.38 (Bug 9) — PURE, the ONE offline full-settle / on-account amount rule for a table bill (Pay and On
- * Account alike). A locally captured, unsynced split leg (paidPending) → refused (R is not known here). A
- * SERVER-held part-payment (collected = P) → refused unless the server deducts prior payments
- * (`serverDeductsPrior`, see lib/pos/tablePayment serverDeductsPriorPayments).
+ * Account alike). A part-payment — SERVER-held (collected) or, 1.0.42, captured on this device in unsynced split
+ * legs (paidPending) — → refused unless the server deducts prior payments (`serverDeductsPrior`, see
+ * lib/pos/tablePayment serverDeductsPriorPayments); then the amount is what is still open.
  * 1.0.38 G3 (amount pin) — `exactAmount` = the amount THIS DEVICE PRESENTED / COLLECTED: R_local = gross − P in
  * the order currency, computed like the server computes R (Σ order totals − Σ paid split settlements, numeric
  * rounding — `roundNumeric`). It is ALWAYS recorded (canonical bill or local rounds / edits / move / merge
@@ -1282,9 +1316,15 @@ export const PART_PAID_OFFLINE_SETTLE_MESSAGE = "Part of this bill is already pa
  * at a figure the cashier never collected. Null only when no single figure exists (mixed currencies).
  */
 export function offlineSettleAmount(p: OperationalTableBill, serverDeductsPrior: boolean): { ok: false; reason: string } | { ok: true; exactAmount: number | null } {
-  if (p.paidPending > 0 || (p.collected > 0 && !serverDeductsPrior)) return { ok: false, reason: PART_PAID_OFFLINE_SETTLE_MESSAGE };
-  if (p.bill.mixedCurrency || p.gross == null) return { ok: true, exactAmount: null };
-  return { ok: true, exactAmount: Math.max(0, roundNumeric(p.gross - p.collected, 2)) };
+  // 1.0.42 (DESK-O1/O2) — with the server deducting prior payments, a bill with locally captured, unsynced split
+  // legs settles for exactly what is still open: R_local = T − P_server − P_local. The settle depends on every
+  // pending leg (pendingMutationOpIds), so the server books those legs first and then its own R; the amount pin
+  // makes it REFUSE (PAY_AMOUNT_CHANGED → conflict) rather than book another figure when a leg was refused or the
+  // bill changed elsewhere — so with no single figure to pin (mixed currencies) such a bill stays refused.
+  // Through 1.0.41 any captured leg refused the settle: a bill split offline could never be paid in full offline.
+  if ((p.paidPending > 0 || p.collected > 0) && !serverDeductsPrior) return { ok: false, reason: PART_PAID_OFFLINE_SETTLE_MESSAGE };
+  if (p.bill.mixedCurrency || p.gross == null) return p.paidPending > 0 ? { ok: false, reason: PART_PAID_OFFLINE_SETTLE_MESSAGE } : { ok: true, exactAmount: null };
+  return { ok: true, exactAmount: Math.max(0, roundNumeric(p.gross - p.collected - p.paidPending, 2)) };
 }
 
 /** 1.0.38 — an offline discount on a bill the server already holds part-payment for (SPLIT_DISCOUNT_UNSUPPORTED). */

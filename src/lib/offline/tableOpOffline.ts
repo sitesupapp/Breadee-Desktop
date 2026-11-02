@@ -27,6 +27,7 @@ import {
   type BillRef,
   type OperationalTableBill,
   type ProjectionScope,
+  type SplitItemRef,
   TABLE_OP_SCHEMA_VERSION,
   billRefKey,
   getOperationalTableBill,
@@ -36,6 +37,7 @@ import {
   scopedOperations,
   shiftlessCanonicalOrders,
   shiftlessRefusal,
+  splitItemOf,
   structuralAllRefs,
   structuralRefusedByServer,
   tablesOfOp,
@@ -462,7 +464,17 @@ export async function captureMergeTablesOffline(input: {
     }
     await localdb.operations.add(op);
     const now = new Date().toISOString();
-    const blocks = sl.map((l) => ({ op_id: operationId, source_table_id: l.row.id, source_table_name: l.row.name, lines: l.unpaid.map((x) => ({ ...x, modifiers: [...x.modifiers] })) }));
+    // 1.0.42 (DESK-O2) — each folded line keeps the SOURCE item it is allocated by, so the merged-in amount stays
+    // collectible offline (Split / full Pay); the server merge re-parents the items keeping their ids.
+    const itemsOf = (l: MergeLeg): Record<string, SplitItemRef> => {
+      const items: Record<string, SplitItemRef> = {};
+      for (const x of l.unpaid) {
+        const it = splitItemOf(l.p.meta.get(x.id));
+        if (it) items[x.id] = it;
+      }
+      return items;
+    };
+    const blocks = sl.map((l) => ({ op_id: operationId, source_table_id: l.row.id, source_table_name: l.row.name, lines: l.unpaid.map((x) => ({ ...x, modifiers: [...x.modifiers] })), items: itemsOf(l) }));
     for (const l of sl) {
       if (l.draft) await localdb.dineDrafts.update(l.draft.local_session_id, { status: "merged", merged_into_table: primary.id, merged_op_id: operationId, updated_at: now });
     }
