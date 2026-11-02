@@ -267,14 +267,19 @@ export async function setItemModifierGroups(tenantId: string, itemId: string, gr
   // ids) for no reason.
   if (removed.length === 0 && added.length === 0) return;
   if (removed.length) {
-    unwrap(
+    const deleted = unwrap(
       await supabase
         .from("menu_item_modifier_groups")
         .delete()
         .eq("menu_item_id", itemId)
         .in("modifier_group_id", removed)
         .select("id"),
-    );
+    ) as { id: string }[] | null;
+    // DESK-4 - a DELETE the row policy filters out returns no error and no rows. Without this
+    // check the drawer reported "saved" while the links were unchanged (Production immg_write).
+    if ((deleted?.length ?? 0) < removed.length) {
+      throw new Error("The modifier groups were not removed from this item. You may not have permission to manage modifiers.");
+    }
   }
   if (added.length) {
     unwrap(
