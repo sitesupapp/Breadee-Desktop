@@ -10,7 +10,7 @@ import { Modal } from "@/components/overlays";
 import { Badge, Button, Input, cn, type Gate } from "@/components/ui";
 import { NumericKeypad } from "@/components/pos/NumericKeypad";
 import { CASH_CONTRACT_CURRENCY, formatMoney, parseAmount, type CurrencyCode } from "@/lib/currency";
-import { differenceLabel } from "@/lib/pos/shifts";
+import { differenceLabel, shiftCloseOutcome } from "@/lib/pos/shifts";
 import { buildShiftReportDetail, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { paymentSummary } from "@/lib/pos/paymentBreakdown";
 import type { ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -50,7 +50,7 @@ export function OpenShiftDialog({
       onClose={onCancel}
       footer={
         <div className="flex items-center justify-between gap-3">
-          {error ? <p className="truncate text-xs font-semibold text-red-700">{error}</p> : <span />}
+          {error ? <p role="alert" className="min-w-0 flex-1 break-words text-xs font-semibold text-red-700">{error}</p> : <span />}
           <div className="flex shrink-0 gap-2">
             <Button variant="ghost" size="lg" onClick={onCancel} disabled={busy}>
               Cancel
@@ -155,7 +155,7 @@ export function EndShiftDialog({
       onClose={onCancel}
       footer={
         <div className="flex items-center justify-between gap-3">
-          {error ? <p className="truncate text-xs font-semibold text-red-700">{error}</p> : <span />}
+          {error ? <p role="alert" className="min-w-0 flex-1 break-words text-xs font-semibold text-red-700">{error}</p> : <span />}
           <div className="flex shrink-0 gap-2">
             {onTransferOpenOrders && (
               <Button variant="primary" size="lg" onClick={onTransferOpenOrders} disabled={busy}>
@@ -363,12 +363,13 @@ export function ShiftReportDialog({
 }) {
   if (!report) return null;
   const diff = differenceLabel(report.difference);
+  const outcome = shiftCloseOutcome(report);
   const detail = buildShiftReportDetail(shiftOrders, report.by_item);
   return (
     <Modal
       open
       title="End of shift report"
-      subtitle="Sent for manager review - it is not approved yet."
+      subtitle={outcome.subtitle}
       size="md"
       onClose={onClose}
       footer={
@@ -385,7 +386,7 @@ export function ShiftReportDialog({
       }
     >
       <div className="mb-3 flex items-center gap-2">
-        <Badge tone="amber">Pending manager review</Badge>
+        <Badge tone={outcome.tone}>{outcome.label}</Badge>
         <Badge tone={diff.tone}>
           {diff.label} {formatMoney(Math.abs(report.difference), CASH_CONTRACT_CURRENCY)}
         </Badge>
