@@ -37,6 +37,7 @@ export function ItemDrawer({
   categories,
   groups,
   showModifiers,
+  canAssignModifiers = true,
   primaryCurrency,
   priceCurrency,
   rate,
@@ -53,6 +54,8 @@ export function ItemDrawer({
   categories: BuilderCategory[];
   groups: BuilderGroup[];
   showModifiers: boolean;
+  /** DESK-4 - may change modifier-group links (Production `immg_write`: owner / menu.manage_modifiers). */
+  canAssignModifiers?: boolean;
   primaryCurrency: CurrencyCode;
   priceCurrency: CurrencyCode;
   rate: number | null;
@@ -86,7 +89,7 @@ export function ItemDrawer({
     onSubmit({
       draft,
       price: priceAmount === null ? null : { amount: priceAmount, currency: priceCurrency },
-      groupIds: showModifiers ? assigned : undefined,
+      groupIds: showModifiers && canAssignModifiers ? assigned : undefined,
       file,
       clearImage,
     });
@@ -211,6 +214,11 @@ export function ItemDrawer({
 
           {showModifiers && (
             <Section title="Modifiers & extras">
+              {!canAssignModifiers && !readOnly && (
+                <p className="mb-2 text-xs text-sub">
+                  Changing this item's modifier groups needs the Manage modifiers permission.
+                </p>
+              )}
               {groups.length === 0 ? (
                 <p className="text-xs text-sub">No modifier groups yet. Create one in the Modifiers tab first.</p>
               ) : (
@@ -221,13 +229,13 @@ export function ItemDrawer({
                       className={cn(
                         "flex min-h-[44px] cursor-pointer items-center gap-3 rounded-xl border px-3",
                         assigned.includes(g.id) ? "border-brand bg-brand-soft" : "border-line bg-white hover:bg-slate-50",
-                        readOnly && "cursor-not-allowed opacity-60",
+                        (readOnly || !canAssignModifiers) && "cursor-not-allowed opacity-60",
                       )}
                     >
                       <input
                         type="checkbox"
                         className="h-4 w-4"
-                        disabled={readOnly}
+                        disabled={readOnly || !canAssignModifiers}
                         checked={assigned.includes(g.id)}
                         onChange={(e) =>
                           onChange({
