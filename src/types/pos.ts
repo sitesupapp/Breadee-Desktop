@@ -207,6 +207,10 @@ export type ShiftReport = {
   total_delivery_fees: number;
   delivery_fees_cash: number;
   delivery_fee_cash_treatment: DeliveryFeeCashTreatment;
+  // DESK-3 (R7) - the server's close outcome: 'approved' (direct close) or 'pending_manager_review'.
+  // Optional: a report built offline, or by an older server, does not carry it.
+  shift_status?: string | null;
+  approval_required?: boolean | null;
 } & ShiftPayBreakdown;
 
 // --- Orders / payments -------------------------------------------------------
