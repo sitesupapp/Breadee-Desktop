@@ -52,7 +52,7 @@ import { clearBranchContext } from "@/lib/offline/branchContext";
 import type { Membership, Tenant, TenantStatus } from "@/lib/types";
 import type { FeatureMap } from "@/lib/features";
 import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
-import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
+import { isBackendReachable, lastKnownReachable, subscribeReachability } from "@/lib/offline/reachability";
 import { AUTH_STORAGE_KEY, sealedAuthStorage } from "@/lib/security/sealedAuthStorage";
 import * as vault from "@/lib/security/offlineVault";
 import { markStart, recordSince } from "@/lib/perf/timings";
@@ -199,6 +199,25 @@ export function revalidateActiveSession(): Promise<void> {
     revalidating = null;
   });
   return revalidating;
+}
+
+/**
+ * 1.0.45 (U-1) — RETRY the revalidation while a restored session is still in offline mode. The cold-start
+ * revalidation is a single attempt: when the backend was not reachable at that instant (an updater
+ * relaunch starts before the network is ready) or the token read hit a transport error, nothing tried
+ * again, so the till stayed in "Offline mode" against a reachable backend until a restart. Now a
+ * reachability flip to reachable, and every security tick that does not already know the backend is
+ * down, re-runs the same de-duplicated revalidation. A reauth_required lock is never retried (only a
+ * new sign-in lifts it).
+ */
+function shouldRetryRevalidation(): boolean {
+  const s = useSession.getState();
+  return !!s.userId && s.offlineMode && standingLock !== "reauth_required";
+}
+
+function retryRevalidation(): void {
+  if (!shouldRetryRevalidation()) return;
+  void revalidateActiveSession().catch(() => undefined);
 }
 
 /** Render a locally authorized user (cold-start restore or local sign-in): their verified authority,
@@ -363,6 +382,7 @@ export async function securityTick(): Promise<void> {
   let clock = await observeDeviceClock();
   const s = useSession.getState();
   if (!s.userId) return;
+  if (s.offlineMode && lastKnownReachable() !== false) retryRevalidation();
   const offline = backendLooksOffline(s.offlineMode);
   if (!offline && !standingLock) {
     if (entitlementEnforced()) {
@@ -409,6 +429,9 @@ function startSecurityLoop(): void {
   securityStarted = true;
   window.setInterval(() => void securityTick().catch(() => undefined), SECURITY_TICK_MS);
   window.addEventListener("online", () => void securityReconnect().catch(() => undefined));
+  subscribeReachability((reachable) => {
+    if (reachable) retryRevalidation();
+  });
 }
 
 type CachedContext = {
