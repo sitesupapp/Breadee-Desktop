@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.43";
+export const WHATS_NEW_VERSION = "1.0.44";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -46,6 +46,15 @@ export const WHATS_NEW_PAGES: WhatsNewPage[] = [
       "While offline, items merged in from another table can now be paid with Split or Pay Full Bill, and Pay Full Bill asks only for what is still open after a split. The Split screen shows each share already taken. Each branch keeps its own open shift when you switch branches offline, the sync status also counts work waiting for other branches, and an offline cash receipt shows the amount in the currency the customer paid.",
     bodyAr:
       "أثناء العمل دون اتصال، أصبح بالإمكان دفع الأصناف المدموجة من طاولة أخرى عبر تقسيم الفاتورة أو دفع الفاتورة كاملة، ويطلب دفع الفاتورة كاملة المبلغ المتبقي فقط بعد التقسيم. وتعرض شاشة التقسيم كل حصة دُفعت. ويحتفظ كل فرع بورديته المفتوحة عند التبديل بين الفروع دون اتصال، وتشمل حالة المزامنة العمليات المنتظرة لفروع أخرى، ويعرض إيصال الدفع النقدي دون اتصال المبلغ بالعملة التي دفع بها الزبون.",
+  },
+  {
+    glyph: "sync",
+    title: "Refused offline orders are kept for review",
+    titleAr: "الطلبات المرفوضة أثناء عدم الاتصال تبقى للمراجعة",
+    body:
+      "If Breadee refuses a table that was opened while offline, for example because another terminal changed that table first, the table no longer stays occupied with a bill Breadee never received, and a real bill on it is no longer shown with extra items. The refused order stays in the Sync Center, with its items and value, under \"Refused offline order — review needed\". If the items were served, add them to the table's bill, then withdraw the refused order: Ready Desktop first confirms with Breadee that none of it was recorded. Nothing is removed automatically.",
+    bodyAr:
+      "إذا رفض Breadee طاولة فُتحت أثناء عدم الاتصال، مثلاً لأن جهازاً آخر غيّر تلك الطاولة أولاً، فلن تبقى الطاولة مشغولة بفاتورة لم يستلمها Breadee، ولن تظهر الفاتورة الفعلية عليها بأصناف إضافية. يبقى الطلب المرفوض في مركز المزامنة، مع أصنافه وقيمته، ضمن «طلب غير متصل مرفوض — بحاجة إلى مراجعة». إذا قُدّمت الأصناف، أضفها إلى فاتورة الطاولة، ثم اسحب الطلب المرفوض: يتحقق Ready Desktop أولاً من Breadee أنه لم يُسجَّل أي جزء منه. لا يُحذف أي شيء تلقائياً.",
   },
 ];
 
