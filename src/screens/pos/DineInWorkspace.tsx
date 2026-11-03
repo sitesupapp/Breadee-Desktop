@@ -1605,12 +1605,14 @@ export function useDineInWorkspace(input: {
         );
         setSplitLastPaid({ display_no: result.display_no, amount: result.amount, method: result.method });
         setSplitState(await loadSplitState(st.order_id));
-        await tables.loadBill(ctx);
+        // 1.0.43 — re-read the MAP, not just the bill: a leg changes the table's collected/outstanding, and the
+        // merge preview + the offline map cache read those from the map (it stayed at the pre-leg values).
+        await tables.refresh(ctx);
       } catch (e) {
         setSplitError(classifyError(e).message);
         try {
           setSplitState(await loadSplitState(st.order_id));
-          await tables.loadBill(ctx);
+          await tables.refresh(ctx);
         } catch {
           /* keep the original error visible */
         }
