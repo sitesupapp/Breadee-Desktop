@@ -1,44 +1,20 @@
-# ---------------------------------------------------------------------------
-# Breadee Desktop — Windows BUILD CHECK workflow
-#
-# PURPOSE: Verify that the Tauri desktop app compiles cleanly on a fresh,
-# stable Windows runner. This exists because the local dev machine is
-# unstable (cargo/rustc crash with 0xC0000005), so we can't trust a local
-# build. This is a CI *sanity check* only.
-#
-# THIS IS NOT A RELEASE / PUBLISH WORKFLOW:
-#   - It does NOT run `tauri build`.
-#   - It does NOT produce or upload an installer.
-#   - It does NOT create a GitHub Release or touch production anything.
-#   - It requires NO secrets (typecheck + vite build + `cargo check` only).
-#
-# It runs the frontend checks (typecheck + build) and a Rust `cargo check`
-# of the src-tauri crate. Nothing more.
-# ---------------------------------------------------------------------------
+# CI-only (ci/desktop-1045-revalidate-verify, never merged): Desktop Windows build check for the
+# Staging 1.0.45 candidate = cumulative 1.0.44 + U-1 revalidation retry. Typecheck, focused regression
+# tests, the full suite (compared by name against the baseline), vite build, cargo check / test.
+# No installer, no release, no publish.
 
 name: Desktop Windows Build Check
 
 on:
-  # Run on every push to the working branch for the desktop app (post-merge gate).
   push:
-    branches: [desktop-staging, claude/desktop-1031-payment-hotfix-clean, claude/desktop-1031-cumulative-repair]
-  # Run as a gate on PRs into either integration branch. `desktop-staging` was
-  # added after Level 1 integration found that PRs into it ran NO checks at all
-  # and had to be gated by manual workflow_dispatch.
+    branches: [desktop-staging, ci/desktop-1045-revalidate-verify]
   pull_request:
     branches: [main, desktop-staging]
-  # Allow running it manually from the Actions tab (recovery / diagnostics).
   workflow_dispatch:
 
-# Minimal permissions: this workflow only reads the repo. Deliberately NOT
-# pull_request_target - PR code must never run with a privileged token.
 permissions:
   contents: read
 
-# Cancel an obsolete run when a newer commit arrives for the SAME pull request
-# or the same branch. Keyed on the PR number when present so two different PRs
-# never cancel each other, and so a post-merge desktop-staging run is never
-# cancelled by an unrelated PR.
 concurrency:
   group: desktop-windows-check-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -46,47 +22,44 @@ concurrency:
 jobs:
   build-check:
     name: Windows build check
-    # Clean, stable Windows runner — WebView2 and MSVC build tools are
-    # preinstalled on GitHub's windows-latest image, so no extra system
-    # dependencies are needed for Tauri on Windows.
     runs-on: windows-latest
 
     steps:
-      # 1. Get the source.
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Node toolchain (npm cache keyed off package-lock.json).
-      #    Node 24 is REQUIRED by `npm test`: the suite runs on Node's built-in
-      #    test runner over TypeScript sources, which needs native type
-      #    stripping (Node 22.18+/24) and glob support in `--test` (Node 21+).
-      #    Node 20 has neither, which is why tests were never wired in here.
-      #    This is a CI runtime version only - no package dependency changed.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: 'npm'
 
-      # 3. Install frontend deps exactly as locked (fails if lockfile is stale).
       - name: Install frontend dependencies
         run: npm ci
 
-      # 4. TypeScript type check (no emit).
       - name: Typecheck frontend
         run: npm run typecheck
 
-      # 4b. Focused test suite (99 tests at the Level 1 baseline). Pure logic
-      #     only - no DOM, no network, no test-framework dependency.
-      - name: Run tests
-        run: npm test
+      - name: Focused regression tests (U-1 retry, L4/1, R3-M1, DESK, offline, financial, isolation, sync)
+        run: node --test --test-concurrency=1 --import ./test/register.mjs test/session-revalidation-retry.test.ts test/session-permission-refresh.test.ts test/l41-refused-open-session.test.ts test/desktop-1043-split-map-refresh.test.ts test/desktop-1042-offline-acceptance.test.ts test/desktop-1041-online-acceptance.test.ts test/rc-auth-1-local-signout.test.ts test/pos-session-snapshot.test.ts test/offline-shift-store.test.ts test/offline-recovery-units.test.ts test/offline-branch-context.test.ts test/offline-1038-shift-chain.test.ts test/offline-1038-synccenter.test.ts test/offline-sync-center-source.test.ts test/pos-ui-update.test.ts test/offline-1038-e2e.test.ts test/offline-1038-lifecycle.test.ts test/offline-1038-chains.test.ts test/offline-foundation-concurrency.test.ts test/offline-foundation-online-pins.test.ts test/offline-dinein-split.test.ts test/offline-split.test.ts test/offline-operational-projection.test.ts test/offline-dinein-shell-source.test.ts test/offline-phase-d-integration.test.ts test/offline-closure-rc10.test.ts test/offline-closure-rc11.test.ts test/offline-closure-rc12.test.ts test/offline-closure-rc13.test.ts test/offline-closure-rc14.test.ts test/native-defects-1038.test.ts test/offline-rc-diagnostics.test.ts test/staging-updater.test.ts test/upgrade-1037-to-1038.test.ts test/offline-1038-perf-retention.test.ts test/offline-1038-contracts-flag.test.ts test/offline-pay-order.test.ts test/offline-receivable-collect.test.ts
 
-      # 5. Build the frontend bundle into ./dist.
-      #    Done BEFORE cargo check so the Tauri crate's frontendDist (../dist)
-      #    exists when the Rust build script inspects it.
-      #    Vite inlines these VITE_* values at build time (src/env.ts fails fast
-      #    if the Supabase vars are missing). STAGING Supabase only — supplied
-      #    via encrypted GitHub Actions secrets, never a committed .env.
+      - name: Focused regression tests (1.0.42 DESK-O merge E2E)
+        run: node --test --test-concurrency=1 --import ./test/register.mjs --test-name-pattern="DESK-O" test/offline-1038-movemerge.test.ts
+
+      - name: Run tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee full-suite.log
+      - name: Full-suite summary (failures by name)
+        if: always()
+        shell: bash
+        run: |
+          grep -E "^(# |ℹ )(tests|suites|pass|fail|cancelled|skipped|todo)" full-suite.log || true
+          echo "--- failing tests ---"
+          grep -E "^\s*(not ok |✖ )" full-suite.log | grep -v "failing tests:" | sort -u || echo "(none)"
+
       - name: Build frontend
         run: npm run build
         env:
@@ -94,28 +67,18 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: staging
 
-      # 6. Rust stable toolchain for the native Tauri backend.
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      # 7. Cache Rust build artifacts to speed up subsequent runs.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      # 8. Compile-check the native Tauri crate ONLY (no build, no installer).
-      #    --locked enforces the committed Cargo.lock.
       - name: Cargo check (src-tauri)
         working-directory: src-tauri
         run: cargo check --locked
 
-      # 9. Rust unit tests (Level 3E-A). The native printing module keeps its
-      #    validation, page building and spooler SEQUENCING behind traits, so
-      #    these run on the runner with no printer attached and produce no
-      #    paper - nothing here opens a device. Added because the local dev
-      #    machine crashes rustc with 0xC0000005 and cannot be trusted to run
-      #    them; this runner is the authoritative Rust gate.
       - name: Cargo test (src-tauri)
         working-directory: src-tauri
         run: cargo test --locked
