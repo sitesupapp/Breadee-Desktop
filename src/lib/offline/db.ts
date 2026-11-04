@@ -194,6 +194,20 @@ export interface CachedCustomer {
   /** Phase E: the local id of the first address captured with an offline-created customer, so a
    *  dependent delivery order can chain address_local → canonical. Absent when no address was added. */
   local_address_id?: string | null;
+  /** ISO-CUST-1b — the OU-scoping rule a SERVER-derived row was written under. Rows from before the rule
+   *  (no value) may carry the session's OU instead of the customer's own, so they are quarantined: never
+   *  served to an offline search, phone lookup or profile until an online read rewrites them. */
+  scope_rule?: number;
+}
+
+/** ISO-CUST-1b — the current rule: a server row is filed under the customer's OWN operating unit. */
+export const CUSTOMER_SCOPE_RULE = 2;
+
+/** ISO-CUST-1b — fail-closed read gate. This device's offline-created rows and server rows written under the
+ *  current rule are readable; a legacy row is not, whatever OU it is stamped with. No migration has to run
+ *  (or succeed) first, so an update that starts offline never serves a legacy row. */
+export function isScopeVerifiedCustomer(c: CachedCustomer): boolean {
+  return c.pending_local === true || c.scope_rule === CUSTOMER_SCOPE_RULE;
 }
 
 // ---------------------------------------------------------------------------
@@ -808,10 +822,11 @@ export async function readCachedTableMap(
 // Delivery customer cache (offline lookup) - posCustomers store (v3).
 // ---------------------------------------------------------------------------
 
-/** Upsert one or more cached customers (identity match, or full profile). */
+/** Upsert one or more cached customers (identity match, or full profile). Every caller files server rows
+ *  under the customer's own OU (cachedBranchFor / the op's OU), so each is stamped with the current rule. */
 export async function cacheCustomers(records: CachedCustomer[]): Promise<void> {
   if (records.length === 0) return;
-  await localdb.posCustomers.bulkPut(records);
+  await localdb.posCustomers.bulkPut(records.map((r) => ({ ...r, scope_rule: CUSTOMER_SCOPE_RULE })));
 }
 
 /** Every cached customer for a tenant+branch scope (for local search). Final Foundation (PERF): one
@@ -824,10 +839,11 @@ export async function listCachedCustomers(tenantId: string | null, branchId: str
   const rev = customersRev;
   const c = customerScopeCache;
   if (c && c.rev === rev && c.tenantId === tenantId && c.branchId === (branchId ?? null)) return c.rows;
-  const rows =
+  const rows = (
     branchId != null
       ? await localdb.posCustomers.where("[tenant_id+branch_id]").equals([tenantId, branchId]).toArray()
-      : (await localdb.posCustomers.where("tenant_id").equals(tenantId).toArray()).filter((x) => (x.branch_id ?? null) === null);
+      : (await localdb.posCustomers.where("tenant_id").equals(tenantId).toArray()).filter((x) => (x.branch_id ?? null) === null)
+  ).filter(isScopeVerifiedCustomer);
   if (customersRev === rev) customerScopeCache = { tenantId, branchId: branchId ?? null, rev, rows };
   return rows;
 }
@@ -837,7 +853,7 @@ export async function listCachedCustomers(tenantId: string | null, branchId: str
 export async function findCachedCustomersByPhoneE164(tenantId: string | null, branchId: string | null, e164: string): Promise<CachedCustomer[]> {
   if (!tenantId || !e164) return [];
   const hits = await localdb.posCustomers.where("phone_e164").equals(e164).toArray();
-  return hits.filter((c) => c.tenant_id === tenantId && (c.branch_id ?? null) === (branchId ?? null));
+  return hits.filter((c) => c.tenant_id === tenantId && (c.branch_id ?? null) === (branchId ?? null) && isScopeVerifiedCustomer(c));
 }
 
 /** One cached customer by server id, scope-checked. */
@@ -849,6 +865,7 @@ export async function getCachedCustomer(
   const c = await localdb.posCustomers.get(id);
   if (!c) return undefined;
   if (c.tenant_id !== tenantId || (c.branch_id ?? null) !== (branchId ?? null)) return undefined;
+  if (!isScopeVerifiedCustomer(c)) return undefined;
   return c;
 }
 
@@ -921,7 +938,9 @@ export async function promotePendingLocalCustomer(localId: string, canonicalId: 
   await localdb.transaction("rw", localdb.posCustomers, async () => {
     const local = await localdb.posCustomers.get(localId);
     if (!local) return;
-    const existing = localId === canonicalId ? undefined : await localdb.posCustomers.get(canonicalId);
+    // ISO-CUST-1b — a legacy (unverified) canonical row may carry another OU: never adopt its OU or fields.
+    const existingRow = localId === canonicalId ? undefined : await localdb.posCustomers.get(canonicalId);
+    const existing = existingRow && isScopeVerifiedCustomer(existingRow) ? existingRow : undefined;
     const localAddrs = remapAddresses(local.addresses, addressMap);
     const prior = remapAddresses(existing?.addresses ?? null, addressMap);
     const merged = [...prior, ...localAddrs.filter((a) => !prior.some((p) => p.id === a.id))];
@@ -936,6 +955,7 @@ export async function promotePendingLocalCustomer(localId: string, canonicalId: 
       notes: existing?.notes ?? local.notes,
       has_profile: (existing?.has_profile ?? false) || local.has_profile,
       cached_at: new Date().toISOString(),
+      scope_rule: CUSTOMER_SCOPE_RULE,
     };
     await localdb.posCustomers.put(promoted);
     if (localId !== canonicalId) await localdb.posCustomers.delete(localId);

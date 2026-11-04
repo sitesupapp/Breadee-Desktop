@@ -148,22 +148,23 @@ const hydratedScopes = new Set<string>();
  * device (through 1.0.38 the cache only held customers searched / opened online). Same tables, same RLS
  * scope as the online search (the server decides who is visible), most recently active first, bounded.
  * Once per tenant+branch per run; a failure caches nothing and never touches what is already cached.
+ * `client` is a test seam only (production passes nothing and uses the app's Supabase client).
  */
-export async function hydrateBranchCustomers(scope: CustomerScope): Promise<number> {
+export type HydrateClient = {
+  from: (t: string) => {
+    select: (c: string) => {
+      order: (col: string, o: { ascending: boolean; nullsFirst?: boolean }) => { limit: (n: number) => Promise<{ data: unknown; error: { message: string } | null }> };
+      in: (col: string, vals: string[]) => Promise<{ data: unknown; error: { message: string } | null }>;
+    };
+  };
+};
+export async function hydrateBranchCustomers(scope: CustomerScope, client?: HydrateClient): Promise<number> {
   if (!scope.tenantId) return 0;
   const key = `${scope.tenantId}|${scope.branchId ?? ""}`;
   if (hydratedScopes.has(key)) return 0;
   hydratedScopes.add(key);
   try {
-    const { supabase } = await import("@/lib/supabase");
-    const loose = supabase as unknown as {
-      from: (t: string) => {
-        select: (c: string) => {
-          order: (col: string, o: { ascending: boolean; nullsFirst?: boolean }) => { limit: (n: number) => Promise<{ data: unknown; error: { message: string } | null }> };
-          in: (col: string, vals: string[]) => Promise<{ data: unknown; error: { message: string } | null }>;
-        };
-      };
-    };
+    const loose = client ?? ((await import("@/lib/supabase")).supabase as unknown as HydrateClient);
     const cRes = await loose.from("pos_customers").select("id, name, phone, phone_e164, notes, branch_id").order("last_activity_at", { ascending: false, nullsFirst: false }).limit(CUSTOMER_HYDRATE_LIMIT);
     if (cRes.error || !Array.isArray(cRes.data)) throw new Error(cRes.error?.message ?? "customers unreadable");
     const rows = cRes.data as { id: string; name: string | null; phone: string | null; phone_e164: string | null; notes: string | null; branch_id?: string | null }[];
@@ -184,6 +185,8 @@ export async function hydrateBranchCustomers(scope: CustomerScope): Promise<numb
     // ISO-CUST-1 — a COMPLETE read is the server's whole answer for this user: a server row cached under
     // this OU that the server no longer returns (another OU's customer an earlier owner session filed here
     // before rows kept their own OU) is dropped. Offline-created (pending-local) rows are never touched.
+    // ISO-CUST-1b — this is housekeeping only, not the security boundary: legacy rows are already unreadable
+    // (isScopeVerifiedCustomer), so a capped read (>= the limit) that skips it exposes nothing.
     if (rows.length < CUSTOMER_HYDRATE_LIMIT) {
       const returned = new Set(rows.filter((r) => cachedBranchFor(r.branch_id, scope) === scope.branchId).map((r) => r.id));
       const cached = await listCachedCustomers(scope.tenantId, scope.branchId);
