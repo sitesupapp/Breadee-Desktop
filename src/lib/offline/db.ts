@@ -863,6 +863,12 @@ export async function purgeForeignCachedCustomers(tenantId: string | null, branc
   return foreign.length;
 }
 
+/** Drop specific cached customers by id (hydrate cleanse). Never throws on a missing row. */
+export async function dropCachedCustomers(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await localdb.posCustomers.bulkDelete(ids);
+}
+
 /** Sign-out cleanup: drop the whole customer cache (privacy - phones/addresses). */
 export async function clearCachedCustomers(): Promise<void> {
   await localdb.posCustomers.clear();

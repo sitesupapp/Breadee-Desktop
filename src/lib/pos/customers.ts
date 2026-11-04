@@ -29,6 +29,9 @@ export type CustomerMatch = {
   name: string | null;
   phone: string | null;
   phone_e164: string | null;
+  /** The customer's OWN operating unit as the server returned it (absent when not read). The offline
+   *  cache files the row under this OU, never under the session's - see cachedBranchFor. */
+  branch_id?: string | null;
 };
 
 export type CustomerAddress = {
@@ -64,6 +67,8 @@ export type CustomerProfile = {
   notes: string | null;
   addresses: CustomerAddress[];
   orders: CustomerOrder[];
+  /** As on CustomerMatch: the customer's own OU, when read. */
+  branch_id?: string | null;
 };
 
 // --- errors ------------------------------------------------------------------
@@ -184,7 +189,7 @@ export function customerWriteGate(input: {
 
 // --- reads -------------------------------------------------------------------
 
-const MATCH_COLUMNS = "id, name, phone, phone_e164";
+const MATCH_COLUMNS = "id, name, phone, phone_e164, branch_id";
 /** The shortlist cap. Matches the web picker; a longer list is a search problem. */
 export const SEARCH_LIMIT = 10;
 /** How many past orders the history dialog reads. Matches the web customer card. */
@@ -194,7 +199,9 @@ function toMatch(raw: unknown): CustomerMatch | null {
   const r = asRecord(raw);
   const id = strOrNull(r.id);
   if (!id) return null;
-  return { id, name: strOrNull(r.name), phone: strOrNull(r.phone), phone_e164: strOrNull(r.phone_e164) };
+  const match: CustomerMatch = { id, name: strOrNull(r.name), phone: strOrNull(r.phone), phone_e164: strOrNull(r.phone_e164) };
+  if (r.branch_id !== undefined) match.branch_id = strOrNull(r.branch_id);
+  return match;
 }
 
 /** Strip the characters that would break PostgREST's `or()` grammar. */
@@ -257,7 +264,7 @@ export function mergeMatches(...lists: CustomerMatch[][]): CustomerMatch[] {
 export async function loadCustomerProfile(customerId: string): Promise<CustomerProfile> {
   const { supabase } = await import("@/lib/supabase");
   const [cRes, aRes, oRes] = await Promise.all([
-    supabase.from("pos_customers").select("id, name, phone, phone_e164, notes").eq("id", customerId).maybeSingle(),
+    supabase.from("pos_customers").select("id, name, phone, phone_e164, notes, branch_id").eq("id", customerId).maybeSingle(),
     supabase
       .from("pos_customer_addresses")
       .select("id, address_label, area, street, building, floor, notes, location_url, is_default")
@@ -281,6 +288,7 @@ export async function loadCustomerProfile(customerId: string): Promise<CustomerP
     phone: strOrNull(c.phone),
     phone_e164: strOrNull(c.phone_e164),
     notes: strOrNull(c.notes),
+    ...(c.branch_id !== undefined ? { branch_id: strOrNull(c.branch_id) } : {}),
     addresses: ((aRes.data ?? []) as unknown[])
       .map((raw) => {
         const r = asRecord(raw);
