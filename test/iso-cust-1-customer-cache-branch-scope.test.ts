@@ -91,5 +91,5 @@ test("source: search, profile and provisioning hydrate all read branch_id and fi
 
 test("source: a complete hydrate drops server rows cached under this OU that the server no longer returns — never pending-local rows", () => {
   const cache = src("src/lib/offline/customerCache.ts");
-  assert.match(cache, /if \(rows\.length < CUSTOMER_HYDRATE_LIMIT\) \{[\s\S]{0,400}c\.pending_local !== true && !returned\.has\(c\.id\)[\s\S]{0,80}dropCachedCustomers/);
+  assert.match(cache, /if \(rows\.length < CUSTOMER_HYDRATE_LIMIT\) \{[\s\S]{0,500}dropCachedCustomers\(cached\.filter\(\(c\) => c\.pending_local !== true && !returned\.has\(c\.id\)\)/);
 });
