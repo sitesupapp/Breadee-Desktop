@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.45";
+export const WHATS_NEW_VERSION = "1.0.46";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 

@@ -243,7 +243,7 @@ test("there is ONE staging identity: the acceptance installer uses the staging o
 test("What's New: the RC-AUTH-1 sign-out page leads, bilingual, describing exactly this version", () => {
   const whatsNew = read("src", "lib", "whatsNew.ts");
   assert.match(whatsNew, new RegExp(`export const WHATS_NEW_VERSION = "${base.version.replace(/\./g, "\\.")}";`));
-  assert.equal(base.version, "1.0.45");
+  assert.equal(base.version, "1.0.46");
   // The release workflow takes the FIRST title/titleAr/body/bodyAr in the file as the release notes.
   const lit = (key: string) => JSON.parse(new RegExp(`\\b${key}:\\s*("(?:[^"\\\\]|\\\\.)*")`).exec(whatsNew)![1]);
   assert.match(whatsNew, /glyph: "sync"/);
