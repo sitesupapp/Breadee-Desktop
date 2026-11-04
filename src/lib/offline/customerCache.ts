@@ -15,6 +15,7 @@
 import { isBackendReachable } from "@/lib/offline/reachability";
 import {
   cacheCustomers,
+  dropCachedCustomers,
   findCachedCustomersByPhoneE164,
   getCachedCustomer,
   listCachedCustomers,
@@ -82,16 +83,28 @@ export class CustomerOfflineUnavailableError extends Error {
 
 // --- caching (online writes to the local mirror) -----------------------------
 
+/**
+ * ISO-CUST-1 — the OU a server customer row is cached under: the row's OWN branch, never the session's.
+ * RLS returns every OU an all-branches owner can see, so stamping the session scope filed other OUs'
+ * customers under this one, where a restricted user of the same device then read them offline (native
+ * 2026-11-04: a Main-only cashier found a QA-only customer). A tenant-wide row (no branch), or a caller
+ * that did not read the column, keeps the session scope as before.
+ */
+export function cachedBranchFor(serverBranchId: string | null | undefined, scope: CustomerScope): string | null {
+  return serverBranchId ? serverBranchId : scope.branchId;
+}
+
 /** Cache compact search matches. Never downgrades an existing full profile. */
 export async function cacheCustomerMatches(matches: CustomerMatch[], scope: CustomerScope): Promise<void> {
   if (!scope.tenantId || matches.length === 0) return;
   const records: CachedCustomer[] = [];
   for (const m of matches) {
-    const existing = await getCachedCustomer(m.id, scope.tenantId, scope.branchId).catch(() => undefined);
+    const branchId = cachedBranchFor(m.branch_id, scope);
+    const existing = await getCachedCustomer(m.id, scope.tenantId, branchId).catch(() => undefined);
     records.push({
       id: m.id,
       tenant_id: scope.tenantId,
-      branch_id: scope.branchId,
+      branch_id: branchId,
       name: m.name,
       phone: m.phone,
       phone_e164: m.phone_e164,
@@ -113,7 +126,7 @@ export async function cacheCustomerProfile(profile: CustomerProfile, scope: Cust
     {
       id: profile.id,
       tenant_id: scope.tenantId,
-      branch_id: scope.branchId,
+      branch_id: cachedBranchFor(profile.branch_id, scope),
       name: profile.name,
       phone: profile.phone,
       phone_e164: profile.phone_e164,
@@ -151,9 +164,9 @@ export async function hydrateBranchCustomers(scope: CustomerScope): Promise<numb
         };
       };
     };
-    const cRes = await loose.from("pos_customers").select("id, name, phone, phone_e164, notes").order("last_activity_at", { ascending: false, nullsFirst: false }).limit(CUSTOMER_HYDRATE_LIMIT);
+    const cRes = await loose.from("pos_customers").select("id, name, phone, phone_e164, notes, branch_id").order("last_activity_at", { ascending: false, nullsFirst: false }).limit(CUSTOMER_HYDRATE_LIMIT);
     if (cRes.error || !Array.isArray(cRes.data)) throw new Error(cRes.error?.message ?? "customers unreadable");
-    const rows = cRes.data as { id: string; name: string | null; phone: string | null; phone_e164: string | null; notes: string | null }[];
+    const rows = cRes.data as { id: string; name: string | null; phone: string | null; phone_e164: string | null; notes: string | null; branch_id?: string | null }[];
     const addresses = new Map<string, unknown[]>();
     for (let i = 0; i < rows.length; i += 200) {
       const ids = rows.slice(i, i + 200).map((r) => r.id);
@@ -168,10 +181,18 @@ export async function hydrateBranchCustomers(scope: CustomerScope): Promise<numb
       }
     }
     const now = new Date().toISOString();
+    // ISO-CUST-1 — a COMPLETE read is the server's whole answer for this user: a server row cached under
+    // this OU that the server no longer returns (another OU's customer an earlier owner session filed here
+    // before rows kept their own OU) is dropped. Offline-created (pending-local) rows are never touched.
+    if (rows.length < CUSTOMER_HYDRATE_LIMIT) {
+      const returned = new Set(rows.filter((r) => cachedBranchFor(r.branch_id, scope) === scope.branchId).map((r) => r.id));
+      const cached = await listCachedCustomers(scope.tenantId, scope.branchId);
+      await dropCachedCustomers(cached.filter((c) => c.pending_local !== true && !returned.has(c.id)).map((c) => c.id));
+    }
     const records: CachedCustomer[] = rows.map((r) => ({
       id: r.id,
       tenant_id: scope.tenantId as string,
-      branch_id: scope.branchId,
+      branch_id: cachedBranchFor(r.branch_id, scope),
       name: r.name,
       phone: r.phone,
       phone_e164: r.phone_e164,
