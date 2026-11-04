@@ -1,11 +1,11 @@
 {
-  "version": "1.0.46",
+  "version": "1.0.47",
   "notes": "Sign Out now affects only this device · تسجيل الخروج يشمل هذا الجهاز فقط\n\nSigning out of Ready Desktop now ends the session on this device only. Other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended somewhere else, for example after a password change, Ready Desktop stops taking new orders and asks you to sign in again instead of failing silently. Anything already recorded is kept and synchronises exactly once after you sign in.\n\nأصبح تسجيل الخروج من Ready Desktop ينهي الجلسة على هذا الجهاز فقط، وتبقى الأجهزة الأخرى ومتصفحات الويب التي تستخدم الحساب نفسه مسجّلة الدخول وتواصل البيع. وإذا أُنهيت جلسة الحساب من مكان آخر، مثل تغيير كلمة المرور، يتوقف Ready Desktop عن استقبال طلبات جديدة ويطلب تسجيل الدخول مجدداً بدلاً من الفشل بصمت. يُحفظ كل ما سُجّل مسبقاً وتتم مزامنته لمرة واحدة فقط بعد تسجيل الدخول.",
-  "pub_date": "2026-11-04T11:45:38Z",
+  "pub_date": "2026-11-04T23:09:19Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNW9RbFlXc1BwV0I2ZUNFd083M0N2WU1zQkI5RXRJZDRZUWNUL1lTYm5TU1RYMnZiUE9UekpDL0NZTjR0MnRxQnVxdmZnNEJxdXROV1RzNTJQbHI1Y1FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNzkyNzI5CWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC40Nl94NjQtc2V0dXAuZXhlCmpqcEpXQ2xTQXVWSlZEdDIwSHJxV0VHN05EQXBjWUczTUlMOWxHWnZrNm5xclRVK04zKzhTb2ZSekcxSjJOTEQxMXIyWDVjY1NraDRQNUN2bGRiZ0R3PT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.46/Breadee_Staging_1.0.46_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNWh3OW1aaDBTUEdXTGJKdHRjMkZYaWlYRWxmbEJwejFBSkRmaURpc1NTMUQzWjhmcitsekluUEh3amJ1QldlRVJod3pFSFFnWlA1OVU5N1F5b3FZRHdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzODMzNzUwCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC40N194NjQtc2V0dXAuZXhlCmVMQnJJdCtqcnhkNzRoaGhQMHpKNnU0WEQ4empvV05UT3F2WEtLMDJmWEphUG9UcUdIRWpGTndnVEhiL2Z3MFRvODA3TWs4NmNra1N6YWk4aksrdERRPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.47/Breadee_Staging_1.0.47_x64-setup.exe"
     }
   }
 }
