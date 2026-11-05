@@ -705,7 +705,13 @@ export function projectTableBill(input: {
   const freeing = [...settleOps, ...completedHere].sort((a, b) => a.created_at.localeCompare(b.created_at));
   const lastSettleOpId = freeing.length > 0 ? freeing[freeing.length - 1].operation_id : null;
   // 1.0.38 — a bill moved here offline carries the server-collected amount of its source table.
-  const collected = Math.max(0, Number(mapRow?.collected ?? 0) || 0) + (carriedActive ? Math.max(0, Number(input.draft?.carried_collected ?? 0) || 0) : 0);
+  // 1.0.40 (BUG 01/06) — the production map carries no `collected`; the cached canonical bill does (read from
+  // the PAID split settlements by loadTableBill). Take the larger, so an offline Pay after an ONLINE split
+  // never asks for (or pins) money the server already holds.
+  const canonCollected = (input.canonical?.bill.orders ?? []).reduce((s, o) => s + Math.max(0, Number(o.collected ?? 0) || 0), 0);
+  const collected =
+    Math.max(Math.max(0, Number(mapRow?.collected ?? 0) || 0), Math.round(canonCollected * 100) / 100) +
+    (carriedActive ? Math.max(0, Number(input.draft?.carried_collected ?? 0) || 0) : 0);
   // 1.0.38 — after an unsynced offline move / merge the server versions of the bill's orders are not known
   // on this device: line edits wait for the sync (never a guessed CAS). Rounds / splits / settles chain.
   const versionKnown = structuralOpIds.length === 0;
