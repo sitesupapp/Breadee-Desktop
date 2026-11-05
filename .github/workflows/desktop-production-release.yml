@@ -48,7 +48,7 @@ env:
   PRODUCTION_REF: cltlqfqormkhppmbvyrv
   # The customer-facing note shown in "Breadee Update Available" (latest.json
   # `notes`) and in the GitHub release description. Business language only.
-  RELEASE_NOTE: "Sign Out now affects only this device: other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended elsewhere, Ready Desktop asks you to sign in again instead of failing silently, and work already recorded syncs exactly once afterwards."
+  RELEASE_NOTE: "Split bills now show only what is still due: Pay Full Bill asks for exactly the remaining amount and each guest who pays by split gets their own receipt. A table whose offline order Breadee refused no longer stays occupied, and the Sync Center explains every item, with a Sync now button that reports what synced."
 
 jobs:
   release:

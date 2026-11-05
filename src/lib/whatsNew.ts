@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.39";
+export const WHATS_NEW_VERSION = "1.0.40";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -22,39 +22,21 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titl
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
   {
     glyph: "sync",
-    title: "Sign Out now affects only this device",
-    titleAr: "تسجيل الخروج يشمل هذا الجهاز فقط",
+    title: "Split bills show what is still due",
+    titleAr: "الفواتير المقسّمة تعرض المبلغ المتبقي",
     body:
-      "Signing out of Ready Desktop now ends the session on this device only. Other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended somewhere else, for example after a password change, Ready Desktop stops taking new orders and asks you to sign in again instead of failing silently. Anything already recorded is kept and synchronises exactly once after you sign in.",
+      "After a guest pays their share with Split Bill, the table's bill now shows only the items and amount still to pay, and Pay Full Bill asks for exactly that remaining amount. Each guest who pays by split gets their own receipt with only their items, numbered after the original order. The bill printed before payment also shows only what is still due. Items already paid stay in the order history and reports.",
     bodyAr:
-      "أصبح تسجيل الخروج من Ready Desktop ينهي الجلسة على هذا الجهاز فقط، وتبقى الأجهزة الأخرى ومتصفحات الويب التي تستخدم الحساب نفسه مسجّلة الدخول وتواصل البيع. وإذا أُنهيت جلسة الحساب من مكان آخر، مثل تغيير كلمة المرور، يتوقف Ready Desktop عن استقبال طلبات جديدة ويطلب تسجيل الدخول مجدداً بدلاً من الفشل بصمت. يُحفظ كل ما سُجّل مسبقاً وتتم مزامنته لمرة واحدة فقط بعد تسجيل الدخول.",
+      "بعد أن يدفع أحد الضيوف حصته عبر تقسيم الفاتورة، تعرض فاتورة الطاولة الآن الأصناف والمبلغ المتبقي فقط، ويطلب دفع الفاتورة كاملة هذا المبلغ المتبقي تحديداً. ويحصل كل ضيف يدفع عبر التقسيم على إيصال خاص به يتضمن أصنافه فقط، مرقّماً على أساس الطلب الأصلي. كما تعرض الفاتورة المطبوعة قبل الدفع ما تبقى للدفع فقط. وتبقى الأصناف المدفوعة في سجل الطلبات والتقارير.",
   },
   {
     glyph: "sync",
-    title: "Clearer shifts and safer menu changes",
-    titleAr: "ورديات أوضح وتعديلات أكثر أماناً على قائمة الطعام",
+    title: "A clearer Sync Center and no stuck tables",
+    titleAr: "مركز مزامنة أوضح ولا طاولات عالقة",
     body:
-      "When the same person works in more than one branch, Ready Desktop now opens the right shift for each branch. The end-of-shift report says whether the shift is closed or still waiting for a manager. When an action is refused, for example ending a shift that still has open orders, the full reason is shown. Changing the modifier groups of a menu item now needs the Manage modifiers permission, and a change is only shown as saved when it really was.",
+      "The Sync Center now has a Sync now button that reports how many items synced and how many still need attention, and each item explains in plain words what happened and what to do next. Retry first checks with Breadee, so a table changed on another terminal can be retried safely. A table whose offline order Breadee refused no longer stays occupied; any cash already collected for it stays listed in the Sync Center and is never asked for twice. When charging an order to a customer account, only customers of the current branch are offered.",
     bodyAr:
-      "عندما يعمل الشخص نفسه في أكثر من فرع، يفتح Ready Desktop الآن الوردية الصحيحة لكل فرع. ويوضح تقرير نهاية الوردية ما إذا كانت الوردية مغلقة أو ما زالت بانتظار موافقة المدير. وعند رفض إجراء ما، مثل إنهاء وردية فيها طلبات مفتوحة، يظهر السبب كاملاً. كما أصبح تعديل مجموعات الإضافات لصنف في القائمة يتطلب صلاحية إدارة الإضافات، ولا يظهر أي تعديل على أنه محفوظ إلا إذا حُفظ فعلاً.",
-  },
-  {
-    glyph: "sync",
-    title: "Offline table payments add up",
-    titleAr: "دفع الطاولات دون اتصال أصبح دقيقاً",
-    body:
-      "While offline, items merged in from another table can now be paid with Split or Pay Full Bill, and Pay Full Bill asks only for what is still open after a split. The Split screen shows each share already taken. Each branch keeps its own open shift when you switch branches offline, the sync status also counts work waiting for other branches, and an offline cash receipt shows the amount in the currency the customer paid.",
-    bodyAr:
-      "أثناء العمل دون اتصال، أصبح بالإمكان دفع الأصناف المدموجة من طاولة أخرى عبر تقسيم الفاتورة أو دفع الفاتورة كاملة، ويطلب دفع الفاتورة كاملة المبلغ المتبقي فقط بعد التقسيم. وتعرض شاشة التقسيم كل حصة دُفعت. ويحتفظ كل فرع بورديته المفتوحة عند التبديل بين الفروع دون اتصال، وتشمل حالة المزامنة العمليات المنتظرة لفروع أخرى، ويعرض إيصال الدفع النقدي دون اتصال المبلغ بالعملة التي دفع بها الزبون.",
-  },
-  {
-    glyph: "sync",
-    title: "Refused offline orders are kept for review",
-    titleAr: "الطلبات المرفوضة أثناء عدم الاتصال تبقى للمراجعة",
-    body:
-      "If Breadee refuses a table that was opened while offline, for example because another terminal changed that table first, the table no longer stays occupied with a bill Breadee never received, and a real bill on it is no longer shown with extra items. The refused order stays in the Sync Center, with its items and value, under \"Refused offline order — review needed\". If the items were served, add them to the table's bill, then withdraw the refused order: Ready Desktop first confirms with Breadee that none of it was recorded. Nothing is removed automatically.",
-    bodyAr:
-      "إذا رفض Breadee طاولة فُتحت أثناء عدم الاتصال، مثلاً لأن جهازاً آخر غيّر تلك الطاولة أولاً، فلن تبقى الطاولة مشغولة بفاتورة لم يستلمها Breadee، ولن تظهر الفاتورة الفعلية عليها بأصناف إضافية. يبقى الطلب المرفوض في مركز المزامنة، مع أصنافه وقيمته، ضمن «طلب غير متصل مرفوض — بحاجة إلى مراجعة». إذا قُدّمت الأصناف، أضفها إلى فاتورة الطاولة، ثم اسحب الطلب المرفوض: يتحقق Ready Desktop أولاً من Breadee أنه لم يُسجَّل أي جزء منه. لا يُحذف أي شيء تلقائياً.",
+      "أصبح في مركز المزامنة زر «مزامنة الآن» يعرض عدد العناصر التي تمت مزامنتها وعدد العناصر التي ما زالت تحتاج إلى متابعة، ويشرح كل عنصر بكلمات بسيطة ما حدث وما الخطوة التالية. وتتحقق إعادة المحاولة أولاً من Breadee، لذا يمكن إعادة محاولة طاولة غيّرها جهاز آخر بأمان. ولم تعد الطاولة التي رفض Breadee طلبها غير المتصل تبقى مشغولة، ويبقى أي مبلغ نقدي حُصّل عنها مدرجاً في مركز المزامنة ولا يُطلب مرة ثانية. وعند تحميل طلب على حساب زبون، يُعرض زبائن الفرع الحالي فقط.",
   },
 ];
 
