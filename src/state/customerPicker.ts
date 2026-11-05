@@ -140,7 +140,8 @@ export function useCustomerPicker(input: {
         try {
           // Offline-aware: online searches the server + mirrors to the cache (byte-identical
           // result); offline reads the cached customers so the picker still works.
-          const r = await searchCustomersOfflineAware(term);
+          // 1.0.40 (BUG 05): an on-account charge — only this OU's own + tenant-wide customers.
+          const r = await searchCustomersOfflineAware(term, { chargeable: true });
           // The query may have moved on while this read was in flight.
           if (latestTerm.current !== term) return;
           setResults(r);
@@ -193,7 +194,7 @@ export function useCustomerPicker(input: {
       if (term === "") return;
       let candidates: CustomerMatch[];
       try {
-        candidates = await searchCustomersOfflineAware(term);
+        candidates = await searchCustomersOfflineAware(term, { chargeable: true });
         setResults(candidates);
       } catch (e) {
         const message = e instanceof Error ? e.message : "Could not search customers.";

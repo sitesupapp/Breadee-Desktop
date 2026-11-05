@@ -239,12 +239,18 @@ export function matchCachedCustomers(rows: CachedCustomer[], query: string): Cus
 
 // --- the offline-aware wrappers the stores call ------------------------------
 
-export async function searchCustomersOfflineAware(query: string): Promise<CustomerMatch[]> {
+/**
+ * 1.0.40 (BUG 05) — `chargeable: true` is the ACCOUNT-CHARGING search (Pay On Account picker): online it asks
+ * the server only for the operational branch's own + tenant-wide customers (searchCustomers
+ * chargeableInBranch, branch from the SAME scope the ISO-CUST cache uses). Offline is unchanged — the cache
+ * is already OU-scoped (ISO-CUST-1). Without the flag (delivery identity lookup) behaviour is unchanged.
+ */
+export async function searchCustomersOfflineAware(query: string, opts: { chargeable?: boolean } = {}): Promise<CustomerMatch[]> {
   const scope = await currentCustomerScope();
   if (await isBackendReachable()) {
     let results: CustomerMatch[];
     try {
-      results = await searchCustomers(query);
+      results = await searchCustomers(query, opts.chargeable ? { chargeableInBranch: { branchId: scope.branchId } } : {});
     } catch {
       // rc.13 — a server lookup that FAILS (network flap, an access token expired while offline and not
       // refreshed yet, a 5xx) is NOT an authentication failure: answer from this device's customers
