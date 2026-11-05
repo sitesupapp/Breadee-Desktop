@@ -1,0 +1,11 @@
+{
+  "version": "1.0.39",
+  "notes": "Sign Out now affects only this device: other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended elsewhere, Ready Desktop asks you to sign in again instead of failing silently, and work already recorded syncs exactly once afterwards.",
+  "pub_date": "2026-11-05T08:35:49Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dDg1YXYvakRBLzNXRmZ3ZHNpSzBHY0hMQ2xyZUZWSTRueUoya0FHY2RJMG5vVkVCN3pkUTBlRUVsb2VJK3lyWWh0dVF4b05zSXFiVDBBSWNBOEhRSkFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzODY3NzQ1CWZpbGU6QnJlYWRlZV8xLjAuMzlfeDY0LXNldHVwLmV4ZQorajlFeE5KWE8rWmVTcURxM1JRa1JpUXRXdjFqSVhwVlNSa0ZlU1dFQ3lTUjg2all1YnUzM0x4TmtJUVdQLzJlaFNIRkhZZkQweXNSZlpyTkVIcmVCQT09Cg==",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.39/Breadee_1.0.39_x64-setup.exe"
+    }
+  }
+}
