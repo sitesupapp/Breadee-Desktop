@@ -538,7 +538,17 @@ test("MERGE PARTIAL + UNPAID (mandatory case): P stays on its source, only R mov
 
   const srv = new FakeServer([["A", 1], ["B", 1]]);
   await drain(srv);
-  assert.deepEqual(srv.names(), ["open_table", "round", "split", "open_table", "round", "merge_v4", "pay_table"]);
+  // 1.0.40 — A's split leg and B's open are independent (different tables, no dependency edge) and can be
+  // captured in the same millisecond; the drain orders by created_at only, so their relative order is not part
+  // of the contract (CI 42123248511 saw B's open first). The invariants are the dependency orders below.
+  const names = srv.names();
+  assert.deepEqual([...names].sort(), ["merge_v4", "open_table", "open_table", "pay_table", "round", "round", "split"]);
+  const at = (n: string, k = 0) => names.reduce<number[]>((acc, x, i) => (x === n ? [...acc, i] : acc), [])[k];
+  assert.ok(at("split") > at("round", 0) && at("round", 0) > at("open_table", 0), "A: open → round → split");
+  assert.ok(at("merge_v4") > at("split"), "the merge replays after the split leg");
+  assert.ok(at("merge_v4") > at("round", 1), "the merge replays after both rounds");
+  assert.equal(names[names.length - 1], "pay_table", "the merged primary settles last");
+  assert.equal(names[5], "merge_v4", "merge is the sixth call (calls[5] below)");
   const oA = [...srv.orders.values()].find((o) => o.table_id === "A")!;
   const oB = [...srv.orders.values()].find((o) => o.table_id === "B")!;
   const mg = srv.calls[5].payload as Record<string, unknown>;
