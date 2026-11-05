@@ -104,6 +104,25 @@ export type BillLine = {
   /** Server-assigned round number. Never computed here. */
   batch_no: number;
   modifiers: SelectedModifier[];
+  /** 1.0.40 (BUG 01) — quantity of this line already settled by PAID split settlements (server allocations).
+   *  Absent (= 0) on bills built without the settlement read (offline projections, hand-built tests). */
+  paid_quantity?: number;
+};
+
+/** 1.0.40 (BUG 01 / guest-level split) — one PAID split settlement of a bill order, as the server stored it. */
+export type BillSettlement = {
+  id: string;
+  order_id: string;
+  split_no: number;
+  /** `<order_number>-<split_no>`, the guest's own receipt number. */
+  display_no: string;
+  /** In the ORDER's currency (`amount_order_ccy`). */
+  amount: number;
+  method: string | null;
+  currency: string | null;
+  paid_at: string | null;
+  payment_id: string | null;
+  allocations: { order_item_id: string; quantity: number; amount: number }[];
 };
 
 export type BillOrder = {
@@ -123,6 +142,8 @@ export type BillOrder = {
   exchange_rate: number | null;
   created_at: string | null;
   lines: BillLine[];
+  /** 1.0.40 (BUG 01) — sum of this order's PAID split settlements (order currency). Absent = not read. */
+  collected?: number;
 };
 
 /** One table's open bill. `orders` is normally length 1 (m218 single-bill rule). */
@@ -139,6 +160,18 @@ export type TableBill = {
   splitShift: boolean;
   /** Distinct batch numbers present, ascending. */
   batches: number[];
+  /**
+   * 1.0.40 (BUG 01 / BUG 06) — what the server already holds against this bill through PAID split
+   * settlements (order currency), derived by `loadTableBill` from `pos_split_settlements` (readable under
+   * tenant RLS) because the production `pos_table_map` carries no `collected`. Null when no single figure
+   * exists (mixed currencies) or the settlement read failed. Absent when the bill was built without that
+   * read (offline projection, hand-built bills) — every consumer then behaves exactly as before.
+   */
+  collected?: number | null;
+  /** False when the settlement read FAILED (collected unknown); true when it succeeded; absent = not read. */
+  collectedKnown?: boolean;
+  /** The PAID split settlements behind `collected`, oldest first. Absent = not read. */
+  settlements?: BillSettlement[];
 };
 
 export const EMPTY_BILL = (tableId: string): TableBill => ({

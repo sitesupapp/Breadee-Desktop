@@ -138,9 +138,44 @@ export class PartPaidBillError extends Error {
   }
 }
 
-/** True when the table's open bill already holds paid split money (server `collected`, or a part-paid order). */
+/**
+ * 1.0.40 (BUG 06) — what the server already holds against this bill through PAID split settlements, from
+ * the best figure available ONLINE: the map's `collected` (staging / a server that reports it) or the
+ * bill's own settlement read (`loadTableBill` — production's `pos_table_map` carries no `collected`, so
+ * through 1.0.39 a part-paid bill pinned T while the server charged R = T − P → PAY_AMOUNT_CHANGED). The
+ * larger of the two: both describe the same paid settlements, and the server pin refuses any disagreement.
+ */
+export function effectiveCollected(table: TableSummary | null | undefined, bill: TableBill | null | undefined): number {
+  const fromMap = Math.max(0, Number(table?.collected ?? 0) || 0);
+  const fromBill = bill && bill.collectedKnown === true ? Math.max(0, Number(bill.collected ?? 0) || 0) : 0;
+  return Math.max(fromMap, fromBill);
+}
+
+/**
+ * 1.0.40 (BUG 06 hardening) — true when NO source can say what the server already holds against this bill:
+ * the settlement read failed and the map reports no `collected`. Only meaningful once the server deducts
+ * prior payments (then the pin must be R and R is unknowable); a bill read without the settlement read
+ * (offline projection, older callers) is never "unknown".
+ */
+export function collectedUnknown(table: TableSummary | null | undefined, bill: TableBill | null | undefined): boolean {
+  if (!bill || bill.collectedKnown !== false) return false;
+  return table?.collected == null;
+}
+
+export const PART_PAID_UNKNOWN_MESSAGE =
+  "Breadee could not confirm whether part of this bill is already paid by split. Refresh the table before taking payment.";
+
+export class PartPaidUnknownError extends Error {
+  constructor() {
+    super(PART_PAID_UNKNOWN_MESSAGE);
+    this.name = "PartPaidUnknownError";
+  }
+}
+
+/** True when the table's open bill already holds paid split money (server `collected`, the bill's own
+ *  settlement read, or a part-paid order). */
 export function billIsPartPaid(table: TableSummary | null, bill: TableBill | null): boolean {
-  if (table && Number(table.collected ?? 0) > 0) return true;
+  if (effectiveCollected(table, bill) > 0) return true;
   return (bill?.orders ?? []).some((o) => o.payment_status === "partial" || o.payment_status === "partially_paid");
 }
 
@@ -297,6 +332,9 @@ export function payTableGate(input: {
   // 1.0.38 (F1) — client mitigation until the server deducts prior split payments (see PartPaidBillError
   // and serverDeductsPriorPayments — false by default, so the guard stays on against today's server).
   if (!serverDeductsPriorPayments() && billIsPartPaid(input.table, input.bill)) return { allowed: false, reason: PART_PAID_FULL_PAY_MESSAGE };
+  // 1.0.40 (BUG 06 hardening) — the server charges R = T − P, and P is unknown: never present a pin that
+  // would be refused (or a figure that may be wrong). Refresh re-reads the settlements.
+  if (serverDeductsPriorPayments() && collectedUnknown(input.table, input.bill)) return { allowed: false, reason: PART_PAID_UNKNOWN_MESSAGE };
   if (input.bill.mixedCurrency) {
     return { allowed: false, reason: "These orders were created under different currency settings; settle or clear each order separately." };
   }
@@ -406,7 +444,9 @@ export function tableSettlePins(
   discount: Pick<TablePaymentPayload, "discount_type" | "discount_value"> | null | undefined,
 ): { ok: true; pins: TableSettlePins } | { ok: false; reason: string } {
   const expectedOrderIds = [...new Set(bill.orders.map((o) => o.id))].sort();
-  const collected = Math.max(0, Number(table?.collected ?? 0) || 0);
+  // 1.0.40 (BUG 06) — the map's collected OR the bill's settlement read (production reports no map figure).
+  const collected = effectiveCollected(table, bill);
+  if (serverDeductsPriorPayments() && collectedUnknown(table, bill)) return { ok: false, reason: PART_PAID_UNKNOWN_MESSAGE };
   const due =
     bill.mixedCurrency || bill.total == null
       ? null
@@ -647,6 +687,10 @@ export async function performTablePayment(input: {
     // terminal / cashier, or a transfer of a part-paid bill) still refuses the full charge.
     if (!serverDeductsPriorPayments() && billIsPartPaid(fresh.table, fresh.bill)) {
       return { ok: false, error: new PartPaidBillError(), retryable: false, steps };
+    }
+    // 1.0.40 (BUG 06 hardening) — R unknowable (settlement read failed, no map figure): refuse up front.
+    if (serverDeductsPriorPayments() && (collectedUnknown(fresh.table, fresh.bill) || collectedUnknown(input.table, input.shownBill))) {
+      return { ok: false, error: new PartPaidUnknownError(), retryable: false, steps };
     }
 
     // 1b. 1.0.38 R-1 — pin the bill the cashier SAW (ids + exact amount presented) and carry this attempt's

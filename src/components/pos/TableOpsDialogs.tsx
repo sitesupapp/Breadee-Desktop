@@ -399,10 +399,10 @@ export function MergeTablesDialog({
       ) : (
         <>
           <p className="mb-2 text-xs text-sub">
-            Choose the tables whose bills should move onto {primary?.name}. A part-paid bill can be folded in —
-            what was already paid stays on its original bill and is never charged again; only the unpaid remainder
-            moves. A bill that is fully paid, split, on account, adjusted or on another shift is refused by the
-            server, with the reason shown here.
+            Choose the tables whose bills should move onto {primary?.name}. Whole items that are already paid stay
+            on their original bill and are never charged again; only the unpaid items move. An item paid for only
+            partly (part of its quantity) must be settled first — finish it with Split, then merge. A bill that is
+            fully paid, on account, adjusted or on another shift is refused by the server, with the reason shown here.
           </p>
           <ul className="grid max-h-[40vh] grid-cols-1 gap-2 overflow-y-auto overscroll-contain">
             {sources.map((t) => {

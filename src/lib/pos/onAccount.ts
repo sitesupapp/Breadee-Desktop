@@ -38,9 +38,12 @@ import type { TableBill, TableSummary } from "@/types/tables";
 import { posErrorCode } from "@/lib/offline/posTxnSync";
 import {
   InvalidDiscountError,
+  PartPaidUnknownError,
   billChangedRefusal,
   closePaymentAttempt,
+  collectedUnknown,
   paymentAttemptOpId,
+  serverDeductsPriorPayments,
   tableSettlePins,
   type TableSettlePins,
 } from "@/lib/pos/tablePayment";
@@ -296,6 +299,8 @@ export async function completeTableOnAccount(input: {
   let clientOpId: string | undefined;
   const slot = `on_account_table:${input.tableId}`;
   if (input.shown?.bill) {
+    // 1.0.40 (BUG 06 hardening) — the remaining amount R is unknowable: refuse before any request.
+    if (serverDeductsPriorPayments() && collectedUnknown(input.shown.table, input.shown.bill)) throw new PartPaidUnknownError();
     const pinned = tableSettlePins(input.shown.bill, input.shown.table, {
       discount_type: input.discountType,
       discount_value: input.discountValue,

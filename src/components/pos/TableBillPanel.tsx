@@ -11,7 +11,7 @@
 import { Badge, Button, EmptyState, GatedButton, PanelTitle, Skeleton, type Gate } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { formatMoney } from "@/lib/currency";
-import { linesByBatch, billItemCount } from "@/lib/pos/tableBill";
+import { linesByBatch, billItemCount, billCollected, billDue, unpaidBillView } from "@/lib/pos/tableBill";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { sentRoundLabel } from "@/lib/pos/tableRounds";
 import type { TableBill, TableSummary } from "@/types/tables";
@@ -74,7 +74,12 @@ function submittedAt(iso: string | null): string | null {
 }
 
 export function TableBillPanel(props: TableBillPanelProps) {
-  const { table, bill } = props;
+  const { table } = props;
+  // 1.0.40 (BUG 01) — the live panel shows what is still OPEN: unpaid quantities only, lines settled by a
+  // paid split hidden. A bill with nothing paid renders exactly as before (the view is the same object).
+  const bill = props.bill ? unpaidBillView(props.bill) : null;
+  const paidBySplit = billCollected(props.bill);
+  const due = props.bill && paidBySplit > 0 ? billDue(props.bill) : null;
   // 1.0.38 (native Bug 7) — a selected table with NO open bill known (an empty bill, or none at all once
   // nothing is loading / failed) always shows the approved "No open bill" state with its Open table action
   // (or the open gate's reason). Through the first 1.0.38 build a null bill rendered neither.
@@ -227,12 +232,30 @@ export function TableBillPanel(props: TableBillPanelProps) {
       </div>
 
       <div className="shrink-0 border-t border-line bg-white p-3">
-        {bill && bill.orders.length > 0 && (
+        {bill && bill.orders.length > 0 && due == null && (
           <div className="mb-2 flex items-baseline justify-between">
             <span className="text-sm font-semibold text-sub">Bill total</span>
             <span className="text-xl font-extrabold tabular-nums text-ink">
               {bill.total != null && bill.currency ? formatMoney(bill.total, bill.currency) : "—"}
             </span>
+          </div>
+        )}
+        {/* 1.0.40 (BUG 01) — part-paid by split: the original total, what the splits paid, and the Due —
+            the exact figure Pay will charge (R = T − P). */}
+        {bill && bill.orders.length > 0 && due != null && bill.currency && (
+          <div className="mb-2 space-y-0.5" aria-label="Bill due">
+            <div className="flex items-baseline justify-between text-xs text-sub">
+              <span>Original total</span>
+              <span className="tabular-nums">{bill.total != null ? formatMoney(bill.total, bill.currency) : "—"}</span>
+            </div>
+            <div className="flex items-baseline justify-between text-xs text-sub">
+              <span>Paid by split</span>
+              <span className="tabular-nums">−{formatMoney(paidBySplit, bill.currency)}</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-sm font-semibold text-sub">Due</span>
+              <span className="text-xl font-extrabold tabular-nums text-ink">{formatMoney(due, bill.currency)}</span>
+            </div>
           </div>
         )}
 
