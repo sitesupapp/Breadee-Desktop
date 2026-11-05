@@ -489,7 +489,13 @@ test("MERGE UNPAID + UNPAID offline: primary shows both bills, source free; repl
 
   const srv = new FakeServer([["A", 1], ["B", 1]]);
   await drain(srv);
-  assert.deepEqual(srv.names(), ["open_table", "round", "open_table", "round", "merge_v4"]);
+  // 1.0.40 — A's round and B's open are independent and may share a created_at millisecond (CI 42127424711
+  // replayed both opens first); the contract is: each table opens before its round, and the merge is last.
+  const names = srv.names();
+  assert.deepEqual([...names].sort(), ["merge_v4", "open_table", "open_table", "round", "round"]);
+  assert.equal(names[0], "open_table");
+  assert.equal(names[4], "merge_v4", "the merge replays after both tables' opens and rounds");
+  assert.ok(names.indexOf("round") > 0);
   const mg = srv.calls[4].payload as Record<string, unknown>;
   const [oa, ob] = [...srv.orders.values()];
   assert.deepEqual(mg.expected_orders, { A: oa.id, B: ob.id });
