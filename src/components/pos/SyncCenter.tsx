@@ -8,10 +8,10 @@
 // also renders, and the chip reads the same scoped summary (loadSyncSummary over the live
 // operations log), so the two entry points can never disagree.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Glyph } from "@/components/Glyph";
 import { SyncCenterPanel, useCurrentShiftId, useSyncSummary } from "@/components/sync/SyncCenterPanel";
-import { chipOf, withOtherBranches } from "@/components/sync/syncCenterModel";
+import { OPEN_SYNC_CENTER_EVENT, chipOf, withOtherBranches, type OpenSyncCenterDetail } from "@/components/sync/syncCenterModel";
 
 const CHIP_TONE = {
   attention: "text-amber-700 bg-amber-50 border-amber-200",
@@ -21,6 +21,16 @@ const CHIP_TONE = {
 
 export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; branchId: string | null }) {
   const [open, setOpen] = useState(false);
+  // 1.0.40 (F6) — opened from a table's bill panel ("offline work held for review"), focused on that table.
+  const [focusTableId, setFocusTableId] = useState<string | null>(null);
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      setFocusTableId((e as CustomEvent<OpenSyncCenterDetail>).detail?.tableId ?? null);
+      setOpen(true);
+    };
+    window.addEventListener(OPEN_SYNC_CENTER_EVENT, onOpen);
+    return () => window.removeEventListener(OPEN_SYNC_CENTER_EVENT, onOpen);
+  }, []);
   const summary = useSyncSummary(tenantId, branchId);
   // 1.0.42 (DESK-O4) — this device's whole queue (every branch), so the chip never says "All changes synced" for
   // this branch while work of another branch is still waiting here.
@@ -36,7 +46,10 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setFocusTableId(null);
+          setOpen(true);
+        }}
         className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${CHIP_TONE[chip.kind]}`}
         aria-label="Open sync center"
         title="Sync center"
@@ -52,7 +65,7 @@ export function SyncCenter({ tenantId, branchId }: { tenantId: string | null; br
               <h2 className="text-base font-extrabold text-ink">Sync center</h2>
               <button type="button" onClick={() => setOpen(false)} className="text-sm font-semibold text-sub hover:text-ink">Close</button>
             </div>
-            <SyncCenterPanel tenantId={tenantId} branchId={branchId} currentShiftId={currentShiftId} />
+            <SyncCenterPanel tenantId={tenantId} branchId={branchId} currentShiftId={currentShiftId} focusTableId={focusTableId} />
           </div>
         </div>
       )}

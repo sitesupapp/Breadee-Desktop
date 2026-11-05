@@ -41,6 +41,12 @@ import {
   type ReceiptCheck, type ReceiptCheckInput, type ReceiptClient,
 } from "@/lib/offline/refusedSessions";
 import { loadSyncSummary } from "@/components/sync/syncCenterModel";
+import { OPEN_BEHIND_PARKED_SETTLE_MESSAGE, REFUSED_SESSION_SETTLE_MESSAGE } from "@/lib/offline/dineinOffline";
+import { rebaseRefusedOpen, REBASE_TABLE_BUSY, type RebaseDeps } from "@/lib/offline/openRebase";
+import { operatorRetry, runSyncNow, SYNC_NOW_NO_POS, SYNC_NOW_NOT_RUN } from "@/lib/offline/syncActions";
+import { lastDrainReport } from "@/lib/offline/orchestrator";
+import { loadSyncCenterRows, dependencyCycleOf, adviceFor } from "@/lib/offline/queueForensics";
+import { COLLECTED_OFFLINE_NOT_ON_BILL } from "@/lib/offline/refusedSessions";
 import { isOpenable } from "@/lib/pos/tables";
 import { getDeviceIdentity } from "@/lib/device";
 import type { ActiveShift } from "@/types/pos";
@@ -491,4 +497,250 @@ test("H2 a 1.0.37 refusal whose wording is NOT the proven table-version CAS keep
   await reconcileDineDraftsFromOperations();
   assert.equal((await localdb.dineDrafts.get(sid))?.status, "open");
   assert.equal((await listRefusedSessions(SCOPE)).length, 0);
+});
+
+// ============================================================ 1.0.40 — BUG 03 (Sync Center deadlock) / BUG 04 (phantom table)
+//
+// The Hush "mahdi" chain: Open#1 (offline, cached version) → Round#1 → Pay#1 (cash collected) → table reopened
+// offline (Open#2 chained after Pay#1) → Round#2. On reconnect the server refuses Open#1 on its table-version
+// CAS; everything behind it parks dependency_failed, never sent.
+
+/** Capture the whole incident chain offline. */
+async function incidentChain() {
+  const d1 = await capturedSession();
+  const pay = await settleTableOffline({ sessionId: d1.local_session_id, method: "cash", covers: { orderIds: [], summary: false }, expectedAmount: 1000000 });
+  // still offline: the table is free locally, its NEW bill chains after the payment (rc.10)
+  const proj = await getOperationalTableBill(SCOPE, freeRow({ pos_entity_version: 7 }));
+  assert.equal(proj.freedByOpId ?? proj.settlingOpId, pay.operationId, "offline, the live payment frees the table");
+  const d2 = await openTableOffline({ scope: DSCOPE, tableId: "TBL-X", tableName: "L4/1", seats: 3, currency: "LBP", baseOrderVersion: 7, afterSettleOpId: pay.operationId });
+  await addDraftLine(d2.local_session_id, { menu_item_id: "m3", name: "Milkshake", base_price: 500000, quantity: 1, modifiers: [], kitchen_note: null });
+  await sendRoundOffline(d2.local_session_id);
+  const all = await localdb.operations.toArray();
+  const open1 = all.find((o) => o.operation_id === d1.open_operation_id)!;
+  const open2 = all.find((o) => o.operation_id === d2.open_operation_id)!;
+  return { d1, d2, payOpId: pay.operationId, open1, open2 };
+}
+
+const rebaseDeps = (row: TableSummary | null, receipt = false, calls: string[] = []): RebaseDeps => ({
+  readTable: async (b, t) => { calls.push(`table:${b}:${t}`); return row; },
+  hasReceipt: async (_t, id) => { calls.push(`receipt:${id}`); return receipt; },
+});
+
+test("G2-a refused Open#1 → parked Pay#1 → Open#2 + Round#2 behind it: BOTH sessions refused, table not held, cash preserved and not collectable", async () => {
+  const { d1, d2, payOpId } = await incidentChain();
+  const calls: Call[] = [];
+  await drainOffline(CTX, "reconnect", conflictingOpen(calls));
+  assert.deepEqual(calls.map((c) => c.name), ["open_table"], "only Open#1 reached the server; nothing behind it was sent");
+  const s1 = (await localdb.dineDrafts.get(d1.local_session_id))!;
+  const s2 = (await localdb.dineDrafts.get(d2.local_session_id))!;
+  assert.equal(s1.status, "refused", "a refused session the cashier PAID offline is refused too (BUG 04)");
+  assert.equal(s1.settled_operation_id, payOpId, "its payment reference is kept");
+  assert.equal(s2.status, "refused", "the session reopened behind the dead payment is refused (chained)");
+  // nothing deleted / acknowledged / synced
+  const pay = (await getOperation(payOpId))!;
+  assert.equal(pay.status, "needs_attention");
+  assert.equal(pay.last_error_code, "dependency_failed");
+  assert.equal((await localdb.operations.toArray()).filter((o) => o.status === "cancelled" || o.status === "synced").length, 0);
+  // the floor: free, not held, no phantom paid bill, nothing chains behind the dead pay
+  const { row, work } = await floorOnline(SCOPE, freeRow({ pos_entity_version: 8 }));
+  assert.equal(row.occupied, false);
+  assert.equal(isOpenable(row), true);
+  for (const set of [work.touched, work.syncingSettle, work.attentionSettle, work.structuralHold]) assert.equal(set.has("TBL-X"), false);
+  assert.equal(work.refusedOrders.get("TBL-X"), 2);
+  const p = await getOperationalTableBill(SCOPE, freeRow({ pos_entity_version: 8 }));
+  assert.equal(p.bill.orders.length, 0);
+  assert.equal(p.settlingOpId, null, "the dead payment never frees the table");
+  assert.equal(p.freedByOpId, null);
+  assert.equal(p.attention, 0);
+  // the review: case B money is surfaced, chained order identified
+  const list = await listRefusedSessions(SCOPE);
+  assert.equal(list.length, 2);
+  const r1 = list.find((o) => o.sessionId === d1.local_session_id)!;
+  const r2 = list.find((o) => o.sessionId === d2.local_session_id)!;
+  assert.equal(r1.chained, false);
+  assert.deepEqual(r1.collected.map((c) => [c.kind, c.method, c.amount, c.currency]), [["payment", "cash", 1000000, "LBP"]]);
+  assert.equal(r2.chained, true);
+  assert.equal(r2.rootOpId, d1.open_operation_id);
+  assert.match(r2.refusal, /changed since it was loaded/);
+  assert.match(COLLECTED_OFFLINE_NOT_ON_BILL, /not on any Breadee bill/);
+});
+
+test("G2-b the refusal of both sessions survives a restart (Dexie re-open); the floor stays free; a drain sends nothing", async () => {
+  const { d1, d2 } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  localdb.close();
+  await localdb.open();
+  await reconcileDineDraftsFromOperations();
+  assert.equal((await localdb.dineDrafts.get(d1.local_session_id))?.status, "refused");
+  assert.equal((await localdb.dineDrafts.get(d2.local_session_id))?.status, "refused");
+  __resetDrainLockForTests();
+  const again: Call[] = [];
+  await drainOffline(CTX, "reconnect", conflictingOpen(again));
+  assert.equal(again.length, 0);
+  assert.equal((await floorOnline(SCOPE, freeRow())).row.occupied, false);
+  assert.equal(await getDineDraftForTable(SCOPE, "TBL-X"), null);
+});
+
+test("G2-c F2 a new open chained behind a DEAD (parked) settle is refused with a Sync Center pointer; nothing is captured", async () => {
+  const { payOpId } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  const before = await localdb.operations.count();
+  const drafts = await localdb.dineDrafts.count();
+  await assert.rejects(
+    openTableOffline({ scope: DSCOPE, tableId: "TBL-X", tableName: "L4/1", seats: 3, currency: "LBP", baseOrderVersion: 8, afterSettleOpId: payOpId }),
+    (e: Error) => e.message === OPEN_BEHIND_PARKED_SETTLE_MESSAGE && /Sync Center/.test(e.message),
+  );
+  assert.equal(await localdb.operations.count(), before, "no op captured");
+  assert.equal(await localdb.dineDrafts.count(), drafts, "no session captured");
+  // a fresh open (not chained: the projection no longer offers the dead pay) is allowed and replays on its own
+  const d3 = await openTableOffline({ scope: DSCOPE, tableId: "TBL-X", tableName: "L4/1", seats: 3, currency: "LBP", baseOrderVersion: 8 });
+  assert.deepEqual((await getOperation(d3.open_operation_id))?.dependency_ids, []);
+});
+
+test("G2-d Sync Center: labels carry time + ref, the chain is never printed as a loop; plain reason + action; a TRUE cycle is detected", async () => {
+  const { open1, open2, payOpId } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  const rows = await loadSyncCenterRows({ tenantId: "t1", branchId: "b1", currentBuild: null });
+  const r1 = rows.find((r) => r.operation_id === open1.operation_id)!;
+  const r2 = rows.find((r) => r.operation_id === open2.operation_id)!;
+  assert.notEqual(r1.label, r2.label, "two 'Open table · L4/1' ops are distinguishable");
+  assert.match(r2.blocking ?? "", /^Blocked by Pay table · L4\/1 \[.*ref [0-9a-f]{6}\], itself blocked by Open table · L4\/1 \(This table changed/);
+  const refs = [...(r2.blocking ?? "").matchAll(/ref ([0-9a-f]{6})/g)].map((m) => m[1]);
+  assert.equal(new Set(refs).size, refs.length, "every link of the chain has its own ref — no identical labels at both ends");
+  assert.doesNotMatch(r2.blocking ?? "", /circular/);
+  assert.match(r1.advice?.reason ?? "", /table version changed/);
+  assert.match(r1.advice?.action ?? "", /Retry/);
+  const round1 = rows.find((r) => r.type === "dinein_send_round" && r.created_at < r2.created_at)!;
+  assert.match(round1.advice?.reason ?? "", /^Round could not sync because the table version changed/);
+  assert.match(round1.advice?.reason ?? "", /payment is recorded on this device and must not be collected again/);
+  const payRow = rows.find((r) => r.operation_id === payOpId)!;
+  assert.match(payRow.advice?.reason ?? "", /must not be collected again/);
+  assert.equal(dependencyCycleOf((await getOperation(open2.operation_id))!, new Map((await localdb.operations.toArray()).map((o) => [o.operation_id, o]))), null, "a chain is not a cycle");
+  // a genuine cycle (A ↔ B) is detected and explained
+  const a = { ...open1, operation_id: "CYC-A", dependency_ids: ["CYC-B"], status: "needs_attention", last_error_code: "dependency_failed", last_error_message: "CYC-B" } as OfflineOperation;
+  const b = { ...open1, operation_id: "CYC-B", dependency_ids: ["CYC-A"], status: "needs_attention", last_error_code: "dependency_failed", last_error_message: "CYC-A" } as OfflineOperation;
+  const m = new Map([[a.operation_id, a], [b.operation_id, b]]);
+  assert.deepEqual(dependencyCycleOf(a, m)?.map((x) => x.operation_id), ["CYC-A", "CYC-B"]);
+  assert.match(adviceFor(a, m)?.reason ?? "", /circular dependency/);
+});
+
+test("G2-e F3 Retry rebase: free server table + no receipt → re-armed ONCE with the fresh version (same client_op_id); the chain then syncs exactly once", async () => {
+  const { d1, d2, open1 } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  const seen: string[] = [];
+  const r = await rebaseRefusedOpen(open1.operation_id, rebaseDeps(freeRow({ pos_entity_version: 8 }), false, seen), "u1", { drain: false });
+  assert.deepEqual(r, { kind: "rebased", fromVersion: 7, toVersion: 8 });
+  assert.deepEqual(seen, [`receipt:${open1.client_op_id}`, "table:b1:TBL-X"]);
+  const o = (await getOperation(open1.operation_id))!;
+  assert.equal(o.status, "pending");
+  assert.equal(o.client_op_id, open1.client_op_id, "pos_op_replay keys on id+type+branch, so the id is kept");
+  assert.equal((o.payload as { expected_version: number }).expected_version, 8);
+  assert.equal(o.rebases?.length, 1);
+  assert.equal(o.rebases?.[0].from_version, 7);
+  assert.match(o.rebases?.[0].refusal ?? "", /changed since it was loaded/);
+  assert.equal((await rebaseRefusedOpen(open1.operation_id, rebaseDeps(freeRow({ pos_entity_version: 9 })), "u1", { drain: false })).kind, "not_applicable", "re-armed once: a queued open is not rebased again");
+  await reconcileRefusedSessions();
+  assert.equal((await localdb.dineDrafts.get(d1.local_session_id))?.status, "settled", "back to settled — never open, never payable again");
+  assert.equal((await localdb.dineDrafts.get(d2.local_session_id))?.status, "open");
+  __resetDrainLockForTests();
+  const calls: Call[] = [];
+  await drainOffline(CTX, "operator-retry", deps(calls));
+  assert.deepEqual(calls.map((c) => c.name), ["open_table", "round", "pay_table", "open_table", "round"]);
+  assert.equal((calls[0].arg as { expected_version: number }).expected_version, 8);
+  assert.equal(calls.filter((c) => c.name === "pay_table").length, 1, "the cash is applied exactly once");
+  assert.equal((await localdb.operations.toArray()).every((x) => x.status === "synced"), true);
+});
+
+test("G2-e2 F3 Retry rebase never re-arms with a server receipt, on an occupied table, or offline — nothing changes", async () => {
+  const { open1 } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  const before = JSON.stringify(await localdb.operations.toArray());
+  assert.deepEqual(await rebaseRefusedOpen(open1.operation_id, rebaseDeps(freeRow(), true), "u1", { drain: false }), { kind: "receipt_found" });
+  assert.deepEqual(await rebaseRefusedOpen(open1.operation_id, rebaseDeps(REAL_BILL_ROW()), "u1", { drain: false }), { kind: "table_busy", message: REBASE_TABLE_BUSY });
+  assert.deepEqual(await rebaseRefusedOpen(open1.operation_id, rebaseDeps(null), "u1", { drain: false }), { kind: "table_busy", message: REBASE_TABLE_BUSY });
+  const off = await rebaseRefusedOpen(open1.operation_id, { readTable: async () => { throw new TypeError("Failed to fetch"); }, hasReceipt: async () => false }, "u1", { drain: false });
+  assert.equal(off.kind, "offline");
+  assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
+  // operatorRetry surfaces the genuine conflict and queues nothing
+  const rr = await operatorRetry(open1.operation_id, { actorUserId: "u1", rebaseDeps: rebaseDeps(REAL_BILL_ROW()), drain: async () => 1 });
+  assert.deepEqual(rr, { ok: false, text: REBASE_TABLE_BUSY });
+  assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
+});
+
+test("G2-f RC-4 lost ACK: the open applied server-side but the answer was lost → retried → idempotent receipt → synced exactly once", async () => {
+  await capturedSession();
+  const applied = new Set<string>();
+  const calls: Call[] = [];
+  let lose = true;
+  const lossy = deps(calls, {
+    openTable: async (p: unknown) => {
+      const id = (p as { client_op_id: string }).client_op_id;
+      calls.push({ name: "open_table", arg: p });
+      const dup = applied.has(id);
+      applied.add(id);
+      if (lose) { lose = false; throw new TypeError("Failed to fetch"); }
+      return { table_id: "TBL-X", pos_entity_version: 8, idempotent: dup };
+    },
+  });
+  await drainOffline(CTX, "reconnect", lossy);
+  const { open } = await opsOf();
+  assert.equal(open.status, "retryable");
+  await localdb.operations.update(open.operation_id, { last_attempt_at: new Date(Date.now() - 600_000).toISOString() });
+  __resetDrainLockForTests();
+  await drainOffline(CTX, "reconnect", lossy);
+  const after = await opsOf();
+  assert.equal(after.open.status, "synced");
+  assert.equal(after.round.status, "synced");
+  assert.equal(applied.size, 1, "one client_op_id → one server application");
+  assert.equal(calls.filter((c) => c.name === "round").length, 1);
+});
+
+test("G2-g case B: a refused order's recorded payment is never offered for a second collection; withdraw checks its receipt too", async () => {
+  const { d1, d2, payOpId, open1 } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  await assert.rejects(settleTableOffline({ sessionId: d1.local_session_id, method: "cash", covers: { orderIds: [], summary: false } }), (e: Error) => e.message === REFUSED_SESSION_SETTLE_MESSAGE);
+  await assert.rejects(settleTableOffline({ sessionId: d1.local_session_id, method: "card", covers: { orderIds: [], summary: false } }), (e: Error) => e.message === REFUSED_SESSION_SETTLE_MESSAGE);
+  assert.equal((await localdb.operations.toArray()).filter((o) => o.operation_type === "pay_table").length, 1, "no second payment op");
+  // the operator's authorized withdrawal remains the only retirement; the pay's receipt is checked in pos_op_submissions
+  const asked: ReceiptCheckInput[] = [];
+  const w1 = await withdrawRefusedSession({ sessionId: d1.local_session_id, scope: SCOPE, actorUserId: "u1", checkReceipts: async (q) => { asked.push(q); return { kind: "none" }; } });
+  assert.equal(w1.ok, true);
+  const pay = (await getOperation(payOpId))!;
+  assert.deepEqual([...asked[0].openClientOpIds].sort(), [open1.client_op_id, pay.client_op_id].sort());
+  assert.equal(pay.status, "cancelled");
+  assert.deepEqual(pay.withdrawal?.verified_against, ["pos_op_submissions", `authority:${WITHDRAW_PERMISSION}`]);
+  assert.ok((await localdb.syncHistory.toArray()).some((h) => h.operation_id === payOpId && /collected offline/i.test(h.action_label)));
+  // the chained order stays refused behind the withdrawn payment (no phantom resurrection)
+  await reconcileRefusedSessions();
+  assert.equal((await localdb.dineDrafts.get(d2.local_session_id))?.status, "refused");
+  assert.equal((await floorOnline(SCOPE, freeRow())).row.occupied, false);
+  assert.equal((await withdrawRefusedSession({ sessionId: d2.local_session_id, scope: SCOPE, actorUserId: "u1", checkReceipts: noReceipts })).ok, true);
+});
+
+test("G2-h the floor row and the bill panel agree: no occupied card over an empty bill, no settle hold, no 'held' state", async () => {
+  await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  const { row, work } = await floorOnline(SCOPE, freeRow());
+  const p = await getOperationalTableBill(SCOPE, freeRow());
+  assert.equal(row.occupied, p.bill.orders.length > 0, "card and bill tell the same story");
+  // the bill panel's "held for review" condition (DineInWorkspace offlineWorkHeld) is false: nothing projects it
+  assert.equal(work.touched.has("TBL-X") || work.syncingSettle.has("TBL-X") || work.structuralHold.has("TBL-X"), false);
+});
+
+test("G2-i Sync now: runs the drain and reports the pass's actual counts; a pass that did not run is never '0 synced'", async () => {
+  await capturedSession();
+  const run = (ctx: typeof CTX, d: PosTxnSyncDeps) => async () => { __resetDrainLockForTests(); await drainOffline(ctx, "operator-sync-now", d); return 1; };
+  const bad = await runSyncNow(run(CTX, conflictingOpen([])), lastDrainReport);
+  assert.equal(bad.ran, true);
+  if (bad.ran) assert.deepEqual([bad.synced, bad.needsAttention, bad.failed], [0, 2, 0]);
+  assert.match(bad.text, /0 synced · 2 still need attention · 0 failed/);
+  assert.deepEqual(await runSyncNow(async () => 0, lastDrainReport), { ran: false, text: SYNC_NOW_NO_POS });
+  assert.deepEqual(await runSyncNow(run({ ...CTX, online: false }, deps([])), lastDrainReport), { ran: false, text: SYNC_NOW_NOT_RUN });
+  // operator retry of the refused open (table free on Breadee) → rebased → drained → real outcome "Synced."
+  const { open } = await opsOf();
+  const rr = await operatorRetry(open.operation_id, { actorUserId: "u1", rebaseDeps: rebaseDeps(freeRow({ pos_entity_version: 8 })), drain: run(CTX, deps([])) });
+  assert.deepEqual(rr, { ok: true, text: "Synced." });
+  assert.equal((await opsOf()).round.status, "synced");
+  const ok = await runSyncNow(run(CTX, deps([])), lastDrainReport);
+  assert.equal(ok.ran, true);
 });

@@ -555,7 +555,13 @@ export function projectTableBill(input: {
   // history (the draft + op are durable). Ops captured before rc.10 carry no `covers`: they close the
   // session they depend on and every canonical order already in a snapshot fetched before they were
   // captured (and the summary) — exactly the bill that was on screen when they were taken.
-  const tableSettles = (ix.settlesByTable.get(tableId) ?? []).filter((o) => live(o) && !reflectedIn(o, fetchedAt)); // = sorted ∩ isTableSettleOp ∩ table_id === tableId
+  // 1.0.40 (BUG 03/04) — a settle of ANOTHER (not this table's open) session that is dead behind a refused,
+  // never-applied open (refusedRootOf) closed a bill Breadee never had: it neither holds nor frees this table
+  // (no phantom "paid" bill, no new open chained behind it). The money it records stays visible in the Sync
+  // Center ("collected offline — not on any Breadee bill") and is never offered for collection again.
+  const deadSettle = (o: OfflineOperation) =>
+    rec(rec(o.payload).covers).session_local !== (input.draft?.local_session_id ?? undefined) && refusedRootOf(o, (id) => ix.firstById.get(id)) != null;
+  const tableSettles = (ix.settlesByTable.get(tableId) ?? []).filter((o) => live(o) && !reflectedIn(o, fetchedAt) && !deadSettle(o)); // = sorted ∩ isTableSettleOp ∩ table_id === tableId
   // 1.0.38 (G1) — a payment captured AFTER an offline move / merge that the server then REFUSED: the bill
   // that op would have taken off this table never left it server-side, but the cashier already collected it
   // inside that payment (parked behind the refusal, never sent). It is HELD by that payment here too — never
@@ -1177,9 +1183,62 @@ export type SessionRefusal = {
   workOpIds: string[];
   /** The server's refusal text, verbatim. */
   refusal: string;
+  /** 1.0.40 (BUG 03/04) — the op the server actually refused (or the operator withdrew): this session's own
+   *  open, or — for a session reopened on the table after an offline payment — the earlier session's open
+   *  that the whole chain waits on. */
+  rootOpId: string;
+  /** True when the session was not refused itself but is parked behind another session's refused open. */
+  chained: boolean;
+  /** 1.0.40 — the live settle / on-account / split ops of the session: money this device recorded for an order
+   *  that never reached Breadee (case B — never collectible again; kept until the operator withdraws it). */
+  settleOpIds: string[];
 };
 
 const neverApplied = (o: OfflineOperation) => o.status === "needs_attention" && o.canonical_entity_id == null && o.synced_at == null;
+
+/** 1.0.40 — a dinein_open_table the server refused on its table-version CAS, provably never applied. */
+export function isCasRefusedOpen(o: OfflineOperation): boolean {
+  if (o.operation_type !== "dinein_open_table" || !neverApplied(o)) return false;
+  const code = o.last_error_code ?? "";
+  if (NOT_A_SERVER_REFUSAL.has(code) || code === "retry_exhausted") return false;
+  return OPEN_TABLE_CAS_REFUSAL.test(o.last_error_message ?? "");
+}
+
+/** An op parked by the orchestrator behind a failed prerequisite that never left the device (0 handler calls). */
+// (A settle carries its TABLE id as canonical_entity_id from capture — that is a target, not a server result.)
+const parkedNeverSent = (o: OfflineOperation) =>
+  o.status === "needs_attention" &&
+  o.synced_at == null &&
+  (o.canonical_entity_id == null || isSettleRecord(o)) &&
+  o.last_error_code === "dependency_failed" &&
+  (o.retry_count ?? 0) === 0;
+
+/**
+ * 1.0.40 (BUG 03/04) — PURE. The refused, never-applied ROOT a parked op is dead behind, following its
+ * dependency chain (round → open; pay → open / rounds; a table reopened after an offline pay → that pay → its
+ * open …): a CAS-refused open (isCasRefusedOpen), or an op the operator already WITHDREW after Breadee confirmed
+ * it was never applied. Every link must be parked `dependency_failed` with no request ever sent. Null when any
+ * link is weaker (attempted, transient, in flight, missing) — then nothing changes. Cycle-safe.
+ */
+export function refusedRootOf(o: OfflineOperation, get: (id: string) => OfflineOperation | undefined, seen: Set<string> = new Set()): string | null {
+  if (seen.has(o.operation_id)) return null;
+  seen.add(o.operation_id);
+  if (isCasRefusedOpen(o)) return o.operation_id;
+  if (o.status === "cancelled" && o.withdrawal?.reason === "refused_never_applied") return o.operation_id;
+  if (!parkedNeverSent(o)) return null;
+  for (const id of o.dependency_ids) {
+    const d = get(id);
+    if (!d) continue;
+    const r = refusedRootOf(d, get, seen);
+    if (r) return r;
+  }
+  return null;
+}
+
+/** 1.0.40 — a settle op that records money for a bill (pay / on-account / split leg). */
+function isSettleRecord(o: OfflineOperation): boolean {
+  return o.operation_type === "pay_table" || o.operation_type === "on_account_table" || o.operation_type === "split_settle";
+}
 
 /**
  * PURE — was this local session REFUSED by the server with NOTHING of it applied? Proven only from this
@@ -1195,21 +1254,30 @@ const neverApplied = (o: OfflineOperation) => o.status === "needs_attention" && 
  * Anything weaker (a transient fault, an op ever attempted, a retry in flight) → null: the old behaviour.
  */
 export function sessionRefusal(d: DineDraft, ops: OfflineOperation[]): SessionRefusal | null {
-  if (d.status !== "open" && d.status !== "refused") return null;
+  // 1.0.40 (BUG 04) — a refused session the cashier then PAID offline is `settled`; it is refused all the same
+  // (its open never applied, so neither did its payment).
+  if (d.status !== "open" && d.status !== "refused" && d.status !== "settled") return null;
   const { work, missing } = sessionWorkOps(d, ops);
   if (missing > 0) return null;
   const open = work.find((o) => o.operation_id === d.open_operation_id);
   if (!open || open.operation_type !== "dinein_open_table" || !neverApplied(open)) return null;
-  const code = open.last_error_code ?? "";
-  if (NOT_A_SERVER_REFUSAL.has(code) || code === "retry_exhausted" || !OPEN_TABLE_CAS_REFUSAL.test(open.last_error_message ?? "")) return null;
+  // 1.0.40 (BUG 03) — its own open refused (L4/1), or parked never-sent behind ANOTHER session's refused,
+  // never-applied open (the table was reopened after an offline payment of that session).
+  const byId = new Map(ops.map((o) => [o.operation_id, o] as const));
+  const rootOpId = refusedRootOf(open, (id) => byId.get(id));
+  if (!rootOpId) return null;
   for (const o of work) {
     if (o === open) continue;
-    if (!neverApplied(o) || o.last_error_code !== "dependency_failed" || (o.retry_count ?? 0) !== 0) return null;
+    if (!parkedNeverSent(o)) return null;
   }
+  const root = byId.get(rootOpId);
   return {
     openOpId: open.operation_id,
     workOpIds: [open.operation_id, ...work.filter((o) => o !== open).map((o) => o.operation_id)],
-    refusal: open.last_error_message ?? "",
+    refusal: root?.last_error_message ?? open.last_error_message ?? "",
+    rootOpId,
+    chained: rootOpId !== open.operation_id,
+    settleOpIds: work.filter(isSettleRecord).map((o) => o.operation_id),
   };
 }
 

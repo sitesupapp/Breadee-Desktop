@@ -137,6 +137,14 @@ export async function resolveShiftRef(shiftId: string | null | undefined): Promi
   return resolveOperationalShift(shiftId);
 }
 
+/** 1.0.40 (BUG 03, F2) — the refusal of an offline open on a table freed only by a parked offline payment. */
+export const OPEN_BEHIND_PARKED_SETTLE_MESSAGE =
+  "This table's last offline payment hasn't synced and needs attention. Resolve it in the Sync Center before opening a new bill here — the payment is recorded on this device; don't collect it again.";
+
+/** 1.0.40 (case B) — a payment / on-account on an order Breadee refused (never on any bill). */
+export const REFUSED_SESSION_SETTLE_MESSAGE =
+  "Breadee refused this offline order, so it is not on any bill. Any payment already recorded for it stays on this device — review it in the Sync Center; don't collect it again.";
+
 export async function openTableOffline(args: {
   scope: DineinScope;
   tableId: string; // canonical table id (configured tables) — known from the cached map/floor
@@ -217,6 +225,13 @@ export async function openTableOffline(args: {
   };
   // ATOMIC: op + projection committed together (C8).
   await localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
+    // 1.0.40 (BUG 03, F2) — never chain a new bill behind a settle / move that is PARKED (needs attention) or
+    // withdrawn: the new open would be dead at capture (dependency_failed) and every round, payment and later
+    // reopen of the table would pile up behind it. The operator resolves the parked op in the Sync Center first.
+    if (afterSettle) {
+      const prev = await localdb.operations.get(afterSettle);
+      if (prev && (prev.status === "needs_attention" || prev.status === "cancelled")) throw new Error(OPEN_BEHIND_PARKED_SETTLE_MESSAGE);
+    }
     await localdb.operations.add(op);
     await localdb.dineDrafts.add(draft);
   });
@@ -486,6 +501,8 @@ export async function settleTableOffline(input: {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
     if (input.sessionId && !d) throw new Error("dine session not found");
+    // 1.0.40 (case B) — a refused / withdrawn order is on no Breadee bill: never collected (again) offline.
+    if (d && (d.status === "refused" || d.status === "withdrawn")) throw new Error(REFUSED_SESSION_SETTLE_MESSAGE);
     if (!d && !input.table) throw new Error("This table isn't available offline. Reconnect to settle it.");
     if (d && d.rounds.length === 0 && !input.table) throw new Error("Nothing has been sent to settle on this table.");
     const tableId = d ? d.table_id : (input.table as CanonicalTableTarget).tableId;
@@ -608,6 +625,7 @@ export async function tableOnAccountOffline(input: {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const d = input.sessionId ? await localdb.dineDrafts.get(input.sessionId) : undefined;
     if (input.sessionId && !d) throw new Error("dine session not found");
+    if (d && (d.status === "refused" || d.status === "withdrawn")) throw new Error(REFUSED_SESSION_SETTLE_MESSAGE);
     if (!d && !input.table) throw new Error("This table isn't available offline. Reconnect to put it on account.");
     if (d && d.rounds.length === 0 && !input.table) throw new Error("Nothing has been sent to put on account for this table.");
     if (!input.customerId && !input.customerLocal) throw new Error("A customer is required to put this table on account.");

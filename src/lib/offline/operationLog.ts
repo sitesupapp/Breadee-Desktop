@@ -173,6 +173,19 @@ export interface OfflineOperation {
     /** Server receipt tables checked for this op's client_op_id (none held it). */
     verified_against: string[];
   } | null;
+  /** 1.0.40 (BUG 03, F3) — operator retries of a table open the server refused on its table-version CAS that
+   *  were re-armed with the table's CURRENT version, after Breadee showed the table free with no open bill and
+   *  held no receipt of this client_op_id (the same id is kept: pos_op_replay keys on id + type + branch only).
+   *  Append-only audit; the op's refusal history stays in Sync history. */
+  rebases?: {
+    at: string;
+    by_user_id: string | null;
+    from_version: number | null;
+    from_version_after_op: string | null;
+    to_version: number;
+    refusal: string | null;
+    verified_against: string[];
+  }[];
 }
 
 // rc.10 — build provenance: every new operation is stamped with the running build (set once at startup
@@ -284,7 +297,7 @@ export async function unsettledOperationCount(): Promise<number> {
  * syncing, pending or cancelled op is left untouched (returns false) so a retry can never disturb
  * in-flight or terminal work or resurrect a withdrawn op. The next drain picks it up.
  */
-export async function requeueOperation(operationId: string): Promise<boolean> {
+export async function requeueOperation(operationId: string, opts: { drain?: boolean } = {}): Promise<boolean> {
   const op = await localdb.operations.get(operationId);
   if (!op || op.status !== "needs_attention") return false;
   await localdb.operations.update(operationId, {
@@ -297,7 +310,8 @@ export async function requeueOperation(operationId: string): Promise<boolean> {
   // chain — never an unrelated parked op), and asks the live POS for a drain: "Try again on next sync"
   // through 1.0.37 re-queued one op and then waited for a connectivity flip that might never come.
   await requeueDependents([operationId]).catch(() => undefined);
-  requestDrain("operator-retry");
+  // 1.0.40 (F5) — a caller that waits for the outcome (operatorRetry) runs the drain itself.
+  if (opts.drain !== false) requestDrain("operator-retry");
   return true;
 }
 
@@ -365,7 +379,8 @@ export function implicitLocalDependencies(o: OfflineOperation): string[] {
 // The replay core cannot import the UI, so an operator retry ANNOUNCES that a drain is wanted; the live
 // POS workspace (the owner of the authoritative drain context) subscribes and runs its existing
 // single-flight drain. No listener (tests, settings screen without POS) = a harmless no-op.
-type DrainListener = (reason: string) => void;
+// 1.0.40 (F5) — a listener may return the drain's promise, so "Sync now" can wait for the pass it asked for.
+type DrainListener = (reason: string) => void | Promise<unknown>;
 const drainListeners = new Set<DrainListener>();
 
 /** Subscribe to drain requests. Returns the unsubscribe function. */
@@ -385,11 +400,31 @@ export function __drainListenerCountForTests(): number {
 export function requestDrain(reason: string): void {
   for (const l of [...drainListeners]) {
     try {
-      l(reason);
+      const r = l(reason);
+      if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch(() => undefined);
     } catch {
       /* a listener fault never breaks the caller */
     }
   }
+}
+
+/**
+ * 1.0.40 (F5) — ask the live POS for a drain and WAIT for it to finish. Returns how many listeners ran it
+ * (0 = no POS mounted to drain; nothing happened). Never throws. The drain itself is the same single-flight
+ * pass as every other trigger (reconnect / periodic / operator retry).
+ */
+export async function requestDrainAndWait(reason: string): Promise<number> {
+  const ls = [...drainListeners];
+  await Promise.all(
+    ls.map(async (l) => {
+      try {
+        await l(reason);
+      } catch {
+        /* a listener fault never breaks the caller */
+      }
+    }),
+  );
+  return ls.length;
 }
 
 /**

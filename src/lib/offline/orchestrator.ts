@@ -47,7 +47,20 @@ export type OperationDrainReport = {
   migrateError?: string;
   /** A legacy-reconciliation failure this pass (same resumability guarantee). */
   reconcileError?: string;
+  /** 1.0.40 (F5) — true once the pass actually ran (online, signed in, lock held); an early-return report
+   *  (offline / no session / a drain already running) is false and is never shown as "0 synced". */
+  executed?: boolean;
 };
+
+/** 1.0.40 (F5) — the last pipeline pass that actually ran (drainOffline), for "Sync now" result counts. */
+let lastExecutedReport: OperationDrainReport | null = null;
+export function lastDrainReport(): OperationDrainReport | null {
+  return lastExecutedReport;
+}
+/** Test-only. */
+export function __setLastDrainReportForTests(r: OperationDrainReport | null): void {
+  lastExecutedReport = r;
+}
 
 /** Module single-flight lock — the one guarantee that two concurrent drains never
  *  process the financial queue together, AND that migration/re-open/reconcile can never
@@ -303,6 +316,7 @@ export async function drainOperations(
   try {
     // 1.0.38 — a hung session read (auth lock) must not hold the drain lock either.
     if (!(await withTimeout(d.hasSession(), SESSION_CHECK_TIMEOUT_MS, "session check").catch(() => false))) return report;
+    report.executed = true;
 
     const allOps = await localdb.operations.toArray();
     const byId = new Map(allOps.map((o) => [o.operation_id, o]));
@@ -661,6 +675,7 @@ export async function drainOffline(
     }
     if (migrateError) report.migrateError = migrateError;
     if (reconcileError) report.reconcileError = reconcileError;
+    if (report.executed) lastExecutedReport = report;
     return report;
   } finally {
     draining = false;

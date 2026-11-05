@@ -96,3 +96,37 @@ test("the workspace passes the active tenant into the status bar", () => {
   const pw = ts("src/screens/pos/PosWorkspace.tsx");
   assert.match(pw, /<PosStatusBar[\s\S]{0,400}tenantId=\{tenantId\}/, "PosWorkspace threads tenantId to the status bar");
 });
+
+// --- 1.0.40 (BUG 03 / BUG 04) -------------------------------------------------
+
+test("1.0.40 F5: 'Sync now' runs the existing drain (no second drainer) and shows the pass's counts; Retry shows its outcome", () => {
+  const panel = jsx(SYNC_PANEL);
+  assert.match(panel, /runSyncNow\(\)/, "Sync now goes through runSyncNow (requestDrainAndWait → the POS single-flight drain)");
+  assert.match(panel, />\s*\{syncing \? "Syncing…" : "Sync now"\}/);
+  assert.match(panel, /setSyncNote\(r\.text\)/, "the counts sentence is shown");
+  assert.match(panel, /operatorRetry\(operationId/, "per-op Retry reports its real outcome");
+  assert.match(panel, /retryNote\.text/);
+  // reconnect stays the default; the POS listener returns the drain's promise so the result can be awaited
+  const pw = ts("src/screens/pos/PosWorkspace.tsx");
+  assert.match(pw, /onDrainRequested\(\(\) => drainWithFreshContext\("operator-retry"\)\)/);
+  assert.match(pw, /window\.addEventListener\("online", run\)/, "automatic sync on reconnect is unchanged");
+});
+
+test("1.0.40 F6: an occupied table whose bill is empty because of held offline work points to the Sync Center (no recolor, no gate change)", () => {
+  const bp = jsx("src/components/pos/TableBillPanel.tsx");
+  assert.match(bp, /table\.occupied && props\.offlineWorkHeld\s*\?\s*OFFLINE_WORK_HELD_MESSAGE/);
+  assert.match(ts("src/components/pos/TableBillPanel.tsx"), /This table has offline work held for review in the Sync Center\./);
+  assert.match(bp, /Open Sync Center/);
+  const dw = ts("src/screens/pos/DineInWorkspace.tsx");
+  assert.match(dw, /offlineWorkHeld=\{selected != null && \(opTotals\.has\(selected\.id\) \|\| syncingSettle\.has\(selected\.id\) \|\| structuralHold\.has\(selected\.id\)\)\}/);
+  assert.match(dw, /onOpenSyncCenter=\{\(\) => requestOpenSyncCenter\(selected\?\.id \?\? null\)\}/);
+  const sc = jsx(SYNC_CENTER);
+  assert.match(sc, /addEventListener\(OPEN_SYNC_CENTER_EVENT/, "the POS Sync Center opens on request, focused on the table");
+  assert.match(sc, /focusTableId=\{focusTableId\}/);
+});
+
+test("1.0.40 case B: the refused-order review shows locally collected money as not on any Breadee bill", () => {
+  const panel = jsx(SYNC_PANEL);
+  assert.match(panel, /COLLECTED_OFFLINE_NOT_ON_BILL/);
+  assert.match(panel, /never charge the guest again/);
+});

@@ -120,7 +120,8 @@ async function referenceRows(input: { tenantId: string; branchId: string | null;
   const diag = QF.buildDiagnostic(ordered, input.currentBuild, { currentShiftId: input.currentShiftId, allOps: all });
   const rank = (s: string) => (s === "needs_attention" ? 0 : s === "synced" ? 2 : 1);
   return diag
-    .map((r, i) => ({ ...r, operation_id: ordered[i].operation_id, label: String(ordered[i].operation_type).replace(/_/g, " ") }))
+    // 1.0.40 (F4) — operator label with capture time + short ref, and the plain-language advice.
+    .map((r, i) => ({ ...r, operation_id: ordered[i].operation_id, label: `${QF.opLabel(ordered[i])} ${QF.opRef(ordered[i])}`, advice: QF.adviceFor(ordered[i], new Map(all.map((o) => [o.operation_id, o]))) }))
     .sort((a, b) => rank(a.status) - rank(b.status) || b.created_at.localeCompare(a.created_at));
 }
 

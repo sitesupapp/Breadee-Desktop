@@ -64,7 +64,10 @@ function inScope(d: DineDraft, s: Scope): boolean {
 export async function reconcileRefusedSessions(only?: { tenantId: string | null; branchId: string | null; tableId?: string | null }): Promise<{ refused: string[]; reopened: string[] }> {
   if (only && !only.tenantId) return { refused: [], reopened: [] };
   return localdb.transaction("rw", localdb.dineDrafts, localdb.operations, async () => {
-    const drafts = (await localdb.dineDrafts.where("status").anyOf("open", "refused").toArray()).filter(
+    // 1.0.40 (BUG 04) — `settled` too: a refused session the cashier then paid offline (its payment never
+    // applied either). Its settle reference (settled_operation_id) is KEPT, so the money stays on record and the
+    // session returns to `settled` — never `open`, never payable again — if the proof stops holding.
+    const drafts = (await localdb.dineDrafts.where("status").anyOf("open", "refused", "settled").toArray()).filter(
       (d) => !only || (d.tenant_id === only.tenantId && (d.branch_id ?? null) === (only.branchId ?? null) && (!only.tableId || d.table_id === only.tableId)),
     );
     const out = { refused: [] as string[], reopened: [] as string[] };
@@ -72,16 +75,24 @@ export async function reconcileRefusedSessions(only?: { tenantId: string | null;
     // Hot path (runs before every capture): a live session whose open is not parked can never be refused —
     // decide that from its open op alone, and read the whole log only when some session needs the proof.
     const opens = await localdb.operations.bulkGet(drafts.map((d) => d.open_operation_id));
-    if (drafts.every((d, i) => d.status === "open" && opens[i]?.status !== "needs_attention")) return out;
+    if (drafts.every((d, i) => d.status !== "refused" && opens[i]?.status !== "needs_attention")) return out;
     const all = await localdb.operations.toArray();
-    for (const d of drafts) {
+    for (const [i, d] of drafts.entries()) {
+      if (d.status !== "refused" && opens[i]?.status !== "needs_attention") continue;
       const ev = sessionRefusal(d, all.filter((o) => opInScope(o, draftScope(d))));
       const now = new Date().toISOString();
-      if (d.status === "open" && ev) {
-        await localdb.dineDrafts.update(d.local_session_id, { status: "refused", closed_reason: "open_refused_unapplied", closed_evidence_op_id: ev.openOpId, closed_at: now, updated_at: now });
+      if (d.status !== "refused" && ev) {
+        await localdb.dineDrafts.update(d.local_session_id, {
+          status: "refused",
+          closed_reason: "open_refused_unapplied",
+          closed_evidence_op_id: ev.rootOpId,
+          closed_at: now,
+          updated_at: now,
+        });
         out.refused.push(d.local_session_id);
       } else if (d.status === "refused" && !ev) {
-        await localdb.dineDrafts.update(d.local_session_id, { status: "open", closed_reason: null, closed_evidence_op_id: null, closed_at: null, updated_at: now });
+        const settled = typeof d.settled_operation_id === "string" && d.settled_operation_id !== "";
+        await localdb.dineDrafts.update(d.local_session_id, { status: settled ? "settled" : "open", closed_reason: null, closed_evidence_op_id: null, closed_at: null, updated_at: now });
         out.reopened.push(d.local_session_id);
       }
     }
@@ -105,7 +116,42 @@ export type RefusedOrderSummary = {
   refusal: string;
   openOpId: string;
   workOpIds: string[];
+  /** 1.0.40 — the op Breadee actually refused (this order's open, or an earlier order's open it waits on). */
+  rootOpId: string;
+  /** 1.0.40 — parked behind ANOTHER order's refused open (the table was reopened after an offline payment). */
+  chained: boolean;
+  /** 1.0.40 (case B) — money this device recorded for this order. It is NOT on any Breadee bill and must
+   *  never be collected again; it stays on record until the operator withdraws the order. */
+  collected: RefusedSettlement[];
 };
+
+/** 1.0.40 — one locally recorded payment / on-account of a refused order. Display only — never authority. */
+export type RefusedSettlement = {
+  opId: string;
+  kind: "payment" | "on_account" | "split";
+  method: string | null;
+  /** The amount this device presented / collected (order currency), when recorded. */
+  amount: number | null;
+  currency: string | null;
+  capturedAt: string;
+};
+
+/** 1.0.40 — the operator wording for a refused order's locally recorded money (case B). */
+export const COLLECTED_OFFLINE_NOT_ON_BILL =
+  "Collected offline — not on any Breadee bill. Do not collect this payment again.";
+
+function settlementOf(o: OfflineOperation): RefusedSettlement {
+  const p = (o.payload ?? {}) as Record<string, unknown>;
+  const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;
+  return {
+    opId: o.operation_id,
+    kind: o.operation_type === "on_account_table" ? "on_account" : o.operation_type === "split_settle" ? "split" : "payment",
+    method: typeof p.method === "string" ? p.method : null,
+    amount,
+    currency: typeof p.currency === "string" ? p.currency : null,
+    capturedAt: o.created_at,
+  };
+}
 
 /** This scope's refused sessions with their review figures, newest first. Read-only. */
 export async function listRefusedSessions(scope: Scope): Promise<RefusedOrderSummary[]> {
@@ -131,6 +177,9 @@ export async function listRefusedSessions(scope: Scope): Promise<RefusedOrderSum
       refusal: ev.refusal,
       openOpId: ev.openOpId,
       workOpIds: ev.workOpIds,
+      rootOpId: ev.rootOpId,
+      chained: ev.chained,
+      collected: ev.settleOpIds.map((id) => all.find((o) => o.operation_id === id)).filter((o): o is OfflineOperation => !!o).map(settlementOf),
     });
   }
   return out.sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
@@ -263,6 +312,15 @@ export const WITHDRAW_CHECK_FAILED =
 
 class StaleWithdrawal extends Error {}
 
+const isRoundOp = (o: OfflineOperation) => o.operation_type === "dinein_send_round";
+const WITHDRAW_LABEL: Record<string, string> = {
+  dinein_open_table: "Open table",
+  dinein_send_round: "Send round",
+  pay_table: "Payment (collected offline, never on a Breadee bill)",
+  on_account_table: "On account (recorded offline, never on a Breadee bill)",
+  split_settle: "Split payment (collected offline, never on a Breadee bill)",
+};
+
 /**
  * Withdraw a refused, never-applied session — an explicit operator action, never automatic.
  * Order: re-prove the refusal from durable state → server receipt check (no receipt for ANY op) → one Dexie
@@ -290,8 +348,10 @@ export async function withdrawRefusedSession(input: {
       tenantId: d.tenant_id,
       branchIds: [...new Set([d.branch_id, ...work.map((o) => o.scope.branch_id)].filter((b): b is string => typeof b === "string" && b.length > 0))],
       actorUserId: input.actorUserId,
-      openClientOpIds: work.filter((o) => o.operation_type === "dinein_open_table").map((o) => o.client_op_id),
-      roundClientOpIds: work.filter((o) => o.operation_type !== "dinein_open_table").map((o) => o.client_op_id),
+      // 1.0.40 — rounds record in pos_order_submissions; the open AND every settle (pos_pay_table /
+      // pos_complete_table_on_account / pos_split_settle, all through pos_op_replay) in pos_op_submissions.
+      openClientOpIds: work.filter((o) => !isRoundOp(o)).map((o) => o.client_op_id),
+      roundClientOpIds: work.filter(isRoundOp).map((o) => o.client_op_id),
     });
   } catch (e) {
     outcome = { kind: receiptFaultKind(e), detail: e instanceof Error ? e.message : String(e) };
@@ -318,7 +378,7 @@ export async function withdrawRefusedSession(input: {
       for (const o of work) {
         await localdb.operations.update(o.operation_id, {
           status: "cancelled",
-          withdrawal: { at, by_user_id: input.actorUserId, reason: "refused_never_applied", verified_at: at, verified_against: [o.operation_type === "dinein_open_table" ? "pos_op_submissions" : "pos_order_submissions", `authority:${WITHDRAW_PERMISSION}`] },
+          withdrawal: { at, by_user_id: input.actorUserId, reason: "refused_never_applied", verified_at: at, verified_against: [isRoundOp(o) ? "pos_order_submissions" : "pos_op_submissions", `authority:${WITHDRAW_PERMISSION}`] },
         });
       }
       await localdb.dineDrafts.update(input.sessionId, { status: "withdrawn", closed_reason: "refused_withdrawn", withdrawn_at: at, withdrawn_by: input.actorUserId, updated_at: at });
@@ -332,7 +392,7 @@ export async function withdrawRefusedSession(input: {
       at,
       operation_id: o.operation_id,
       operation_type: o.operation_type,
-      action_label: o.operation_type === "dinein_open_table" ? "Open table" : "Send round",
+      action_label: WITHDRAW_LABEL[String(o.operation_type)] ?? "Send round",
       tenant_id: o.scope.tenant_id,
       branch_id: o.scope.branch_id,
       device_id: o.scope.device_id,
