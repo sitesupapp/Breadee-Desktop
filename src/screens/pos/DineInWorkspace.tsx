@@ -30,7 +30,8 @@ import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
 import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
 import { loadAutoSeatDirectOpen, readCachedAutoSeat } from "@/lib/pos/autoSeat";
-import { classifyError } from "@/lib/pos/errors";
+import { classifyError, mergeRefusalReason, MergePartialLineError } from "@/lib/pos/errors";
+import { findPartlyPaidLine } from "@/lib/pos/tableBill";
 import { canClearTable, canCloseTable, canEditOrders, canManageFloor, canMergeTables, canMoveTable, canOpenTable, canSplitBill, canViewFloor } from "@/lib/pos/access";
 import { buildChangeModifiersPayload, buildSetQuantityPayload, editOrderLine } from "@/lib/pos/orders";
 import { modifierChangeRemovesComponents } from "@/lib/pos/editReason";
@@ -89,6 +90,7 @@ import { PaymentDialog } from "@/components/pos/PaymentDialog";
 import {
   buildTablePaymentPayload,
   createPaymentLatch,
+  effectiveCollected,
   payTable,
   payTableGate,
   performTablePayment,
@@ -98,7 +100,7 @@ import {
   validateTableDiscount,
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
-import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt, buildTableBillReceipt } from "@/lib/pos/tablePaymentCompletion";
+import { billIsCleared, buildTablePaymentReceipt, buildTableOnAccountReceipt, buildTableBillReceipt, buildSplitSettlementReceipt } from "@/lib/pos/tablePaymentCompletion";
 import {
   completeTableOnAccount,
   createOnAccountLatch,
@@ -795,19 +797,31 @@ export function useDineInWorkspace(input: {
         // 1.0.38 (PERF R1) — re-check the shared store before the server path (nothing sent if lost).
         const lost = await serverPathLost();
         if (lost) throw new Error(lost);
-        const r = await mergeTables({
-          primaryTableId: selected.id,
-          sourceTableIds,
-          expected,
-          clientOpId,
-        });
+        let r: Awaited<ReturnType<typeof mergeTables>>;
+        try {
+          r = await mergeTables({
+            primaryTableId: selected.id,
+            sourceTableIds,
+            expected,
+            clientOpId,
+          });
+        } catch (e) {
+          // 1.0.40 (BUG 02) — the server's partial_line guard stands; name the item + table and the remedy.
+          if (mergeRefusalReason(e instanceof Error ? e.message : String(e ?? "")) === "partial_line") {
+            const where = ctx.tenantId
+              ? await findPartlyPaidLine({ tenantId: ctx.tenantId, branchId: ctx.branchId, tables: [...sources, selected] }).catch(() => null)
+              : null;
+            throw new MergePartialLineError(where, e);
+          }
+          throw e;
+        }
         // Attempt resolved — a later merge of the same tables mints a fresh id.
         mergeOpId.current = null;
         return `Merged ${r.sources_merged} table${r.sources_merged === 1 ? "" : "s"} into ${primaryName}.`;
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold, serverPathLost],
+    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold, serverPathLost, ctx],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -1613,6 +1627,30 @@ export function useDineInWorkspace(input: {
           }),
         );
         setSplitLastPaid({ display_no: result.display_no, amount: result.amount, method: result.method });
+        // 1.0.40 (guest-level split) — this guest's own receipt: only the items of THIS split, the server's
+        // amount, numbered <order_number>-<split_no>. Presentation never undoes the settled split.
+        try {
+          const parentOrder = useTables.getState().bill?.orders.find((o) => o.id === st.order_id);
+          input.onPresentReceipt(
+            buildSplitSettlementReceipt({
+              result,
+              parentOrderNumber: st.order_number,
+              allocations,
+              lines: st.lines,
+              tableName: selected?.name ?? "",
+              seats: selected?.seats ?? null,
+              tenantName: pos.tenantName,
+              branchName: pos.branch.name,
+              operatorName: pos.userName,
+              primaryCurrency: parentOrder?.currency ?? (st.currency === "LBP" ? "LBP" : st.currency === "USD" ? "USD" : input.currency),
+              rate: parentOrder?.exchange_rate ?? null,
+              shiftId: input.shiftId,
+              at: new Date().toLocaleString(),
+            }),
+          );
+        } catch {
+          /* the split is settled; a receipt problem never disturbs it */
+        }
         setSplitState(await loadSplitState(st.order_id));
         // 1.0.43 — re-read the MAP, not just the bill: a leg changes the table's collected/outstanding, and the
         // merge preview + the offline map cache read those from the map (it stayed at the pre-leg values).
@@ -1630,7 +1668,7 @@ export function useDineInWorkspace(input: {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [splitState, tables, ctx, offlineCapture, input.currency, input.offlineScope, selected, projectionSplit, bumpProj, serverPathLost],
+    [splitState, tables, ctx, offlineCapture, input.currency, input.offlineScope, input.onPresentReceipt, input.shiftId, pos, selected, projectionSplit, bumpProj, serverPathLost],
   );
 
   // Phase 2: a persisted REMOVAL or REDUCTION needs an audited reason; a plain
@@ -2717,7 +2755,7 @@ export function useDineInWorkspace(input: {
            payments (settleAmountDue; T otherwise — the F1 gate then refuses a part-paid bill anyway). */
         /* 1.0.42 (DESK-O1) — offline, what is still open: minus the server-held part-payment AND the legs taken on
            this device (through 1.0.41 the dialog offered the gross bill after an offline split). */
-        subtotal={settleAmountDue(settleBill?.subtotal ?? 0, offlineCapture ? (offlineProj?.collected ?? 0) + (offlineProj?.paidPending ?? 0) : selected?.collected)}
+        subtotal={settleAmountDue(settleBill?.subtotal ?? 0, offlineCapture ? (offlineProj?.collected ?? 0) + (offlineProj?.paidPending ?? 0) : effectiveCollected(selected, settleBill))}
         primaryCurrency={settleBill?.currency ?? input.currency}
         rate={input.rate}
         discountGate={pos.gates.applyDiscounts}

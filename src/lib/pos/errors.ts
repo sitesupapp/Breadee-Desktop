@@ -97,7 +97,7 @@ export type ClassifiedError = {
  */
 export const MERGE_REASON_HINTS: Record<string, string> = {
   partial_line:
-    "One of the selected tables has a part-paid line. Finish settling or split that bill before merging it in.",
+    "An item on one of these tables is only partly paid. Settle the rest of that item on its table with Split, then merge.",
   combo_partial:
     "A combo on one of the selected tables is only part paid. Settle it as a whole before merging.",
   settled_with_adjustments:
@@ -119,6 +119,25 @@ export const MERGE_REASON_HINTS: Record<string, string> = {
   payment_residue:
     "A selected table has leftover payment that must be resolved before its bill can be merged.",
 };
+
+/**
+ * 1.0.40 (BUG 02) — the merge was refused with `reason: partial_line` (the server's intentional guard: a line
+ * paid only by part of its quantity cannot be folded). When the client could identify the item and the
+ * table it names both and the remedy; otherwise the generic remedy. The guard itself is never bypassed.
+ */
+export function mergePartialLineMessage(where: { itemName: string; tableName: string } | null): string {
+  if (!where) return `This merge was refused: ${MERGE_REASON_HINTS.partial_line}`;
+  return `This merge was refused: ${where.itemName} on ${where.tableName} is only partly paid. Settle the rest of ${where.itemName} on ${where.tableName} with Split, then merge.`;
+}
+
+export class MergePartialLineError extends Error {
+  readonly cause: unknown;
+  constructor(where: { itemName: string; tableName: string } | null, cause: unknown) {
+    super(mergePartialLineMessage(where));
+    this.name = "MergePartialLineError";
+    this.cause = cause;
+  }
+}
 
 /** Pull the `reason:` token out of a v3 UNSUPPORTED_STATE merge refusal, if present. */
 export function mergeRefusalReason(message: string): string | null {
@@ -576,6 +595,8 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
 export const OFFLINE_MESSAGE = "The server can't be reached right now.";
 
 export function classifyError(error: unknown): ClassifiedError {
+  // 1.0.40 (BUG 02) — a partial_line merge refusal already resolved to the item + table and its remedy.
+  if (error instanceof MergePartialLineError) return { kind: "merge_unsupported", message: error.message, hint: null, expected: true };
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : "Something went wrong.";
   // Merge Tables v3: an UNSUPPORTED_STATE refusal carries a `reason:` token naming

@@ -30,6 +30,7 @@ import type { CurrencyCode } from "@/lib/currency";
 import type { PaymentMethod } from "@/lib/pos/payments";
 import type { TablePaymentResult } from "@/lib/pos/tablePayment";
 import type { TableBill, TableSummary } from "@/types/tables";
+import { billCollected, billDue, unpaidBillView } from "@/lib/pos/tableBill";
 
 export type TableCompletionStep =
   | "refresh-table-map"
@@ -215,8 +216,13 @@ export type TableBillReceiptInput = {
 };
 
 export function buildTableBillReceipt(input: TableBillReceiptInput): ReceiptData {
-  const subtotal = input.bill.subtotal ?? 0;
-  const total = input.bill.total ?? subtotal;
+  // 1.0.40 (BUG 01) — a bill part-paid by split prints what is still OPEN: only the unpaid quantities and
+  // the amount due (T − P, the figure Pay will charge). A bill with nothing paid prints exactly as before.
+  const paid = billCollected(input.bill);
+  const bill = unpaidBillView(input.bill);
+  const due = paid > 0 ? billDue(input.bill) : null;
+  const subtotal = due ?? input.bill.subtotal ?? 0;
+  const total = due ?? input.bill.total ?? subtotal;
   const orderNumbers = input.bill.orders.map((o) => o.order_number).filter(Boolean);
 
   return buildReceipt({
@@ -233,7 +239,7 @@ export function buildTableBillReceipt(input: TableBillReceiptInput): ReceiptData
     paid: false,
     method: null,
     currency: input.primaryCurrency,
-    lines: input.bill.orders.flatMap((order) =>
+    lines: bill.orders.flatMap((order) =>
       order.lines.map((l) => ({
         name: l.name,
         qty: l.quantity,
@@ -249,6 +255,75 @@ export function buildTableBillReceipt(input: TableBillReceiptInput): ReceiptData
     total,
     tenderCurrency: null,
     exchangeRate: input.bill.orders[0]?.exchange_rate ?? null,
+    shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,
+  });
+}
+
+// --- 1.0.40 guest-level split: the receipt of ONE paid split ------------------
+//
+// A split is a settlement of SOME items of the parent order by one guest. Its receipt lists only what that
+// guest paid for (the allocated quantities, priced at the server's unit price), carries the server's
+// amount as the total, and is numbered `<order_number>-<split_no>` (the server's display_no), which links
+// it to the parent order. It never prints the parent bill. Through 1.0.39 an online split printed nothing.
+
+export type SplitSettlementReceiptInput = {
+  /** The server's answer to `pos_split_settle`. */
+  result: { split_no: number; display_no: string; amount: number; method: string; currency_code: string; order_number: string };
+  /** The parent order's number as the split screen showed it (fallback when the server omits it). */
+  parentOrderNumber: string;
+  /** What the guest paid for: the allocated quantities. */
+  allocations: { order_item_id: string; quantity: number }[];
+  /** The split screen's lines (server-priced) the allocations refer to. */
+  lines: { order_item_id: string; name: string; final_unit_price: number; kitchen_note: string | null }[];
+  tableName: string;
+  seats: number | null;
+  tenantName: string;
+  branchName: string;
+  operatorName: string;
+  /** The parent order's selling currency. */
+  primaryCurrency: CurrencyCode;
+  rate: number | null;
+  shiftId: string | null;
+  at: string;
+};
+
+export function buildSplitSettlementReceipt(input: SplitSettlementReceiptInput): ReceiptData {
+  const parent = input.result.order_number || input.parentOrderNumber;
+  const number = input.result.display_no || `${parent}-${input.result.split_no}`;
+  const lines = input.allocations
+    .filter((a) => Number(a.quantity) > 0)
+    .map((a) => {
+      const l = input.lines.find((x) => x.order_item_id === a.order_item_id);
+      const unit = l?.final_unit_price ?? 0;
+      return {
+        name: l?.name ?? "Item",
+        qty: a.quantity,
+        unitPrice: unit,
+        lineTotal: Math.round(unit * a.quantity * 100) / 100,
+        modifiers: [],
+        note: l?.kitchen_note ?? null,
+      };
+    });
+  return buildReceipt({
+    businessName: input.tenantName,
+    branchName: input.branchName,
+    staffName: input.operatorName,
+    orderType: "Dine-in",
+    orderSource: "dine_in",
+    tableName: input.tableName,
+    seats: input.seats,
+    orderNumber: number,
+    at: input.at,
+    paid: true,
+    method: input.result.method,
+    currency: input.primaryCurrency,
+    lines,
+    // The server priced the split; its amount is the receipt's figure.
+    subtotal: input.result.amount,
+    discount: 0,
+    total: input.result.amount,
+    tenderCurrency: null,
+    exchangeRate: input.rate,
     shiftRef: input.shiftId ? input.shiftId.slice(0, 8) : null,
   });
 }
