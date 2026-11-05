@@ -210,27 +210,56 @@ export function sanitizeSearchTerm(query: string): string {
 }
 
 /**
+ * 1.0.40 (BUG 05) — the OU restriction for an ACCOUNT-CHARGING customer search (Pay On Account /
+ * receivables): only the operational branch's own customers plus tenant-wide (branch-less) ones. RLS alone
+ * is not enough here: `can_access_branch` is true everywhere for an owner, so an owner standing on OU B was
+ * offered OU A's customers (and the 10-row cap filled up with them). The server refuses the charge anyway
+ * (ON_ACCOUNT_CUSTOMER_OTHER_OU); this keeps the picker from offering them at all. A null branch (scope not
+ * resolved) fails closed to tenant-wide customers only. Pure — returns the PostgREST `or` filter.
+ */
+export function chargeableBranchFilter(branchId: string | null | undefined): string {
+  return branchId ? `branch_id.eq.${branchId},branch_id.is.null` : "branch_id.is.null";
+}
+
+/** 1.0.40 (BUG 05) — defence in depth over a result set: true when the match may be charged on account in
+ *  `branchId` (its own OU or tenant-wide). A match whose branch column was not read (undefined) is left to
+ *  the server's refusal. Pure. */
+export function isChargeableInBranch(match: Pick<CustomerMatch, "branch_id">, branchId: string | null | undefined): boolean {
+  if (match.branch_id === undefined || match.branch_id === null) return true;
+  return !!branchId && match.branch_id === branchId;
+}
+
+export type CustomerSearchOptions = {
+  /** 1.0.40 (BUG 05) — restrict to customers chargeable in this branch (see chargeableBranchFilter). Only the
+   *  on-account picker sets it; delivery identity lookup keeps the tenant-wide behaviour (phone is unique
+   *  per tenant: uq_pos_customer_phone). */
+  chargeableInBranch?: { branchId: string | null };
+};
+
+/**
  * Name-or-phone search, tenant/branch scoped by RLS.
  *
  * Two passes, deliberately: the typed term (name OR raw phone, as the web does)
  * and - when the term is phone-like - the NORMALISED form against `phone_e164`.
  * The second pass is what finds "+9613123456" when the cashier typed "03123456".
  */
-export async function searchCustomers(query: string): Promise<CustomerMatch[]> {
+export async function searchCustomers(query: string, opts: CustomerSearchOptions = {}): Promise<CustomerMatch[]> {
   const term = sanitizeSearchTerm(query);
   if (term === "") return [];
   const { supabase } = await import("@/lib/supabase");
+  // Each .or() is its own PostgREST `or=` parameter; separate parameters are ANDed.
+  const ou = opts.chargeableInBranch ? chargeableBranchFilter(opts.chargeableInBranch.branchId) : null;
 
-  const byText = supabase
+  let byText = supabase
     .from("pos_customers")
     .select(MATCH_COLUMNS)
-    .or(`phone.ilike.%${term}%,name.ilike.%${term}%`)
-    .order("name")
-    .limit(SEARCH_LIMIT);
+    .or(`phone.ilike.%${term}%,name.ilike.%${term}%`);
+  if (ou) byText = byText.or(ou);
+  const byTextQ = byText.order("name").limit(SEARCH_LIMIT);
 
   const e164 = looksLikePhone(term) ? normalizePhoneE164(term) : null;
   const digits = phoneDigits(term);
-  const byPhone =
+  let byPhone =
     e164 || digits.length >= 4
       ? supabase
           .from("pos_customers")
@@ -240,17 +269,20 @@ export async function searchCustomers(query: string): Promise<CustomerMatch[]> {
               .filter(Boolean)
               .join(","),
           )
-          .limit(SEARCH_LIMIT)
       : null;
+  if (byPhone && ou) byPhone = byPhone.or(ou);
+  const byPhoneQ = byPhone ? byPhone.limit(SEARCH_LIMIT) : null;
 
-  const [textRes, phoneRes] = await Promise.all([byText, byPhone ?? Promise.resolve({ data: [], error: null })]);
+  const [textRes, phoneRes] = await Promise.all([byTextQ, byPhoneQ ?? Promise.resolve({ data: [], error: null })]);
   if (textRes.error) throw new Error(textRes.error.message);
   if (phoneRes && "error" in phoneRes && phoneRes.error) throw new Error(phoneRes.error.message);
 
-  return mergeMatches(
+  const merged = mergeMatches(
     ((textRes.data ?? []) as unknown[]).map(toMatch).filter((m): m is CustomerMatch => m !== null),
     (((phoneRes?.data ?? []) as unknown[]) ?? []).map(toMatch).filter((m): m is CustomerMatch => m !== null),
   );
+  const branch = opts.chargeableInBranch;
+  return branch ? merged.filter((m) => isChargeableInBranch(m, branch.branchId)) : merged;
 }
 
 /** Union by id, first occurrence wins, capped at the shortlist size. */

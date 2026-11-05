@@ -375,7 +375,8 @@ test("C a server search FAILURE answers from the device's customers (never an er
   const cc = src("src/lib/offline/customerCache.ts");
   const i = cc.indexOf("export async function searchCustomersOfflineAware");
   const body = cc.slice(i, i + 1400);
-  assert.match(body, /try \{\s*results = await searchCustomers\(query\);\s*\} catch \{[\s\S]*?return searchCachedCustomers\(scope, query\);/);
+  // 1.0.40 (BUG 05): the call may carry the on-account OU option; the failure fallback is unchanged.
+  assert.match(body, /try \{\s*results = await searchCustomers\(query(?:, [^;]*)?\);\s*\} catch \{[\s\S]*?return searchCachedCustomers\(scope, query\);/);
 });
 
 test("C pending-local + server results are ONE logical customer (dedupe by id and normalised phone)", () => {

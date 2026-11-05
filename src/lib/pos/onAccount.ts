@@ -388,7 +388,9 @@ export type OnAccountOutcome<T> =
 export function isDefinitiveOnAccountRefusal(error: unknown): boolean {
   if (billChangedRefusal(error)) return true;
   const code = posErrorCode(error);
-  return code !== null && code.startsWith("ON_ACCOUNT_");
+  // 1.0.40 — ON_ACCOUNT_CUSTOMER_OTHER_OU (BUG 05) is covered by the prefix; ORDER_TRANSFER_PENDING (BUG 09)
+  // is raised right after the order lock, before any write — equally definitive.
+  return code !== null && (code.startsWith("ON_ACCOUNT_") || code === "ORDER_TRANSFER_PENDING");
 }
 
 /**
