@@ -300,7 +300,7 @@ test("BUG 6: Open Tables and its rail count read the SAME effective floor the Di
   assert.match(read("src", "screens", "pos", "DineInWorkspace.tsx"), /effectiveTables: displayMap\.tables,/);
 });
 
-test("RELEASE 1.0.40 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
+test("RELEASE 1.0.48 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
   const NOTE =
     "Split bills now show only what is still due: Pay Full Bill asks for exactly the remaining amount and each guest who pays by split gets their own receipt. A table whose offline order Breadee refused no longer stays occupied, and the Sync Center explains every item, with a Sync now button that reports what synced.";
   const wf = read(".github", "workflows", "desktop-production-release.yml");
@@ -312,12 +312,12 @@ test("RELEASE 1.0.40 (production): customer note in latest.json + release body, 
   assert.equal((wf.match(/VITE_SERVER_1038_CONTRACTS: "1"/g) ?? []).length, 2, "both production build steps compile the 1.0.38 contracts ON");
   assert.match(wf, /1\.0\.38 contracts flag is NOT enabled in the bundle/);
   assert.match(wf, /tags:\s*\n\s*- 'desktop-prod-v\*'/);
-  // One version everywhere (Production 1.0.40 = the cumulative candidate tested on staging as 1.0.44: 1.0.43 + L4/1; staging 1.0.40 was the withdrawn accidental build).
-  assert.equal(JSON.parse(read("package.json")).version, "1.0.40");
-  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.40");
-  assert.match(read("src-tauri", "Cargo.toml"), /^version = "1\.0\.40"$/m);
+  // One version everywhere (Production 1.0.48 = the cumulative candidate tested on staging as 1.0.44: 1.0.43 + L4/1; staging 1.0.48 was the withdrawn accidental build).
+  assert.equal(JSON.parse(read("package.json")).version, "1.0.48");
+  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.48");
+  assert.match(read("src-tauri", "Cargo.toml"), /^version = "1\.0\.48"$/m);
   assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).identifier, "app.breadee.desktop");
-  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.40"/);
+  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.48"/);
 });
 
 test("BUG 5: an offline quantity INCREASE of a sent line is a new round (never the version-checked line edit); decrease / remove stay audited edits", () => {
