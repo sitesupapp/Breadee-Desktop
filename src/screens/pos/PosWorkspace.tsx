@@ -558,9 +558,8 @@ function PosWorkspaceInner() {
   const periodicBusy = useRef(false);
   useEffect(() => {
     if (!online) return;
-    const offRequest = onDrainRequested(() => {
-      void drainWithFreshContext("operator-retry");
-    });
+    // 1.0.40 (F5) — the drain's promise is returned so "Sync now" / Retry can report the pass's real outcome.
+    const offRequest = onDrainRequested(() => drainWithFreshContext("operator-retry"));
     const tick = async () => {
       if (periodicBusy.current) return;
       const s = useSession.getState();

@@ -157,7 +157,8 @@ test("both entry points render the SAME shared panel; neither reads the legacy o
   const pos = srcOf("src/components/pos/SyncCenter.tsx");
   const settings = srcOf("src/screens/settings/SyncCenter.tsx");
   for (const [name, src] of [["pos", pos], ["settings", settings]] as const) {
-    assert.match(src, /<SyncCenterPanel tenantId=\{tenantId\} branchId=\{branchId\} currentShiftId=\{currentShiftId\} \/>/, `${name} renders the shared panel`);
+    // (1.0.40 F6 — the POS dialog may pass the table it was opened for: focusTableId)
+    assert.match(src, /<SyncCenterPanel tenantId=\{tenantId\} branchId=\{branchId\} currentShiftId=\{currentShiftId\}( focusTableId=\{focusTableId\})? \/>/, `${name} renders the shared panel`);
     assert.match(src, /currentShiftId = useCurrentShiftId\(\)/, `${name} uses the shared shift selector`);
     for (const forbidden of ["outbox", "localdb", "syncNow", "pendingCount", "historySummary"]) {
       assert.ok(!src.includes(forbidden), `${name} SyncCenter must not use ${forbidden}`);
@@ -309,9 +310,12 @@ test("source: the panel/model never drain, migrate, replay or write — the only
       assert.ok(!src.includes(forbidden), `${name} must not contain ${forbidden}`);
     }
   }
-  // requeueOperation appears only inside the click handler.
-  assert.equal(panel.match(/requeueOperation\(/g)?.length, 1);
-  assert.match(panel, /const retry = useCallback\(\s*async \(operationId: string\) => \{\s*setRequeuing\(operationId\);\s*try \{\s*await requeueOperation\(operationId\)/);
+  // The retry appears only inside the click handler. 1.0.40 (F3/F5): through operatorRetry (syncActions).
+  assert.equal(panel.match(/operatorRetry\(/g)?.length, 1);
+  assert.equal(panel.match(/requeueOperation\(/g), null, "the panel never re-queues directly");
+  assert.match(panel, /const retry = useCallback\(\s*async \(operationId: string\) => \{\s*setRequeuing\(operationId\);\s*try \{\s*const r = await operatorRetry\(operationId/);
+  // 1.0.40 (F5) — the one other action, Sync now, only ASKS the POS for its existing drain (runSyncNow).
+  assert.equal(panel.match(/runSyncNow\(/g)?.length, 1);
   // Settings no longer has the misleading copy or the legacy drain.
   const settings = srcOf("src/screens/settings/SyncCenter.tsx");
   assert.ok(!/Nothing queued|All changes are synced|Sync now/.test(settings));

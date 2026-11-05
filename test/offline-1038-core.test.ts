@@ -313,7 +313,8 @@ test("D5 source: periodic drain is bounded, online-only, scoped, single-flight; 
   const s = src("src/screens/pos/PosWorkspace.tsx");
   assert.match(s, /window\.setInterval\(\(\) => void tick\(\), 45_000\)/);
   assert.match(s, /if \(periodicBusy\.current\) return;/);
-  assert.match(s, /onDrainRequested\(\(\) => \{\s*void drainWithFreshContext\("operator-retry"\)/);
+  // 1.0.40 (F5) — the listener RETURNS the drain's promise (Sync now / Retry await the pass's real outcome).
+  assert.match(s, /onDrainRequested\(\(\) => drainWithFreshContext\("operator-retry"\)\)/);
   assert.match(s, /sum\.pending \+ sum\.syncing \+ sum\.retryable \+ sum\.waiting_dependency \+ sum\.legacy_pending > 0/);
   assert.ok(!s.includes("pendingCount()"), "the dormant outbox count is gone from the POS badge");
 });

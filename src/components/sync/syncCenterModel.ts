@@ -19,6 +19,14 @@
 import { localdb } from "@/lib/offline/db";
 import { summarizeOperations, type OfflineOperation } from "@/lib/offline/operationLog";
 
+/** 1.0.40 (F6) — ask the POS Sync Center to open, focused on one table's offline work. */
+export const OPEN_SYNC_CENTER_EVENT = "breadee:open-sync-center";
+export type OpenSyncCenterDetail = { tableId: string | null };
+export function requestOpenSyncCenter(tableId: string | null): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<OpenSyncCenterDetail>(OPEN_SYNC_CENTER_EVENT, { detail: { tableId } }));
+}
+
 /** Every state an operator can see, across both entry points. */
 export type SyncDisplayState =
   | "pending"

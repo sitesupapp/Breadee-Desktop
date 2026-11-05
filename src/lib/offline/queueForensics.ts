@@ -345,22 +345,135 @@ export function opLabel(o: OfflineOperation): string {
   return t ? `${base} · ${t}` : base;
 }
 
+/** 1.0.40 (BUG 03, F4) — the op's identity for a chain: when it was captured and a short reference, so two
+ *  ops of the same type on the same table (an earlier and a later bill) never read as the same step. */
+export function opRef(o: OfflineOperation): string {
+  const t = new Date(o.created_at);
+  const at = Number.isNaN(t.getTime()) ? "" : `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+  const short = o.operation_id.replace(/^[a-z_]+:/i, "").replace(/-/g, "").slice(0, 6);
+  return `[${at ? `captured ${at}, ` : ""}ref ${short}]`;
+}
+
 /** 1.0.38 (G1) — the REAL predecessor that blocks a dependency_failed op: its failed prerequisite(s), each
- *  followed down to the refused root (a chain round → merge → pay names the round, not "waiting"). */
+ *  followed down to the refused root (a chain round → merge → pay names the round, not "waiting").
+ *  1.0.40 (F4) — every link carries its capture time + short ref (an "Open table · T" that waits on a
+ *  "Pay table · T" that waits on an EARLIER "Open table · T" is a chain, not a loop), and a TRUE cycle — a link
+ *  that leads back to an op already in the chain — is detected and reported as one. */
 function blockedBy(o: OfflineOperation, byId: Map<string, OfflineOperation>): string {
   const listed = (o.last_error_message ?? "").split(",").map((s) => s.trim()).filter((id) => byId.has(id));
   const failed = (listed.length > 0 ? listed : o.dependency_ids).map((id) => byId.get(id)).filter((d): d is OfflineOperation => d != null && d.status === "needs_attention");
   if (failed.length === 0) return "Blocked by an earlier step that could not complete";
-  const describe = (d: OfflineOperation, depth: number): string => {
+  const describe = (d: OfflineOperation, depth: number, seen: Set<string>): string => {
+    if (seen.has(d.operation_id)) return `${opLabel(d)} ${opRef(d)} — a circular dependency: these steps wait for each other and can never sync by themselves`;
+    seen.add(d.operation_id);
     if (d.last_error_code === "dependency_failed" && depth < 8) {
       const next = (d.last_error_message ?? "").split(",").map((s) => s.trim()).map((id) => byId.get(id)).find((x): x is OfflineOperation => x != null && x.status === "needs_attention");
-      if (next) return `${opLabel(d)}, itself blocked by ${describe(next, depth + 1)}`;
+      if (next) return `${opLabel(d)} ${opRef(d)}, itself blocked by ${describe(next, depth + 1, seen)}`;
     }
     const dc = classifyOperation(d);
     const why = dc.category === "STALE_BILL_ROUND" || dc.category === "PRICE_CONFLICT" ? dc.reason : (d.last_error_message ?? d.last_error_code ?? "refused").slice(0, 100);
-    return `${opLabel(d)} (${why})`;
+    return `${opLabel(d)} (${why}) ${opRef(d)}`;
   };
-  return `Blocked by ${failed.map((d) => describe(d, 0)).join("; ")}`;
+  return `Blocked by ${failed.map((d) => describe(d, 0, new Set([o.operation_id]))).join("; ")}`;
+}
+
+/** 1.0.40 (F4) — PURE. A true dependency cycle through `o` (each op waits, directly or not, on itself), as the
+ *  ops in the loop; null when there is none. A long chain of distinct ops is never reported as a cycle. */
+export function dependencyCycleOf(o: OfflineOperation, byId: Map<string, OfflineOperation>): OfflineOperation[] | null {
+  const path: OfflineOperation[] = [];
+  const onPath = new Set<string>();
+  const done = new Set<string>();
+  const visit = (x: OfflineOperation): OfflineOperation[] | null => {
+    if (onPath.has(x.operation_id)) return path.slice(path.findIndex((p) => p.operation_id === x.operation_id));
+    if (done.has(x.operation_id) || x.status === "synced" || x.status === "cancelled") return null;
+    onPath.add(x.operation_id);
+    path.push(x);
+    for (const id of x.dependency_ids) {
+      const d = byId.get(id);
+      if (!d) continue;
+      const c = visit(d);
+      if (c) return c;
+    }
+    path.pop();
+    onPath.delete(x.operation_id);
+    done.add(x.operation_id);
+    return null;
+  };
+  // (a cycle reached from `o` blocks it too, even when `o` itself is not inside the loop)
+  return visit(o);
+}
+
+/** 1.0.40 (F4) — the plain-language reason + recommended action for an op that needs the operator. */
+export type OpAdvice = { reason: string; action: string };
+
+const CAS_REFUSAL = /changed since it was loaded/i;
+
+/** PURE — what an op that needs attention / is in conflict means and what to do about it (null otherwise). */
+export function adviceFor(o: OfflineOperation, byId: Map<string, OfflineOperation>): OpAdvice | null {
+  if (o.status !== "needs_attention") return null;
+  const cycle = o.last_error_code === "circular_dependency" ? [o] : null;
+  if (cycle || (o.last_error_code === "dependency_failed" && dependencyCycleOf(o, byId))) {
+    return {
+      reason: "These offline steps wait for each other (a circular dependency), so they can never sync by themselves.",
+      action: "Don't re-enter the orders. Copy diagnostics and contact support.",
+    };
+  }
+  // Follow a dependency_failed chain to its root refusal.
+  let root: OfflineOperation = o;
+  const seen = new Set<string>();
+  while (root.last_error_code === "dependency_failed" && !seen.has(root.operation_id)) {
+    seen.add(root.operation_id);
+    const next = [...(root.last_error_message ?? "").split(",").map((s) => s.trim()), ...root.dependency_ids]
+      .map((id) => byId.get(id))
+      .find((x): x is OfflineOperation => x != null && x.status === "needs_attention");
+    if (!next) break;
+    root = next;
+  }
+  const casRoot = root.operation_type === "dinein_open_table" && CAS_REFUSAL.test(root.last_error_message ?? "");
+  const isPay = o.operation_type === "pay_table" || o.operation_type === "split_settle";
+  const paidInChain = isPay || [...byId.values()].some(
+    (x) => (x.operation_type === "pay_table" || x.operation_type === "split_settle") && x.status === "needs_attention" && x.dependency_ids.includes(o.operation_id),
+  );
+  const moneyNote = paidInChain ? " The payment is recorded on this device and must not be collected again." : "";
+  if (casRoot) {
+    const where = root === o ? "" : ` (waits on ${opLabel(root)} ${opRef(root)})`;
+    const what =
+      o.operation_type === "dinein_open_table"
+        ? root === o
+          ? "The table could not be opened because the table changed on Breadee after this terminal last loaded it (table version changed)."
+          : "This table was reopened after an earlier offline bill that could not sync because the table version changed."
+        : o.operation_type === "dinein_send_round"
+          ? "Round could not sync because the table version changed."
+          : isPay
+            ? "Payment could not sync because the table version changed, so its bill never reached Breadee."
+            : "This step could not sync because the table version changed.";
+    return {
+      reason: `${what}${where}${moneyNote}`,
+      action:
+        root === o
+          ? "Press Retry while online: Breadee re-checks the table and, if it is free with no open bill, sends the open again with the current version. If the table is busy, add the items to its bill online and withdraw this order."
+          : `Retry ${opLabel(root)} ${opRef(root)}, or review the refused order at the top of this list.`,
+    };
+  }
+  if (o.last_error_code === "dependency_failed") {
+    return {
+      reason: `This step waits on an earlier step that could not sync (${opLabel(root)} ${opRef(root)}).${moneyNote}`,
+      action: `Resolve ${opLabel(root)} first; this step follows it automatically.`,
+    };
+  }
+  if (o.last_error_code === "retry_exhausted") {
+    return { reason: `Breadee kept answering with a temporary error.${moneyNote}`, action: "Press Retry when the connection is stable." };
+  }
+  if (isPay) {
+    return {
+      reason: `Breadee refused this payment (${(o.last_error_message ?? o.last_error_code ?? "refused").slice(0, 120)}). It was not applied to the bill.`,
+      action: "Check the table's bill online before collecting again; retry only once the cause is fixed.",
+    };
+  }
+  return {
+    reason: `Breadee refused this step: ${(o.last_error_message ?? o.last_error_code ?? "refused").slice(0, 140)}.${moneyNote}`,
+    action: "Retry once the cause is fixed; if it keeps failing, copy diagnostics for support.",
+  };
 }
 
 function blockingOf(o: OfflineOperation, byId: Map<string, OfflineOperation>): string | null {
@@ -434,7 +547,12 @@ export function buildDiagnostic(
 
 /** rc.12 — one Sync Center row: the operation's CURRENT state (one row per operation — the rc.11 list
  *  showed every history EVENT, so one op appeared as Synced, Syncing and Needs attention at once). */
-export type SyncCenterRow = DiagnosticRow & { operation_id: string; label: string };
+export type SyncCenterRow = DiagnosticRow & {
+  operation_id: string;
+  label: string;
+  /** 1.0.40 (F4) — plain-language reason + recommended action, for an op that needs the operator. */
+  advice: OpAdvice | null;
+};
 
 const UNSETTLED = ["pending", "blocked_dependency", "syncing", "retryable", "needs_attention"];
 
@@ -469,7 +587,13 @@ export async function loadSyncCenterRows(input: {
   const diag = buildDiagnostic(ordered, input.currentBuild, { currentShiftId: input.currentShiftId ?? null, allOps: [...known.values()] });
   const rank = (s: string) => (s === "needs_attention" ? 0 : s === "synced" ? 2 : 1);
   return diag
-    .map((r, i) => ({ ...r, operation_id: ordered[i].operation_id, label: String(ordered[i].operation_type).replace(/_/g, " ") }))
+    .map((r, i) => ({
+      ...r,
+      operation_id: ordered[i].operation_id,
+      // 1.0.40 (F4) — the operator label (type + table) with its capture time + short ref.
+      label: `${opLabel(ordered[i])} ${opRef(ordered[i])}`,
+      advice: adviceFor(ordered[i], known),
+    }))
     .sort((a, b) => rank(a.status) - rank(b.status) || b.created_at.localeCompare(a.created_at));
 }
 

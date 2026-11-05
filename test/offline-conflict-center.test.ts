@@ -96,7 +96,10 @@ test("GC: drops only OLD synced ops; never unsettled work or recent synced", asy
 // record ("Manager review") is no longer offered a retry — it has no handler and would only re-park.
 test("Sync Center source: a needs_attention event offers a requeue action; it calls requeueOperation", () => {
   const src = srcOf("src/components/sync/SyncCenterPanel.tsx");
-  assert.match(src, /import \{[^}]*\brequeueOperation\b[^}]*\} from "@\/lib\/offline\/operationLog";/);
-  assert.match(src, /await requeueOperation\(operationId\)/);
+  // 1.0.40 (F3/F5) — the click goes through operatorRetry (syncActions), which re-queues (requeueOperation) or,
+  // for a CAS-refused table open, re-arms it after Breadee re-checks the table — and reports the real outcome.
+  assert.match(src, /import \{[^}]*\boperatorRetry\b[^}]*\} from "@\/lib\/offline\/syncActions";/);
+  assert.match(src, /await operatorRetry\(operationId,/);
+  assert.match(srcOf("src/lib/offline/syncActions.ts"), /requeueOperation\(operationId, \{ drain: false \}\)/);
   assert.match(src, /e\.status === "needs_attention" && e\.operation_id && canRetry\(state\) &&/, "retry button gated on needs_attention");
 });

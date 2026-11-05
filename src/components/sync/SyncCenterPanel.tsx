@@ -8,9 +8,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { listHistory, type SyncHistoryEvent } from "@/lib/offline/syncHistory";
-import { currentCaptureBuild, listOperations, requeueOperation } from "@/lib/offline/operationLog";
+import { currentCaptureBuild, listOperations } from "@/lib/offline/operationLog";
 import { buildDiagnostic, loadSyncCenterRows, type SyncCenterRow } from "@/lib/offline/queueForensics";
-import { listRefusedSessions, withdrawRefusedSession, type RefusedOrderSummary } from "@/lib/offline/refusedSessions";
+import { COLLECTED_OFFLINE_NOT_ON_BILL, listRefusedSessions, withdrawRefusedSession, type RefusedOrderSummary } from "@/lib/offline/refusedSessions";
+import { operatorRetry, runSyncNow } from "@/lib/offline/syncActions";
 import { getDeviceIdentity } from "@/lib/device";
 import { formatMoney, isCurrencyCode } from "@/lib/currency";
 import { resolveBranchId } from "@/lib/branch";
@@ -92,14 +93,23 @@ export function useSyncSummary(tenantId: string | null, branchId: string | null,
   return summary;
 }
 
+/** 1.0.40 (F6) — does this Sync Center row act on `tableId`? (its pinned table, or any table a move / merge involves) */
+export function rowTouchesTable(r: Pick<SyncCenterRow, "pins">, tableId: string | null | undefined): boolean {
+  if (!tableId) return false;
+  return r.pins?.table_id === tableId || (r.pins?.tables ?? []).includes(tableId);
+}
+
 export function SyncCenterPanel({
   tenantId,
   branchId,
   currentShiftId,
+  focusTableId = null,
 }: {
   tenantId: string | null;
   branchId: string | null;
   currentShiftId: string | null;
+  /** 1.0.40 (F6) — opened from a table's bill panel: that table's offline work is listed first. */
+  focusTableId?: string | null;
 }) {
   const [summary, setSummary] = useState<SyncSummary>(EMPTY_SUMMARY);
   const [events, setEvents] = useState<SyncHistoryEvent[]>([]);
@@ -149,18 +159,37 @@ export function SyncCenterPanel({
 
   // Conflict Center: put a parked (needs-attention) operation back in the queue. Only a
   // needs_attention op is affected; it syncs on the next connection. Never touches in-flight work.
+  // 1.0.40 (F3/F5) — a table open refused on its table version is re-checked against Breadee and re-sent with
+  // the current version when the table is free; then the drain runs and the op's REAL outcome is shown.
+  const [retryNote, setRetryNote] = useState<{ operationId: string; text: string } | null>(null);
   const retry = useCallback(
     async (operationId: string) => {
       setRequeuing(operationId);
       try {
-        await requeueOperation(operationId).catch(() => false);
+        const r = await operatorRetry(operationId, { actorUserId: userId ?? null }).catch(() => ({ ok: false, text: "The retry could not run on this device." }));
+        setRetryNote({ operationId, text: r.text });
         await refresh();
       } finally {
         setRequeuing(null);
       }
     },
-    [refresh],
+    [refresh, userId],
   );
+
+  // 1.0.40 (F5) — "Sync now": the same drain as reconnect, with the pass's actual counts.
+  const [syncing, setSyncing] = useState(false);
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  const syncImmediately = useCallback(async () => {
+    setSyncing(true);
+    setSyncNote(null);
+    try {
+      const r = await runSyncNow().catch(() => ({ ran: false as const, text: "Sync could not run on this device." }));
+      setSyncNote(r.text);
+      await refresh();
+    } finally {
+      setSyncing(false);
+    }
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -196,15 +225,22 @@ export function SyncCenterPanel({
   ];
 
   const retryButton = (operationId: string) => (
-    <button
-      type="button"
-      onClick={() => void retry(operationId)}
-      disabled={requeuing === operationId}
-      className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60"
-    >
-      {requeuing === operationId ? "Queuing…" : "Try again on next sync"}
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => void retry(operationId)}
+        disabled={requeuing === operationId}
+        className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60"
+      >
+        {requeuing === operationId ? "Retrying…" : "Retry now"}
+      </button>
+      {retryNote?.operationId === operationId && <p className="mt-1 font-semibold text-amber-800" role="status">{retryNote.text}</p>}
+    </>
   );
+
+  // 1.0.40 (F6) — opened for one table: its work first (order otherwise unchanged).
+  const shownRows = focusTableId ? [...rows].sort((a, b) => Number(rowTouchesTable(b, focusTableId)) - Number(rowTouchesTable(a, focusTableId))) : rows;
+  const shownRefused = focusTableId ? [...refused].sort((a, b) => Number(b.tableId === focusTableId) - Number(a.tableId === focusTableId)) : refused;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -221,6 +257,14 @@ export function SyncCenterPanel({
           <span className="text-sub">{summary.synced} synced</span>
           <button
             type="button"
+            onClick={() => void syncImmediately()}
+            disabled={syncing}
+            className="ml-3 rounded-lg border border-brand/30 bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand-dark hover:bg-brand-soft/70 disabled:opacity-60"
+          >
+            {syncing ? "Syncing…" : "Sync now"}
+          </button>
+          <button
+            type="button"
             onClick={() => void copyDiagnostics()}
             className="ml-3 rounded-lg border border-line px-2 py-0.5 text-[11px] font-semibold text-sub hover:bg-slate-50"
           >
@@ -228,12 +272,17 @@ export function SyncCenterPanel({
           </button>
           {diagNote && <span className="ml-2 text-[11px] text-sub">{diagNote}</span>}
         </p>
+        {syncNote && (
+          <p className="mt-1 text-[11px] font-semibold text-ink" role="status">
+            {syncNote}
+          </p>
+        )}
         {summary.notYetQueued > 0 && (
           <p className="mt-1 text-[11px] text-sub">
             Includes {summary.notYetQueued} offline item{summary.notYetQueued === 1 ? "" : "s"} that will be queued on the next sync.
           </p>
         )}
-        <p className="mt-1 text-[11px] text-sub">Offline work syncs automatically while the POS is open and this terminal is online.</p>
+        <p className="mt-1 text-[11px] text-sub">Offline work syncs automatically while the POS is open and this terminal is online. Sync now runs that same sync immediately.</p>
         <details className="mt-2 text-[11px] text-sub">
           <summary className="cursor-pointer font-semibold">What these states mean</summary>
           <dl className="mt-1 space-y-0.5">
@@ -273,8 +322,11 @@ export function SyncCenterPanel({
                 the floor. If the items were served, add them to the table's bill first.
               </p>
               <ul className="mt-2 space-y-2">
-                {refused.map((o) => (
-                  <li key={o.sessionId} className="rounded-lg border border-amber-300 bg-white px-3 py-2 text-[11px] text-sub">
+                {shownRefused.map((o) => (
+                  <li
+                    key={o.sessionId}
+                    className={`rounded-lg border bg-white px-3 py-2 text-[11px] text-sub ${focusTableId && o.tableId === focusTableId ? "border-amber-500 ring-1 ring-amber-400" : "border-amber-300"}`}
+                  >
                     <p className="text-sm font-semibold text-ink">
                       {o.tableName} · {o.items} item{o.items === 1 ? "" : "s"}
                       {isCurrencyCode(o.currency) ? ` · ${formatMoney(o.total, o.currency)}` : ""}
@@ -283,13 +335,33 @@ export function SyncCenterPanel({
                       Captured {fmtTime(o.capturedAt)} · {o.rounds} round{o.rounds === 1 ? "" : "s"} ·{" "}
                       {o.kitchenPrinted ? "kitchen ticket printed — it may have been served" : "no kitchen ticket printed"}
                     </p>
-                    <p>Breadee said: {o.refusal.slice(0, 160)}</p>
+                    <p>
+                      {o.chained ? "Waits on an earlier offline order on this table that Breadee refused. " : ""}Breadee said: {o.refusal.slice(0, 160)}
+                    </p>
+                    {o.collected.length > 0 && (
+                      <div className="mt-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5" role="note">
+                        <p className="font-semibold text-red-800">{COLLECTED_OFFLINE_NOT_ON_BILL}</p>
+                        <ul className="mt-0.5 list-disc pl-4 text-red-800">
+                          {o.collected.map((c) => (
+                            <li key={c.opId}>
+                              {c.kind === "on_account" ? "On account" : c.kind === "split" ? "Split payment" : "Payment"}
+                              {c.method ? ` (${c.method})` : ""}
+                              {c.amount != null && c.currency && isCurrencyCode(c.currency) ? ` · ${formatMoney(c.amount, c.currency)}` : ""} · recorded {fmtTime(c.capturedAt)}
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="mt-0.5 text-red-800">
+                          Keep this money with the shift's cash. It is not on any bill in Breadee; if the order is re-entered online, record its payment against the money already held — never charge the guest again.
+                        </p>
+                      </div>
+                    )}
                     {withdrawNote?.sessionId === o.sessionId && <p className="mt-1 font-semibold text-amber-800">{withdrawNote.text}</p>}
                     {confirmWithdraw === o.sessionId ? (
                       <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2">
                         <p className="font-semibold text-red-800">
                           Withdraw this order? It is never sent. Only do this once the items are on the table's bill, or were not served.
                           Breadee is asked first to confirm none of it was applied.
+                          {o.collected.length > 0 ? " The payment recorded for it stays in Sync history as withdrawn — account for the money it represents." : ""}
                         </p>
                         <div className="mt-2 flex gap-2">
                           <button
@@ -319,25 +391,26 @@ export function SyncCenterPanel({
               </ul>
             </section>
           )}
-          {rows.length === 0 ? (
+          {shownRows.length === 0 ? (
             <p className="px-5 py-8 text-center text-sm text-sub">No offline operations on this device.</p>
           ) : (
             <ul className="divide-y divide-line">
-              {rows.map((r) => {
+              {shownRows.map((r) => {
                 const state = displayStateOf(r.status, r.error_code, r.type);
                 return (
-                  <li key={r.operation_id}>
+                  <li key={r.operation_id} className={focusTableId && rowTouchesTable(r, focusTableId) ? "bg-amber-50/40" : undefined}>
                     <button
                       type="button"
                       onClick={() => setExpandedOp(expandedOp === r.operation_id ? null : r.operation_id)}
                       className="flex w-full items-center justify-between gap-3 px-5 py-2.5 text-left hover:bg-slate-50"
                     >
                       <span className="flex min-w-0 flex-col">
-                        <span className="truncate text-sm font-semibold capitalize text-ink">{r.label}</span>
+                        <span className="truncate text-sm font-semibold text-ink">{r.label}</span>
                         <span className="truncate text-[11px] text-sub">
                           {fmtTime(r.created_at)} · {eraLabel(r.era)}
                           {r.blocking ? ` · ${r.blocking}` : ""}
                         </span>
+                        {r.advice && <span className="mt-0.5 text-[11px] font-semibold text-amber-800">{r.advice.reason}</span>}
                       </span>
                       <span className={`shrink-0 text-[11px] font-semibold ${toneClass(state)}`} title={SYNC_STATE_DEFS[state].definition}>
                         {SYNC_STATE_DEFS[state].label}
@@ -352,6 +425,11 @@ export function SyncCenterPanel({
                         {r.canonical && <div>Server ref: {r.canonical}</div>}
                         <div>Classification: {r.category} · {r.disposition}</div>
                         {r.blocking && <div>Blocking: {r.blocking}</div>}
+                        {r.advice && (
+                          <div className="font-semibold text-amber-900">
+                            What happened: {r.advice.reason} What to do: {r.advice.action}
+                          </div>
+                        )}
                         <div>{SYNC_STATE_DEFS[state].definition}</div>
                         {r.depends_on.length > 0 && (
                           <div>

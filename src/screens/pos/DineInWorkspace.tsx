@@ -147,6 +147,7 @@ import {
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
+import { requestOpenSyncCenter } from "@/components/sync/syncCenterModel";
 import { captureEditOrderLineOffline } from "@/lib/offline/itemEditOffline";
 import { captureMoveTableOffline, captureMergeTablesOffline } from "@/lib/offline/tableOpOffline";
 import type { PosContext } from "@/state/pos";
@@ -2616,10 +2617,14 @@ export function useDineInWorkspace(input: {
         onPrintBill={() => void printBill()}
         printBusy={printingBill}
         refusedOfflineOrders={selected ? (refusedOrders.get(selected.id) ?? 0) : 0}
+        // 1.0.40 (BUG 04, F6) — occupied on the floor only through this device's offline work (projection
+        // overlay / a settle or move not yet on Breadee): point to that work instead of "Refresh the map".
+        offlineWorkHeld={selected != null && (opTotals.has(selected.id) || syncingSettle.has(selected.id) || structuralHold.has(selected.id))}
+        onOpenSyncCenter={() => requestOpenSyncCenter(selected?.id ?? null)}
       />
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, selectedProj, offlineProjFailed, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill, refusedOrders],
+    [selected, tables.bill, tables.billLoading, tables.billError, offlineCapture, selectedProj, offlineProjFailed, openGate, addItemsGate, hasOpenShift, enterAddItems, opGates, requestOp, payGate, requestPay, splitGate, openSplit, requestOpenSelected, printBill, printingBill, refusedOrders, opTotals, syncingSettle, structuralHold],
   );
 
   const roundPanel = useCallback(

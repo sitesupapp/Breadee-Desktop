@@ -55,7 +55,15 @@ export type TableBillPanelProps = {
   /** 1.0.39 (L4/1) — offline orders for this table the server refused before any of them applied. They are
    *  never part of the bill shown here; the operator reviews them in the Sync Center. */
   refusedOfflineOrders?: number;
+  /** 1.0.40 (BUG 04, F6) — the floor shows this table occupied from this device's offline work (local
+   *  projection / a parked offline settle) while Breadee's bill for it is empty: that work is held for review. */
+  offlineWorkHeld?: boolean;
+  /** 1.0.40 (F6) — open the Sync Center focused on this table. */
+  onOpenSyncCenter?: () => void;
 };
+
+/** 1.0.40 (F6) — the empty-bill text for a table occupied only by offline work held for review. */
+export const OFFLINE_WORK_HELD_MESSAGE = "This table has offline work held for review in the Sync Center.";
 
 /** A submitted time, shown short. The server's timestamp, never a local clock. */
 function submittedAt(iso: string | null): string | null {
@@ -106,6 +114,11 @@ export function TableBillPanel(props: TableBillPanelProps) {
             {props.refusedOfflineOrders === 1 ? "An offline order" : `${props.refusedOfflineOrders} offline orders`} for this table
             {props.refusedOfflineOrders === 1 ? " was" : " were"} refused by Breadee and never added to any bill. If the items
             were served, add them to this table's bill, then review the refused order in the Sync Center.
+            {props.onOpenSyncCenter && (
+              <button type="button" onClick={props.onOpenSyncCenter} className="ml-1 underline">
+                Open Sync Center
+              </button>
+            )}
           </div>
         )}
         {!table && (
@@ -130,12 +143,18 @@ export function TableBillPanel(props: TableBillPanelProps) {
           <EmptyState
             title="No open bill"
             hint={
-              table.occupied
-                ? "This table is marked occupied but has no open dine-in order. Refresh the map."
-                : "This table is free. Open it to start serving."
+              table.occupied && props.offlineWorkHeld
+                ? OFFLINE_WORK_HELD_MESSAGE
+                : table.occupied
+                  ? "This table is marked occupied but has no open dine-in order. Refresh the map."
+                  : "This table is free. Open it to start serving."
             }
             action={
-              props.openGate.allowed ? (
+              table.occupied && props.offlineWorkHeld && props.onOpenSyncCenter ? (
+                <Button variant="ghost" onClick={props.onOpenSyncCenter}>
+                  Open Sync Center
+                </Button>
+              ) : props.openGate.allowed ? (
                 <Button onClick={props.onOpenTable}>Open table</Button>
               ) : props.shiftOpen ? undefined : (
                 <Button variant="ghost" onClick={props.onOpenShift}>
