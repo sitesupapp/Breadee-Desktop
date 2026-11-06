@@ -727,7 +727,9 @@ test("Level 3D's screens add no RPC of their own, and never the item remover", (
   // 56 -> 57 for Desktop 1.0.37 Full-Offline GAP-2 pos_receivable_collect (offline receivables collection;
   //   called from the receivable-collect capture/replay layer, NOT these delivery screens — the
   //   no-direct-callPosRpc check below still holds).
-  assert.equal(names.length, 57);
+  // 57 -> 58 for Desktop 1.0.40 (BUG 08) pos_payout_accounting_capability (read-only probe, called from
+  //   lib/pos/payouts.ts, NOT these delivery screens — the no-direct-callPosRpc check below still holds).
+  assert.equal(names.length, 58);
   assert.ok(names.includes("pos_edit_order"));
   assert.ok(names.includes("pos_void_order"));
   assert.ok(names.includes("pos_set_delivery_ops"));
