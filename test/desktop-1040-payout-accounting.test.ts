@@ -54,6 +54,9 @@ test("08-5 the UI only offers the new flow when the backend advertises it; offli
   assert.match(modal, /kind === "expense" && accounting && online/);
   const handlers = read("lib", "offline", "handlers.ts");
   assert.match(handlers, /p\.post_to_accounting === true \? \{ postToAccounting: true \}/);
+  // The reverse confirmation only claims the expense payment is voided under the Accounting contract.
+  assert.match(modal, /payout\.source_type === "expense" && payoutAccountingKnown\(\)/);
+  assert.match(modal, /The linked\s+record is NOT changed\./);
   const capture = read("lib", "offline", "payoutOffline.ts");
   assert.match(capture, /input\.postToAccounting === true && proof\.source_type === "expense"/);
 });
