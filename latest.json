@@ -1,11 +1,11 @@
 {
-  "version": "1.0.47",
-  "notes": "Sign Out now affects only this device · تسجيل الخروج يشمل هذا الجهاز فقط\n\nSigning out of Ready Desktop now ends the session on this device only. Other terminals and web browsers using the same account stay signed in and keep selling. If an account's sign-in is ended somewhere else, for example after a password change, Ready Desktop stops taking new orders and asks you to sign in again instead of failing silently. Anything already recorded is kept and synchronises exactly once after you sign in.\n\nأصبح تسجيل الخروج من Ready Desktop ينهي الجلسة على هذا الجهاز فقط، وتبقى الأجهزة الأخرى ومتصفحات الويب التي تستخدم الحساب نفسه مسجّلة الدخول وتواصل البيع. وإذا أُنهيت جلسة الحساب من مكان آخر، مثل تغيير كلمة المرور، يتوقف Ready Desktop عن استقبال طلبات جديدة ويطلب تسجيل الدخول مجدداً بدلاً من الفشل بصمت. يُحفظ كل ما سُجّل مسبقاً وتتم مزامنته لمرة واحدة فقط بعد تسجيل الدخول.",
-  "pub_date": "2026-11-04T23:09:19Z",
+  "version": "1.0.48",
+  "notes": "Split bills show what is still due · الفواتير المقسّمة تعرض المبلغ المتبقي\n\nAfter a guest pays their share with Split Bill, the table's bill now shows only the items and amount still to pay, and Pay Full Bill asks for exactly that remaining amount. Each guest who pays by split gets their own receipt with only their items, numbered after the original order. The bill printed before payment also shows only what is still due. Items already paid stay in the order history and reports.\n\nبعد أن يدفع أحد الضيوف حصته عبر تقسيم الفاتورة، تعرض فاتورة الطاولة الآن الأصناف والمبلغ المتبقي فقط، ويطلب دفع الفاتورة كاملة هذا المبلغ المتبقي تحديداً. ويحصل كل ضيف يدفع عبر التقسيم على إيصال خاص به يتضمن أصنافه فقط، مرقّماً على أساس الطلب الأصلي. كما تعرض الفاتورة المطبوعة قبل الدفع ما تبقى للدفع فقط. وتبقى الأصناف المدفوعة في سجل الطلبات والتقارير.",
+  "pub_date": "2026-11-06T08:23:13Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNWh3OW1aaDBTUEdXTGJKdHRjMkZYaWlYRWxmbEJwejFBSkRmaURpc1NTMUQzWjhmcitsekluUEh3amJ1QldlRVJod3pFSFFnWlA1OVU5N1F5b3FZRHdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzODMzNzUwCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC40N194NjQtc2V0dXAuZXhlCmVMQnJJdCtqcnhkNzRoaGhQMHpKNnU0WEQ4empvV05UT3F2WEtLMDJmWEphUG9UcUdIRWpGTndnVEhiL2Z3MFRvODA3TWs4NmNra1N6YWk4aksrdERRPT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.47/Breadee_Staging_1.0.47_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNXBtMGo0Zk15cXU4eHJJRWl2SENLUXV6QVF0Rlo3M3U2WmJSR2dkcm5jZHpNa3IvZzA5ZjVsTFVlRWVwcm1NMmVwcGRTOFlQRDBvdXhySnVZczdneWdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTUzMzg1CWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC40OF94NjQtc2V0dXAuZXhlCjJNa3dRYzJ3eE1qM1lOdWNkYndWV1o3MzlqTlVoazEzS3VOdXdmdVgxS1NWU0MyNnlUVU02SG45ZC90ZmpvSWxKN04weGJZREtrbW4xZlVKTWRWckRnPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.48/Breadee_Staging_1.0.48_x64-setup.exe"
     }
   }
 }
