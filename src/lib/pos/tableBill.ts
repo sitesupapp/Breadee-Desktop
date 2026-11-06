@@ -9,7 +9,15 @@
 
 import { asRecord, num, numOrNull, str, strOrNull } from "@/lib/pos/rpc";
 import { isCurrencyCode, type CurrencyCode } from "@/lib/currency";
-import { EMPTY_BILL, type BillLine, type BillOrder, type BillSettlement, type TableBill } from "@/types/tables";
+import {
+  EMPTY_BILL,
+  type BillLine,
+  type BillOrder,
+  type BillSettlement,
+  type TableBill,
+  type TableMap,
+  type TableSummary,
+} from "@/types/tables";
 import type { SelectedModifier } from "@/types/pos";
 
 /** Statuses that constitute an OPEN bill - mirrors m218 / pos_table_map. */
@@ -248,6 +256,86 @@ export function applyPaidSettlements(bill: TableBill, read: PaidSettlementRead):
   }));
   const collected = bill.mixedCurrency ? null : round2(orders.reduce((sum, o) => sum + (o.collected ?? 0), 0));
   return { ...bill, orders, collected, collectedKnown: true, settlements };
+}
+
+/**
+ * 1.0.40 (BUG 01, table card) — PURE: the amount a table card shows. A part-paid bill shows what is still
+ * DUE (total − paid by split) instead of the gross total; everything else is exactly the server's total.
+ * `paid` prefers the server's own `collected`, else the desktop-derived `paid_by_split`. Display only.
+ */
+export function tableCardAmount(table: Pick<TableSummary, "total" | "collected" | "paid_by_split">): {
+  amount: number | null;
+  partPaid: boolean;
+} {
+  if (table.total == null) return { amount: null, partPaid: false };
+  const paid = Math.max(0, Number(table.collected ?? table.paid_by_split ?? 0) || 0);
+  if (paid <= 0) return { amount: table.total, partPaid: false };
+  return { amount: Math.max(0, round2(table.total - paid)), partPaid: true };
+}
+
+/**
+ * 1.0.40 (BUG 01, table card) — when the server's map reports no `collected` (production), derive what PAID
+ * split settlements hold against each occupied table's open bill with TWO reads for the whole branch (open
+ * dine-in orders → their paid settlements), the same source and order filter `loadTableBill` uses. Read
+ * only and display only (`paid_by_split`). Never throws: any failure returns the map unchanged, so the card
+ * shows the gross total exactly as before.
+ */
+export async function readMapPaidBySplit(
+  map: TableMap,
+  ctx: { tenantId: string | null; branchId: string | null },
+  deps: {
+    readOrders?: (tableIds: string[], tenantId: string, branchId: string | null) => Promise<{ id: string; table_id: string }[] | null>;
+    readSettlements?: typeof readPaidSettlements;
+  } = {},
+): Promise<TableMap> {
+  if (!ctx.tenantId) return map;
+  const candidates = map.tables.filter((t) => t.orders > 0 && t.collected == null && t.total != null && !t.mixed_currency);
+  if (candidates.length === 0) return map;
+  try {
+    const orders = await (deps.readOrders ?? readOpenTableOrders)(candidates.map((t) => t.id), ctx.tenantId, ctx.branchId);
+    if (!orders || orders.length === 0) return map;
+    const read = await (deps.readSettlements ?? readPaidSettlements)(orders.map((o) => o.id), ctx.tenantId);
+    if (!read.ok) return map;
+    const tableOf = new Map(orders.map((o) => [o.id, o.table_id]));
+    const paid = new Map<string, number>();
+    for (const raw of read.rows) {
+      const r = asRecord(raw);
+      if (r.status !== undefined && str(r.status) !== "paid") continue;
+      const tableId = tableOf.get(strOrNull(r.parent_order_id) ?? "");
+      if (!tableId) continue;
+      paid.set(tableId, (paid.get(tableId) ?? 0) + num(r.amount_order_ccy));
+    }
+    if (paid.size === 0) return map;
+    return {
+      ...map,
+      tables: map.tables.map((t) => (paid.has(t.id) && t.collected == null ? { ...t, paid_by_split: round2(paid.get(t.id) ?? 0) } : t)),
+    };
+  } catch {
+    return map;
+  }
+}
+
+async function readOpenTableOrders(
+  tableIds: string[],
+  tenantId: string,
+  branchId: string | null,
+): Promise<{ id: string; table_id: string }[] | null> {
+  const { supabase } = await import("@/lib/supabase");
+  let q = supabase
+    .from("pos_orders")
+    .select("id, table_id, branch_id")
+    .eq("tenant_id", tenantId)
+    .in("table_id", tableIds)
+    .eq("order_type", "dine_in")
+    .in("status", OPEN_STATUSES)
+    .neq("payment_status", "paid");
+  if (branchId) q = q.eq("branch_id", branchId);
+  const { data, error } = await q;
+  if (error || !Array.isArray(data)) return null;
+  return (data as unknown[])
+    .map((raw) => asRecord(raw))
+    .filter((r) => strOrNull(r.id) && strOrNull(r.table_id) && (branchId === null || strOrNull(r.branch_id) === branchId))
+    .map((r) => ({ id: str(r.id), table_id: str(r.table_id) }));
 }
 
 /** 1.0.40 (BUG 02) — the first line paid for only PART of its quantity (the merge guard's `partial_line`). */

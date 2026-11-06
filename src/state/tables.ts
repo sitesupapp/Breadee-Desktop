@@ -11,7 +11,7 @@
 import { create } from "zustand";
 import { EMPTY_TABLE_MAP, type TableBill, type TableMap } from "@/types/tables";
 import { loadTableMap } from "@/lib/pos/tables";
-import { loadTableBill } from "@/lib/pos/tableBill";
+import { loadTableBill, readMapPaidBySplit } from "@/lib/pos/tableBill";
 import { isBackendReachable } from "@/lib/offline/reachability";
 import { cacheBill, cacheTableMap, readCachedTableMap } from "@/lib/offline/db";
 import type { TableSummary } from "@/types/tables";
@@ -161,6 +161,12 @@ export const useTables = create<TableState>((set, get) => ({
         bill: stillThere ? get().bill : null,
       });
       if (stillThere) await get().loadBill(ctx);
+      // 1.0.40 (BUG 01) — a server map without `collected` (production): derive each part-paid table's
+      // paid-by-split amount for the CARD only (fire-and-forget, never throws, never cached, never a money
+      // input). Applied only if this exact map is still the one shown.
+      void readMapPaidBySplit(map, ctx).then((enriched) => {
+        if (enriched !== map && get().map === map && sameContext(get().context, ctx)) set({ map: enriched });
+      });
       // rc.9 — keep every occupied table's canonical bill offline-ready (fire-and-forget, bounded).
       void prewarmOpenBills(ctx, map.tables);
     } catch (e) {

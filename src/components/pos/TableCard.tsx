@@ -8,6 +8,7 @@ import { cn } from "@/components/ui";
 import { Glyph, type GlyphName } from "@/components/Glyph";
 import { formatMoney } from "@/lib/currency";
 import { elapsedMinutes, formatElapsed, tableCardState } from "@/lib/pos/tables";
+import { tableCardAmount } from "@/lib/pos/tableBill";
 import type { TableCardState, TableSummary } from "@/types/tables";
 
 /** Minimum practical card size - comfortably above the 44px touch floor. */
@@ -52,6 +53,8 @@ export function TableCard({
   const state = tableCardState(table);
   const style = STATE_STYLE[state];
   const elapsed = formatElapsed(elapsedMinutes(table.opened_at, now));
+  // 1.0.40 (BUG 01) — a part-paid bill shows what is still DUE, never the gross total.
+  const shown = tableCardAmount(table);
 
   return (
     <button
@@ -93,9 +96,10 @@ export function TableCard({
             {style.label}
           </span>
           {/* A total the server declined to sum is shown as a warning, not a number. */}
-          {table.total != null && table.currency ? (
-            <span className="text-sm font-extrabold tabular-nums text-ink">
-              {formatMoney(table.total, table.currency)}
+          {shown.amount != null && table.currency ? (
+            <span className="text-sm font-extrabold tabular-nums text-ink" title={shown.partPaid ? "Part paid by split - amount still due" : undefined}>
+              {shown.partPaid && <span className="mr-1 text-[11px] font-bold text-sub">Due</span>}
+              {formatMoney(shown.amount, table.currency)}
             </span>
           ) : table.mixed_currency ? (
             <span className="text-[11px] font-bold text-red-700">Settle separately</span>

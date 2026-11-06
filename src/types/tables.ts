@@ -45,6 +45,10 @@ export type TableSummary = {
    *  been paid and what is still owed, and the merge summary totals the outstanding correctly. */
   collected: number | null;
   outstanding: number | null;
+  /** 1.0.40 (BUG 01, table card) — DISPLAY ONLY: what PAID split settlements already hold against this
+   *  table's open bill, derived on the desktop (`readMapPaidBySplit`) when the server's map reports no
+   *  `collected` (production). Never read by a money path — those use `collected` / the bill's own read. */
+  paid_by_split?: number | null;
   currency: CurrencyCode | null;
   /** True when the table's open orders span more than one currency snapshot. */
   mixed_currency: boolean;
