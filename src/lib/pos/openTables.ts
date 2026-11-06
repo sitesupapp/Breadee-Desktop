@@ -33,6 +33,18 @@ export function selectOpenTables(tables: TableSummary[]): TableSummary[] {
   return tables.filter((t) => t.orders > 0);
 }
 
+/**
+ * 1.0.40 (BUG 01, native Staging 1.0.49) — what a table still OWES: the server total minus what PAID split
+ * settlements already hold (the server's `collected`, else the display-only `paid_by_split`). The note above
+ * predates split settlement: a part-paid table stays open with its gross `total`, so summing `total` showed
+ * 300,000 outstanding beside a row reading "Part paid · 200,000". Unpaid tables are exactly `total`.
+ */
+export function outstandingOf(t: Pick<TableSummary, "total" | "collected" | "paid_by_split">): number | null {
+  if (t.total === null) return null;
+  const paid = Math.max(0, Number(t.collected ?? t.paid_by_split ?? 0) || 0);
+  return paid > 0 ? Math.max(0, Math.round((t.total - paid) * 100) / 100) : t.total;
+}
+
 export type OutstandingBucket = {
   currency: CurrencyCode;
   /** Sum of the tables' own `total`, in this currency. Never cross-currency. */
@@ -58,7 +70,7 @@ export function outstandingByCurrency(open: TableSummary[]): OutstandingBucket[]
   for (const t of open) {
     if (t.mixed_currency || t.total === null || t.currency === null) continue;
     const b = byCcy.get(t.currency) ?? { amount: 0, tables: 0 };
-    b.amount += t.total;
+    b.amount += outstandingOf(t) ?? 0;
     b.tables += 1;
     byCcy.set(t.currency, b);
   }
@@ -111,7 +123,7 @@ export function sortOpenTables(open: TableSummary[], sort: OpenTablesSort): Tabl
       // not single-currency, this is not a valid financial ordering, so fall
       // back to the always-safe oldest-first rather than mislead.
       if (!canSortByHighest(rows)) return sortOpenTables(rows, "oldest");
-      return rows.sort((a, b) => (b.total ?? -Infinity) - (a.total ?? -Infinity));
+      return rows.sort((a, b) => (outstandingOf(b) ?? -Infinity) - (outstandingOf(a) ?? -Infinity));
     case "oldest":
     default:
       return rows.sort((a, b) => (openedMs(a) ?? Infinity) - (openedMs(b) ?? Infinity));
