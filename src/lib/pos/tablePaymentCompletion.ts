@@ -125,11 +125,32 @@ export type TableReceiptInput = {
  * once the payment lands there is no open bill left to read it from.
  */
 export function buildTablePaymentReceipt(input: TableReceiptInput): ReceiptData {
-  const figures = paymentFigures({
+  const raw = paymentFigures({
     result: input.result,
     billSubtotal: input.bill.subtotal ?? 0,
     requestedDiscount: input.requestedDiscount,
   });
+  // 1.0.40 (BUG 01 / guest-level split, native) — the LAST guest's receipt of a bill already part paid by
+  // split lists only what THIS payment covers: the unpaid items, subtotal = gross − paid by split. Items other
+  // guests already paid are on their own `<order>-<n>` receipts. Applied only when the figures prove the server
+  // charged the remainder (subtotal − discount − paid = amount), so a figure is never deducted twice; on a
+  // recovered payment (no server figures) the pre-payment due is used. Nothing paid → exactly as before.
+  const paidBySplit = billCollected(input.bill);
+  const due = billDue(input.bill);
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
+  // The server reported the GROSS subtotal T and charged R = T − P (staging, verified natively) …
+  const serverGross = input.result !== null && paidBySplit > 0 && near(raw.subtotal - raw.discount - paidBySplit, raw.amount);
+  // … or reported the remainder itself as the subtotal (subtotal == the pre-payment due).
+  const serverNet =
+    input.result !== null && paidBySplit > 0 && !serverGross && due !== null && near(raw.subtotal, due) && near(raw.subtotal - raw.discount, raw.amount);
+  const recoveredPartPaid = input.result === null && paidBySplit > 0 && due !== null;
+  const remainderOnly = serverGross || serverNet || recoveredPartPaid;
+  const figures = serverGross
+    ? { ...raw, subtotal: Math.max(0, Math.round((raw.subtotal - paidBySplit) * 100) / 100) }
+    : recoveredPartPaid
+      ? { ...raw, subtotal: due as number, amount: Math.max(0, (due as number) - raw.discount) }
+      : raw;
+  const lineBill = remainderOnly ? unpaidBillView(input.bill) : input.bill;
 
   const tenderTotal = tenderTotalFor(figures.amount, input.primaryCurrency, input.tenderCurrency, input.rate);
 
@@ -163,7 +184,7 @@ export function buildTablePaymentReceipt(input: TableReceiptInput): ReceiptData 
     paid: true,
     method: input.method,
     currency: input.primaryCurrency,
-    lines: input.bill.orders.flatMap((order) =>
+    lines: lineBill.orders.flatMap((order) =>
       order.lines.map((l) => ({
         name: l.name,
         qty: l.quantity,

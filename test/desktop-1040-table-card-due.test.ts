@@ -6,8 +6,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { readMapPaidBySplit, tableCardAmount, type PaidSettlementRead } from "@/lib/pos/tableBill";
+import { runSyncNow, syncNowText } from "@/lib/offline/syncActions";
 import type { TableMap, TableSummary } from "@/types/tables";
 
 const T = (over: Partial<TableSummary>): TableSummary => ({
@@ -33,6 +35,43 @@ const T = (over: Partial<TableSummary>): TableSummary => ({
 });
 const MAP = (tables: TableSummary[]): TableMap => ({ tables, total: tables.length, occupied: tables.length, available: 0, configured: tables.length, legacy_hidden: 0 });
 const CTX = { tenantId: "ten", branchId: "br" };
+
+test("BUG 02 native: table-operation refusals (merge partial_line remedy) wrap and are announced, never clipped", () => {
+  const src = readFileSync("src/components/pos/TableOpsDialogs.tsx", "utf8");
+  assert.equal(/className="truncate[^"]*text-(red|amber)-(7|8)00"/.test(src), false, "no clipped error / gate paragraph remains");
+  assert.equal((src.match(/role="alert" className="break-words text-xs font-semibold text-red-700"/g) ?? []).length, 4, "Move, Close, Clear and Merge");
+});
+
+test("BUG 09 native: payment / seat / transfer / edit-reason dialog refusals wrap instead of being clipped", () => {
+  for (const f of ["PaymentDialog", "SeatCountDialog", "TransferDialog", "EditReasonDialog"]) {
+    const src = readFileSync(`src/components/pos/${f}.tsx`, "utf8");
+    assert.equal(/className="truncate[^"]*text-(red|amber)-(7|8)00"/.test(src), false, `${f}: no clipped error / gate paragraph`);
+  }
+  assert.match(readFileSync("src/components/pos/PaymentDialog.tsx", "utf8"), /role="alert" className="break-words text-xs font-semibold text-red-700">\{props\.error\}/);
+});
+
+test("BUG 01 native: the card, the Open Tables list and the Add-items header use the due amount", () => {
+  assert.match(readFileSync("src/components/pos/TableCard.tsx", "utf8"), /tableCardAmount\(table\)/);
+  assert.match(readFileSync("src/components/pos/OpenTablesModal.tsx", "utf8"), /Part paid/);
+  assert.match(readFileSync("src/components/pos/DineInRoundPanel.tsx", "utf8"), /billDue\(bill\)/);
+  assert.match(readFileSync("src/state/tables.ts", "utf8"), /readMapPaidBySplit\(map, ctx\)/);
+});
+
+test("BUG 03 native: Sync now never reports fewer items needing attention than are waiting for review", async () => {
+  const pass = { synced: 0, needsAttention: 0, failed: 0, waiting: 0 };
+  assert.equal(syncNowText(pass), "Sync finished: 0 synced · 0 still need attention · 0 failed (will retry).");
+  assert.equal(syncNowText(pass, 2), "Sync finished: 0 synced · 2 still need attention · 0 failed (will retry).");
+  assert.equal(syncNowText({ ...pass, needsAttention: 3 }, 2), "Sync finished: 0 synced · 3 still need attention · 0 failed (will retry).");
+  assert.equal(syncNowText({ ...pass, synced: 1 }, 1), "Sync finished: 1 synced · 1 still needs attention · 0 failed (will retry).");
+  const report = { executed: true, startedAt: "9999-01-01T00:00:00Z", drained: [], needsAttention: [], retryable: [], skippedBackoff: [], blocked: [] };
+  const r = await runSyncNow(async () => 1, () => report as never, async () => 2);
+  assert.equal(r.ran, true);
+  assert.match(r.text, /0 synced · 2 still need attention/);
+  const failing = await runSyncNow(async () => 1, () => report as never, async () => {
+    throw new Error("db");
+  });
+  assert.match(failing.text, /0 still need attention/, "a failed standing read never breaks the report");
+});
 
 test("card amount: an unpaid bill shows exactly the server total (unchanged)", () => {
   assert.deepEqual(tableCardAmount(T({ collected: null })), { amount: 300000, partPaid: false });

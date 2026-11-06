@@ -38,7 +38,12 @@ import {
   type TablePaymentResult,
 } from "@/lib/pos/tablePayment";
 import { completeTableOnAccount, type TableOnAccountPayload } from "@/lib/pos/onAccount";
-import { billIsCleared, buildSplitSettlementReceipt, buildTableBillReceipt } from "@/lib/pos/tablePaymentCompletion";
+import {
+  billIsCleared,
+  buildSplitSettlementReceipt,
+  buildTableBillReceipt,
+  buildTablePaymentReceipt,
+} from "@/lib/pos/tablePaymentCompletion";
 import { MERGE_REASON_HINTS, MergePartialLineError, classifyError, mergePartialLineMessage } from "@/lib/pos/errors";
 import { PosRpcError } from "@/lib/pos/rpc";
 import type { BillLine, BillOrder, TableBill, TableSummary } from "@/types/tables";
@@ -400,6 +405,56 @@ test("pre-payment Print bill of a part-paid bill: only unpaid lines, total = due
   assert.equal(r.total, 17);
   assert.equal(r.subtotal, 17);
   assert.equal(r.paid, false);
+});
+
+// Native Staging 1.0.48: the last guest's Pay Full Bill receipt listed every item (incl. those other guests had
+// already paid on their own -n receipts) with Subtotal T next to Total R.
+const payReceipt = (bill: TableBill, result: TablePaymentResult | null, requestedDiscount = 0) =>
+  buildTablePaymentReceipt({
+    ...receiptCommon,
+    bill,
+    table: prodTable(22),
+    result,
+    requestedDiscount,
+    method: "cash",
+    primaryCurrency: "USD",
+    tenderCurrency: "USD",
+    rate: null,
+    tenderedInput: null,
+  });
+
+test("final Pay Full Bill receipt of a part-paid bill: only the unpaid items, subtotal = total = R (server reports gross T)", () => {
+  const r = payReceipt(l41Bill(), { ...okResult(17), subtotal: 22 });
+  assert.deepEqual(r.lines.map((l) => [l.name, l.qty]), [["Pizza", 1], ["Cola", 2]]);
+  assert.equal(r.subtotal, 17);
+  assert.equal(r.total, 17);
+  assert.equal(r.paid, true);
+});
+
+test("final receipt: server reports the remainder as subtotal → unpaid items, subtotal kept (no double deduction)", () => {
+  const r = payReceipt(l41Bill(), okResult(17));
+  assert.deepEqual(r.lines.map((l) => [l.name, l.qty]), [["Pizza", 1], ["Cola", 2]]);
+  assert.equal(r.subtotal, 17);
+  assert.equal(r.total, 17);
+});
+
+test("final receipt: recovered payment (no server figures) uses the pre-payment due", () => {
+  const r = payReceipt(l41Bill(), null);
+  assert.deepEqual(r.lines.map((l) => [l.name, l.qty]), [["Pizza", 1], ["Cola", 2]]);
+  assert.equal(r.subtotal, 17);
+  assert.equal(r.total, 17);
+});
+
+test("final receipt with nothing paid by split is exactly as before", () => {
+  const plain = applyPaidSettlements(foldBill("tbl-l41", l41Bill().orders.map((o) => ({ ...o, lines: o.lines.map(({ paid_quantity: _p, ...l }) => l) }))), { ok: true, rows: [] });
+  const r = payReceipt(plain, okResult(22));
+  assert.equal(r.lines.length, 3);
+  assert.equal(r.subtotal, 22);
+  assert.equal(r.total, 22);
+  // figures that do not match the bill (unexpected server shape) never trigger the remainder view
+  const odd = payReceipt(l41Bill(), { ...okResult(20), subtotal: 22 });
+  assert.equal(odd.lines.length, 3);
+  assert.equal(odd.subtotal, 22);
 });
 
 test("pre-payment Print bill with nothing paid is unchanged (gross lines, gross total)", () => {
