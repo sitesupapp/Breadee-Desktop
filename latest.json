@@ -1,11 +1,11 @@
 {
-  "version": "1.0.50",
+  "version": "1.0.51",
   "notes": "Split bills show what is still due · الفواتير المقسّمة تعرض المبلغ المتبقي\n\nAfter a guest pays their share with Split Bill, the table's bill now shows only the items and amount still to pay, and Pay Full Bill asks for exactly that remaining amount. Each guest who pays by split gets their own receipt with only their items, numbered after the original order. The bill printed before payment also shows only what is still due. Items already paid stay in the order history and reports.\n\nبعد أن يدفع أحد الضيوف حصته عبر تقسيم الفاتورة، تعرض فاتورة الطاولة الآن الأصناف والمبلغ المتبقي فقط، ويطلب دفع الفاتورة كاملة هذا المبلغ المتبقي تحديداً. ويحصل كل ضيف يدفع عبر التقسيم على إيصال خاص به يتضمن أصنافه فقط، مرقّماً على أساس الطلب الأصلي. كما تعرض الفاتورة المطبوعة قبل الدفع ما تبقى للدفع فقط. وتبقى الأصناف المدفوعة في سجل الطلبات والتقارير.",
-  "pub_date": "2026-11-06T12:53:09Z",
+  "pub_date": "2026-11-06T17:53:29Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNWdYa252K2k2VE9Pdi9pejY5RDM3eVlwa3g5QXVTTnVRZUYxSkVySmVEc016VGFRWVI4L0g1ZHgxQmsvT0c5amxkNFArcnFvWU56T2JGR2lKUUU2V1FJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTY5NTgwCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC41MF94NjQtc2V0dXAuZXhlCkVwSC83ejVXU1FqVmVPNWJLWkpzZGdqdFYxZlA2OWhQUVhxMDZnNkRPMFgwdTBqMTkrSmRjS25GZ0NxY3dsUjlqMjZJeENCcDEvTjA1ckZnMkVxL0J3PT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.50/Breadee_Staging_1.0.50_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNWc0ZVJRVFI5clU4bzZYb3VIZTBHUlRXOGZEU2d4OUdzTTlVVmk5eGJKbHBZcUNsOURyM3J4Y3A2RjV3bWpOTzVxVklkd3lUMUtnbzE4dHhEZ3dLQ3dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTg3NjAyCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC41MV94NjQtc2V0dXAuZXhlCndoS29UNWRCUTV6ZE9hMm9MOEduSURrVW1OSjVnZWFOS1AyWCtIWU8rMm5Fb053M25ldm9RdVpaMmhDN2o0QjV0TEtkVGlKOTU5V21wbTU0TWxsN0JBPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.51/Breadee_Staging_1.0.51_x64-setup.exe"
     }
   }
 }
