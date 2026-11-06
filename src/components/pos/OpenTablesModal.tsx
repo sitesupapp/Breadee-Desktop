@@ -17,6 +17,7 @@ import { Badge, Button, Input, cn } from "@/components/ui";
 import { Modal } from "@/components/overlays";
 import { formatMoney } from "@/lib/currency";
 import { elapsedMinutes, formatElapsed } from "@/lib/pos/tables";
+import { tableCardAmount } from "@/lib/pos/tableBill";
 import {
   canSortByHighest,
   mixedCurrencyOpenTables,
@@ -227,14 +228,16 @@ export function OpenTablesModal(props: {
                       <td className="px-2 py-2 text-sub">{t.order_number ? `#${t.order_number}` : "—"}</td>
                       <td className="px-2 py-2 text-sub">{elapsed ?? "—"}</td>
                       <td className="px-2 py-2">
-                        <Badge tone="amber">Unpaid</Badge>
+                        {/* 1.0.40 (BUG 01) — a bill part paid by split is not "Unpaid". */}
+                        {tableCardAmount(t).partPaid ? <Badge tone="amber">Part paid</Badge> : <Badge tone="amber">Unpaid</Badge>}
                       </td>
                       <td className="px-2 py-2 text-right font-semibold">
                         {/* A summable single-currency bill, or the server's
                             refusal to sum a mixed one - never a guessed number.
-                            Guarding on the fields directly narrows the nulls. */}
+                            Guarding on the fields directly narrows the nulls.
+                            1.0.40 (BUG 01) — part-paid shows what is still due. */}
                         {t.total !== null && t.currency !== null ? (
-                          formatMoney(t.total, t.currency)
+                          formatMoney(tableCardAmount(t).amount ?? t.total, t.currency)
                         ) : (
                           <span className="text-amber-700">Mixed</span>
                         )}

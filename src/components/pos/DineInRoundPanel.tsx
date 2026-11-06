@@ -12,7 +12,7 @@
 import { Badge, Button, EmptyState, GatedButton, PanelTitle, StatusDot, cn, type Gate } from "@/components/ui";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { CartLineRow } from "@/components/pos/CartLineRow";
-import { billItemCount, linesByBatch } from "@/lib/pos/tableBill";
+import { billCollected, billDue, billItemCount, linesByBatch } from "@/lib/pos/tableBill";
 import { preparingRoundLabel, sentRoundLabel } from "@/lib/pos/tableRounds";
 import type { CartLine } from "@/types/pos";
 import type { BillLine, TableBill, TableSummary } from "@/types/tables";
@@ -78,7 +78,10 @@ export function DineInRoundPanel(props: DineInRoundPanelProps) {
                 {billItemCount(bill)} item{billItemCount(bill) === 1 ? "" : "s"}
               </span>
               <span className="font-bold text-ink">
-                {bill.total != null && bill.currency ? formatMoney(bill.total, bill.currency) : "—"}
+                {/* 1.0.40 (BUG 01) — a bill part paid by split shows what is still due. */}
+                {bill.total != null && bill.currency
+                  ? `${billCollected(bill) > 0 ? "Due " : ""}${formatMoney(billDue(bill) ?? bill.total, bill.currency)}`
+                  : "—"}
               </span>
             </>
           ) : (
