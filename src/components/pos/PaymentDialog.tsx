@@ -335,8 +335,10 @@ export function PaymentDialog(props: PaymentDialogProps) {
       footer={
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            {activeBlocked && <p className="truncate text-xs font-semibold text-amber-800">{activeBlocked}</p>}
-            {props.error && <p className="truncate text-xs font-semibold text-red-700">{props.error}</p>}
+            {/* 1.0.40 (native) — server refusals (ORDER_TRANSFER_PENDING, ON_ACCOUNT_*, PAY_AMOUNT_CHANGED …) wrap
+                and are announced; a clipped refusal hid its remedy. */}
+            {activeBlocked && <p className="break-words text-xs font-semibold text-amber-800">{activeBlocked}</p>}
+            {props.error && <p role="alert" className="break-words text-xs font-semibold text-red-700">{props.error}</p>}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button variant="ghost" size="lg" onClick={props.onCancel} disabled={props.busy}>

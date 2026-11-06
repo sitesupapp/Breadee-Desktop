@@ -101,7 +101,8 @@ test("the workspace passes the active tenant into the status bar", () => {
 
 test("1.0.40 F5: 'Sync now' runs the existing drain (no second drainer) and shows the pass's counts; Retry shows its outcome", () => {
   const panel = jsx(SYNC_PANEL);
-  assert.match(panel, /runSyncNow\(\)/, "Sync now goes through runSyncNow (requestDrainAndWait → the POS single-flight drain)");
+  // default drain (requestDrainAndWait) and report; only the standing-review count is supplied (native 1.0.48)
+  assert.match(panel, /runSyncNow\(undefined, undefined, standing\)/, "Sync now goes through runSyncNow (requestDrainAndWait → the POS single-flight drain)");
   assert.match(panel, />\s*\{syncing \? "Syncing…" : "Sync now"\}/);
   assert.match(panel, /setSyncNote\(r\.text\)/, "the counts sentence is shown");
   assert.match(panel, /operatorRetry\(operationId/, "per-op Retry reports its real outcome");

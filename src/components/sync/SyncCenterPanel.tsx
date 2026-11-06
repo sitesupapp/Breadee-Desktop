@@ -183,13 +183,19 @@ export function SyncCenterPanel({
     setSyncing(true);
     setSyncNote(null);
     try {
-      const r = await runSyncNow().catch(() => ({ ran: false as const, text: "Sync could not run on this device." }));
+      // Items already parked for review (needs attention + conflict + manager review) count too, so the sentence
+      // matches the header above it (native Staging 1.0.48).
+      const standing = async () => {
+        const s = await loadSyncSummary(tenantId, branchId, { includeSynced: true });
+        return s.needsAttention + s.conflict + s.managerReview;
+      };
+      const r = await runSyncNow(undefined, undefined, standing).catch(() => ({ ran: false as const, text: "Sync could not run on this device." }));
       setSyncNote(r.text);
       await refresh();
     } finally {
       setSyncing(false);
     }
-  }, [refresh]);
+  }, [refresh, tenantId, branchId]);
 
   useEffect(() => {
     void refresh();

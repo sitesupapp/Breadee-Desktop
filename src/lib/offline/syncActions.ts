@@ -21,9 +21,18 @@ export const SYNC_NOW_NO_POS =
   "Nothing was synced: this terminal is offline, or the POS screen is not open. Offline work syncs automatically once the POS is open and online.";
 export const SYNC_NOW_NOT_RUN = "Nothing was synced: this terminal may be offline, or a sync was already running. Try again in a moment.";
 
-/** PURE — the operator sentence for a pass's counts. */
-export function syncNowText(r: { synced: number; needsAttention: number; failed: number; waiting: number }): string {
-  const parts = [`${r.synced} synced`, `${r.needsAttention} still need${r.needsAttention === 1 ? "s" : ""} attention`, `${r.failed} failed (will retry)`];
+/**
+ * PURE — the operator sentence for a pass's counts. `standingAttention` (native Staging 1.0.48): items that were
+ * ALREADY parked for review before this pass are not re-processed by it, so the pass alone reported "0 still need
+ * attention" under a header saying "2 needs attention". The sentence now reports the larger of the two, so it never
+ * contradicts the screen.
+ */
+export function syncNowText(
+  r: { synced: number; needsAttention: number; failed: number; waiting: number },
+  standingAttention = 0,
+): string {
+  const attention = Math.max(r.needsAttention, Math.max(0, standingAttention));
+  const parts = [`${r.synced} synced`, `${attention} still need${attention === 1 ? "s" : ""} attention`, `${r.failed} failed (will retry)`];
   if (r.waiting > 0) parts.push(`${r.waiting} waiting`);
   return `Sync finished: ${parts.join(" · ")}.`;
 }
@@ -38,14 +47,19 @@ export function countsOf(report: OperationDrainReport): { synced: number; needsA
   };
 }
 
-export async function runSyncNow(drain: (reason: string) => Promise<number> = requestDrainAndWait, last: () => OperationDrainReport | null = lastDrainReport): Promise<SyncNowResult> {
+export async function runSyncNow(
+  drain: (reason: string) => Promise<number> = requestDrainAndWait,
+  last: () => OperationDrainReport | null = lastDrainReport,
+  standingAttention: () => Promise<number> = async () => 0,
+): Promise<SyncNowResult> {
   const since = new Date().toISOString();
   const listeners = await drain("operator-sync-now");
   if (listeners === 0) return { ran: false, text: SYNC_NOW_NO_POS };
   const r = last();
   if (!r || !r.executed || r.startedAt < since) return { ran: false, text: SYNC_NOW_NOT_RUN };
   const c = countsOf(r);
-  return { ran: true, ...c, text: syncNowText(c) };
+  const standing = await standingAttention().catch(() => 0);
+  return { ran: true, ...c, text: syncNowText(c, standing) };
 }
 
 export type RetryResult = { ok: boolean; text: string };
