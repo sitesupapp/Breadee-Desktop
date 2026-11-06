@@ -84,6 +84,8 @@ test("G the merge wrapper sends primary + sources + expected + client_op_id in p
   assert.match(code, /source_table_ids: input\.sourceTableIds/);
   assert.match(code, /expected: input\.expected/);
   assert.match(code, /client_op_id: input\.clientOpId/);
+  // 1.0.40 (BUG 02) — the online merge opts in to the server's partial-quantity merge contract.
+  assert.match(code, /allow_partial_line: true/);
 });
 
 // --- H. the RPC is in the desktop allow-list ---
