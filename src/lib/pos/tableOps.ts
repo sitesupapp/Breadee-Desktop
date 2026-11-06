@@ -257,6 +257,10 @@ export async function mergeTables(input: {
         source_table_ids: input.sourceTableIds,
         ...(input.expected ? { expected: input.expected } : {}),
         ...(input.clientOpId ? { client_op_id: input.clientOpId } : {}),
+        // 1.0.40 (BUG 02) — opt in to the server's partial-quantity merge: a line paid for only part of its
+        // quantity is split server-side (paid part stays on its receipt, unpaid part joins the primary). A
+        // backend without the extension ignores the key and keeps refusing with `partial_line` (same message).
+        allow_partial_line: true,
       },
     }),
   );
