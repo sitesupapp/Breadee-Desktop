@@ -138,40 +138,6 @@ export class PartPaidBillError extends Error {
   }
 }
 
-/**
- * 1.0.40 (BUG 06) — what the server already holds against this bill through PAID split settlements, from
- * the best figure available ONLINE: the map's `collected` (staging / a server that reports it) or the
- * bill's own settlement read (`loadTableBill` — production's `pos_table_map` carries no `collected`, so
- * through 1.0.39 a part-paid bill pinned T while the server charged R = T − P → PAY_AMOUNT_CHANGED). The
- * larger of the two: both describe the same paid settlements, and the server pin refuses any disagreement.
- */
-export function effectiveCollected(table: TableSummary | null | undefined, bill: TableBill | null | undefined): number {
-  const fromMap = Math.max(0, Number(table?.collected ?? 0) || 0);
-  const fromBill = bill && bill.collectedKnown === true ? Math.max(0, Number(bill.collected ?? 0) || 0) : 0;
-  return Math.max(fromMap, fromBill);
-}
-
-/**
- * 1.0.40 (BUG 06 hardening) — true when NO source can say what the server already holds against this bill:
- * the settlement read failed and the map reports no `collected`. Only meaningful once the server deducts
- * prior payments (then the pin must be R and R is unknowable); a bill read without the settlement read
- * (offline projection, older callers) is never "unknown".
- */
-export function collectedUnknown(table: TableSummary | null | undefined, bill: TableBill | null | undefined): boolean {
-  if (!bill || bill.collectedKnown !== false) return false;
-  return table?.collected == null;
-}
-
-export const PART_PAID_UNKNOWN_MESSAGE =
-  "Breadee could not confirm whether part of this bill is already paid by split. Refresh the table before taking payment.";
-
-export class PartPaidUnknownError extends Error {
-  constructor() {
-    super(PART_PAID_UNKNOWN_MESSAGE);
-    this.name = "PartPaidUnknownError";
-  }
-}
-
 /** True when the table's open bill already holds paid split money (server `collected`, the bill's own
  *  settlement read, or a part-paid order). */
 export function billIsPartPaid(table: TableSummary | null, bill: TableBill | null): boolean {
@@ -209,6 +175,44 @@ export function setServerDeductsPriorPayments(capability: boolean | null): void 
 }
 /** The 1.0.38 server contracts (R = T − P cores, move_v2, merge_v4, bill pins) are live on this backend. */
 export const server1038ContractsLive = serverDeductsPriorPayments;
+
+// NOTE: keep the 1.0.40 helpers below AFTER the release switch above. The release workflows prove the
+// compiled `VITE_SERVER_1038_CONTRACTS` switch is ON by finding it within 600 characters after
+// `this.name="PartPaidBillError"` in the bundle; code inserted between the two breaks that gate.
+
+/**
+ * 1.0.40 (BUG 06) — what the server already holds against this bill through PAID split settlements, from
+ * the best figure available ONLINE: the map's `collected` (staging / a server that reports it) or the
+ * bill's own settlement read (`loadTableBill` — production's `pos_table_map` carries no `collected`, so
+ * through 1.0.39 a part-paid bill pinned T while the server charged R = T − P → PAY_AMOUNT_CHANGED). The
+ * larger of the two: both describe the same paid settlements, and the server pin refuses any disagreement.
+ */
+export function effectiveCollected(table: TableSummary | null | undefined, bill: TableBill | null | undefined): number {
+  const fromMap = Math.max(0, Number(table?.collected ?? 0) || 0);
+  const fromBill = bill && bill.collectedKnown === true ? Math.max(0, Number(bill.collected ?? 0) || 0) : 0;
+  return Math.max(fromMap, fromBill);
+}
+
+/**
+ * 1.0.40 (BUG 06 hardening) — true when NO source can say what the server already holds against this bill:
+ * the settlement read failed and the map reports no `collected`. Only meaningful once the server deducts
+ * prior payments (then the pin must be R and R is unknowable); a bill read without the settlement read
+ * (offline projection, older callers) is never "unknown".
+ */
+export function collectedUnknown(table: TableSummary | null | undefined, bill: TableBill | null | undefined): boolean {
+  if (!bill || bill.collectedKnown !== false) return false;
+  return table?.collected == null;
+}
+
+export const PART_PAID_UNKNOWN_MESSAGE =
+  "Breadee could not confirm whether part of this bill is already paid by split. Refresh the table before taking payment.";
+
+export class PartPaidUnknownError extends Error {
+  constructor() {
+    super(PART_PAID_UNKNOWN_MESSAGE);
+    this.name = "PartPaidUnknownError";
+  }
+}
 
 /** 1.0.38 (Bug 9) — the amount a settle / on-account of this bill is FOR, in the bill's own currency: the
  *  remaining obligation R = T − P when the server deducts prior payments, else the whole bill T (the F1 guard
