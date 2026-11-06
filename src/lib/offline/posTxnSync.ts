@@ -382,6 +382,8 @@ export type PosTxnSyncDeps = {
     sourceId: string;
     note: string | null;
     clientOpId: string;
+    /** 1.0.40 (BUG 08) — replay an Accounting-contract capture (expense settled from drawer cash). */
+    postToAccounting?: boolean;
   }) => Promise<{ payout_id: string; amount: number; amount_usd: number; idempotent: boolean }>;
   /** Phase-E: create/edit a customer (+ optional address) via pos_upsert_customer. client_op_id →
    *  exactly-once (server replay wrapper). A same-OU identity clash surfaces as a CUSTOMER_IDENTITY_
@@ -591,6 +593,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
         sourceId: args.sourceId,
         note: args.note,
         clientOpId: args.clientOpId,
+        postToAccounting: args.postToAccounting === true,
       }),
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";

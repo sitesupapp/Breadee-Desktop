@@ -19,7 +19,10 @@ import {
   buildPayoutCreatePayload,
   loadPayoutList,
   loadPayoutSourcesOfflineAware,
+  loadPayoutAccountingCapability,
+  loadExpenseCategories,
   reversePayout,
+  type ExpenseCategory,
   type Payout,
   type PayoutListState,
   type PayoutSource,
@@ -32,7 +35,7 @@ import {
   type PayoutScope,
 } from "@/lib/offline/payoutOffline";
 
-type Step = "amount" | "kind" | "source" | "review";
+type Step = "amount" | "kind" | "source" | "newExpense" | "review";
 
 export function PayoutsModal({
   open,
@@ -357,6 +360,19 @@ function NewPayout({
   const [error, setError] = useState<string | null>(null);
   // One op id per payout attempt; reused on retry so a lost response never pays out twice.
   const opId = useRef<string | null>(null);
+  // 1.0.40 (BUG 08) — Accounting contract (backend-advertised). false = the exact pre-1.0.40 flow.
+  const [accounting, setAccounting] = useState(false);
+  const [categories, setCategories] = useState<ExpenseCategory[] | null>(null);
+  const [newExp, setNewExp] = useState<{ categoryId: string | null; categoryName: string; description: string; payee: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    void loadPayoutAccountingCapability().then((ok) => {
+      if (live) setAccounting(ok);
+    });
+    return () => {
+      live = false;
+    };
+  }, [online]);
 
   const amountNum = parseAmount(amount);
   // Offline capture is possible only when the POS is offline-ready AND the full 5-D scope is present.
@@ -377,6 +393,7 @@ function NewPayout({
     async (k: PayoutSourceType) => {
       setKind(k);
       setSource(null);
+      setNewExp(null);
       setSources(null);
       setStep("source");
       setSources(await loadPayoutSourcesOfflineAware(sourceScope, k, online));
@@ -386,7 +403,7 @@ function NewPayout({
   );
 
   const submit = useCallback(async () => {
-    if (!shiftId || !kind || !source) return;
+    if (!shiftId || !kind || (!source && !newExp)) return;
     setBusy(true);
     setError(null);
     if (!opId.current) opId.current = crypto.randomUUID();
@@ -397,16 +414,20 @@ function NewPayout({
             shiftId,
             amount: amountNum,
             sourceType: kind,
-            sourceId: source.id,
+            sourceId: source ? source.id : null,
             note: note.trim() || null,
             clientOpId: opId.current,
+            postToAccounting: accounting,
+            newExpense: newExp ? { categoryId: newExp.categoryId, description: newExp.description, payee: newExp.payee || null } : null,
           }),
           online,
         });
       } else {
         // OFFLINE: capture durably against a source PROVEN while online (fail-closed otherwise).
         // The server re-validates the source + prices the cash-out on replay (exactly-once).
+        // A NEW petty-cash expense needs the live categories + server, so it is online-only.
         if (!offlineScope) throw new PayoutOfflineError();
+        if (!source) throw new PayoutOfflineError("A new petty-cash expense needs a connection.");
         const proof = await provePayoutSourceOffline(kind, source.id, offlineScope);
         if (!proof.ok) throw new Error(proof.reason);
         await capturePayoutOffline({
@@ -419,6 +440,7 @@ function NewPayout({
           note: note.trim() || null,
           amountUsd: payoutAmountUsd(amountNum, currency, usdRate),
           clientOpId: opId.current,
+          postToAccounting: accounting,
         });
       }
       await onDone();
@@ -427,14 +449,22 @@ function NewPayout({
     } finally {
       setBusy(false);
     }
-  }, [amountNum, currency, kind, note, offlineScope, onDone, online, shiftId, shiftLocalId, source, usdRate]);
+  }, [accounting, amountNum, currency, kind, newExp, note, offlineScope, onDone, online, shiftId, shiftLocalId, source, usdRate]);
+
+  const startNewExpense = useCallback(async () => {
+    setSource(null);
+    setNewExp({ categoryId: null, categoryName: "", description: "", payee: "" });
+    setStep("newExpense");
+    setCategories(null);
+    setCategories(await loadExpenseCategories(tenantId));
+  }, [tenantId]);
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2 text-xs">
         <StepDot n={1} label="Amount" active={step === "amount"} done={amountNum > 0 && step !== "amount"} />
         <StepDot n={2} label="What for" active={step === "kind"} done={!!kind && step !== "kind" && step !== "amount"} />
-        <StepDot n={3} label="Record" active={step === "source"} done={!!source && step === "review"} />
+        <StepDot n={3} label="Record" active={step === "source" || step === "newExpense"} done={(!!source || !!newExp) && step === "review"} />
         <StepDot n={4} label="Confirm" active={step === "review"} done={false} />
       </div>
 
@@ -493,6 +523,16 @@ function NewPayout({
           <p className="mb-2 text-sm font-bold text-ink">
             Link the {PAYOUT_SOURCE_TYPES.find((t) => t.type === kind)?.label.toLowerCase()} this pays for
           </p>
+          {kind === "expense" && accounting && online && (
+            <button
+              type="button"
+              onClick={() => void startNewExpense()}
+              className="mb-2 w-full rounded-lg border border-dashed border-brand px-3 py-2 text-left hover:bg-brand-soft"
+            >
+              <span className="block text-sm font-bold text-ink">+ New petty-cash expense</span>
+              <span className="block text-[12px] text-sub">Records a new expense in Accounting, paid from this drawer</span>
+            </button>
+          )}
           {sources === null ? (
             <p className="py-6 text-center text-sm text-sub">Reading records…</p>
           ) : sources.length === 0 ? (
@@ -507,6 +547,7 @@ function NewPayout({
                     type="button"
                     onClick={() => {
                       setSource(s);
+                      setNewExp(null);
                       setStep("review");
                     }}
                     className="w-full rounded-lg border border-line px-3 py-2 text-left hover:border-brand hover:bg-brand-soft"
@@ -526,7 +567,55 @@ function NewPayout({
         </div>
       )}
 
-      {step === "review" && source && (
+      {step === "newExpense" && newExp && (
+        <div className="space-y-3">
+          <p className="text-sm font-bold text-ink">New petty-cash expense</p>
+          <div>
+            <p className="mb-1 text-[12px] font-bold text-ink">Category</p>
+            {categories === null ? (
+              <p className="py-2 text-sm text-sub">Reading categories…</p>
+            ) : (
+              <div className="flex max-h-40 flex-wrap gap-1 overflow-y-auto">
+                {categories.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => setNewExp({ ...newExp, categoryId: c.id, categoryName: c.name })}
+                    className={cn(
+                      "rounded-lg border px-2 py-1 text-[12px]",
+                      newExp.categoryId === c.id ? "border-brand bg-brand-soft font-bold text-brand-dark" : "border-line text-ink",
+                    )}
+                  >
+                    {c.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-bold text-ink" htmlFor="payout-exp-desc">
+              What was it for?
+            </label>
+            <Input id="payout-exp-desc" value={newExp.description} onChange={(e) => setNewExp({ ...newExp, description: e.target.value })} placeholder="e.g. gas for the generator" />
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-bold text-ink" htmlFor="payout-exp-payee">
+              Paid to (optional)
+            </label>
+            <Input id="payout-exp-payee" value={newExp.payee} onChange={(e) => setNewExp({ ...newExp, payee: e.target.value })} placeholder="e.g. the station" />
+          </div>
+          <div className="flex justify-between gap-2">
+            <Button variant="ghost" onClick={() => setStep("source")}>
+              Back
+            </Button>
+            <Button size="lg" disabled={!newExp.categoryId || newExp.description.trim() === ""} onClick={() => setStep("review")}>
+              Next
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {step === "review" && (source || newExp) && (
         <div className="space-y-3">
           <div className="rounded-xl border border-line p-3">
             <div className="flex items-baseline justify-between">
@@ -535,8 +624,10 @@ function NewPayout({
             </div>
             <div className="mt-2 border-t border-line pt-2">
               <p className="text-[12px] text-sub">For</p>
-              <p className="text-sm font-bold text-ink">{source.label}</p>
-              <p className="text-[11px] text-sub">{PAYOUT_SOURCE_TYPES.find((t) => t.type === kind)?.label}</p>
+              <p className="text-sm font-bold text-ink">{source ? source.label : newExp?.description}</p>
+              <p className="text-[11px] text-sub">
+                {source ? PAYOUT_SOURCE_TYPES.find((t) => t.type === kind)?.label : `New petty-cash expense · ${newExp?.categoryName ?? ""}`}
+              </p>
             </div>
           </div>
           <div>
@@ -546,13 +637,16 @@ function NewPayout({
             <Input id="payout-note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. paid the driver in cash" />
           </div>
           <p className="text-[12px] text-sub">
-            This records the cash leaving the till. It does NOT create a new expense or payable — the linked record above
-            is the only business entry.
+            {accounting && kind === "expense"
+              ? newExp
+                ? "This records the cash leaving the till and creates the expense above in Accounting, paid from this drawer."
+                : "This records the cash leaving the till and pays the expense above from this drawer in Accounting. No second expense is created."
+              : "This records the cash leaving the till. It does NOT create a new expense or payable — the linked record above is the only business entry."}
             {!online && " Offline, it's recorded locally against the drawer and syncs on reconnect."}
           </p>
           {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">{error}</p>}
           <div className="flex justify-between gap-2">
-            <Button variant="ghost" onClick={() => setStep("source")} disabled={busy}>
+            <Button variant="ghost" onClick={() => setStep(newExp ? "newExpense" : "source")} disabled={busy}>
               Back
             </Button>
             <Button

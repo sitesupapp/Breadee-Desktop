@@ -150,6 +150,9 @@ export async function capturePayoutOffline(input: {
   amountUsd?: number | null;
   /** One id per payout attempt, reused on retry (the server idempotency key). */
   clientOpId: string;
+  /** 1.0.40 (BUG 08) — captured while the backend advertised the payout -> Accounting contract: the
+   *  replay settles the linked EXPENSE from drawer cash. Absent on older captures (drawer-only replay). */
+  postToAccounting?: boolean;
 }): Promise<CapturePayoutResult> {
   const { scope, proof } = input;
   if (!(input.amount > 0)) throw new Error("A payout amount must be greater than zero.");
@@ -183,6 +186,7 @@ export async function capturePayoutOffline(input: {
       currency: input.currency,
       method: "cash", // a payout is always physical cash out of the till
       ...(input.amountUsd != null && input.amountUsd > 0 ? { amount_usd: input.amountUsd } : {}),
+      ...(input.postToAccounting === true && proof.source_type === "expense" ? { post_to_accounting: true } : {}),
     },
     status: "pending",
     retry_count: 0,

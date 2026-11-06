@@ -122,6 +122,9 @@ export type PosRpcName =
   | "pos_payout_create"
   | "pos_payout_reverse"
   | "pos_payout_list"
+  // 1.0.40 (BUG 08) — read-only probe: does this backend support the payout -> Accounting contract
+  // (post_to_accounting / new_expense)? Absent on an older backend -> the Desktop keeps the old flow.
+  | "pos_payout_accounting_capability"
   // Phase H — POS Analytics. ONE server-aggregated report over a bounded date range,
   // gated pos.analytics.view. READ-only; the SAME response drives the dashboard AND PDF.
   | "pos_analytics_summary"

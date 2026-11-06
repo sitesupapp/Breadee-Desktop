@@ -81,13 +81,21 @@ export class PayoutOfflineError extends Error {
   }
 }
 
+/** 1.0.40 (BUG 08) — a NEW petty-cash expense the payout creates (and pays) in Accounting. */
+export type NewPettyCashExpense = { category_id: string | null; description: string; payee: string | null };
+
 export type PayoutCreatePayload = {
   shift_id: string;
   amount: number;
   source_type: PayoutSourceType;
-  source_id: string;
+  /** null only with `new_expense` (the server creates the expense and links it). */
+  source_id: string | null;
   note: string | null;
   client_op_id: string;
+  /** 1.0.40 (BUG 08) — an expense payout settles the expense from drawer cash in Accounting. Sent only
+   *  when the backend advertises the contract; an older backend never sees it. */
+  post_to_accounting?: true;
+  new_expense?: NewPettyCashExpense;
 };
 
 /**
@@ -99,18 +107,65 @@ export function buildPayoutCreatePayload(input: {
   shiftId: string;
   amount: number;
   sourceType: PayoutSourceType;
-  sourceId: string;
+  sourceId: string | null;
   note: string | null;
   clientOpId: string;
+  postToAccounting?: boolean;
+  newExpense?: { categoryId: string | null; description: string; payee: string | null } | null;
 }): PayoutCreatePayload {
+  // Accounting applies to EXPENSE payouts only; every other source keeps its drawer-only treatment.
+  const accounting = input.postToAccounting === true && input.sourceType === "expense";
+  const newExpense = accounting && input.newExpense ? input.newExpense : null;
   return {
     shift_id: input.shiftId,
     amount: input.amount,
     source_type: input.sourceType,
-    source_id: input.sourceId,
+    source_id: newExpense ? null : input.sourceId,
     note: input.note && input.note.trim() !== "" ? input.note.trim() : null,
     client_op_id: input.clientOpId,
+    ...(accounting ? { post_to_accounting: true as const } : {}),
+    ...(newExpense
+      ? {
+          new_expense: {
+            category_id: newExpense.categoryId,
+            description: newExpense.description.trim(),
+            payee: newExpense.payee && newExpense.payee.trim() !== "" ? newExpense.payee.trim() : null,
+          },
+        }
+      : {}),
   };
+}
+
+/** 1.0.40 (BUG 08) — does this backend post expense payouts to Accounting? false on ANY failure (an
+ *  older backend has no probe), so the Desktop then behaves exactly as before. */
+let lastKnownPayoutAccounting: boolean | null = null;
+export async function loadPayoutAccountingCapability(): Promise<boolean> {
+  try {
+    const r = asRecord(await callPosRpc("pos_payout_accounting_capability", {}));
+    lastKnownPayoutAccounting = bool(r.expense_settlement);
+    return lastKnownPayoutAccounting;
+  } catch {
+    // Unknown function (older backend) or no connection: keep the last answer this session saw.
+    return lastKnownPayoutAccounting ?? false;
+  }
+}
+
+export type ExpenseCategory = { id: string; name: string };
+
+/** 1.0.40 (BUG 08) — the tenant's expense categories (RLS read) for a new petty-cash expense. */
+export async function loadExpenseCategories(tenantId: string | null | undefined): Promise<ExpenseCategory[]> {
+  if (!tenantId) return [];
+  try {
+    const { supabase } = await import("@/lib/supabase");
+    const client = supabase as unknown as {
+      from(t: string): { select(c: string): { eq(c: string, v: unknown): { order(c: string, o: { ascending: boolean }): PromiseLike<{ data: unknown; error: unknown }> } } };
+    };
+    const { data, error } = await client.from("expense_categories").select("id, name").eq("tenant_id", tenantId).order("name", { ascending: true });
+    if (error || !Array.isArray(data)) return [];
+    return (data as unknown[]).map((row) => asRecord(row)).filter((r) => str(r.id) && str(r.name)).map((r) => ({ id: str(r.id), name: str(r.name) }));
+  } catch {
+    return [];
+  }
 }
 
 function parsePayout(v: unknown): Payout {
