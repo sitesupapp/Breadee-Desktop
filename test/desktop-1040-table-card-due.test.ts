@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 
 import { readMapPaidBySplit, tableCardAmount, type PaidSettlementRead } from "@/lib/pos/tableBill";
 import { runSyncNow, syncNowText } from "@/lib/offline/syncActions";
+import { outstandingByCurrency, outstandingOf, sortOpenTables } from "@/lib/pos/openTables";
 import type { TableMap, TableSummary } from "@/types/tables";
 
 const T = (over: Partial<TableSummary>): TableSummary => ({
@@ -71,6 +72,20 @@ test("BUG 03 native: Sync now never reports fewer items needing attention than a
     throw new Error("db");
   });
   assert.match(failing.text, /0 still need attention/, "a failed standing read never breaks the report");
+});
+
+test("BUG 01 native 1.0.49: the Open Tables OUTSTANDING total and 'highest' sort use what is still owed", () => {
+  const partPaid = T({ id: "t1", total: 300000, collected: null, paid_by_split: 100000 });
+  const unpaid = T({ id: "t2", total: 0 });
+  const big = T({ id: "t3", total: 250000 });
+  assert.equal(outstandingOf(partPaid), 200000);
+  assert.equal(outstandingOf(unpaid), 0);
+  assert.equal(outstandingOf(T({ total: null, mixed_currency: true })), null);
+  assert.deepEqual(outstandingByCurrency([partPaid, unpaid]), [{ currency: "LBP", amount: 200000, tables: 2 }]);
+  // unchanged when nothing is paid by split
+  assert.deepEqual(outstandingByCurrency([big, unpaid]), [{ currency: "LBP", amount: 250000, tables: 2 }]);
+  // 'highest' ranks by what is owed: 250,000 unpaid before 200,000 still due on a 300,000 bill
+  assert.deepEqual(sortOpenTables([partPaid, big], "highest").map((t) => t.id), ["t3", "t1"]);
 });
 
 test("card amount: an unpaid bill shows exactly the server total (unchanged)", () => {
