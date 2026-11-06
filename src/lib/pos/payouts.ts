@@ -139,6 +139,10 @@ export function buildPayoutCreatePayload(input: {
 /** 1.0.40 (BUG 08) — does this backend post expense payouts to Accounting? false on ANY failure (an
  *  older backend has no probe), so the Desktop then behaves exactly as before. */
 let lastKnownPayoutAccounting: boolean | null = null;
+/** 1.0.40 (BUG 08) — the last capability answer this session saw (false until a probe succeeded). */
+export function payoutAccountingKnown(): boolean {
+  return lastKnownPayoutAccounting === true;
+}
 export async function loadPayoutAccountingCapability(): Promise<boolean> {
   try {
     const r = asRecord(await callPosRpc("pos_payout_accounting_capability", {}));

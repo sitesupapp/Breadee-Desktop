@@ -21,6 +21,7 @@ import {
   loadPayoutSourcesOfflineAware,
   loadPayoutAccountingCapability,
   loadExpenseCategories,
+  payoutAccountingKnown,
   reversePayout,
   type ExpenseCategory,
   type Payout,
@@ -238,6 +239,18 @@ function PayoutRow({
   afterReverse: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
+  // 1.0.40 (BUG 08) — reverse wording follows the backend's payout -> Accounting contract.
+  const [, setAcctProbe] = useState(0);
+  useEffect(() => {
+    if (!confirming || payout.source_type !== "expense") return;
+    let live = true;
+    void loadPayoutAccountingCapability().then(() => {
+      if (live) setAcctProbe((n) => n + 1);
+    });
+    return () => {
+      live = false;
+    };
+  }, [confirming, payout.source_type]);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -299,8 +312,10 @@ function PayoutRow({
       {confirming && !reversed && (
         <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2">
           <p className="text-[12px] font-semibold text-amber-900">
-            Reverse this cash-out? The {formatMoney(payout.amount, currency)} returns to the expected drawer. The linked
-            record is NOT changed.
+            {payout.source_type === "expense" && payoutAccountingKnown()
+              ? `Reverse this cash-out? The ${formatMoney(payout.amount, currency)} returns to the expected drawer. If it paid the expense in Accounting, that expense payment is voided too (and a petty-cash expense it created).`
+              : <>Reverse this cash-out? The {formatMoney(payout.amount, currency)} returns to the expected drawer. The linked
+            record is NOT changed.</>}
           </p>
           <Input
             className="mt-2"
