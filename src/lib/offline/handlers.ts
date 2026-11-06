@@ -986,6 +986,8 @@ type PayoutPayload = {
   source_type: string;
   source_id: string;
   note: string | null;
+  /** 1.0.40 (BUG 08) — present only on captures made against a backend with the Accounting contract. */
+  post_to_accounting?: boolean;
 };
 
 /** payout — record a cash PAYOUT offline (pos_payout_create), exactly-once on client_op_id. The
@@ -1014,6 +1016,7 @@ export const payoutHandler: OperationHandler = {
         sourceId: p.source_id,
         note: p.note,
         clientOpId: op.client_op_id,
+        ...(p.post_to_accounting === true ? { postToAccounting: true } : {}),
       });
       return { ok: true, canonicalId: r.payout_id || null, resultMeta: { payout_id: r.payout_id, amount: r.amount, amount_usd: r.amount_usd, idempotent: r.idempotent } };
     } catch (e) {
