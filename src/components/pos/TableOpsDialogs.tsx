@@ -401,7 +401,8 @@ export function MergeTablesDialog({
           <p className="mb-2 text-xs text-sub">
             Choose the tables whose bills should move onto {primary?.name}. Whole items that are already paid stay
             on their original bill and are never charged again; only the unpaid items move. An item paid for only
-            partly (part of its quantity) must be settled first — finish it with Split, then merge. A bill that is
+            partly (part of its quantity) keeps its paid quantity on its original bill and only its unpaid quantity
+            moves; a combo paid only in part must be settled as a whole first. A bill that is
             fully paid, on account, adjusted or on another shift is refused by the server, with the reason shown here.
           </p>
           <ul className="grid max-h-[40vh] grid-cols-1 gap-2 overflow-y-auto overscroll-contain">
