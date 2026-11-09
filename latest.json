@@ -1,0 +1,11 @@
+{
+  "version": "1.0.40",
+  "notes": "Split bills now show only what is still due: Pay Full Bill asks for exactly the remaining amount and each guest who pays by split gets their own receipt. A table whose offline order Breadee refused no longer stays occupied, and the Sync Center explains every item, with a Sync now button that reports what synced.",
+  "pub_date": "2026-11-09T14:16:08Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dDRJLy9KUVRQd0JNSFBGUDIxeHBPeHBuUXBaTTIyWDlHZnJYSmNnMG5xODZxR0ExWVlSVitCZmJxelQ3cHV0azAzK0xROG9IR2RtWmpnZEdxc0p6a0FZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjMzNzYxCWZpbGU6QnJlYWRlZV8xLjAuNDBfeDY0LXNldHVwLmV4ZQpsSGZ3NlNNMUxaY0lnSzRWNzZIdUYxS3IwKy9lWUNrZnZFNGkzN2dyZ1VDdmlCcTVNa1RBdHlNT2pmeVZ0VC9xOUR2OGVVZXVJQVUzb0U0NE5jL2NBZz09Cg==",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.40/Breadee_1.0.40_x64-setup.exe"
+    }
+  }
+}
