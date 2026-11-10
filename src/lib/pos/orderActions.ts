@@ -120,11 +120,14 @@ export function canPrintOrder(): boolean {
 
 /** The payment cell. An unpaid order shows no method, because it has none.
  *  1.0.38 (Bug 4): a merged clean source has no balance of its own — it MOVED (never "unpaid"). */
-export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method"> & Partial<Pick<ShiftOpenOrder, "status">> & MergeProvenance): string {
+export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method"> & Partial<Pick<ShiftOpenOrder, "status" | "collected">> & MergeProvenance): string {
   if (order.status != null && isMergedSource({ status: order.status, merged_into_order_id: order.merged_into_order_id })) {
     return `No balance — moved to #${mergedTargetLabel(order)}`;
   }
   if (order.payment_status === "refunded") return "refunded";
+  // 1.0.41 (BUG 02 S3) — Breadee keeps a part-paid order 'unpaid' until its final settle; split payments already
+  // collected part of it (orderDue.attachCollected), so it is never labelled plain "unpaid".
+  if (order.payment_status !== "paid" && Number(order.collected ?? 0) > 0) return "part paid";
   if (order.payment_status !== "paid") return order.payment_status || "unpaid";
   return order.payment_method ? `paid · ${order.payment_method}` : "paid";
 }

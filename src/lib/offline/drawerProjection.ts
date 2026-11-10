@@ -78,6 +78,32 @@ export function computeDrawerProjection(
   };
 }
 
+/**
+ * 1.0.41 (BUG 04 U5) — PURE. The best-effort LOCAL USD amount of a CASH split leg (Σ final unit price × quantity
+ * of the allocated lines, order currency → USD), for the offline drawer only — the server derives the real charge,
+ * exactly like a full settle's `cash_amount_usd`. Null for a non-cash leg, an unknown line, or an unknown rate
+ * (the drawer then counts it as unknown, never guesses).
+ */
+export function offlineLegCashUsd(
+  lines: readonly { id: string; final_unit_price: number }[],
+  allocations: readonly { order_item_id: string; quantity: number | string }[],
+  method: string,
+  currency: string | null | undefined,
+  usdRate: number | null | undefined,
+): number | null {
+  if (method !== "cash") return null;
+  let total = 0;
+  for (const a of allocations) {
+    const l = lines.find((x) => x.id === a.order_item_id);
+    if (!l) return null;
+    total += Number(l.final_unit_price) * Number(a.quantity);
+  }
+  if (!Number.isFinite(total) || total <= 0) return null;
+  if (currency === "USD") return round2(total);
+  if (currency === "LBP" && usdRate && usdRate > 0) return round2(total / usdRate);
+  return null;
+}
+
 /** The immutable scope a drawer belongs to (the live till). */
 export type DrawerScope = {
   tenantId: string;
@@ -125,6 +151,15 @@ export function extractDrawerMovements(
       if (p.refund === true && p.tender === "cash") {
         const usd = typeof p.expected_refund_usd === "number" ? p.expected_refund_usd : null;
         if (usd != null && usd > 0) movements.push({ kind: "refund", method: "cash", amountUsd: usd, operationId: op.operation_id });
+        else unknown++;
+      }
+    } else if (op.operation_type === "split_settle") {
+      // 1.0.41 (BUG 04 U5) — a CASH split leg is cash into the drawer. Through 1.0.40 split legs were ignored, so
+      // the offline expected cash was understated. A leg captured without a locally-known USD amount (pre-1.0.41,
+      // or an unknown rate) is counted as unknown, never guessed.
+      if (p.method === "cash") {
+        const usd = typeof p.cash_amount_usd === "number" ? p.cash_amount_usd : null;
+        if (usd != null && usd > 0) movements.push({ kind: "sale", method: "cash", amountUsd: usd, operationId: op.operation_id });
         else unknown++;
       }
     } else if (op.operation_type === "pay_table" || op.operation_type === "pay_order") {

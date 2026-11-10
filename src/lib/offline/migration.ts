@@ -44,6 +44,12 @@ function needsPaymentBridge(op: OfflineOperation): boolean {
   return !(op.payload as { payment_intent?: unknown } | null)?.payment_intent;
 }
 
+/** 1.0.41 (U5) — the drawer-projection fields of a legacy sale row (local provisional total, its currency). */
+export function drawerFields(t: Pick<PosOfflineTxn, "total" | "currency">): { total?: number; currency?: string } {
+  const total = Number(t.total);
+  return Number.isFinite(total) && total > 0 && typeof t.currency === "string" && t.currency !== "" ? { total, currency: t.currency } : {};
+}
+
 function txnStatus(s: PosOfflineTxnStatus): OperationStatus {
   if (s === "synced") return "synced";
   if (s === "needs_attention") return "needs_attention";
@@ -126,7 +132,7 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
           status: "pending",
           // rc.14 — MERGE over the op's payload: its remap fields (shift_local / customer_local /
           // address_local) stay with the logical order (rc.13 replaced the payload and dropped them).
-          payload: { ...((existingTxnOp.payload as object | null) ?? {}), order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true },
+          payload: { ...((existingTxnOp.payload as object | null) ?? {}), order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true, ...drawerFields(t) },
           last_error_code: null,
           last_error_message: null,
         });
@@ -142,7 +148,7 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
         // carries the payment. A cancelled op is never resurrected.
         const prev = (existingTxnOp.payload as { paid?: unknown } | null) ?? {};
         await localdb.operations.update(id, {
-          payload: { ...prev, order_payload: t.order_payload, payment_intent: t.payment_intent, paid: prev.paid === true || t.paid === true },
+          payload: { ...prev, order_payload: t.order_payload, payment_intent: t.payment_intent, paid: prev.paid === true || t.paid === true, ...drawerFields(t) },
         });
       } else {
         report.skippedAlreadyMigrated++;
@@ -178,7 +184,9 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
       canonical_entity_id: t.server_order_id ?? null,
       dependency_ids: dependsShift ? [shiftOpId(dependsShift)] : [],
       depends_on_local_entities: localDeps,
-      payload: { order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true, shift_local: dependsShift, customer_local: customerLocal, address_local: addressLocal },
+      // 1.0.41 (BUG 04 U5) — the local provisional total + currency travel with the op for the offline drawer
+      // projection only (offlineDrawer.extractTakeawayCashMovements; never sent — the handler submits order_payload).
+      payload: { order_payload: t.order_payload, payment_intent: t.payment_intent, paid: t.paid === true, shift_local: dependsShift, customer_local: customerLocal, address_local: addressLocal, ...drawerFields(t) },
       status: txnStatus(t.status),
       retry_count: t.attempts ?? 0,
       last_attempt_at: t.last_attempt_at ?? null,

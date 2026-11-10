@@ -128,6 +128,11 @@ function terminalClass(message: string, e?: unknown): { retryClass: RetryClass; 
   // or "permission" (the override refusal mentions permission) and never a retry: nothing was written.
   const price = priceRefusalCode(message, e);
   if (price) return { retryClass: "CONFLICT", code: price };
+  // 1.0.41 (RC-D) — the 1.0.40 server holds (BUG 09 / BUG 10). Raised before any write ("Nothing was charged");
+  // a person clears them (open the collector's shift, decide the transfer) and the SAME request can then land.
+  // Through 1.0.40 they fell through to a generic "validation" refusal.
+  const hold = serverHoldCode(message, e);
+  if (hold) return { retryClass: "CONFLICT", code: hold };
   const kind = terminalKind(message);
   if (kind === "permission") return { retryClass: "AUTHORITY_REFUSED", code: "permission" };
   if (kind === "shift_closed") return { retryClass: "CONFLICT", code: "shift_closed" };
@@ -140,6 +145,20 @@ function terminalClass(message: string, e?: unknown): { retryClass: RetryClass; 
  *  price without pos.price_override). The whole submit rolled back and the client_op_id was NOT recorded, so a
  *  reviewed retry is still exactly-once. The structured code (details.pos_error_code) wins; the server's fixed
  *  wording is the fallback for call sites that only keep the message. Returns the lower-case op code or null. */
+/** 1.0.41 (RC-D) — _pos_payment_shift (COLLECTOR_NO_OPEN_SHIFT / COLLECTOR_SHIFT_CLOSED) and the order-transfer
+ *  guard (ORDER_TRANSFER_PENDING), by structured code (details.pos_error_code) or the server's fixed wording. */
+const SERVER_HOLD_CODES = new Set(["COLLECTOR_NO_OPEN_SHIFT", "COLLECTOR_SHIFT_CLOSED", "ORDER_TRANSFER_PENDING"]);
+export function serverHoldCode(message: string, e?: unknown): string | null {
+  const code = e !== undefined ? posErrorCode(e) : null;
+  if (code && SERVER_HOLD_CODES.has(code)) return code.toLowerCase();
+  const named = /\b(COLLECTOR_NO_OPEN_SHIFT|COLLECTOR_SHIFT_CLOSED|ORDER_TRANSFER_PENDING)\b/.exec(message);
+  if (named) return named[1].toLowerCase();
+  if (/open your own shift on this branch before taking this payment/i.test(message)) return "collector_no_open_shift";
+  if (/your shift closed while this payment was being taken/i.test(message)) return "collector_shift_closed";
+  if (/waiting for a transfer decision/i.test(message)) return "order_transfer_pending";
+  return null;
+}
+
 const PRICE_REFUSAL_CODES = new Set(["PRICE_CHANGED", "INVALID_LINE_QUANTITY", "INVALID_LINE_PRICE", "PRICE_OVERRIDE_NOT_PERMITTED"]);
 export function priceRefusalCode(message: string, e?: unknown): string | null {
   const code = e !== undefined ? posErrorCode(e) : null;

@@ -233,6 +233,39 @@ export function settleHeldByRefusedStructural(settle: OfflineOperation, s: Offli
   return settle.dependency_ids.includes(s.operation_id) && typeof s.last_attempt_at === "string" && settle.created_at <= s.last_attempt_at;
 }
 
+/**
+ * 1.0.41 (BUG 04 U2, HIGH) — a SPLIT LEG captured on top of an offline move / merge that the server then REFUSED,
+ * while that op was still projected (captured before the refusing attempt, replaying after it). The cashier
+ * collected part of the bill the op had brought over; when the op is refused the bill goes back to its own table
+ * at its FULL balance and the parked leg was counted nowhere (through 1.0.40 only a full pay / on-account was
+ * "held"), so the same value could be collected twice. Such a leg HOLDS every table the refused op involves:
+ * no Pay / On account / Split is offered there until a person reviews it (the leg's money stays recorded).
+ * A leg the server refused on its own, or a cancelled one, holds nothing.
+ */
+export function splitLegHeldByRefusedStructural(leg: OfflineOperation, s: OfflineOperation): boolean {
+  if (leg.operation_type !== "split_settle" || !settleStillCovers(leg)) return false;
+  if (!isStructuralOp(s) || !structuralRefusedByServer(s)) return false;
+  return leg.dependency_ids.includes(s.operation_id) && typeof s.last_attempt_at === "string" && leg.created_at <= s.last_attempt_at;
+}
+
+/** 1.0.41 (U2) — PURE. Every table held by such a split leg, over one scoped op list. */
+export function tablesHeldBySplitLegs(ops: readonly OfflineOperation[]): Set<string> {
+  const held = new Set<string>();
+  const legs = ops.filter((o) => o.operation_type === "split_settle" && o.status !== "cancelled");
+  if (legs.length === 0) return held;
+  for (const s of ops) {
+    if (!isStructuralOp(s) || !structuralRefusedByServer(s)) continue;
+    if (!legs.some((l) => splitLegHeldByRefusedStructural(l, s))) continue;
+    const t = structuralTables(s);
+    for (const x of [...t.vacates, ...(t.fills ? [t.fills] : [])]) held.add(x);
+  }
+  return held;
+}
+
+/** 1.0.41 (U2) — the operator refusal on a table held by such a split leg. */
+export const SPLIT_LEG_HELD_MESSAGE =
+  "Part of this bill was already paid on this terminal (a split payment taken after an offline move or merge that Breadee refused). Don't collect it again — a manager must review it in the Sync Center first.";
+
 /** 1.0.38 (G1) — a split leg the SERVER reported as having paid its whole order (`parent_completed`). */
 export function splitCompletedOrder(o: OfflineOperation): string | null {
   if (o.operation_type !== "split_settle" || o.status !== "synced" || o.result_meta?.parent_completed !== true) return null;
@@ -1211,11 +1244,14 @@ export function isCasRefusedOpen(o: OfflineOperation): boolean {
 }
 
 /** An op parked by the orchestrator behind a failed prerequisite that never left the device (0 handler calls). */
-// (A settle carries its TABLE id as canonical_entity_id from capture — that is a target, not a server result.)
+// (A settle carries its TABLE id as canonical_entity_id from capture — that is a target, not a server result.
+//  1.0.41 (BUG 04 U1) — so does an offline move / merge (tableOpOffline stores the destination / primary table at
+//  capture): through 1.0.40 a session moved or merged behind a refused open was therefore never recognised as
+//  refused — a phantom occupied destination, a held online move/merge and a missing refused-orders review.)
 const parkedNeverSent = (o: OfflineOperation) =>
   o.status === "needs_attention" &&
   o.synced_at == null &&
-  (o.canonical_entity_id == null || isSettleRecord(o)) &&
+  (o.canonical_entity_id == null || isSettleRecord(o) || isStructuralOp(o)) &&
   o.last_error_code === "dependency_failed" &&
   (o.retry_count ?? 0) === 0;
 
@@ -1425,6 +1461,13 @@ export async function tablesWithUnreflectedWork(
       syncingSettle.add(t);
       if (o.status === "needs_attention") attentionSettle.add(t);
     }
+  }
+  // 1.0.41 (U2) — a split leg held by a refused move / merge holds every table that op involves (the restored
+  // bill must never be collectible again at its full balance while that leg's money stands).
+  for (const t of tablesHeldBySplitLegs(scoped)) {
+    syncingSettle.add(t);
+    attentionSettle.add(t);
+    structuralHold.add(t);
   }
   return { touched, syncingSettle, attentionSettle, refusedSettle, structuralHold, refusedOrders };
 }

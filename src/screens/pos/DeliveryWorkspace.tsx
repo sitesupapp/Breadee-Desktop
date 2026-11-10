@@ -185,6 +185,7 @@ import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
 import { capturePayOrderOffline, payOrderClientOpId } from "@/lib/offline/payOrderOffline";
+import { notifyPosSettled } from "@/state/shiftOrders";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
 import { getDeviceIdentity } from "@/lib/device";
@@ -1945,6 +1946,8 @@ export function useDeliveryWorkspace(input: {
               : { tone: "success", message: "Delivery settled offline", detail: "Recorded on this device — it will sync when you reconnect." },
           );
           if (payTarget.fromQueue && detail) void refreshDetail(detail.id);
+          // 1.0.41 (BUG 02 R5) — every order surface re-reads (the shift's Orders list showed it unpaid).
+          notifyPosSettled();
           await input.refreshCashBox().catch(() => {});
         } catch (e) {
           setPayError(e instanceof Error ? e.message : "The delivery could not be settled offline.");

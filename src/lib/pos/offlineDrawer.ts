@@ -17,6 +17,7 @@
 
 import type { CashBox } from "@/types/pos";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
+import type { PosOfflineTxn } from "@/lib/offline/db";
 import { extractDrawerMovements, type DrawerMovement, type DrawerScope } from "@/lib/offline/drawerProjection";
 
 const CACHE_PREFIX = "breadee-desktop-cashbox:";
@@ -103,6 +104,37 @@ export function extractTakeawayCashMovements(
   return { movements, unknownAmountCount: unknown };
 }
 
+/** 1.0.41 (U5) — PURE. A legacy capture-store sale, viewed as the takeaway_sale op the next drain stages
+ *  (same deterministic id `mig:txn:<local id>`), for the drawer projection only. Never written anywhere. */
+export function legacySaleAsOp(t: PosOfflineTxn): OfflineOperation {
+  return {
+    operation_id: `mig:txn:${t.local_txn_id}`,
+    operation_type: "takeaway_sale",
+    schema_version: 1,
+    scope: {
+      tenant_id: t.tenant_id,
+      branch_id: t.branch_id ?? null,
+      device_id: t.device_id,
+      terminal_id: t.terminal_id ?? "",
+      cashier_user_id: t.cashier_user_id,
+    },
+    created_at: t.created_at,
+    client_op_id: t.client_op_id,
+    local_entity_id: t.local_txn_id,
+    canonical_entity_id: null,
+    dependency_ids: [],
+    depends_on_local_entities: [],
+    payload: { payment_intent: t.payment_intent, total: t.total, currency: t.currency },
+    status: t.status === "synced" ? "synced" : t.status === "needs_attention" ? "needs_attention" : "pending",
+    retry_count: 0,
+    last_attempt_at: null,
+    last_error_code: null,
+    last_error_message: null,
+    result_meta: null,
+    synced_at: null,
+  };
+}
+
 /** PURE — the provisional offline drawer for one shift. */
 export function buildOfflineDrawerView(input: {
   ops: OfflineOperation[];
@@ -153,7 +185,15 @@ export async function loadOfflineDrawerView(args: {
 }): Promise<OfflineDrawerView> {
   const { localdb } = await import("@/lib/offline/db");
   // The op log is retention-bounded (synced ops 30 days); scope + time filtering happens in the pure core.
-  const ops = (await localdb.operations.toArray()) as OfflineOperation[];
+  const logged = (await localdb.operations.toArray()) as OfflineOperation[];
+  // 1.0.41 (BUG 04 U5) — an offline takeaway cash sale stays in the legacy capture store until a drain stages it
+  // into the op log, and no drain runs while the server is off: through 1.0.40 every such sale was missing from
+  // the offline drawer. Not-yet-staged rows are read here (deduplicated by their deterministic op id).
+  const staged = new Set(logged.map((o) => o.operation_id));
+  const unstaged = (await localdb.posOfflineTxns.toArray().catch(() => []))
+    .filter((t) => !staged.has(`mig:txn:${t.local_txn_id}`))
+    .map(legacySaleAsOp);
+  const ops = [...logged, ...unstaged];
   const server = args.pendingLocal ? null : readCachedServerCashBox(args.shiftId);
   let openingFloatUsd: number | null = null;
   if (!server) {

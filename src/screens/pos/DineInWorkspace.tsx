@@ -149,6 +149,8 @@ import {
   type OperationalTableBill,
 } from "@/lib/offline/operationalProjection";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
+import { notifyPosSettled } from "@/state/shiftOrders";
+import { offlineLegCashUsd } from "@/lib/offline/drawerProjection";
 import { requestOpenSyncCenter } from "@/components/sync/syncCenterModel";
 import { captureEditOrderLineOffline } from "@/lib/offline/itemEditOffline";
 import { captureMoveTableOffline, captureMergeTablesOffline } from "@/lib/offline/tableOpOffline";
@@ -1574,6 +1576,8 @@ export function useDineInWorkspace(input: {
           const completes = splitCompletesBill(p, po.key, allocations.map((a) => ({ order_item_id: a.order_item_id, quantity: Number(a.quantity) })))
             ? { tableId: selected.id, sessionLocal: draft?.local_session_id ?? null, orderIds: po.orderId ? [po.orderId] : [] }
             : null;
+          // 1.0.41 (U5) — the leg's local USD cash amount, for the offline drawer only.
+          const legCashUsd = offlineLegCashUsd(p.bill.orders.flatMap((o) => o.lines), allocations, method, p.currency ?? input.currency, input.rate);
           const cap = await splitOperationalBillOffline({
             scope: input.offlineScope,
             orderId: po.orderId,
@@ -1587,6 +1591,8 @@ export function useDineInWorkspace(input: {
             // 1.0.38 — and after the offline move / merge that brought this bill here (barrier).
             dependencyIds: [...sessionDeps, ...po.bumpOps, ...creators, ...p.structuralOpIds],
             completes,
+            tableId: selected.id,
+            cashAmountUsd: legCashUsd,
           });
           if (!cap.ok) {
             setSplitError(cap.reason);
@@ -1595,6 +1601,7 @@ export function useDineInWorkspace(input: {
           // Re-derive the ONE projection so the panel, sidebar and card all show the leg as
           // settlement-pending-sync (never falsely canonical-paid).
           bumpProj();
+          notifyPosSettled(); // 1.0.41 (BUG 02 R5) — the shift's Orders list re-reads too
           const after = await getOperationalTableBill(input.offlineScope, raw);
           const s = projectionSplit(after, selected.name);
           if (s.ok) setSplitState(s.state);
@@ -1628,6 +1635,7 @@ export function useDineInWorkspace(input: {
           }),
         );
         setSplitLastPaid({ display_no: result.display_no, amount: result.amount, method: result.method });
+        notifyPosSettled(); // 1.0.41 (BUG 02 R5) — a part-paid order shows its due on every surface
         // 1.0.40 (guest-level split) — this guest's own receipt: only the items of THIS split, the server's
         // amount, numbered <order_number>-<split_no>. Presentation never undoes the settled split.
         try {
@@ -2095,6 +2103,7 @@ export function useDineInWorkspace(input: {
             detail: "The table is free for a new order. The payment syncs automatically when you reconnect.",
           });
           bumpProj();
+          notifyPosSettled(); // 1.0.41 (BUG 02 R5) — the shift's Orders list re-reads too
         } catch (e) {
           const c = classifyError(e);
           setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);
@@ -2186,6 +2195,7 @@ export function useDineInWorkspace(input: {
         });
 
         if (outcome.ok) {
+          notifyPosSettled(); // 1.0.41 (BUG 02 R5)
           toast.push({
             tone: "success",
             message: outcome.recovered
@@ -2272,6 +2282,7 @@ export function useDineInWorkspace(input: {
             detail: "The table is free for a new order. It syncs automatically when you reconnect.",
           });
           bumpProj();
+          notifyPosSettled(); // 1.0.41 (BUG 02 R5)
         } catch (e) {
           const c = classifyError(e);
           setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);

@@ -17,6 +17,7 @@ import { localdb, readAllOperationsMirrored } from "@/lib/offline/db";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import { closeEffectiveDependencies } from "@/lib/offline/endShiftOffline";
 import { canonicalIdFor } from "@/lib/offline/entityMap";
+import { recoveryOf, retryPrecondition } from "@/lib/offline/refusalPolicy";
 
 export type ForensicCategory =
   | "HISTORICAL_LINE_ID_BUG" // pre-rc.10 round 22P02 — auto-recoverable (replay-safe)
@@ -463,6 +464,18 @@ export function adviceFor(o: OfflineOperation, byId: Map<string, OfflineOperatio
   }
   if (o.last_error_code === "retry_exhausted") {
     return { reason: `Breadee kept answering with a temporary error.${moneyNote}`, action: "Press Retry when the connection is stable." };
+  }
+  // 1.0.41 (RC-C) — the refusal is deterministic for the frozen request: never advise a Retry that cannot help.
+  const recovery = recoveryOf(o);
+  if (recovery === "review") {
+    return {
+      reason: `Breadee refused this ${isPay ? "payment" : "step"} (${(o.last_error_message ?? o.last_error_code ?? "refused").slice(0, 120)}). It was not applied, and sending it again cannot succeed.${moneyNote}`,
+      action: "Do not press Retry or collect again. Check the table's bill on Breadee, then re-enter what is missing online or withdraw this item; copy diagnostics for a manager.",
+    };
+  }
+  const pre = recovery === "retry" ? retryPrecondition(o) : null;
+  if (pre) {
+    return { reason: `Breadee refused this step for now: ${(o.last_error_message ?? o.last_error_code ?? "refused").slice(0, 120)}.${moneyNote}`, action: pre };
   }
   if (isPay) {
     return {

@@ -12,6 +12,7 @@ import { PayoutsPage } from "@/screens/PayoutsPage";
 import { Profile } from "@/screens/Profile";
 import { Settings } from "@/screens/settings/Settings";
 import { Info } from "@/screens/Info";
+import { startSyncWorker } from "@/lib/offline/syncWorker";
 
 function Splash({ label }: { label: string }) {
   return (
@@ -38,6 +39,14 @@ function PostLogin() {
 
 export default function App() {
   const { loading, init } = useSession();
+  const signedIn = useSession((s) => !!s.userId);
+
+  // 1.0.41 (BUG 03 RC-A) — ONE app-level sync worker for the whole signed-in session, whichever screen is
+  // open (Settings → Sync Center works with the POS closed). Stopped on sign-out.
+  useEffect(() => {
+    if (!signedIn) return;
+    return startSyncWorker();
+  }, [signedIn]);
 
   useEffect(() => {
     // rc.10 — a startup failure must never strand the app on the splash (or surface a raw error).

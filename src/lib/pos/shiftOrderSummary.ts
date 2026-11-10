@@ -101,6 +101,9 @@ export type ShiftOpenOrder = {
   /** rc.14 — offline only: this row (or its payment) exists on this device and is not yet confirmed by
    *  the server. Absent on every server-read row. */
   local_pending?: boolean;
+  /** 1.0.41 (BUG 02 S3) — Σ PAID split settlements (order currency) of a not-yet-paid order (orderDue.attachCollected);
+   *  undefined / null = unknown (never read as zero). */
+  collected?: number | null;
 } & MergeProvenance;
 
 /**

@@ -310,19 +310,25 @@ test("D5 drains are single-flight: a concurrent pass returns an empty report", a
 });
 
 test("D5 source: periodic drain is bounded, online-only, scoped, single-flight; operator retry triggers a drain", () => {
-  const s = src("src/screens/pos/PosWorkspace.tsx");
-  assert.match(s, /window\.setInterval\(\(\) => void tick\(\), 45_000\)/);
-  assert.match(s, /if \(periodicBusy\.current\) return;/);
+  // 1.0.41 (BUG 03 RC-A) — the periodic pass and the operator-retry listener moved, unchanged in behaviour,
+  // from the POS workspace into the app-level sync worker (so they also run with the POS closed).
+  const w = src("src/lib/offline/syncWorker.ts");
+  assert.match(w, /window\.setInterval\(\(\) => void tick\(\), 45_000\)/);
+  assert.match(w, /if \(periodicBusy\) return;/);
+  assert.match(w, /if \(getBackendHealth\(\) !== "online"\) return;/, "periodic pass only while the database answers");
   // 1.0.40 (F5) — the listener RETURNS the drain's promise (Sync now / Retry await the pass's real outcome).
-  assert.match(s, /onDrainRequested\(\(\) => drainWithFreshContext\("operator-retry"\)\)/);
-  assert.match(s, /sum\.pending \+ sum\.syncing \+ sum\.retryable \+ sum\.waiting_dependency \+ sum\.legacy_pending > 0/);
+  assert.match(w, /onDrainRequested\(\(\) => appDrain\("operator-retry"\)\)/);
+  assert.match(w, /sum\.pending \+ sum\.syncing \+ sum\.retryable \+ sum\.waiting_dependency \+ sum\.legacy_pending > 0/);
+  const s = src("src/screens/pos/PosWorkspace.tsx");
+  assert.ok(!/onDrainRequested\(/.test(s), "no second drain listener in the POS workspace (one worker)");
   assert.ok(!s.includes("pendingCount()"), "the dormant outbox count is gone from the POS badge");
 });
 
 // ---------------- C4: drain in the capture (pinned) branch ----------------
 
 test("C4 source: the drain context and the customer scope use the pinned operational branch", () => {
-  const ws = src("src/screens/pos/PosWorkspace.tsx");
+  // 1.0.41 — the drain context is built by the app-level sync worker (moved from the POS workspace unchanged).
+  const ws = src("src/lib/offline/syncWorker.ts");
   assert.match(ws, /branchId: resolveBranchId\(s\.tenant, s\.membership, useOperationalBranch\.getState\(\)\.getBranch\(t, u\)\)/);
   const cc = src("src/lib/offline/customerCache.ts");
   assert.match(cc, /resolveBranchId\(s\.tenant, s\.membership, pinned\)/);

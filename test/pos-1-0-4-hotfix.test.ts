@@ -252,7 +252,9 @@ test("a second settlement is refused again at the press, not only at the render"
   // One dialog, one confirm handler, one payment RPC in the whole workspace.
   assert.equal((workspace.match(/<PaymentDialog/g) ?? []).length, 1);
   assert.equal((workspace.match(/const confirmPayment = useCallback/g) ?? []).length, 1);
-  assert.equal((workspace.match(/await payOrder\(/g) ?? []).length, 1);
+  // 1.0.41 (F-WRITE) — the one call is bounded: `await withDeadline(payOrder(...))`. Still exactly ONE call site.
+  assert.equal((workspace.match(/(?:await |await withDeadline\(\s*)payOrder\(/g) ?? []).length, 1);
+  assert.equal((workspace.match(/\bpayOrder\(\{/g) ?? []).length, 1, "exactly one pos_pay_order call in the workspace");
   // And the synchronous latch still guards it, so two clicks in one tick cannot
   // both reach the server.
   const pay = workspace.slice(workspace.indexOf("const confirmPayment"), workspace.indexOf("const doOpenShift"));

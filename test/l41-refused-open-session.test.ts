@@ -42,7 +42,7 @@ import {
 } from "@/lib/offline/refusedSessions";
 import { loadSyncSummary } from "@/components/sync/syncCenterModel";
 import { OPEN_BEHIND_PARKED_SETTLE_MESSAGE, REFUSED_SESSION_SETTLE_MESSAGE } from "@/lib/offline/dineinOffline";
-import { rebaseRefusedOpen, REBASE_TABLE_BUSY, type RebaseDeps } from "@/lib/offline/openRebase";
+import { rebaseRefusedOpen, REBASE_TABLE_BUSY, type RebaseDeps, type TableSale } from "@/lib/offline/openRebase";
 import { operatorRetry, runSyncNow, SYNC_NOW_NO_POS, SYNC_NOW_NOT_RUN } from "@/lib/offline/syncActions";
 import { lastDrainReport } from "@/lib/offline/orchestrator";
 import { loadSyncCenterRows, dependencyCycleOf, adviceFor } from "@/lib/offline/queueForensics";
@@ -521,9 +521,11 @@ async function incidentChain() {
   return { d1, d2, payOpId: pay.operationId, open1, open2 };
 }
 
-const rebaseDeps = (row: TableSummary | null, receipt = false, calls: string[] = []): RebaseDeps => ({
+// 1.0.41 — the rebase also proves Breadee holds NO sale on the table since the capture (duplicate guard).
+const rebaseDeps = (row: TableSummary | null, receipt = false, calls: string[] = [], sales: TableSale[] = []): RebaseDeps => ({
   readTable: async (b, t) => { calls.push(`table:${b}:${t}`); return row; },
   hasReceipt: async (_t, id) => { calls.push(`receipt:${id}`); return receipt; },
+  salesSince: async (_t, b, t) => { calls.push(`sales:${b}:${t}`); return sales; },
 });
 
 test("G2-a refused Open#1 → parked Pay#1 → Open#2 + Round#2 behind it: BOTH sessions refused, table not held, cash preserved and not collectable", async () => {
@@ -630,7 +632,7 @@ test("G2-e F3 Retry rebase: free server table + no receipt → re-armed ONCE wit
   const seen: string[] = [];
   const r = await rebaseRefusedOpen(open1.operation_id, rebaseDeps(freeRow({ pos_entity_version: 8 }), false, seen), "u1", { drain: false });
   assert.deepEqual(r, { kind: "rebased", fromVersion: 7, toVersion: 8 });
-  assert.deepEqual(seen, [`receipt:${open1.client_op_id}`, "table:b1:TBL-X"]);
+  assert.deepEqual(seen, [`receipt:${open1.client_op_id}`, "table:b1:TBL-X", "sales:b1:TBL-X"]);
   const o = (await getOperation(open1.operation_id))!;
   assert.equal(o.status, "pending");
   assert.equal(o.client_op_id, open1.client_op_id, "pos_op_replay keys on id+type+branch, so the id is kept");
@@ -658,12 +660,45 @@ test("G2-e2 F3 Retry rebase never re-arms with a server receipt, on an occupied 
   assert.deepEqual(await rebaseRefusedOpen(open1.operation_id, rebaseDeps(freeRow(), true), "u1", { drain: false }), { kind: "receipt_found" });
   assert.deepEqual(await rebaseRefusedOpen(open1.operation_id, rebaseDeps(REAL_BILL_ROW()), "u1", { drain: false }), { kind: "table_busy", message: REBASE_TABLE_BUSY });
   assert.deepEqual(await rebaseRefusedOpen(open1.operation_id, rebaseDeps(null), "u1", { drain: false }), { kind: "table_busy", message: REBASE_TABLE_BUSY });
-  const off = await rebaseRefusedOpen(open1.operation_id, { readTable: async () => { throw new TypeError("Failed to fetch"); }, hasReceipt: async () => false }, "u1", { drain: false });
+  const off = await rebaseRefusedOpen(open1.operation_id, { readTable: async () => { throw new TypeError("Failed to fetch"); }, hasReceipt: async () => false, salesSince: async () => [] }, "u1", { drain: false });
   assert.equal(off.kind, "offline");
   assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
   // operatorRetry surfaces the genuine conflict and queues nothing
   const rr = await operatorRetry(open1.operation_id, { actorUserId: "u1", rebaseDeps: rebaseDeps(REAL_BILL_ROW()), drain: async () => 1 });
   assert.deepEqual(rr, { ok: false, text: REBASE_TABLE_BUSY });
+  assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
+});
+
+test("1.0.41 duplicate guard: a FREE table with a sale recorded since the capture is NOT re-armed (fail closed); a failed sales read changes nothing", async () => {
+  const { open1 } = await incidentChain();
+  await drainOffline(CTX, "reconnect", conflictingOpen([]));
+  const before = JSON.stringify(await localdb.operations.toArray());
+  // staff re-entered the order online, were paid and freed the table: Breadee now shows it FREE with 0 orders
+  const resold: TableSale[] = [{ order_number: "1042", created_at: new Date().toISOString(), status: "completed" }];
+  let since = "";
+  const deps: RebaseDeps = { ...rebaseDeps(freeRow({ pos_entity_version: 8 })), salesSince: async (_t, _b, _id, s) => { since = s; return resold; } };
+  const r = await rebaseRefusedOpen(open1.operation_id, deps, "u1", { drain: false });
+  assert.equal(r.kind, "sold_since");
+  if (r.kind === "sold_since") {
+    assert.match(r.message, /#1042/);
+    assert.match(r.message, /NOT re-sent/);
+    assert.match(r.message, /Do not collect again/);
+  }
+  const captured = Date.parse((await getOperation(open1.operation_id))!.created_at);
+  assert.equal(Date.parse(since), captured - 30 * 60_000, "the guard looks back 30 minutes before the capture (clock skew)");
+  assert.equal(JSON.stringify(await localdb.operations.toArray()), before, "nothing re-armed, nothing re-queued");
+  // the operator Retry surfaces the same fail-closed outcome and queues nothing
+  let drained = 0;
+  const rr = await operatorRetry(open1.operation_id, { actorUserId: "u1", rebaseDeps: deps, drain: async () => { drained++; return 1; } });
+  assert.equal(rr.ok, false);
+  assert.match(rr.text, /NOT re-sent/);
+  assert.equal(drained, 0, "no drain after a fail-closed retry");
+  assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
+  // the sales check cannot be made → fail closed as "needs a connection", nothing changes
+  const broken: RebaseDeps = { ...rebaseDeps(freeRow({ pos_entity_version: 8 })), salesSince: async () => { throw new TypeError("Failed to fetch"); } };
+  assert.equal((await rebaseRefusedOpen(open1.operation_id, broken, "u1", { drain: false })).kind, "offline");
+  const missing = { readTable: async () => freeRow({ pos_entity_version: 8 }), hasReceipt: async () => false } as unknown as RebaseDeps;
+  assert.equal((await rebaseRefusedOpen(open1.operation_id, missing, "u1", { drain: false })).kind, "offline", "no sales check available → never re-armed");
   assert.equal(JSON.stringify(await localdb.operations.toArray()), before);
 });
 

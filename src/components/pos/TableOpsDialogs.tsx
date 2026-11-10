@@ -21,6 +21,7 @@ import {
   validateClearReason,
 } from "@/lib/pos/tableOps";
 import type { TableSummary } from "@/types/tables";
+import { tableCardAmount } from "@/lib/pos/tableBill";
 
 // --- Move --------------------------------------------------------------------
 
@@ -348,8 +349,11 @@ export function MergeTablesDialog({
   // 1.0.36 (R3): partially-paid breakdown. Outstanding = what is still owed (what the merged bill will
   // collect); collected = what was already paid (stays settled on the original bill, never re-charged).
   // Fall back to the full total when the server didn't send a breakdown (older server / mixed currency).
-  const outstandingOf = (t: TableSummary | null) => (t ? t.outstanding ?? t.total ?? 0 : 0);
-  const collectedOf = (t: TableSummary | null) => t?.collected ?? 0;
+  // 1.0.41 (BUG 01 preview) — the SAME due source as the table card (tableCardAmount: server `collected`, else the
+  // 1.0.40 `paid_by_split` read). Production's map sends no `collected`, so the preview showed the GROSS total
+  // ("To collect 100,000" where 75,000 was due).
+  const outstandingOf = (t: TableSummary | null) => (t ? t.outstanding ?? tableCardAmount(t).amount ?? 0 : 0);
+  const collectedOf = (t: TableSummary | null) => t?.collected ?? t?.paid_by_split ?? 0;
   const selectedSources = sources.filter((s) => selected.includes(s.id));
   // The summary is only meaningful when the primary and every selected source share ONE non-mixed
   // currency — never sum across currencies. (The server likewise refuses a cross-currency merge.)

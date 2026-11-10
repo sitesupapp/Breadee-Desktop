@@ -18,6 +18,10 @@
 //   the payload — and a CAS refusal records no receipt, so the same id replays exactly once.
 //   - a table that is occupied / has a bill on Breadee is a GENUINE conflict: nothing is changed, the operator
 //     is told what to do (never an overwrite of someone else's bill).
+//   - 1.0.41 (duplicate guard, BUG 03 HIGH) — a FREE table is not enough: when Breadee holds ANY dine-in order on
+//     that table created since (30 min before) the offline capture, the same items may already have been rung,
+//     paid and the table freed online. The open is NOT re-armed (fail closed, `sold_since`); the operator
+//     withdraws it (receipt-checked) or adds the items online. Any read failure is fail-closed too.
 // Nothing is deleted, acknowledged or marked synced here.
 
 import { localdb } from "@/lib/offline/db";
@@ -25,11 +29,17 @@ import { requeueDependents, requestDrain, type OfflineOperation } from "@/lib/of
 import { isCasRefusedOpen } from "@/lib/offline/operationalProjection";
 import type { TableSummary } from "@/types/tables";
 
+/** 1.0.41 — one dine-in sale Breadee recorded on the table (ids / numbers / times only). */
+export type TableSale = { order_number: string | null; created_at: string; status: string | null };
+
 export type RebaseDeps = {
   /** The table's LIVE pos_table_map row (null when the server does not list it). Throws when unreachable. */
   readTable(branchId: string | null, tableId: string): Promise<TableSummary | null>;
   /** True when Breadee holds a receipt of this client_op_id (pos_op_submissions). Throws when it cannot tell. */
   hasReceipt(tenantId: string, clientOpId: string): Promise<boolean>;
+  /** 1.0.41 (duplicate guard) — every dine-in order Breadee holds on this table created at or after `sinceIso`
+   *  (any status: open, paid, voided). Throws when it cannot tell. */
+  salesSince(tenantId: string, branchId: string | null, tableId: string, sinceIso: string): Promise<TableSale[]>;
 };
 
 export type RebaseOutcome =
@@ -37,8 +47,26 @@ export type RebaseOutcome =
   | { kind: "not_applicable" }
   | { kind: "receipt_found" }
   | { kind: "table_busy"; message: string }
+  | { kind: "sold_since"; message: string; sales: TableSale[] }
   | { kind: "offline"; message: string }
   | { kind: "stale"; message: string };
+
+/** 1.0.41 — how far before the capture time the duplicate guard looks (device and server clocks differ). A
+ *  larger window only makes the guard stricter (more fail-closed reviews), never a duplicate more likely. */
+export const REBASE_SALES_LOOKBACK_MS = 30 * 60_000;
+
+/** 1.0.41 — fail closed: Breadee recorded a sale on this table around / after this offline open was taken. */
+export function rebaseSoldSinceMessage(sales: TableSale[]): string {
+  const refs = sales
+    .slice(0, 3)
+    .map((s) => (s.order_number ? `#${s.order_number}` : "an order"))
+    .join(", ");
+  return (
+    `Breadee recorded another sale on this table (${refs}) after this offline order was taken, so it is NOT re-sent: ` +
+    "it could ring the same items and payment twice. If those items were already entered again on Breadee, withdraw this offline order " +
+    "(the cash this terminal collected for it stays recorded in Sync history and diagnostics). If they were not, add them to the table online. Do not collect again."
+  );
+}
 
 export const REBASE_TABLE_BUSY =
   "Breadee shows this table occupied (or with an open bill) now, so this offline open cannot be re-sent. Add the items to the table's current bill online, then withdraw the refused order in the Sync Center.";
@@ -70,14 +98,26 @@ export async function rebaseRefusedOpen(operationId: string, deps: RebaseDeps, a
   if (!tableId) return { kind: "not_applicable" };
   let row: TableSummary | null;
   let receipt: boolean;
+  let sales: TableSale[] | null = null;
   try {
     receipt = await deps.hasReceipt(o.scope.tenant_id, o.client_op_id);
     row = await deps.readTable(o.scope.branch_id ?? null, tableId);
+    if (!receipt && tableFreeOnServer(row)) {
+      // 1.0.41 (duplicate guard) — a FREE table is not proof that nobody re-entered this order: staff may have
+      // rung the same items online, been paid and freed the table meanwhile. Any dine-in order Breadee holds on
+      // this table since (shortly before) the capture → fail closed, nothing is re-armed.
+      if (typeof deps.salesSince !== "function") throw new Error("the table's sales could not be checked");
+      const captured = Date.parse(o.created_at);
+      if (!Number.isFinite(captured)) throw new Error("the offline capture time is unknown");
+      sales = await deps.salesSince(o.scope.tenant_id, o.scope.branch_id ?? null, tableId, new Date(captured - REBASE_SALES_LOOKBACK_MS).toISOString());
+      if (!Array.isArray(sales)) throw new Error("the table's sales could not be checked");
+    }
   } catch (e) {
     return { kind: "offline", message: `${REBASE_NEEDS_CONNECTION}${e instanceof Error && e.message ? ` (${e.message.slice(0, 120)})` : ""}` };
   }
   if (receipt) return { kind: "receipt_found" };
   if (!tableFreeOnServer(row)) return { kind: "table_busy", message: REBASE_TABLE_BUSY };
+  if (sales && sales.length > 0) return { kind: "sold_since", message: rebaseSoldSinceMessage(sales), sales };
   const toVersion = Number((row as TableSummary).pos_entity_version);
   if (!Number.isFinite(toVersion)) return { kind: "table_busy", message: REBASE_TABLE_BUSY };
   const p = (o.payload ?? {}) as Record<string, unknown>;
@@ -131,5 +171,24 @@ export const liveRebaseDeps: RebaseDeps = {
     if (r.error) throw new Error(r.error.message ?? "receipt check failed");
     if (!Array.isArray(r.data)) throw new Error("receipt check: no rows array");
     return r.data.length > 0;
+  },
+  async salesSince(tenantId, branchId, tableId, sinceIso) {
+    const { supabase } = await import("@/lib/supabase");
+    let q = supabase
+      .from("pos_orders")
+      .select("order_number, created_at, status")
+      .eq("tenant_id", tenantId)
+      .eq("table_id", tableId)
+      .eq("order_type", "dine_in")
+      .gte("created_at", sinceIso);
+    if (branchId) q = q.eq("branch_id", branchId);
+    const r = await q.order("created_at", { ascending: false }).limit(5);
+    if (r.error) throw new Error(r.error.message ?? "sales check failed");
+    if (!Array.isArray(r.data)) throw new Error("sales check: no rows array");
+    return (r.data as { order_number?: unknown; created_at?: unknown; status?: unknown }[]).map((x) => ({
+      order_number: x.order_number == null ? null : String(x.order_number),
+      created_at: String(x.created_at ?? ""),
+      status: x.status == null ? null : String(x.status),
+    }));
   },
 };

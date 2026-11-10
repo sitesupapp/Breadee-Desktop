@@ -12,6 +12,7 @@ import { currentCaptureBuild, listOperations } from "@/lib/offline/operationLog"
 import { buildDiagnostic, loadSyncCenterRows, type SyncCenterRow } from "@/lib/offline/queueForensics";
 import { COLLECTED_OFFLINE_NOT_ON_BILL, listRefusedSessions, withdrawRefusedSession, type RefusedOrderSummary } from "@/lib/offline/refusedSessions";
 import { operatorRetry, runSyncNow } from "@/lib/offline/syncActions";
+import { noRetryText } from "@/lib/offline/refusalPolicy";
 import { getDeviceIdentity } from "@/lib/device";
 import { formatMoney, isCurrencyCode } from "@/lib/currency";
 import { resolveBranchId } from "@/lib/branch";
@@ -23,8 +24,11 @@ import {
   SYNC_STATE_DEFS,
   SYNC_STATE_ORDER,
   canRetry,
+  canRetryOp,
   chipOf,
+  countOwnedByOthers,
   displayStateOf,
+  ownedByOthersText,
   loadSyncSummary,
   type SyncDisplayState,
   type SyncSummary,
@@ -129,6 +133,7 @@ export function SyncCenterPanel({
   const [confirmWithdraw, setConfirmWithdraw] = useState<string | null>(null);
   const [withdrawing, setWithdrawing] = useState<string | null>(null);
   const [withdrawNote, setWithdrawNote] = useState<{ sessionId: string; text: string } | null>(null);
+  const [othersCount, setOthersCount] = useState(0);
   const refusedScope = useCallback(() => {
     const dev = getDeviceIdentity();
     return { tenantId, branchId, cashierUserId: userId ?? null, deviceId: dev.device_id, terminalId: dev.terminal_id ?? null };
@@ -137,9 +142,11 @@ export function SyncCenterPanel({
   const refresh = useCallback(async () => {
     setRefused(await listRefusedSessions(refusedScope()).catch(() => []));
     setSummary(await loadSyncSummary(tenantId, branchId, { includeSynced: true }).catch(() => EMPTY_SUMMARY));
+    // 1.0.41 (RC-B) — say how many of the counted items the current sign-in will not send.
+    setOthersCount(await countOwnedByOthers(tenantId, branchId, { cashierUserId: userId ?? null, deviceId: getDeviceIdentity().device_id }).catch(() => 0));
     if (tab === "history") setEvents(await listHistory(tenantId, branchId, 100).catch(() => []));
     else setRows(await loadSyncCenterRows({ tenantId, branchId, currentBuild: currentCaptureBuild(), currentShiftId }).catch(() => []));
-  }, [tenantId, branchId, tab, currentShiftId, refusedScope]);
+  }, [tenantId, branchId, tab, currentShiftId, refusedScope, userId]);
 
   const withdraw = useCallback(
     async (sessionId: string) => {
@@ -288,7 +295,8 @@ export function SyncCenterPanel({
             Includes {summary.notYetQueued} offline item{summary.notYetQueued === 1 ? "" : "s"} that will be queued on the next sync.
           </p>
         )}
-        <p className="mt-1 text-[11px] text-sub">Offline work syncs automatically while the POS is open and this terminal is online. Sync now runs that same sync immediately.</p>
+        {ownedByOthersText(othersCount) && <p className="mt-1 text-[11px] font-semibold text-amber-800">{ownedByOthersText(othersCount)}</p>}
+        <p className="mt-1 text-[11px] text-sub">Offline work syncs automatically whenever Breadee&apos;s server answers, on any screen. Sync now runs that same sync immediately.</p>
         <details className="mt-2 text-[11px] text-sub">
           <summary className="cursor-pointer font-semibold">What these states mean</summary>
           <dl className="mt-1 space-y-0.5">
@@ -449,7 +457,13 @@ export function SyncCenterPanel({
                             </ul>
                           </div>
                         )}
-                        {canRetry(state) && retryButton(r.operation_id)}
+                        {canRetryOp(state, r)
+                          ? retryButton(r.operation_id)
+                          : canRetry(state) && (
+                              <div className="mt-1 font-semibold text-amber-900">
+                                {noRetryText({ status: "needs_attention", operation_type: r.type as never, last_error_code: r.error_code, last_error_message: r.error })}
+                              </div>
+                            )}
                       </div>
                     )}
                   </li>

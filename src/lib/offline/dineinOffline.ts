@@ -20,7 +20,7 @@ import {
   normalizeCustomerRef,
 } from "@/lib/offline/operationLog";
 import type { OperationScope } from "@/lib/offline/operationLog";
-import { opInScope, sessionClosure, settleHeldByRefusedStructural, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
+import { opInScope, sessionClosure, settleHeldByRefusedStructural, settleStillCovers, structuralRefusedByServer, tablesHeldBySplitLegs, SPLIT_LEG_HELD_MESSAGE } from "@/lib/offline/operationalProjection";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { reconcileRefusedSessions } from "@/lib/offline/refusedSessions";
 import type { SubmitOrderPayload, SubmitOrderItem } from "@/lib/pos/orders";
@@ -491,6 +491,7 @@ export async function settleTableOffline(input: {
     if (!d && !input.table) throw new Error("This table isn't available offline. Reconnect to settle it.");
     if (d && d.rounds.length === 0 && !input.table) throw new Error("Nothing has been sent to settle on this table.");
     const tableId = d ? d.table_id : (input.table as CanonicalTableTarget).tableId;
+    await assertNotHeldBySplitLeg(tableId);
     const currency = d ? d.currency : (input.table as CanonicalTableTarget).currency;
     const tableName = d ? d.table_name : (input.table as CanonicalTableTarget).tableName;
     const clientOpId = d
@@ -554,6 +555,14 @@ export async function settleTableOffline(input: {
     if (d) await markDraftSettled(d, operationId);
     return { operationId, clientOpId, alreadyCaptured: false };
   });
+}
+
+/** 1.0.41 (BUG 04 U2) — refuse a capture that would collect a bill held by a split leg of a refused move / merge
+ *  (operationalProjection.tablesHeldBySplitLegs). Must run inside a transaction that includes `operations`. */
+async function assertNotHeldBySplitLeg(tableId: string | null | undefined): Promise<void> {
+  if (!tableId) return;
+  const ops = await localdb.operations.where("operation_type").anyOf("move_table", "merge_tables", "split_settle").toArray();
+  if (tablesHeldBySplitLegs(ops).has(tableId)) throw new Error(SPLIT_LEG_HELD_MESSAGE);
 }
 
 /** What any later capture against a session's bill must replay AFTER: its open, every round and — 1.0.38 —
@@ -629,6 +638,7 @@ export async function tableOnAccountOffline(input: {
       ? { tenant_id: d.tenant_id, branch_id: d.branch_id, device_id: d.device_id, terminal_id: d.terminal_id ?? "", cashier_user_id: d.cashier_user_id }
       : canonicalTableScope(input.table as CanonicalTableTarget);
     const tableId = d ? d.table_id : (input.table as CanonicalTableTarget).tableId;
+    await assertNotHeldBySplitLeg(tableId);
     const tableName = d ? d.table_name : (input.table as CanonicalTableTarget).tableName;
     const dependsLocal: string[] = input.customerLocal ? [input.customerLocal] : [];
     const sessionDeps = d ? sessionBarrier(d) : [];
@@ -803,6 +813,10 @@ export async function splitOperationalBillOffline(input: {
    *  what it covers, and the session is settled atomically with it — so the next customer on the table opens
    *  a NEW session (never round N+1 of this paid order). Omitted → a partial leg (unchanged). */
   completes?: { tableId: string; sessionLocal: string | null; orderIds: string[] } | null;
+  /** 1.0.41 (U2) — the table this leg is taken on (projection / guard only; never sent). */
+  tableId?: string | null;
+  /** 1.0.41 (U5) — best-effort LOCAL USD amount of a CASH leg, for the offline drawer only (never sent). */
+  cashAmountUsd?: number | null;
 }): Promise<DineSplitCaptureResult> {
   const allocs = input.allocations.filter((a) => Number(a.quantity) > 0 && (a.order_item_id || a.line_local));
   if (allocs.length === 0) return { ok: false, reason: "Select at least one item to split." };
@@ -818,6 +832,10 @@ export async function splitOperationalBillOffline(input: {
   return localdb.transaction("rw", localdb.operations, localdb.dineDrafts, async () => {
     const existing = await getOperation(operationId);
     if (existing) return { ok: true, operationId, clientOpId, alreadyCaptured: true };
+    // 1.0.41 (U2) — never a further leg on a bill held by a split leg of a refused move / merge.
+    const heldTables = tablesHeldBySplitLegs(await localdb.operations.where("operation_type").anyOf("move_table", "merge_tables", "split_settle").toArray());
+    const legTable = input.tableId ?? completes?.tableId ?? null;
+    if (legTable && heldTables.has(legTable)) return { ok: false, reason: SPLIT_LEG_HELD_MESSAGE };
     const rows = await localdb.operations.where("operation_type").equals("split_settle").toArray();
     const legs = rows
       .filter((o) => {
@@ -852,6 +870,10 @@ export async function splitOperationalBillOffline(input: {
         split_seq: legs.length + 1,
         table_name: input.tableName,
         order_number: input.orderNumber ?? null,
+        // 1.0.41 (U5) — drawer-projection only (never sent), like pay_table's cash_amount_usd.
+        ...(input.method === "cash" && input.cashAmountUsd != null && Number.isFinite(input.cashAmountUsd) && input.cashAmountUsd > 0
+          ? { cash_amount_usd: Math.round((input.cashAmountUsd + Number.EPSILON) * 100) / 100 }
+          : {}),
         // 1.0.38 (G1) — projection-only (never sent): the bill this completing leg closes (isTableSettleOp).
         ...(completes
           ? {

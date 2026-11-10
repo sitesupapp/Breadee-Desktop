@@ -19,6 +19,30 @@
 import { create } from "zustand";
 import { stableSelectionIndex, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import { loadOrdersHistoryOfflineAware } from "@/lib/offline/ordersHistoryOffline";
+import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
+import { attachCollected } from "@/lib/pos/orderDue";
+
+/**
+ * 1.0.41 (BUG 02 R5) — every payment surface (online or offline: takeaway, delivery, dine-in Pay / Split / On
+ * account) announces a recorded settlement with this event, and the shift's orders re-read. Through 1.0.40 the
+ * store refreshed only on a ticket print / receipt / adoption, so a paid order kept showing "Open"/"Unpaid"
+ * "until another transaction".
+ */
+export const POS_SETTLED_EVENT = "breadee:pos-settled";
+export function notifyPosSettled(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(new CustomEvent(POS_SETTLED_EVENT));
+  } catch {
+    /* best-effort: the next refresh trigger still runs */
+  }
+}
+
+type RefreshArgs = { tenantId: string | null; shiftId: string | null; branchId?: string | null; preferId?: string | null };
+/** 1.0.41 (R5) — request sequence: only the LATEST refresh may commit (a slow, stale read never overwrites a
+ *  fresher one). */
+let refreshSeq = 0;
+let lastArgs: RefreshArgs | null = null;
 
 type ShiftOrdersState = {
   /** Every order in the active shift, oldest first. */
@@ -63,6 +87,8 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
   limited: false,
 
   refresh: async ({ tenantId, shiftId, branchId, preferId }) => {
+    const my = ++refreshSeq;
+    lastArgs = { tenantId, shiftId, branchId: branchId ?? null };
     // A shift change invalidates immediately, before the request - so nothing
     // from the previous shift is on screen while the new list loads.
     if (get().shiftId !== shiftId) {
@@ -77,9 +103,12 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
       // rc.14 (F3) — offline-aware: online = the server read + write-through snapshot; offline = that
       // snapshot merged with this device's local orders (never a raw "Failed to fetch").
       const res = await loadOrdersHistoryOfflineAware({ kind: "shift", tenantId, branchId: branchId ?? null, shiftId });
-      const orders = res.orders;
+      // 1.0.41 (BUG 02 S3) — part-paid orders carry what split payments already collected (same source as Pay).
+      const orders = res.offline ? res.orders : await attachCollected(res.orders, tenantId).catch(() => res.orders);
       // Discard a response that arrived after the shift moved on.
       if (get().shiftId !== shiftId) return;
+      // 1.0.41 (R5) — or after a NEWER refresh started (that one commits; this read may predate a payment).
+      if (my !== refreshSeq) return;
       const previous = get();
       const previousId = previous.index >= 0 ? (previous.orders[previous.index]?.id ?? null) : null;
       set({
@@ -90,6 +119,7 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
         limited: res.limited,
       });
     } catch (e) {
+      if (my !== refreshSeq) return;
       set({
         loading: false,
         error: e instanceof Error ? e.message : "The shift's orders could not be loaded.",
@@ -113,8 +143,34 @@ export const useShiftOrders = create<ShiftOrdersState>((set, get) => ({
     set({ index: next });
   },
 
-  reset: () => set({ orders: [], index: -1, loading: false, error: null, shiftId: null, offline: false, limited: false }),
+  reset: () => {
+    refreshSeq++; // an in-flight read of the old shift never commits after a reset
+    lastArgs = null;
+    set({ orders: [], index: -1, loading: false, error: null, shiftId: null, offline: false, limited: false });
+  },
 }));
+
+/** 1.0.41 (R5) — re-read the CURRENT shift's orders (same tenant / branch / shift as the last refresh). */
+export function refreshShiftOrdersAgain(): Promise<void> {
+  const a = lastArgs;
+  if (!a || !a.tenantId || !a.shiftId || useShiftOrders.getState().shiftId !== a.shiftId) return Promise.resolve();
+  return useShiftOrders.getState().refresh({ tenantId: a.tenantId, shiftId: a.shiftId, branchId: a.branchId ?? null });
+}
+
+/** 1.0.41 (R5) — after every recorded settlement and every reconnect drain (on ANY screen), the list re-reads. */
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  const again = () => {
+    void refreshShiftOrdersAgain();
+  };
+  window.addEventListener(POS_SETTLED_EVENT, again);
+  window.addEventListener(OFFLINE_DRAINED_EVENT, again);
+}
+
+/** Test hook. */
+export function __resetShiftOrdersSeqForTests(): void {
+  refreshSeq = 0;
+  lastArgs = null;
+}
 
 /** The selected order, or null. Exported so the invariant lives in one place. */
 export function selectedShiftOrder(state: Pick<ShiftOrdersState, "orders" | "index">): ShiftOpenOrder | null {

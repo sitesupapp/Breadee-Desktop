@@ -75,12 +75,15 @@ test("every capture-lock reason has a user-facing message", () => {
   for (const r of reasons) assert.ok(CAPTURE_LOCK_MESSAGE[r] && CAPTURE_LOCK_MESSAGE[r].length > 20, r);
 });
 
-test("PosWorkspace wires securityReconnect into the shared drain and renders the capture-lock banner", () => {
+test("the app sync worker wires securityReconnect into the shared drain; PosWorkspace renders the capture-lock banner", () => {
+  // 1.0.41 (BUG 03 RC-A) — the drain moved from the POS screen to the ONE app-level worker (syncWorker.ts).
   const pos = src("src/screens/pos/PosWorkspace.tsx");
-  assert.match(pos, /import \{ securityReconnect, useSession \} from "@\/state\/session"/);
-  assert.match(pos, /securityCheck: \(\) => securityReconnect\(\)/);
+  const worker = src("src/lib/offline/syncWorker.ts");
+  assert.match(worker, /import\("@\/state\/session"\)/);
+  assert.match(worker, /securityCheck: \(\) => securityReconnect\(\)/);
   assert.match(pos, /session\.captureLock && \(/);
   assert.match(pos, /CAPTURE_LOCK_MESSAGE\[session\.captureLock\]/);
-  // Exactly one drain path carries the hook (no second drain / queue).
-  assert.equal((pos.match(/runReconnectDrain\(/g) ?? []).length, 1);
+  // Exactly one drain path carries the hook (no second drain / queue): the worker's, and none in the POS screen.
+  assert.equal((worker.match(/runReconnectDrain\(/g) ?? []).length, 1);
+  assert.equal((pos.match(/runReconnectDrain\(/g) ?? []).length, 0);
 });

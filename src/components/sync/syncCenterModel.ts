@@ -18,6 +18,7 @@
 
 import { localdb } from "@/lib/offline/db";
 import { summarizeOperations, type OfflineOperation } from "@/lib/offline/operationLog";
+import { CONFLICT_CODES_1041, retryHelps } from "@/lib/offline/refusalPolicy";
 
 /** 1.0.40 (F6) — ask the POS Sync Center to open, focused on one table's offline work. */
 export const OPEN_SYNC_CENTER_EVENT = "breadee:open-sync-center";
@@ -124,6 +125,9 @@ const CONFLICT_ERROR_CODES = new Set([
   "merge_expected_mismatch",
   "move_table_conflict",
   "merge_tables_conflict",
+  // 1.0.41 (RC-D) — codes the handlers already file as CONFLICT that were missing here, so the Conflict vs
+  // Needs-attention split was cosmetic (an UNSUPPORTED_STATE merge refusal, e.g. reason kitchen_active).
+  ...CONFLICT_CODES_1041,
 ]);
 
 /**
@@ -159,6 +163,22 @@ export function statusLabel(status: string, errorCode?: string | null, operation
  *  quarantined legacy record (it has no handler; a retry would only park it again). */
 export function canRetry(state: SyncDisplayState): boolean {
   return state === "needs_attention" || state === "conflict";
+}
+
+/** 1.0.41 (RC-C) — the Retry button for ONE parked op: its display state allows a retry AND its refusal class
+ *  says a re-send can help (refusalPolicy: retry / rebase). Never for a deterministic refusal of the frozen
+ *  request (bill paid / changed / moved, pins, closed shift …) nor for a child parked behind a refused parent. */
+export function canRetryOp(
+  state: SyncDisplayState,
+  op: { status: string; type?: string | null; operation_type?: string | null; error_code?: string | null; error?: string | null; last_error_code?: string | null; last_error_message?: string | null },
+): boolean {
+  if (!canRetry(state)) return false;
+  return retryHelps({
+    status: op.status as OfflineOperation["status"],
+    operation_type: (op.operation_type ?? op.type ?? "") as OfflineOperation["operation_type"],
+    last_error_code: op.last_error_code ?? op.error_code ?? null,
+    last_error_message: op.last_error_message ?? op.error ?? null,
+  });
 }
 
 export type SyncSummary = {
@@ -254,6 +274,35 @@ export async function loadSyncSummary(
   s.toSync = s.pending + s.waiting + s.syncing + s.retrying;
   s.parked = s.needsAttention + s.conflict + s.managerReview;
   return s;
+}
+
+/** 1.0.41 (BUG 03 RC-B) — who is signed in on this terminal: the drain replays ONLY their work (plus parked
+ *  users' own work under their sealed sessions), while the counts above cover the whole tenant + branch. */
+export type SyncOwner = { cashierUserId: string | null; deviceId: string | null };
+
+const UNSETTLED_STATUSES = ["pending", "blocked_dependency", "syncing", "retryable", "needs_attention"];
+
+/** PURE — does this op belong to someone other than the signed-in cashier on this device? */
+export function ownedByOther(scope: { cashier_user_id?: string | null; device_id?: string | null }, mine: SyncOwner): boolean {
+  return (scope.cashier_user_id ?? null) !== mine.cashierUserId || (scope.device_id ?? null) !== mine.deviceId;
+}
+
+/**
+ * 1.0.41 (RC-B) — how many unsettled ops in the counted scope the signed-in cashier's sync will NOT send (another
+ * cashier's or another terminal's capture). Bounded by the unsettled status index. They are still counted (they
+ * are real, unsynced work) — this number lets every surface SAY why they do not move.
+ */
+export async function countOwnedByOthers(tenantId: string | null, branchId: string | null, mine: SyncOwner): Promise<number> {
+  if (!tenantId) return 0;
+  const match = inScope(tenantId, branchId);
+  const ops = await localdb.operations.where("status").anyOf(UNSETTLED_STATUSES).toArray();
+  return ops.filter((o) => match(o.scope) && ownedByOther(o.scope, mine)).length;
+}
+
+/** The operator sentence for `n` ops owned by another cashier / terminal (null when none). */
+export function ownedByOthersText(n: number): string | null {
+  if (n <= 0) return null;
+  return `${n} of these ${n === 1 ? "was" : "were"} captured by another cashier or on another terminal. ${n === 1 ? "It syncs" : "They sync"} when that cashier is signed in (or parked) on the terminal that captured ${n === 1 ? "it" : "them"} — not under the current sign-in.`;
 }
 
 export type SyncChip = { text: string; kind: "attention" | "pending" | "clear" };

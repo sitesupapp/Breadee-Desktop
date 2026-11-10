@@ -50,7 +50,8 @@ import { DeliveryModal } from "@/components/pos/DeliveryModal";
 import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { hydrateRefundProofs } from "@/lib/pos/refundProofHydration";
 import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
-import { useShiftOrders, selectedShiftOrder } from "@/state/shiftOrders";
+import { useShiftOrders, selectedShiftOrder, notifyPosSettled } from "@/state/shiftOrders";
+import { DINE_IN_PAY_FROM_TABLE_MESSAGE, LOCAL_PAYMENT_PENDING_MESSAGE } from "@/lib/pos/orderDue";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { paymentSummary } from "@/lib/pos/paymentBreakdown";
@@ -79,6 +80,8 @@ import { readPosFeatures } from "@/lib/pos/posFeatures";
 import { buildSubmitPayload, cartSubtotal, submitOrder, submitPayloadToCartLines, type SubmitOrderPayload } from "@/lib/pos/orders";
 import { payOrder, withDeadline, isAmbiguousOutcome, INTERACTIVE_MONEY_DEADLINE_MS, type PaymentMethod } from "@/lib/pos/payments";
 import { takeawayPayOpId, TAKEAWAY_PAY_OP_VERSION } from "@/lib/offline/opIdentity";
+import { appDrain } from "@/lib/offline/syncWorker";
+import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
 import { completePayment, completeOnAccountReceipt, tenderTotalFor } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
@@ -470,56 +473,23 @@ function PosWorkspaceInner() {
   //     old OU (the pre-reconnect closure values are never used for replay).
   // syncPosTxns is single-flight, so two triggers racing coalesce into one safe pass
   // that is already running under fresh context - the loser simply no-ops.
+  // 1.0.41 (BUG 03 RC-A) — the drain is owned by the APP-LEVEL sync worker (lib/offline/syncWorker), started
+  // once after sign-in, so Settings → Sync Center can sync with the POS closed. This screen only ASKS for that
+  // same pass (identical sequence and server-authoritative context: see syncWorker.pass) and re-reads its own
+  // queue display when any pass finishes (OFFLINE_DRAINED_EVENT, scoped below to the live context).
   const drainWithFreshContext = useCallback(
     async (trigger: "reconnect" | "backend-returned" | "periodic" | "operator-retry") => {
-      // Thin wrapper over the extracted, integration-tested drain sequence. It drains
-      // under the server-authoritative context and re-validates that context before
-      // committing any post-sync state, re-passing if an OU switch / sign-out landed
-      // mid-drain. The queue display and the shift re-read are both scoped to the PASS
-      // context, never a render-time closure.
-      await runReconnectDrain({
-        isOfflineMode: () => useSession.getState().offlineMode,
-        // Offline-first recovery — leave offline mode through the canonical revalidation (adopts the
-        // user's own session, or their one-time in-memory credential after a local sign-in).
-        loadContextOnline: () => useSession.getState().goOnline(),
-        readContext: () => {
-          const s = useSession.getState();
-          const t = s.tenant?.id ?? null;
-          const u = s.userId ?? null;
-          if (!t || !u) return null;
-          // 1.0.38 (C4) — replay in the SAME operational branch the capture used: an all-branches
-          // operator's PINNED branch (R5; the pin pos.ts resolves/repairs), not Main. Through 1.0.37 every
-          // op captured in a pinned non-Main branch was deferred forever, and the post-drain shift re-read
-          // under Main dropped that branch's (pending) open shift.
-          return { tenantId: t, userId: u, branchId: resolveBranchId(s.tenant, s.membership, useOperationalBranch.getState().getBranch(t, u)) };
-        },
-        sync: (c) =>
-          syncPosTxns(
-            { tenantId: c.tenantId, branchId: c.branchId, cashierUserId: c.userId, deviceId: getDeviceIdentity().device_id, terminalId: getDeviceIdentity().terminal_id, online: true },
-            trigger,
-          ).then(() => undefined),
-        refreshQueue: async (c, isCurrent) => {
-          const pending = await pendingPosTxnCount().catch(() => 0);
-          const list = await listResumablePosTxns(c.tenantId, c.branchId, c.userId).catch(() => []);
-          // Re-check AFTER the async reads: if the OU switched meanwhile, do not paint
-          // this OU's queue into the now-active OU's UI.
-          if (!isCurrent()) return;
-          setOfflinePending(pending);
-          setResumable(list);
-        },
-        refreshShift: (c, isCurrent) => useShift.getState().refresh(c.tenantId, c.userId, c.branchId, isCurrent),
-        // Final Foundation (SEC) — device / user standing before replay (bounded, never blocks the drain;
-        // a revocation locks NEW captures only, captured work still drains server-authoritatively).
-        securityCheck: () => securityReconnect(),
-      });
-      // Offline-first recovery — then the work captured by users PARKED on this device (switch user),
-      // each under their own sealed session, never the active user's. Only once online again.
-      if (!useSession.getState().offlineMode && (await isBackendReachable().catch(() => false))) {
-        await drainParkedUsers(useSession.getState().userId, trigger).catch(() => []);
-      }
+      await appDrain(trigger);
     },
     [],
   );
+  useEffect(() => {
+    const onDrained = () => {
+      void refreshOfflineQueue();
+    };
+    window.addEventListener(OFFLINE_DRAINED_EVENT, onDrained);
+    return () => window.removeEventListener(OFFLINE_DRAINED_EVENT, onDrained);
+  }, [refreshOfflineQueue]);
 
   useEffect(() => {
     void refreshOfflineQueue();
@@ -548,47 +518,8 @@ function PosWorkspaceInner() {
     void drainWithFreshContext("backend-returned");
   }, [backendReachable, drainWithFreshContext]);
 
-  // 1.0.38 (C2/D5) — two more triggers into the SAME single-flight drain:
-  //   * an operator Retry (Sync Center / Needs Attention) announces a drain request — it no longer waits
-  //     for a connectivity flip that may never come;
-  //   * a bounded periodic pass every 45 s, ONLY while online and THIS context (5-D scope) still holds
-  //     replayable work (pending / syncing / retryable / waiting on a dependency, or legacy rows not yet
-  //     staged). A transient failure on a stable connection otherwise waited for the next restart/flap.
-  //     `periodicBusy` keeps the timer single-flight at the UI layer too (the orchestrator lock is the
-  //     real guard); parked ops alone never trigger it (they wait for a human).
-  const periodicBusy = useRef(false);
-  useEffect(() => {
-    if (!online) return;
-    // 1.0.40 (F5) — the drain's promise is returned so "Sync now" / Retry can report the pass's real outcome.
-    const offRequest = onDrainRequested(() => drainWithFreshContext("operator-retry"));
-    const tick = async () => {
-      if (periodicBusy.current) return;
-      const s = useSession.getState();
-      const t = s.tenant?.id ?? null;
-      const u = s.userId ?? null;
-      if (!t || !u) return;
-      periodicBusy.current = true;
-      try {
-        const dev = getDeviceIdentity();
-        const sum = await summarizeOperations(
-          { tenantId: t, branchId: resolveBranchId(s.tenant, s.membership, useOperationalBranch.getState().getBranch(t, u)), cashierUserId: u, deviceId: dev.device_id, terminalId: dev.terminal_id },
-          { includeSynced: false },
-        );
-        if (sum.pending + sum.syncing + sum.retryable + sum.waiting_dependency + sum.legacy_pending > 0) {
-          await drainWithFreshContext("periodic");
-        }
-      } catch {
-        /* best-effort; the next tick retries */
-      } finally {
-        periodicBusy.current = false;
-      }
-    };
-    const id = window.setInterval(() => void tick(), 45_000);
-    return () => {
-      offRequest();
-      window.clearInterval(id);
-    };
-  }, [online, drainWithFreshContext]);
+  // 1.0.38 (C2/D5) operator-retry + 45 s periodic triggers: 1.0.41 moved both into the app-level sync worker
+  // (lib/offline/syncWorker.startSyncWorker), unchanged in behaviour, so they also run with the POS closed.
 
   // --- window ----------------------------------------------------------------
   useEffect(() => {
@@ -1895,6 +1826,9 @@ function PosWorkspaceInner() {
         });
       }
       const ref = `OFF-${localId.slice(0, 6).toUpperCase()}`;
+      // 1.0.41 (BUG 02 R5) — the payment is recorded: every order surface re-reads, even when the kitchen latch
+      // below returns early (through 1.0.40 the Orders list kept the sale "unpaid" until another transaction).
+      notifyPosSettled();
       // Takeaway pay still tells the kitchen; the ticket is latched so a prior
       // offline Send for the same order never double-prints.
       try {
@@ -2162,6 +2096,18 @@ function PosWorkspaceInner() {
         toast.push({ tone: "warning", message: `Order ${order.order_number ?? ""} can no longer be paid.`.trim() });
         return;
       }
+      // 1.0.41 (BUG 02 Money A) — a TABLE order is paid on its table: the table path deducts what split payments
+      // already collected (and pins the bill). From this list it would be shown — and collected — at its gross total.
+      if (order.order_type === "dine_in" && order.table_id) {
+        toast.push({ tone: "warning", message: DINE_IN_PAY_FROM_TABLE_MESSAGE });
+        return;
+      }
+      // 1.0.41 (BUG 02 Money B) — this order (or its payment) was recorded on this device and is not confirmed by
+      // Breadee yet: paying it again here would take the money twice.
+      if (order.local_pending === true) {
+        toast.push({ tone: "warning", message: LOCAL_PAYMENT_PENDING_MESSAGE });
+        return;
+      }
       if (!shiftId) {
         toast.push({ tone: "warning", message: "Open a shift before taking payment." });
         return;
@@ -2196,15 +2142,14 @@ function PosWorkspaceInner() {
         // sale is committed DURABLY offline under the cart's stable op id (shared
         // with any prior offline Send), never an online submit/pay. An EXISTING
         // server order is never rerouted offline - it settles online or not at all.
-        const offlineNow = useShift.getState().pendingLocalId != null || !(await isBackendReachable());
-        if (intent.kind === "draft" && input.method === "cash" && offlineNow) {
+        if (intent.kind === "draft" && input.method === "cash" && (useShift.getState().pendingLocalId != null || !(await isBackendReachable()))) {
           await saveOfflineCashPayment(lines, { currency: input.currency, discount: input.discount });
           return;
         }
         // 1.0.41 (approved Server Off policy) — only cash is ever recorded as collected without Breadee. A card or
         // other method needs its authorisation online; refuse it up front instead of attempting an online
         // payment that cannot complete (1.0.40 then showed "Nothing was lost" although nothing was saved).
-        if (intent.kind === "draft" && input.method !== "cash" && offlineNow) {
+        if (intent.kind === "draft" && input.method !== "cash" && (useShift.getState().pendingLocalId != null || !(await isBackendReachable()))) {
           setPayError("Breadee is not reachable, so only cash can be taken right now. Card and other payment methods need a confirmed connection. Nothing was charged.");
           return;
         }

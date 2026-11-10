@@ -107,10 +107,14 @@ test("1.0.40 F5: 'Sync now' runs the existing drain (no second drainer) and show
   assert.match(panel, /setSyncNote\(r\.text\)/, "the counts sentence is shown");
   assert.match(panel, /operatorRetry\(operationId/, "per-op Retry reports its real outcome");
   assert.match(panel, /retryNote\.text/);
-  // reconnect stays the default; the POS listener returns the drain's promise so the result can be awaited
+  // reconnect stays the default; the (1.0.41 app-level) worker listener returns the drain's promise so the
+  // result can be awaited — with or without the POS screen open.
+  const worker = ts("src/lib/offline/syncWorker.ts");
+  assert.match(worker, /onDrainRequested\(\(\) => appDrain\("operator-retry"\)\)/);
+  assert.match(worker, /window\.addEventListener\("online", run\)/, "automatic sync on reconnect, app-wide");
   const pw = ts("src/screens/pos/PosWorkspace.tsx");
-  assert.match(pw, /onDrainRequested\(\(\) => drainWithFreshContext\("operator-retry"\)\)/);
   assert.match(pw, /window\.addEventListener\("online", run\)/, "automatic sync on reconnect is unchanged");
+  assert.match(ts("src/App.tsx"), /return startSyncWorker\(\);/, "the worker runs for the whole signed-in session");
 });
 
 test("1.0.40 F6: an occupied table whose bill is empty because of held offline work points to the Sync Center (no recolor, no gate change)", () => {
