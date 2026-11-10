@@ -1,5 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { healthBadge, useBackendHealth } from "@/lib/offline/useBackendHealth";
+import { loadReadiness, type Readiness } from "@/lib/offline/readiness";
 import { useSession } from "@/state/session";
 import { getDeviceIdentity } from "@/lib/device";
 import { useSyncScope, useSyncSummary } from "@/components/sync/SyncCenterPanel";
@@ -35,6 +37,27 @@ export function Shell() {
   useEffect(() => {
     void useUpdates.getState().checkOnStartup();
   }, []);
+
+  const backendHealth = useBackendHealth();
+  const health = healthBadge(backendHealth, s.offlineMode, s.online);
+  // 1.0.41 (F-READY) — re-read every 5 minutes and when the signed-in user / tenant changes. Read-only.
+  const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const readyUser = s.userId ?? null;
+  const readyTenant = s.tenant?.id ?? null;
+  useEffect(() => {
+    let live = true;
+    const tick = () => {
+      void loadReadiness({ userId: readyUser, tenantId: readyTenant, branchId: syncBranchId })
+        .then((r) => live && setReadiness(r))
+        .catch(() => undefined);
+    };
+    tick();
+    const id = window.setInterval(tick, 5 * 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+    };
+  }, [readyUser, readyTenant, syncBranchId]);
 
   const branchLabel = s.membership?.all_branches
     ? "All branches"
@@ -90,12 +113,15 @@ export function Shell() {
           <div className="flex items-center gap-3 text-xs">
             {sync.parked > 0 && <Badge tone="amber">{sync.parked} need attention</Badge>}
             {sync.toSync > 0 && <Badge tone="amber">{sync.toSync} to sync</Badge>}
-            {s.offlineMode ? (
-              <Badge tone="amber">Offline mode</Badge>
-            ) : s.online ? (
-              <Badge tone="green">Online</Badge>
-            ) : (
-              <Badge tone="red">No internet</Badge>
+            {/* 1.0.41 (RC-A2) — the ONE health truth (backend reachability), not navigator.onLine alone. */}
+            <span title={health.title}>
+              <Badge tone={health.tone}>{health.text}</Badge>
+            </span>
+            {/* 1.0.41 (F-READY) — can this terminal keep trading if Breadee's server goes off, and until when. */}
+            {readiness && (
+              <span title={readiness.detail}>
+                <Badge tone={readiness.tone}>{readiness.text}</Badge>
+              </span>
             )}
             {/* Offline-first recovery — Switch user keeps this user's offline sign-in on the device (works
                 without a connection); 1.0.38 — so does Sign out (it ends the server session only; "Remove" on

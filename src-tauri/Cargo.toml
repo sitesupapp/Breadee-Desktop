@@ -56,6 +56,9 @@ tauri-plugin-process = "2"
 # control. This crate is enormous and feature-gated for exactly this reason -
 # taking printing must not quietly take the rest of Win32 with it.
 [target.'cfg(target_os = "windows")'.dependencies]
+# 1.0.41 (F-CRASH) — NOT A NEW CRATE: webview2-com 0.38.2 is already in Cargo.lock (tauri -> wry). Named here
+# only so crash_guard.rs can register the WebView2 ProcessFailed handler on the controller tauri exposes.
+webview2-com = "0.38"
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",

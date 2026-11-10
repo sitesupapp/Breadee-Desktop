@@ -5,6 +5,8 @@ import { bootTheme } from "@/lib/theme/apply";
 import { rcLogStartup } from "@/lib/rcDiagnostics";
 import { captureBuildStamp, setCaptureBuild } from "@/lib/offline/operationLog";
 import { env } from "@/env";
+import { RootErrorBoundary } from "@/components/RootErrorBoundary";
+import { requestPersistentStorage } from "@/lib/offline/durability";
 import "@/index.css";
 
 // BEFORE the first render, deliberately. Applying the stored theme from a React
@@ -19,8 +21,14 @@ rcLogStartup();
 // rc.10 — stamp every captured offline operation with the running build (queue forensics).
 setCaptureBuild(captureBuildStamp(env.BUILD_SHA, env.APP_VERSION));
 
+// 1.0.41 (F-STORE) — ask once for persistent storage: the offline queue must not be evicted under disk pressure.
+void requestPersistentStorage();
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {/* 1.0.41 (F-CRASH) — a render crash shows a reload screen, never a blank till. */}
+    <RootErrorBoundary>
+      <App />
+    </RootErrorBoundary>
   </React.StrictMode>,
 );

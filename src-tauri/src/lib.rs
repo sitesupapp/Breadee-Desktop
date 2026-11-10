@@ -14,6 +14,7 @@
 // So the second launch must not become a second till. It hands focus back to
 // the instance that already exists and exits.
 
+pub mod crash_guard;
 pub mod device_security;
 pub mod printing;
 
@@ -44,6 +45,11 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
+        // 1.0.41 (F-CRASH) — a dead WebView2 renderer reloads the page, boundedly (see crash_guard.rs).
+        .setup(|app| {
+            crash_guard::install(app);
+            Ok(())
+        })
         // THE APP'S ONLY IPC SURFACE (Level 3E-A onwards).
         //
         // The printing commands plus (Final Foundation) the device-security

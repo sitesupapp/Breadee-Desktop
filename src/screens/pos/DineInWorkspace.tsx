@@ -114,6 +114,7 @@ import { paymentBlockedReason, type PaymentMethod } from "@/lib/pos/payments";
 import { selectSubtotal, useCart } from "@/state/cart";
 import { isMapStale, selectedTable as pickSelected, useTables } from "@/state/tables";
 import { useFloor } from "@/state/floor";
+import { readServerOffAssignment, sectionOfTable, serverOffOwnership } from "@/lib/offline/tableOwnership";
 import {
   type DineinScope,
   openTableOffline,
@@ -502,6 +503,50 @@ export function useDineInWorkspace(input: {
         : "This table's offline payment is still syncing — wait a moment; the floor refreshes when it lands."
       : null;
 
+  // 1.0.41 (Server Off F-OWN) — while offline capture is active, this terminal acts only on tables it already
+  // holds (its open local session) or that sit in the floor sections assigned to it (Settings → Device → Offline
+  // tables). Never inferred from the cached table map alone; online nothing changes (the server coordinates).
+  const offlineCaptureNow = !input.online && input.offlineReady === true && input.offlineScope != null;
+  const ownFloorLayout = useFloor((f) => f.layout);
+  const [selectedHeldHere, setSelectedHeldHere] = useState(false);
+  useEffect(() => {
+    let live = true;
+    if (!offlineCaptureNow || !selected || !input.offlineScope) {
+      setSelectedHeldHere(false);
+      return;
+    }
+    void getDineDraftForTable(input.offlineScope, selected.id)
+      .then((d) => live && setSelectedHeldHere(d != null && d.status === "open"))
+      .catch(() => live && setSelectedHeldHere(false));
+    return () => {
+      live = false;
+    };
+  }, [offlineCaptureNow, selected?.id, input.offlineScope, projRev]);
+  const serverOffOwnershipReason: string | null =
+    offlineCaptureNow && selected
+      ? serverOffOwnership({
+          assignment: readServerOffAssignment(ctx.tenantId, ctx.branchId),
+          hasLocalSession: selectedHeldHere,
+          sectionId: sectionOfTable(ownFloorLayout, selected.id),
+        }).reason
+      : null;
+  // Callbacks read the CURRENT verdict (never a stale closure).
+  const ownershipReasonRef = useRef<string | null>(null);
+  ownershipReasonRef.current = serverOffOwnershipReason;
+  /** 1.0.41 (F-OWN) — the verdict for ANOTHER table (a move destination / merge source), offline only. */
+  const serverOffReasonFor = useCallback(
+    async (tableId: string): Promise<string | null> => {
+      if (!(!input.online && input.offlineReady === true && input.offlineScope != null)) return null;
+      const d = await getDineDraftForTable(input.offlineScope, tableId).catch(() => null);
+      return serverOffOwnership({
+        assignment: readServerOffAssignment(ctx.tenantId, ctx.branchId),
+        hasLocalSession: d != null && d.status === "open",
+        sectionId: sectionOfTable(useFloor.getState().layout, tableId),
+      }).reason;
+    },
+    [input.online, input.offlineReady, input.offlineScope, ctx.tenantId, ctx.branchId],
+  );
+
   // rc.14 (F1/F2/F5) — ONLINE, the selected table's loaded server bill holds an order WITHOUT a shift
   // (historical rc.4–rc.11 contamination): pay / move / merge are refused up-front with the actionable
   // explanation instead of a server refusal. Never re-attributed to a current shift. Clean bills unaffected.
@@ -513,6 +558,7 @@ export function useDineInWorkspace(input: {
 
   const openGate: Gate = useMemo(() => {
     if (settleSyncHoldReason) return { allowed: false, reason: settleSyncHoldReason };
+    if (serverOffOwnershipReason) return { allowed: false, reason: serverOffOwnershipReason };
     const base = canOpenTable(pos.access, hasOpenShift);
     if (!base.allowed) return base;
     if (!selected) return { allowed: false, reason: "Select a table first." };
@@ -530,7 +576,7 @@ export function useDineInWorkspace(input: {
       };
     }
     return { allowed: true, reason: null };
-  }, [pos.access, hasOpenShift, selected, input.online, input.offlineReady, input.offlineReadyMissing, input.offlineScope, settleSyncHoldReason]);
+  }, [pos.access, hasOpenShift, selected, input.online, input.offlineReady, input.offlineReadyMissing, input.offlineScope, settleSyncHoldReason, serverOffOwnershipReason]);
 
   // Level 2C gates. Each combines the permission-map answer with the desktop's
   // own preconditions (shift, connection, an actual bill to act on).
@@ -564,13 +610,15 @@ export function useDineInWorkspace(input: {
       const reason = g.allowed && input.online ? structuralHoldReason([selected?.id], structuralHold) : null;
       return reason ? { allowed: false, reason } : g;
     };
+    // 1.0.41 (F-OWN) — offline, a table this terminal does not serve is view-only (permission still first).
+    const owned = (g: Gate): Gate => (g.allowed && serverOffOwnershipReason ? { allowed: false, reason: serverOffOwnershipReason } : g);
     return {
-      move: unsynced(historical(offlineAware(canMoveTable(pos.access), "move"))),
+      move: owned(unsynced(historical(offlineAware(canMoveTable(pos.access), "move")))),
       close: tableOpGate({ kind: "close", permitted: canCloseTable(pos.access), ...common }),
       clear: tableOpGate({ kind: "clear", permitted: canClearTable(pos.access), ...common }),
-      merge: unsynced(historical(offlineAware(canMergeTables(pos.access), "merge"))),
+      merge: owned(unsynced(historical(offlineAware(canMergeTables(pos.access), "merge")))),
     };
-  }, [pos.access, selected, hasOpenShift, input.online, offlineProjOn, input.offlineReadyMissing, historicalShiftlessReason, structuralHold]);
+  }, [pos.access, selected, hasOpenShift, input.online, offlineProjOn, input.offlineReadyMissing, historicalShiftlessReason, structuralHold, serverOffOwnershipReason]);
 
   // Phase C/D — offline capture is live when the backend is unreachable AND the device is
   // hydrated for offline Dine-In. Declared HERE (above the payment gate + the provisional bill)
@@ -628,8 +676,10 @@ export function useDineInWorkspace(input: {
     // rc.10 — a bill settled offline is CLOSED locally (it leaves the active projection), so payTableGate
     // already refuses a second settle of it ("no open bill"); a NEW bill on the reused table is payable.
     if (g.allowed && historicalShiftlessReason) return { allowed: false, reason: historicalShiftlessReason };
+    // 1.0.41 (F-OWN) — offline, never collect a table another terminal serves.
+    if (g.allowed && serverOffOwnershipReason) return { allowed: false, reason: serverOffOwnershipReason };
     return g;
-  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying, settleSyncHoldReason, historicalShiftlessReason]);
+  }, [pos.gates.takePayments, pos.branch.id, selected, settleBill, hasOpenShift, input.online, offlineCapture, paying, settleSyncHoldReason, historicalShiftlessReason, serverOffOwnershipReason]);
 
   const select = useCallback(
     (id: string) => {
@@ -700,6 +750,9 @@ export function useDineInWorkspace(input: {
           "move",
           async () => {
             if (!toRow) throw new Error("Choose a free table to move to.");
+            // 1.0.41 (F-OWN) — the destination must be a table THIS terminal serves while the server is off.
+            const notOurs = await serverOffReasonFor(destinationId);
+            if (notOurs) throw new Error(notOurs);
             const r = await captureMoveTableOffline({ scope, from: fromRow, to: toRow, mapLoadedAt: tables.lastLoadedAt });
             if (!r.ok) throw new Error(r.reason);
             bumpProj();
@@ -730,7 +783,7 @@ export function useDineInWorkspace(input: {
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, opGates.move.allowed, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, ctx, structuralHold, serverPathLost],
+    [selected, opGates.move.allowed, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, ctx, structuralHold, serverPathLost, serverOffReasonFor],
   );
 
   const confirmClose = useCallback(() => {
@@ -770,6 +823,11 @@ export function useDineInWorkspace(input: {
           "merge",
           async () => {
             if (sourceRows.length !== sourceTableIds.length) throw new Error("A selected table is no longer on this floor. Reopen Merge.");
+            // 1.0.41 (F-OWN) — every source must be a table THIS terminal serves while the server is off.
+            for (const id of sourceTableIds) {
+              const notOurs = await serverOffReasonFor(id);
+              if (notOurs) throw new Error(notOurs);
+            }
             const r = await captureMergeTablesOffline({ scope, primary: primaryRow, sources: sourceRows, mapLoadedAt: tables.lastLoadedAt });
             if (!r.ok) throw new Error(r.reason);
             bumpProj();
@@ -824,7 +882,7 @@ export function useDineInWorkspace(input: {
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold, serverPathLost, ctx],
+    [selected, opGates.merge.allowed, displayMap.tables, tables.map.tables, tables.lastLoadedAt, runOp, offlineProjOn, input.offlineScope, bumpProj, structuralHold, serverPathLost, ctx, serverOffReasonFor],
   );
 
   /** Open a confirmation. The shortcut and the button both come through here. */
@@ -964,6 +1022,8 @@ export function useDineInWorkspace(input: {
     if (settleSyncHoldReason) return { allowed: false, reason: settleSyncHoldReason };
     const base = computeAddItemsGate({ ctx: gateCtx, createOrders: input.createOrders });
     if (!base.allowed) return base;
+    // 1.0.41 (F-OWN) — offline, never add a round on a table another terminal serves.
+    if (serverOffOwnershipReason) return { allowed: false, reason: serverOffOwnershipReason };
     // The buffer is shared with Takeaway on purpose (one cart, one round at a
     // time). If someone else's work is in it, say whose rather than merging.
     // rc.10 — a takeaway buffer that is already durably saved (sent offline / submitted) is NOT a lock:
@@ -984,7 +1044,7 @@ export function useDineInWorkspace(input: {
       return { allowed: false, reason: "Another table has an unsent round. Send or discard it first." };
     }
     return base;
-  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, cart.durable, cart.savedOrder, selected, settleSyncHoldReason]);
+  }, [gateCtx, input.createOrders, input.cartLines.length, cart.owner, cart.durable, cart.savedOrder, selected, settleSyncHoldReason, serverOffOwnershipReason]);
 
   const submitGate: Gate = useMemo(
     () =>
@@ -1535,6 +1595,7 @@ export function useDineInWorkspace(input: {
             setSplitError("This table isn't available offline. Reconnect to split it.");
             return;
           }
+          if (ownershipReasonRef.current) return setSplitError(ownershipReasonRef.current); // 1.0.41 (F-OWN)
           // Re-derive the projection at confirm time (never act on a stale panel), then map each
           // selected line back to its server identity and validate against the remaining quantity.
           const raw = tables.map.tables.find((t) => t.id === selected.id) ?? selected;
@@ -2243,6 +2304,8 @@ export function useDineInWorkspace(input: {
     }) => {
       const table = selected;
       if (!table || !payGate.allowed) return;
+      // 1.0.41 (F-OWN) — payGate already holds it; defence in depth at the press.
+      if (offlineCapture && ownershipReasonRef.current) return setPayError(ownershipReasonRef.current);
 
       // Phase D — OFFLINE on-account CAPTURE (receivable) against a cached/proven customer. Depends
       // on the session open+rounds; durable before success; no server RPC. Online path unchanged.

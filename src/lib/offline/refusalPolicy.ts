@@ -86,6 +86,10 @@ const REVIEW_CODES = new Set([
   "invalid_request",
   "no_table",
   "no_order",
+  // 1.0.41 (S-PAYOUT) — the payout is above what is open on its source, or the source is void / cancelled
+  "payout_exceeds_source",
+  "payout_source_ineligible",
+  "payout_exceeds_expense_balance",
   // the server's line price check (the captured lines are frozen; a reviewed re-entry is the recovery)
   "price_changed",
   "invalid_line_quantity",

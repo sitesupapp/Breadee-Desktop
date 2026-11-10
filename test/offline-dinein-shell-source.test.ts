@@ -55,8 +55,9 @@ test("1.0.38: Move/Merge capture offline when ready; Close/Clear stay online-onl
   assert.match(src, /const common = \{ table: selected, hasOpenShift, online: input\.online, offlineCapable: offlineProjOn && server1038ContractsLive\(\) \};/);
   assert.match(src, /needs a connection on this device/);
   // rc.14 — wrapped (online) in the historical shift-less refusal; 1.0.38 (WS-F) — and in the unsynced-work hold.
-  assert.match(src, /move: (unsynced\()?(historical\()?offlineAware\(canMoveTable\(pos\.access\), "move"/);
-  assert.match(src, /merge: (unsynced\()?(historical\()?offlineAware\(canMergeTables\(pos\.access\), "merge"/);
+  // 1.0.41 (F-OWN) — and, offline, in the Server Off table-ownership hold (owned).
+  assert.match(src, /move: (owned\()?(unsynced\()?(historical\()?offlineAware\(canMoveTable\(pos\.access\), "move"/);
+  assert.match(src, /merge: (owned\()?(unsynced\()?(historical\()?offlineAware\(canMergeTables\(pos\.access\), "merge"/);
   assert.ok(/captureMoveTableOffline\(/.test(src) && /captureMergeTablesOffline\(/.test(src), "move / merge are captured offline");
   assert.ok(!/captureCloseTableOffline|captureClearTableOffline/.test(src), "close / clear are never captured offline");
   // The reason is SHOWN on the bill panel (a disabled button with only a hover title read as "does nothing").

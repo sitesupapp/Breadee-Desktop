@@ -1065,6 +1065,11 @@ export const payoutHandler: OperationHandler = {
       const t = terminalKind(msg);
       if (t === "shift_closed") return { ok: false, retryClass: "CONFLICT", code: "shift_closed", message: msg };
       if (t === "permission") return { ok: false, retryClass: "AUTHORITY_REFUSED", code: "permission", message: msg };
+      // 1.0.41 (S-PAYOUT) — the server's source cap / eligibility refusals (raised before any write).
+      const pc = posErrorCode(e);
+      if (pc === "PAYOUT_EXCEEDS_SOURCE" || pc === "PAYOUT_SOURCE_INELIGIBLE" || pc === "PAYOUT_EXCEEDS_EXPENSE_BALANCE") {
+        return { ok: false, retryClass: "CONFLICT", code: pc.toLowerCase(), message: msg };
+      }
       if (isPayoutDrift(msg)) return { ok: false, retryClass: "CONFLICT", code: "payout_source_drift", message: msg };
       return { ok: false, retryClass: "VALIDATION_TERMINAL", code: t ?? "validation", message: msg };
     }

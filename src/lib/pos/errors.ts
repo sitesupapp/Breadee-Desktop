@@ -6,7 +6,11 @@
 // them, so the UI can decide whether to show a red fault or an amber "expected
 // refusal, here is what to do next", and can offer the right recovery action.
 
+import { isStorageFullError, STORAGE_FULL_MESSAGE } from "@/lib/offline/durability";
+
 export type RefusalKind =
+  // 1.0.41 (F-STORE) — this terminal's storage is full: the capture was NOT saved.
+  | "storage_full"
   | "no_shift"
   // rc.14 — a historical bill the server holds WITHOUT a shift (never re-attributed automatically).
   | "historical_shiftless"
@@ -600,6 +604,8 @@ export const OFFLINE_MESSAGE = "The server can't be reached right now.";
 export function classifyError(error: unknown): ClassifiedError {
   // 1.0.40 (BUG 02) — a partial_line merge refusal already resolved to the item + table and its remedy.
   if (error instanceof MergePartialLineError) return { kind: "merge_unsupported", message: error.message, hint: null, expected: true };
+  // 1.0.41 (F-STORE) — a local write failed because the disk / browser storage is full: say it was NOT saved.
+  if (isStorageFullError(error)) return { kind: "storage_full", message: STORAGE_FULL_MESSAGE, hint: null, expected: false };
   const message =
     error instanceof Error ? error.message : typeof error === "string" ? error : "Something went wrong.";
   // Merge Tables v3: an UNSUPPORTED_STATE refusal carries a `reason:` token naming

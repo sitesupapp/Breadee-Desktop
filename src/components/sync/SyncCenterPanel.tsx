@@ -13,6 +13,7 @@ import { buildDiagnostic, loadSyncCenterRows, type SyncCenterRow } from "@/lib/o
 import { COLLECTED_OFFLINE_NOT_ON_BILL, listRefusedSessions, withdrawRefusedSession, type RefusedOrderSummary } from "@/lib/offline/refusedSessions";
 import { operatorRetry, runSyncNow } from "@/lib/offline/syncActions";
 import { noRetryText } from "@/lib/offline/refusalPolicy";
+import { BACKUP_MIN_PASSPHRASE, buildQueueBackup, downloadBackup } from "@/lib/offline/durability";
 import { getDeviceIdentity } from "@/lib/device";
 import { formatMoney, isCurrencyCode } from "@/lib/currency";
 import { resolveBranchId } from "@/lib/branch";
@@ -226,6 +227,25 @@ export function SyncCenterPanel({
     }
   }, [tenantId, branchId, currentShiftId]);
 
+  // 1.0.41 (F-STORE) — encrypted backup of this terminal's unsynced work (read-only).
+  const [backupPass, setBackupPass] = useState("");
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupNote, setBackupNote] = useState<string | null>(null);
+  const exportBackup = useCallback(async () => {
+    setBackingUp(true);
+    setBackupNote(null);
+    try {
+      const env = await buildQueueBackup(backupPass);
+      const name = downloadBackup(env);
+      setBackupNote(`Saved ${name} (${env.summary.operations} operations, ${env.summary.capture_rows} offline sales, ${env.summary.sessions} table sessions).`);
+      setBackupPass("");
+    } catch (e) {
+      setBackupNote(e instanceof Error ? e.message : "The backup could not be created on this device.");
+    } finally {
+      setBackingUp(false);
+    }
+  }, [backupPass]);
+
   const chip = chipOf(summary);
   const breakdown: { state: SyncDisplayState; n: number }[] = [
     { state: "needs_attention", n: summary.needsAttention },
@@ -285,6 +305,37 @@ export function SyncCenterPanel({
           </button>
           {diagNote && <span className="ml-2 text-[11px] text-sub">{diagNote}</span>}
         </p>
+        {/* 1.0.41 (F-STORE) — an ENCRYPTED copy of this terminal's unsynced work, for a failing computer. Read-only:
+            nothing is sent, acknowledged or deleted. The passphrase is chosen and typed by the operator. */}
+        <details className="mt-2 text-[11px] text-sub">
+          <summary className="cursor-pointer font-semibold">Back up unsynced work</summary>
+          <form
+            className="mt-1 flex flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void exportBackup();
+            }}
+          >
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={backupPass}
+              onChange={(e) => setBackupPass(e.target.value)}
+              placeholder={`Passphrase (${BACKUP_MIN_PASSPHRASE}+ characters)`}
+              className="rounded-lg border border-line px-2 py-1 text-[11px] text-ink"
+              aria-label="Backup passphrase"
+            />
+            <button
+              type="submit"
+              disabled={backingUp || backupPass.length < BACKUP_MIN_PASSPHRASE}
+              className="rounded-lg border border-line px-2 py-0.5 text-[11px] font-semibold text-sub hover:bg-slate-50 disabled:opacity-60"
+            >
+              {backingUp ? "Encrypting…" : "Save encrypted backup"}
+            </button>
+            {backupNote && <span role="status">{backupNote}</span>}
+          </form>
+          <p className="mt-1">Keep the passphrase separately. Support needs both the file and the passphrase to read it.</p>
+        </details>
         {syncNote && (
           <p className="mt-1 text-[11px] font-semibold text-ink" role="status">
             {syncNote}

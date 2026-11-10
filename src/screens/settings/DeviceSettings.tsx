@@ -3,6 +3,9 @@ import { getDeviceIdentity, updateDeviceIdentity } from "@/lib/device";
 import { unsettledOperationCountForDevice } from "@/lib/offline/operationLog";
 import { useSession } from "@/state/session";
 import { Button, Card, Input } from "@/components/ui";
+import { useSyncScope } from "@/components/sync/SyncCenterPanel";
+import { useFloor } from "@/state/floor";
+import { OFFLINE_TABLES_PERMISSION, readServerOffAssignment, writeServerOffAssignment, type ServerOffAssignment } from "@/lib/offline/tableOwnership";
 
 export function DeviceSettings() {
   const s = useSession();
@@ -43,6 +46,7 @@ export function DeviceSettings() {
   }
 
   return (
+    <>
     <Card className="p-6">
       <h2 className="text-lg font-bold">Device identity</h2>
       <p className="mt-1 text-sm text-sub">Identifies this terminal in audit logs and offline sync records (e.g. “Branch 2101-1 / Cashier PC 1”).</p>
@@ -72,6 +76,85 @@ export function DeviceSettings() {
       <div className="mt-5 flex items-center gap-3">
         <Button onClick={() => void save()}>Save device</Button>
         {saved && <span className="text-sm font-semibold text-brand-dark">Saved</span>}
+      </div>
+    </Card>
+    <ServerOffTables />
+    </>
+  );
+}
+
+/** 1.0.41 (Server Off F-OWN) — the tables THIS terminal serves while Breadee's server is off. */
+function ServerOffTables() {
+  const s = useSession();
+  const { tenantId, branchId } = useSyncScope();
+  const layout = useFloor((f) => f.layout);
+  const canEdit = s.permissions[OFFLINE_TABLES_PERMISSION] === true;
+  const [assignment, setAssignment] = useState<ServerOffAssignment | null>(() => readServerOffAssignment(tenantId, branchId));
+  const [mode, setMode] = useState<"none" | "all" | "sections">(assignment ? assignment.mode : "none");
+  const [picked, setPicked] = useState<string[]>(assignment && assignment.mode === "sections" ? assignment.sectionIds : []);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    const a = readServerOffAssignment(tenantId, branchId);
+    setAssignment(a);
+    setMode(a ? a.mode : "none");
+    setPicked(a && a.mode === "sections" ? a.sectionIds : []);
+    if (tenantId && branchId) void useFloor.getState().load({ tenantId, branchId }).catch(() => undefined);
+  }, [tenantId, branchId]);
+
+  const save = () => {
+    if (!tenantId || !canEdit) return;
+    try {
+      writeServerOffAssignment(tenantId, branchId, mode === "none" ? null : mode === "all" ? { mode: "all" } : { mode: "sections", sectionIds: picked }, s.userId ?? null);
+      setAssignment(readServerOffAssignment(tenantId, branchId));
+      setNote("Saved for this terminal.");
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "Could not save on this device.");
+    }
+  };
+
+  return (
+    <Card className="mt-5 p-6">
+      <h2 className="text-lg font-bold">Offline tables</h2>
+      <p className="mt-1 text-sm text-sub">
+        While Breadee&apos;s server is off, each terminal keeps trading on its own. To keep two tills from taking the same table, choose the tables
+        this terminal serves then. Tables already open on this terminal always continue here.
+      </p>
+      {!canEdit && <p className="mt-2 text-xs font-semibold text-amber-800">A manager with floor management can change this.</p>}
+      <div className="mt-4 space-y-2 text-sm">
+        <label className="flex items-center gap-2">
+          <input type="radio" name="serveroff-mode" checked={mode === "all"} disabled={!canEdit} onChange={() => setMode("all")} />
+          All tables (the only terminal taking table orders at this branch)
+        </label>
+        <label className="flex items-center gap-2">
+          <input type="radio" name="serveroff-mode" checked={mode === "sections"} disabled={!canEdit} onChange={() => setMode("sections")} />
+          Only these floor sections
+        </label>
+        {mode === "sections" && (
+          <div className="ml-6 flex flex-wrap gap-3">
+            {layout.sections.length === 0 && <span className="text-xs text-sub">No published floor sections yet. Publish the floor first (online).</span>}
+            {layout.sections.map((sec) => (
+              <label key={sec.id} className="flex items-center gap-1 text-sm">
+                <input
+                  type="checkbox"
+                  disabled={!canEdit}
+                  checked={picked.includes(sec.id)}
+                  onChange={(e) => setPicked((p) => (e.target.checked ? [...p, sec.id] : p.filter((x) => x !== sec.id)))}
+                />
+                {sec.name}
+              </label>
+            ))}
+          </div>
+        )}
+        <label className="flex items-center gap-2">
+          <input type="radio" name="serveroff-mode" checked={mode === "none"} disabled={!canEdit} onChange={() => setMode("none")} />
+          None (only tables already open on this terminal)
+        </label>
+      </div>
+      <div className="mt-4 flex items-center gap-3">
+        <Button onClick={save} disabled={!canEdit || !tenantId}>Save offline tables</Button>
+        {note && <span className="text-sm font-semibold text-brand-dark">{note}</span>}
+        {assignment && <span className="text-xs text-sub">Last set {new Date(assignment.setAt).toLocaleString()}</span>}
       </div>
     </Card>
   );
