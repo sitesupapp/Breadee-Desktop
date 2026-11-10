@@ -48,7 +48,7 @@ env:
   PRODUCTION_REF: cltlqfqormkhppmbvyrv
   # The customer-facing note shown in "Breadee Update Available" (latest.json
   # `notes`) and in the GitHub release description. Business language only.
-  RELEASE_NOTE: "Split bills now show only what is still due: Pay Full Bill asks for exactly the remaining amount and each guest who pays by split gets their own receipt. A table whose offline order Breadee refused no longer stays occupied, and the Sync Center explains every item, with a Sync now button that reports what synced."
+  RELEASE_NOTE: "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off."
 
 jobs:
   release:

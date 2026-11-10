@@ -39,6 +39,8 @@ export type PayOrderInput = {
    *  replays the recorded result for a repeated (tenant, client_op_id) instead of charging again, so a
    *  resend after a lost response is an outcome LOOKUP, never a second payment. Omitted → 1.0.40 payload. */
   clientOpId?: string;
+  /** 1.0.41 (F-WRITE) — bound the interactive wait; past it → AmbiguousOutcomeError (never aborted, never re-charged). */
+  deadlineMs?: number;
 };
 
 /** 1.0.41 (F-WRITE) — how long an INTERACTIVE money call may keep the cashier waiting before its outcome
@@ -110,7 +112,10 @@ export async function payOrder(input: PayOrderInput, client?: RpcClient): Promis
     ...(input.discount ?? {}),
     ...(input.clientOpId ? { client_op_id: input.clientOpId } : {}),
   };
-  const row = asRecord(await callPosRpc("pos_pay_order", { p_payload: payload }, client));
+  // 1.0.41 (F-WRITE) — an interactive caller bounds the wait (`deadlineMs`): past it the outcome is AMBIGUOUS (the
+  // request is not aborted; a re-send with the same clientOpId returns the recorded result, never a second charge).
+  const call = callPosRpc("pos_pay_order", { p_payload: payload }, client);
+  const row = asRecord(await (input.deadlineMs && input.deadlineMs > 0 ? withDeadline(call, input.deadlineMs, "pos_pay_order") : call));
   const currency = str(row.currency_code, "USD");
   return {
     order_id: requireId(row.order_id, "pos_pay_order", "order_id"),

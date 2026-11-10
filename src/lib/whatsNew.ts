@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.40";
+export const WHATS_NEW_VERSION = "1.0.41";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -20,6 +20,28 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titl
 // One short, business-worded page per shipped POS capability in this release. No
 // developer terminology; icons come from the existing Glyph set.
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
+  {
+    glyph: "sync",
+    title: "Keeps trading when Breadee's server is off",
+    titleAr: "متابعة البيع عند توقّف خادم Breadee",
+    body:
+      "When Breadee's server stops answering, the top bar says so and this terminal keeps taking cash sales. They are saved on this terminal and sync automatically, from any screen, as soon as Breadee answers again. If Breadee has not confirmed a payment, you are told not to collect it again: pressing Confirm checks the same payment, and Breadee applies it at most once. Card and other payment methods wait for a confirmed connection. A badge in the top bar shows whether this terminal is ready to work offline, and for how long.",
+    bodyAr:
+      "عندما يتوقّف خادم Breadee عن الاستجابة، يُظهر الشريط العلوي ذلك وتتابع هذه المحطة قبول المبيعات النقدية. تُحفظ على هذه المحطة وتتمّ مزامنتها تلقائياً، من أي شاشة، فور عودة Breadee للاستجابة. وإذا لم يؤكّد Breadee دفعةً ما، تُبلَّغ بعدم تحصيلها مرة أخرى: فالضغط على «تأكيد» يتحقّق من الدفعة نفسها، ويطبّقها Breadee مرة واحدة على الأكثر. أما البطاقة وطرق الدفع الأخرى فتنتظر اتصالاً مؤكَّداً. وتُظهر شارة في الشريط العلوي ما إذا كانت هذه المحطة جاهزة للعمل دون اتصال، والمدة المتبقية لذلك.",
+  },
+  {
+    glyph: "sync",
+    title: "A Sync Center that only offers what can work",
+    titleAr: "مركز مزامنة لا يعرض إلا ما يمكن أن ينجح",
+    body:
+      "Retry now appears only where sending again can succeed; otherwise the Sync Center explains why and what to do. A refused offline table is sent again only when no other sale was recorded on it. Part-paid orders show as part paid, and the Orders list refreshes after every payment. In Settings, Device, Offline tables, choose which tables this terminal serves while the server is off, so two tills never take the same table. You can also save an encrypted backup of the work not yet synced.",
+    bodyAr:
+      "أصبح زر إعادة المحاولة يظهر فقط حيث يمكن أن ينجح الإرسال مجدداً، وفي غير ذلك يوضّح مركز المزامنة السبب وما يجب فعله. ولا يُعاد إرسال الطاولة غير المتصلة المرفوضة إلا إذا لم تُسجَّل عليها أي عملية بيع أخرى. وتظهر الطلبات المدفوعة جزئياً على أنها مدفوعة جزئياً، وتُحدَّث قائمة الطلبات بعد كل دفعة. ومن الإعدادات، الجهاز، طاولات عدم الاتصال، اختر الطاولات التي تخدمها هذه المحطة أثناء توقّف الخادم، كي لا تأخذ محطتان الطاولة نفسها. ويمكنك أيضاً حفظ نسخة احتياطية مشفّرة من العمل الذي لم تتمّ مزامنته بعد.",
+  },
+];
+
+/** 1.0.40 pages, kept for reference (not shown). */
+export const WHATS_NEW_PAGES_1040: WhatsNewPage[] = [
   {
     glyph: "sync",
     title: "Split bills show what is still due",

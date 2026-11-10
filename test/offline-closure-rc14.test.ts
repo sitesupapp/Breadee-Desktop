@@ -338,6 +338,7 @@ test("G4/G10 historical shift-less refusals are classified with an actionable ex
   assert.match(dw, /if \(g\.allowed && historicalShiftlessReason\) return \{ allowed: false, reason: historicalShiftlessReason \}/);
   // 1.0.38 — the wrapped gate is now the offline-capturable one (see offline-1038-movemerge); the
   // historical shift-less refusal still wraps Move AND Merge (1.0.38 WS-F: inside the unsynced-work hold).
-  assert.match(dw, /move: (unsynced\()?historical\(offlineAware/);
-  assert.match(dw, /merge: (unsynced\()?historical\(offlineAware/);
+  // 1.0.41 (F-OWN) — and, offline, inside the Server Off table-ownership hold (owned).
+  assert.match(dw, /move: (owned\()?(unsynced\()?historical\(offlineAware/);
+  assert.match(dw, /merge: (owned\()?(unsynced\()?historical\(offlineAware/);
 });

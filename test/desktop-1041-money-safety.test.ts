@@ -20,6 +20,15 @@ test("identity: deterministicUuid moved verbatim — dineinOffline re-export yie
   assert.match(deterministicUuid(["x"]), /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
 });
 
+test("the workspace's ONE pay call is bounded and carries the stable pay id", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const ws = readFileSync(join(process.cwd(), "src", "screens", "pos", "PosWorkspace.tsx"), "utf8");
+  assert.match(ws, /await payOrder\(\{ orderId, method: input\.method, currency: input\.currency, discount: input\.discount, clientOpId: payOpId, deadlineMs: INTERACTIVE_MONEY_DEADLINE_MS \}\)/);
+  const pay = readFileSync(join(process.cwd(), "src", "lib", "pos", "payments.ts"), "utf8");
+  assert.match(pay, /input\.deadlineMs && input\.deadlineMs > 0 \? withDeadline\(call, input\.deadlineMs, "pos_pay_order"\) : call/);
+});
+
 test("identity: the takeaway pay id is stable per cart op id and distinct from it", () => {
   const cart = "0b1c2d3e-0000-4000-8000-000000000001";
   assert.equal(takeawayPayOpId(cart), takeawayPayOpId(cart));

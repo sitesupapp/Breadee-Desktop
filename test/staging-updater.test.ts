@@ -240,18 +240,18 @@ test("there is ONE staging identity: the acceptance installer uses the staging o
   assert.match(installer, /test -f "src-tauri\/target\/release\/breadee-desktop\.exe"/);
 });
 
-test("What's New: the 1.0.40 split-bill page leads, bilingual, describing exactly this version", () => {
+test("What's New: the 1.0.41 Server Off page leads, bilingual, describing exactly this version", () => {
   const whatsNew = read("src", "lib", "whatsNew.ts");
   assert.match(whatsNew, new RegExp(`export const WHATS_NEW_VERSION = "${base.version.replace(/\./g, "\\.")}";`));
-  assert.equal(base.version, "1.0.40");
+  assert.equal(base.version, "1.0.41");
   // The release workflow takes the FIRST title/titleAr/body/bodyAr in the file as the release notes.
   const lit = (key: string) => JSON.parse(new RegExp(`\\b${key}:\\s*("(?:[^"\\\\]|\\\\.)*")`).exec(whatsNew)![1]);
   assert.match(whatsNew, /glyph: "sync"/);
-  assert.equal(lit("title"), "Split bills show what is still due");
-  assert.equal(lit("titleAr"), "الفواتير المقسّمة تعرض المبلغ المتبقي");
-  assert.match(lit("body"), /^After a guest pays their share with Split Bill, the table's bill now shows only the items and amount still to pay/);
-  assert.match(lit("body"), /Items already paid stay in the order history and reports\.$/);
-  assert.match(lit("bodyAr"), /^بعد أن يدفع أحد الضيوف حصته عبر تقسيم الفاتورة/);
+  assert.equal(lit("title"), "Keeps trading when Breadee's server is off");
+  assert.equal(lit("titleAr"), "متابعة البيع عند توقّف خادم Breadee");
+  assert.match(lit("body"), /^When Breadee's server stops answering, the top bar says so and this terminal keeps taking cash sales\./);
+  assert.match(lit("body"), /Card and other payment methods wait for a confirmed connection\./);
+  assert.match(lit("bodyAr"), /^عندما يتوقّف خادم Breadee عن الاستجابة/);
   // Business language only in the notes.
   assert.doesNotMatch(lit("body"), /\b(RPC|Supabase|JWT|token|scope|401|42501|auth-js)\b/i);
 });

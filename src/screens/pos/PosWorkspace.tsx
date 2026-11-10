@@ -2179,11 +2179,7 @@ function PosWorkspaceInner() {
           existingPayOps.current.set(orderId, payOpId);
         }
 
-        const result = await withDeadline(
-          payOrder({ orderId, method: input.method, currency: input.currency, discount: input.discount, clientOpId: payOpId }),
-          INTERACTIVE_MONEY_DEADLINE_MS,
-          "pos_pay_order",
-        );
+        const result = await payOrder({ orderId, method: input.method, currency: input.currency, discount: input.discount, clientOpId: payOpId, deadlineMs: INTERACTIVE_MONEY_DEADLINE_MS });
         existingPayOps.current.delete(orderId);
 
         // An existing order's lines come from the SERVER: there is no cart
