@@ -18,11 +18,19 @@
 //    their 1.0.37 behaviour. A shorter ceiling than the replay watchdog on POST
 //    /rpc is never applied.
 //  - A caller-provided `signal` is always honoured (composed with the timeout).
-//  - Evidence feeds the shared reachability store: any answer marks the backend
-//    reachable; a transport rejection (TypeError "Failed to fetch") marks it
-//    unreachable; our own read timeout only invalidates it (re-probe next time).
+//  - Evidence feeds the shared reachability store: an answer below 500 marks the
+//    backend reachable; a 5xx (gateway / pool exhaustion PGRST003 / statement
+//    timeout / Postgres down) marks it DEGRADED (1.0.41 Server Off); a transport
+//    rejection (TypeError "Failed to fetch") marks it unreachable; our own read
+//    timeout only invalidates it (re-probe next time).
 
-import { invalidateReachability, markBackendReachable, markBackendUnreachable } from "@/lib/offline/reachability";
+import { invalidateReachability, markBackendDegraded, markBackendReachable, markBackendUnreachable, statusProvesHealthy } from "@/lib/offline/reachability";
+
+/** 1.0.41 — route one HTTP answer into the shared store: < 500 healthy, 5xx degraded. */
+function noteAnswer(res: Response): void {
+  if (statusProvesHealthy(res.status)) markBackendReachable();
+  else if (res.status >= 500) markBackendDegraded();
+}
 
 /** Ceiling for a single read request (headers received). */
 export const READ_TIMEOUT_MS = 15_000;
@@ -101,7 +109,7 @@ export function createTimeoutFetch(base: () => typeof fetch, policy: typeof requ
     if (timeoutMs == null) {
       try {
         const res = await f(input, init);
-        markBackendReachable();
+        noteAnswer(res);
         return res;
       } catch (e) {
         if (!callerSignal?.aborted && e instanceof TypeError) markBackendUnreachable();
@@ -121,7 +129,7 @@ export function createTimeoutFetch(base: () => typeof fetch, policy: typeof requ
     }, timeoutMs);
     try {
       const res = await f(input, { ...init, signal: controller.signal });
-      markBackendReachable();
+      noteAnswer(res);
       return res;
     } catch (e) {
       if (timedOut) invalidateReachability();

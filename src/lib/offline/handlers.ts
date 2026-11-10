@@ -6,9 +6,12 @@
 //
 // Konan contract honoured: the Takeaway-cash path is an OPAQUE business handler
 // (submit -> cash pay, with the server's `already paid` natural-state dedup). It is NOT a
-// generic, independently-retryable payment handler — `pos_pay_order` has no client_op_id,
-// so its safety still rests on submit idempotency + the server state-guard, exactly as before.
+// generic, independently-retryable payment handler. 1.0.41: the live `pos_pay_order` wrapper
+// DOES dedup on client_op_id (pos_op_replay/pos_op_record); captures made by 1.0.41+ pay with
+// takeawayPayOpId(client_op_id) so the online attempt and its offline replay are one payment.
+// Older captures keep the state-guard path exactly as before.
 
+import { takeawayPayOpId, TAKEAWAY_PAY_OP_VERSION } from "@/lib/offline/opIdentity";
 import type { SubmitOrderPayload } from "@/lib/pos/orders";
 import type { CurrencyCode } from "@/lib/currency";
 import type { OfflineOperation, RetryClass } from "@/lib/offline/operationLog";
@@ -198,7 +201,9 @@ const FOREIGN_OPEN_SHIFT_MSG =
 
 type TakeawayPayload = {
   order_payload: SubmitOrderPayload;
-  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown> } | null;
+  /** 1.0.41 — `pay_op_v: 1` = captured by 1.0.41+: the replay pays with takeawayPayOpId(client_op_id), the
+   *  SAME id the online attempt of this sale used (lost-response safe). Absent on older captures. */
+  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown>; pay_op_v?: number } | null;
   paid?: boolean;
   /** Phase E: explicit local-id dependencies to remap into order_payload before submit. Absent on
    *  pre-E migrated ops (whose single shift dep lived only in depends_on_local_entities). */
@@ -295,19 +300,34 @@ export const takeawaySaleHandler: OperationHandler = {
       return { ok: false, retryClass: "SERVER_RETRYABLE", code: "order: no id", message: "no order id returned" };
     }
 
-    // 2. Cash payment (state-based `already paid` dedup). Only when an intent exists.
+    // 2. Cash payment. Only when an intent exists.
+    //   - 1.0.41 captures (pay_op_v = 1): idempotent on takeawayPayOpId(client_op_id) — the SAME id the online
+    //     attempt used — so a lost response is replayed as its recorded result. A plain `already paid` then
+    //     means ANOTHER payment settled this order: the cash this device holds is NOT booked, so it is a
+    //     CONFLICT for review (never reported as synced/paid).
+    //   - older captures keep the 1.0.38 state-based `already paid` dedup unchanged.
     let paid = p.paid === true;
     if (p.payment_intent && !paid) {
+      const opBound = p.payment_intent.pay_op_v === TAKEAWAY_PAY_OP_VERSION;
       try {
         await ctx.deps.pay({
           orderId,
           currency: (p.payment_intent.currency as CurrencyCode) ?? "USD",
           discount: p.payment_intent.discount,
+          ...(opBound ? { clientOpId: takeawayPayOpId(op.client_op_id) } : {}),
         });
         paid = true;
         await ctx.update({ payload: { ...p, paid: true, order_payload: payload } });
       } catch (e) {
         const msg = errMsg(e);
+        if (isAlreadyPaid(msg) && opBound) {
+          return {
+            ok: false,
+            retryClass: "CONFLICT",
+            code: "already_paid_elsewhere",
+            message: "This order was already paid by another payment, so the cash this device collected for it is not booked. Review it before closing the shift.",
+          };
+        }
         if (isAlreadyPaid(msg)) {
           paid = true;
           await ctx.update({ payload: { ...p, paid: true, order_payload: payload } });

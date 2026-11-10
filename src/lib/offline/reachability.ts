@@ -7,14 +7,24 @@
 // the exact ambiguous state offline capture must avoid before a submit. So before
 // committing a cash sale we ASK the backend with a short, NON-MUTATING probe.
 //
-// SEMANTICS: the probe is no-cors, so it resolves (opaque) for ANY answer the
-// gateway gives - 200, 401, 404, 5xx - because any answer proves the backend was
-// reached. It rejects ONLY on a network-level failure (no route, DNS/connect fail)
-// or the abort timeout, which is exactly "unreachable". It creates no order,
-// payment, inventory or accounting state, and it is used ONLY before a submit
-// begins. Once a submit has started, an ambiguous result is left to the server's
-// own idempotency (client_op_id) on retry - this probe never reclassifies an
-// already-started submit into a new offline transaction.
+// SEMANTICS (1.0.41 — Server Off): "reachable" now means THE DATABASE ANSWERS, not
+// "some gateway answered". The 2026-11-07 Production incident was a database stall:
+// Auth and the API gateway kept answering while every POS write failed with 5xx /
+// statement timeouts, so the 1.0.40 no-cors auth-health probe (any answer = reachable)
+// kept every till on the online path. The probe is now a CORS read that Postgres
+// itself must execute (anon `select id … limit 0` on a 4-row catalog table: RLS gives
+// anon zero rows, so nothing is ever returned), and a status >= 500 is a FAILURE.
+// A 4xx still proves the database answered (e.g. a permission refusal is raised by
+// Postgres), so it stays "reachable". The probe creates no order, payment, inventory
+// or accounting state and is used ONLY before a submit begins. Once a submit has
+// started, an ambiguous result is left to the server's own idempotency
+// (client_op_id) - this probe never reclassifies an already-started submit.
+//
+// DEGRADED (1.0.41): a 5xx seen on REAL traffic (timeoutFetch → markBackendDegraded)
+// publishes "unreachable" at once and holds it until RECOVERY_SUCCESSES healthy answers
+// have been seen (hysteresis: a stalled database answering one request in three must not
+// flip tills back to the online path between failures). A plain transport drop/return
+// keeps its immediate 1.0.38 semantics.
 //
 // 1.0.38 (PERF C10 / R1) — ONE SHARED STORE. Every default caller (no deps) goes
 // through a module store: a result is reused for REACHABILITY_TTL_MS, concurrent
@@ -42,26 +52,34 @@ export const REACHABILITY_TTL_MS = 3_000;
 /** The probe's own abort ceiling (unchanged from 1.0.37). */
 export const REACHABILITY_PROBE_TIMEOUT_MS = 2_500;
 
-async function healthUrl(): Promise<string> {
+/** 1.0.41 — the database-touching probe target and its headers (anon key: public by design). */
+async function healthRequest(): Promise<{ url: string; headers: Record<string, string> }> {
   // Lazy import so this module stays loadable without build-time env (tests).
   const { env } = await import("@/env");
-  return `${env.SUPABASE_URL}/auth/v1/health`;
+  return {
+    url: `${env.SUPABASE_URL}/rest/v1/subscription_plans?select=id&limit=0`,
+    headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: `Bearer ${env.SUPABASE_ANON_KEY}` },
+  };
 }
 
-/** The raw probe (1.0.37 behaviour): one request, no caching. */
+/** PURE — does this HTTP status prove the DATABASE answered? (5xx = gateway/pool/statement failure.) */
+export function statusProvesHealthy(status: number): boolean {
+  return status > 0 && status < 500;
+}
+
+/** The raw probe: one request, no caching. Healthy only when the database answered (< 500). */
 async function probeBackend(deps: ReachabilityDeps): Promise<boolean> {
   const timeoutMs = deps.timeoutMs ?? REACHABILITY_PROBE_TIMEOUT_MS;
   const onLine = deps.onLine ?? navigatorOnLine;
   // Fast negative: the OS is certain there is no network. No request needed.
   if (onLine() === false) return false;
   const f = deps.fetchFn ?? fetch;
-  const target = deps.url ?? (await healthUrl());
+  const req = deps.url ? { url: deps.url, headers: {} as Record<string, string> } : await healthRequest();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    // no-cors: resolves for any gateway answer, rejects only on a network failure.
-    await f(target, { method: "GET", mode: "no-cors", cache: "no-store", signal: controller.signal });
-    return true;
+    const res = await f(req.url, { method: "GET", cache: "no-store", headers: req.headers, signal: controller.signal });
+    return statusProvesHealthy(res.status);
   } catch {
     return false;
   } finally {
@@ -82,6 +100,40 @@ const listeners = new Set<(reachable: boolean) => void>();
 let eventsInstalled = false;
 let probeOverride: (() => Promise<boolean>) | null = null;
 let probeCount = 0;
+
+// 1.0.41 — DEGRADED hold (database failing while the network is up). See the header.
+/** A 5xx older than this no longer holds the store degraded. */
+export const DEGRADED_WINDOW_MS = 30_000;
+/** Healthy answers needed to leave DEGRADED (hysteresis). */
+export const RECOVERY_SUCCESSES = 2;
+/** Failures inside the window that make DEGRADED read as SERVER_OFF. */
+export const SERVER_OFF_FAILURES = 3;
+let degradedFailures: number[] = [];
+let healthyStreak = 0;
+/** The last negative came from a transport drop / failed probe (not a 5xx). */
+let transportDown = false;
+
+function pruneDegraded(now: number): void {
+  degradedFailures = degradedFailures.filter((t) => now - t < DEGRADED_WINDOW_MS);
+}
+
+/** True while recent 5xx evidence holds the store negative until enough healthy answers arrive. */
+function degradedHold(now: number): boolean {
+  pruneDegraded(now);
+  return degradedFailures.length > 0 && healthyStreak < RECOVERY_SUCCESSES;
+}
+
+/** A healthy answer arrived (probe or real traffic). Returns the verdict to publish. */
+function noteHealthy(now: number): boolean {
+  transportDown = false;
+  if (!degradedHold(now)) return true;
+  healthyStreak += 1;
+  if (healthyStreak >= RECOVERY_SUCCESSES) {
+    degradedFailures = [];
+    return true;
+  }
+  return false;
+}
 
 function publish(value: boolean): void {
   const changed = last?.value !== value;
@@ -117,7 +169,10 @@ async function sharedReachability(): Promise<boolean> {
   probeCount += 1;
   const p = (probeOverride ? probeOverride() : probeBackend({}))
     .catch(() => false)
-    .then((r) => {
+    .then((raw) => {
+      // 1.0.41 — a healthy probe while DEGRADED counts toward recovery, not an instant flip.
+      const r = raw ? noteHealthy(Date.now()) : false;
+      if (!raw) transportDown = true;
       if (gen === generation) publish(r);
       return r;
     })
@@ -147,15 +202,47 @@ export function lastKnownReachable(): boolean | null {
 export function markBackendUnreachable(): void {
   generation += 1;
   inFlight = null;
+  transportDown = true;
   publish(false);
 }
 
-/** The backend ANSWERED a request (any status): the same proof the probe looks for. */
+/** The DATABASE answered a request (status < 500): the same proof the probe looks for. While DEGRADED,
+ *  it counts toward recovery (RECOVERY_SUCCESSES) instead of flipping the store back at once. */
 export function markBackendReachable(): void {
   if (navigatorOnLine() === false) return;
   generation += 1;
   inFlight = null;
-  publish(true);
+  publish(noteHealthy(Date.now()));
+}
+
+/** 1.0.41 — the backend answered with a 5xx (gateway / pool exhaustion / statement timeout / Postgres
+ *  down): the database is failing even though the network is up. Publish the negative at once and hold
+ *  it (see DEGRADED_WINDOW_MS / RECOVERY_SUCCESSES). */
+export function markBackendDegraded(): void {
+  const now = Date.now();
+  generation += 1;
+  inFlight = null;
+  pruneDegraded(now);
+  degradedFailures.push(now);
+  healthyStreak = 0;
+  publish(false);
+}
+
+export type BackendHealth = "online" | "degraded" | "server_off";
+
+/**
+ * 1.0.41 — the ONE three-state connectivity truth for the header, POS gates, Sync Center and the sync
+ * worker. Synchronous, no I/O. `online` only when the last verdict is positive; `server_off` when the OS
+ * is offline, the last negative was a transport drop / failed probe, or SERVER_OFF_FAILURES 5xx landed
+ * inside the window; otherwise `degraded`. Every non-`online` state routes new work to local capture
+ * exactly like 1.0.40's "unreachable" did.
+ */
+export function getBackendHealth(): BackendHealth {
+  if (navigatorOnLine() === false) return "server_off";
+  if (!last || last.value) return "online";
+  pruneDegraded(Date.now());
+  if (transportDown || degradedFailures.length >= SERVER_OFF_FAILURES) return "server_off";
+  return "degraded";
 }
 
 /** Forget the cached verdict (keeps the last value for `lastKnownReachable`); the next caller re-probes. */
@@ -181,6 +268,9 @@ export function __resetReachabilityForTests(probe: (() => Promise<boolean>) | nu
   listeners.clear();
   probeOverride = probe;
   probeCount = 0;
+  degradedFailures = [];
+  healthyStreak = 0;
+  transportDown = false;
 }
 
 /** Test hook: how many default-path probes the store has actually started since the last reset. */

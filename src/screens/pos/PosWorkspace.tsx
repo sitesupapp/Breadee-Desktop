@@ -77,7 +77,8 @@ import { groupsForItem, requiresChoice } from "@/lib/pos/modifiers";
 import { hasIngredients, kitchenNoteFor, type ItemOptionsResult } from "@/lib/pos/itemOptions";
 import { readPosFeatures } from "@/lib/pos/posFeatures";
 import { buildSubmitPayload, cartSubtotal, submitOrder, submitPayloadToCartLines, type SubmitOrderPayload } from "@/lib/pos/orders";
-import { payOrder, type PaymentMethod } from "@/lib/pos/payments";
+import { payOrder, withDeadline, isAmbiguousOutcome, INTERACTIVE_MONEY_DEADLINE_MS, type PaymentMethod } from "@/lib/pos/payments";
+import { takeawayPayOpId, TAKEAWAY_PAY_OP_VERSION } from "@/lib/offline/opIdentity";
 import { completePayment, completeOnAccountReceipt, tenderTotalFor } from "@/lib/pos/paymentCompletion";
 import { completeOnAccount, createOnAccountLatch, performOnAccount, type OnAccountVerdict } from "@/lib/pos/onAccount";
 import { useCustomerPicker } from "@/state/customerPicker";
@@ -1483,6 +1484,10 @@ function PosWorkspaceInner() {
   // Synchronous latch: three fast clicks must not reach the server three times.
   // The server is still the authority (m224); this only avoids the round trips.
   const inFlight = useRef(false);
+  // 1.0.41 (F-WRITE) — the stable pos_pay_order client_op_id per EXISTING order being settled from the
+  // Current Order panel: a press of Confirm after an unconfirmed attempt re-sends the SAME id, which the
+  // server answers with the recorded result instead of charging again. Cleared once the payment is confirmed.
+  const existingPayOps = useRef(new Map<string, string>());
 
   // --- actions ---------------------------------------------------------------
 
@@ -1828,7 +1833,13 @@ function PosWorkspaceInner() {
 
   /** Offline Cash Pay of a draft: upsert the SAME txn with the payment intent; cart cleared. */
   const saveOfflineCashPayment = useCallback(
-    async (lines: CartLine[], input: { currency: CurrencyCode; discount: Record<string, unknown> }) => {
+    async (
+      lines: CartLine[],
+      input: { currency: CurrencyCode; discount: Record<string, unknown> },
+      // 1.0.41 — set when an ONLINE attempt of this same sale got no confirmed answer: the cash is in hand, the
+      // sale is kept durably under the SAME op ids, and the operator is told it is pending confirmation.
+      opts: { afterUnconfirmedOnline?: boolean } = {},
+    ) => {
       // One atomic shift snapshot: shift_id and pending_shift_local_id are a matched
       // pair (see saveOfflineSend) - reading them separately risks an orphan on a
       // reconnect canonicalization that interleaves between the two reads.
@@ -1851,6 +1862,8 @@ function PosWorkspaceInner() {
         method: "cash" as const,
         currency: input.currency,
         ...(input.discount && Object.keys(input.discount).length > 0 ? { discount: input.discount } : {}),
+        // 1.0.41 — the replay pays with takeawayPayOpId(opId): one payment with any online attempt of this sale.
+        pay_op_v: TAKEAWAY_PAY_OP_VERSION,
       };
       const existing = await getPosOfflineTxnByOp(opId);
       const localId = existing?.local_txn_id ?? crypto.randomUUID();
@@ -1930,7 +1943,15 @@ function PosWorkspaceInner() {
       // Durable commit is done; only now clear the cart and close the dialog.
       setPayIntent(null);
       newOrder();
-      toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
+      if (opts.afterUnconfirmedOnline) {
+        toast.push({
+          tone: "warning",
+          message: "Payment saved on this device - awaiting Breadee confirmation",
+          detail: `Ref ${ref}. Breadee did not confirm this payment in time. Do not collect it again: it is kept on this device and confirmed exactly once when the connection is healthy.`,
+        });
+      } else {
+        toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
+      }
     },
     [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, provisionalResult, rate, receiptStore, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
@@ -2175,12 +2196,16 @@ function PosWorkspaceInner() {
         // sale is committed DURABLY offline under the cart's stable op id (shared
         // with any prior offline Send), never an online submit/pay. An EXISTING
         // server order is never rerouted offline - it settles online or not at all.
-        if (
-          intent.kind === "draft" &&
-          input.method === "cash" &&
-          (useShift.getState().pendingLocalId != null || !(await isBackendReachable()))
-        ) {
+        const offlineNow = useShift.getState().pendingLocalId != null || !(await isBackendReachable());
+        if (intent.kind === "draft" && input.method === "cash" && offlineNow) {
           await saveOfflineCashPayment(lines, { currency: input.currency, discount: input.discount });
+          return;
+        }
+        // 1.0.41 (approved Server Off policy) — only cash is ever recorded as collected without Breadee. A card or
+        // other method needs its authorisation online; refuse it up front instead of attempting an online
+        // payment that cannot complete (1.0.40 then showed "Nothing was lost" although nothing was saved).
+        if (intent.kind === "draft" && input.method !== "cash" && offlineNow) {
+          setPayError("Breadee is not reachable, so only cash can be taken right now. Card and other payment methods need a confirmed connection. Nothing was charged.");
           return;
         }
         // ONE settlement, whichever the target was. A draft has its order
@@ -2188,15 +2213,33 @@ function PosWorkspaceInner() {
         // makes a second one); an existing order is already identified, and
         // `ensureOrder` is deliberately not reached on that path - it would
         // submit the cart's unrelated draft.
-        const draft = intent.kind === "draft" ? await ensureOrder() : null;
+        //
+        // 1.0.41 (F-WRITE) — both calls are BOUNDED (the cashier is never left on an endless "Charging...") and
+        // both carry a stable idempotency id: the cart op id for the order, takeawayPayOpId(cart op id) for the
+        // payment (an existing order keeps one id per order while it is unsettled). A resend after an
+        // unconfirmed attempt therefore returns the recorded result instead of charging again.
+        const draft =
+          intent.kind === "draft" ? await withDeadline(ensureOrder(), INTERACTIVE_MONEY_DEADLINE_MS, "pos_submit_order") : null;
         if (intent.kind === "draft" && !draft) return;
         const orderId = intent.kind === "order" ? intent.order.id : (draft as SubmitOrderResult).order_id;
         const orderNumber =
           intent.kind === "order"
             ? (intent.order.order_number ?? intent.order.id.slice(0, 8))
             : (draft as SubmitOrderResult).order_number;
+        let payOpId: string;
+        if (intent.kind === "draft") {
+          payOpId = takeawayPayOpId(useCart.getState().ensureOpId());
+        } else {
+          payOpId = existingPayOps.current.get(orderId) ?? crypto.randomUUID();
+          existingPayOps.current.set(orderId, payOpId);
+        }
 
-        const result = await payOrder({ orderId, method: input.method, currency: input.currency, discount: input.discount });
+        const result = await withDeadline(
+          payOrder({ orderId, method: input.method, currency: input.currency, discount: input.discount, clientOpId: payOpId }),
+          INTERACTIVE_MONEY_DEADLINE_MS,
+          "pos_pay_order",
+        );
+        existingPayOps.current.delete(orderId);
 
         // An existing order's lines come from the SERVER: there is no cart
         // behind it, and a receipt assembled from whatever the buffer happens to
@@ -2249,6 +2292,27 @@ function PosWorkspaceInner() {
         // receipt on screen and the order behind the buttons are the same sale.
         await adoptCreatedOrder(orderId);
       } catch (e) {
+        // 1.0.41 (F-WRITE) — an UNCONFIRMED outcome (no answer in time, dropped link, 5xx) is never presented
+        // as "nothing happened" and never turned into a second, independent payment:
+        //   - a new cash sale: the cash is in hand, so the sale is kept DURABLY on this device under the SAME
+        //     op ids (cart op id + takeawayPayOpId) — its replay is applied once, or returns the recorded
+        //     result if the online attempt did commit;
+        //   - anything else: the same payment id is kept for this order, and the operator is told not to
+        //     collect again; pressing Confirm re-sends that id (the server returns the recorded result).
+        if (isAmbiguousOutcome(e)) {
+          if (intent.kind === "draft" && input.method === "cash") {
+            try {
+              await saveOfflineCashPayment(lines, { currency: input.currency, discount: input.discount }, { afterUnconfirmedOnline: true });
+              return;
+            } catch {
+              // The durable save itself failed: fall through to the unconfirmed message; nothing is cleared.
+            }
+          }
+          setPayError(
+            "Breadee has not confirmed this payment yet. Do NOT collect again. Press Confirm to check the same payment - Breadee applies it at most once.",
+          );
+          return;
+        }
         const c = classifyError(e);
         // The saved order is deliberately KEPT so a retry pays this same order.
         setPayError(c.hint ? `${c.message} ${c.hint}` : c.message);

@@ -30,25 +30,10 @@ import { type TableBill, type BillLine, type BillOrder, type TableSummary } from
 
 const nid = () => crypto.randomUUID();
 
-/** A deterministic uuid derived from stable parts, so a double-tap Send yields the SAME
- *  client_op_id → the server dedups (exactly-once) rather than creating a second round.
- *  128-bit FNV-1a-based digest formatted as an RFC-4122-shaped uuid (v8/custom variant). */
-export function deterministicUuid(parts: string[]): string {
-  const s = parts.join("\u0001");
-  // Four independent 32-bit FNV-1a streams with distinct offsets → 128 bits.
-  const seeds = [0x811c9dc5, 0x01000193, 0x9dc5811c, 0x193010001 >>> 0];
-  const h = seeds.map((seed) => {
-    let x = seed >>> 0;
-    for (let i = 0; i < s.length; i++) {
-      x ^= s.charCodeAt(i);
-      x = Math.imul(x, 0x01000193) >>> 0;
-    }
-    return x >>> 0;
-  });
-  const hex = h.map((n) => n.toString(16).padStart(8, "0")).join(""); // 32 hex chars
-  // RFC-4122-shaped (8-4-4-4-12); version nibble 8 (custom) + variant 8 so it is a valid uuid.
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
+// 1.0.41 — moved verbatim to opIdentity.ts (shared with the payment path); re-exported so every caller and
+// every derived id is unchanged.
+import { deterministicUuid } from "@/lib/offline/opIdentity";
+export { deterministicUuid };
 
 export type DineinScope = {
   tenantId: string;

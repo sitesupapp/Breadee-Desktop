@@ -585,7 +585,10 @@ const RULES: { kind: RefusalKind; test: RegExp; hint: string | null; expected: b
     kind: "offline",
     // Offline-first recovery — a read timeout / abort is the same condition as a dropped link.
     test: /failed to fetch|network|offline|ERR_INTERNET|timed out|timeout|aborted|AbortError|load failed/i,
-    hint: "Nothing was lost. Actions that work offline are kept on this device and sync automatically when the connection returns.",
+    // 1.0.41 (F-WRITE) — this rule classifies ONLINE failures, where nothing was necessarily saved on the device
+    // (1.0.40 said "Nothing was lost", which invited re-ringing a sale whose payment had in fact committed — the
+    // 2026-11-07 orphan). Work saved offline reports its own confirmation; this hint makes no such claim.
+    hint: "Breadee could not confirm this action. Work already saved on this device stays safe and syncs when the connection returns. If a payment was being taken, do not collect it again until Breadee confirms it.",
     expected: true,
   },
 ];

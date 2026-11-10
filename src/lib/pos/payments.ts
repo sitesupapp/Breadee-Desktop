@@ -35,7 +35,60 @@ export type PayOrderInput = {
   currency: CurrencyCode;
   /** Already converted to the order's PRIMARY currency by the caller. */
   discount?: Record<string, unknown>;
+  /** 1.0.41 (F-WRITE) — the payment's stable idempotency id. The production `pos_pay_order` wrapper
+   *  replays the recorded result for a repeated (tenant, client_op_id) instead of charging again, so a
+   *  resend after a lost response is an outcome LOOKUP, never a second payment. Omitted → 1.0.40 payload. */
+  clientOpId?: string;
 };
+
+/** 1.0.41 (F-WRITE) — how long an INTERACTIVE money call may keep the cashier waiting before its outcome
+ *  is treated as unknown. Above the server's 8 s statement timeout plus pool acquisition, so a healthy but
+ *  slow commit is not cut short. The request itself is NOT aborted (an abort does not stop a server-side
+ *  write); its eventual answer still feeds the health store, and the same client_op_id makes a later resend
+ *  return the recorded result. */
+export const INTERACTIVE_MONEY_DEADLINE_MS = 20_000;
+
+/** 1.0.41 — the outcome of a money call is unknown (no answer within the deadline, a dropped link or a
+ *  5xx after the request may have reached the database). Never shown as "nothing happened". */
+export class AmbiguousOutcomeError extends Error {
+  readonly rpc: string;
+  constructor(rpc: string, cause?: unknown) {
+    super(`The result of ${rpc} is not confirmed yet.`);
+    this.name = "AmbiguousOutcomeError";
+    this.rpc = rpc;
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/** Race a money call against a deadline WITHOUT aborting it (see INTERACTIVE_MONEY_DEADLINE_MS). */
+export async function withDeadline<T>(p: Promise<T>, ms: number, rpc: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const deadline = new Promise<never>((_res, rej) => {
+    timer = setTimeout(() => rej(new AmbiguousOutcomeError(rpc)), ms);
+  });
+  // Keep a late rejection of the losing promise from becoming an unhandled rejection.
+  p.catch(() => undefined);
+  try {
+    return await Promise.race([p, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * PURE — could this failure have happened AFTER the server applied the money call? True for our own
+ * deadline, a transport failure (the request may have been delivered before the link dropped), and any
+ * 5xx / gateway / pool / statement-timeout answer. False for a definitive business refusal (4xx with a
+ * server message): that call did not apply.
+ */
+export function isAmbiguousOutcome(e: unknown): boolean {
+  if (e instanceof AmbiguousOutcomeError) return true;
+  if (e instanceof TypeError) return true; // "Failed to fetch" / "Load failed"
+  const status = (e as { status?: unknown } | null)?.status;
+  if (typeof status === "number" && status >= 500) return true;
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  return /failed to fetch|load failed|network ?error|timed out|timeout|AbortError|PGRST00[0-3]|statement timeout|connection pool|ERR_INTERNET/i.test(msg);
+}
 
 /**
  * Client-side pre-check for the one refusal that is worth catching before the
@@ -55,6 +108,7 @@ export async function payOrder(input: PayOrderInput, client?: RpcClient): Promis
     method: input.method,
     currency_code: input.currency,
     ...(input.discount ?? {}),
+    ...(input.clientOpId ? { client_op_id: input.clientOpId } : {}),
   };
   const row = asRecord(await callPosRpc("pos_pay_order", { p_payload: payload }, client));
   const currency = str(row.currency_code, "USD");

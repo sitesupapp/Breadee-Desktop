@@ -82,7 +82,8 @@ export interface PosOfflineTxn {
    * a later offline Cash Pay UPDATES the same transaction (matched by
    * `client_op_id`) to fill this in. Replay pays only when it is present.
    */
-  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown> } | null;
+  /** 1.0.41: `pay_op_v: 1` = this sale's pay is bound to takeawayPayOpId(client_op_id) (see opIdentity). */
+  payment_intent: { method: "cash"; currency: string; discount?: Record<string, unknown>; pay_op_v?: number } | null;
   /** True once this order has been sent to the kitchen (online or offline). */
   sent_to_kitchen?: boolean;
   currency: string;

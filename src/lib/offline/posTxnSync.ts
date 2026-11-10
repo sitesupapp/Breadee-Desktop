@@ -282,7 +282,9 @@ const numMap = (v: unknown): Record<string, number> => {
 
 export type PosTxnSyncDeps = {
   submit: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string }>;
-  pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown> }) => Promise<unknown>;
+  /** 1.0.41 — `clientOpId` (when the capture carries one) makes the replayed pay idempotent with the online
+   *  attempt of the same sale (pos_pay_order replays the recorded result). */
+  pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown>; clientOpId?: string }) => Promise<unknown>;
   /** Open (or adopt) the shift for an offline-opened Case-2 shift, exactly once. */
   openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string; requireNew?: boolean }) => Promise<{ shiftId: string; reused: boolean }>;
   /** Phase-C: occupy a table / establish the session (pos_open_table, op-id + version CAS). */
@@ -453,7 +455,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
   },
   pay: async (args) => {
     const { payOrder } = await import("@/lib/pos/payments");
-    return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount }, rc);
+    return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount, ...(args.clientOpId ? { clientOpId: args.clientOpId } : {}) }, rc);
   },
   openShift: async (args) => {
     const { openShiftWithOp } = await import("@/lib/pos/shifts");
