@@ -48,7 +48,7 @@ env:
   PRODUCTION_REF: cltlqfqormkhppmbvyrv
   # The customer-facing note shown in "Breadee Update Available" (latest.json
   # `notes`) and in the GitHub release description. Business language only.
-  RELEASE_NOTE: "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off."
+  RELEASE_NOTE: "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers, at the time, price and exchange rate they were taken at. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off."
 
 jobs:
   release:

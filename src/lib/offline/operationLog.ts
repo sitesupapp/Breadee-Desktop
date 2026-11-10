@@ -20,6 +20,7 @@
 //     (`needs_attention`, reason `unknown_handler`) and never executed.
 
 import { localdb, operationsRevision } from "@/lib/offline/db";
+import { captureEvidenceFor, type CaptureCurrency, type CaptureEvidence } from "@/lib/offline/captureEvidence";
 
 /** The business operation types Phase B knows. Compat handlers only — Phase B adds NO
  *  new offline business capability. Future phases register new types here. */
@@ -186,6 +187,16 @@ export interface OfflineOperation {
     refusal: string | null;
     verified_against: string[];
   }[];
+  /** 1.0.41 (S-CAPTURE) — when it was captured and at which rate; stamped once at creation, never rewritten.
+   *  Sent as `capture` on replay; the server validates it before honouring it. Absent on older ops. */
+  capture?: CaptureEvidence | null;
+}
+
+// 1.0.41 (S-CAPTURE) — the till's currency at capture time, read through a provider registered at startup
+// (main.tsx) so this module does not import the session store.
+let captureCurrencyProvider: (() => CaptureCurrency) | null = null;
+export function setCaptureCurrencyProvider(provider: (() => CaptureCurrency) | null): void {
+  captureCurrencyProvider = provider;
 }
 
 // rc.10 — build provenance: every new operation is stamped with the running build (set once at startup
@@ -212,7 +223,17 @@ export function captureBuildStamp(sha: string | null | undefined, appVersion: st
 localdb.operations.hook("creating", (_pk, obj) => {
   const o = obj as OfflineOperation;
   if (o.captured_build == null && captureBuild) o.captured_build = captureBuild;
+  applyCaptureStamp(o);
 });
+
+/** 1.0.41 (S-CAPTURE) — stamp an op being created with its capture evidence (once; never overwrites). */
+export function applyCaptureStamp(o: OfflineOperation): void {
+  if (o.capture != null || !captureCurrencyProvider) return;
+  let currency: CaptureCurrency = null;
+  try { currency = captureCurrencyProvider(); } catch { currency = null; }
+  const c = captureEvidenceFor(o.created_at, currency);
+  if (c) o.capture = c;
+}
 
 /** The schema version new captures are written at. Bump when the envelope/payload shape changes. */
 export const OPERATION_SCHEMA_VERSION = 1;

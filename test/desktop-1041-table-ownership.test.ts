@@ -41,9 +41,23 @@ test("a table this terminal already holds is always its own (opened / re-homed h
   assert.deepEqual(serverOffOwnership({ assignment: null, hasLocalSession: true, sectionId: null }), { allowed: true, reason: null });
 });
 
-test("no assignment → only tables already held here (never the cached free map)", () => {
-  assert.deepEqual(serverOffOwnership({ assignment: null, hasLocalSession: false, sectionId: "SEC-A" }), { allowed: false, reason: SERVER_OFF_NOT_ASSIGNED_MESSAGE });
-  assert.match(assignmentReadinessNote(null) ?? "", /No Server Off tables are assigned/);
+test("NOT CONFIGURED (every restaurant on upgrade) → never blocked: any table, as in 1.0.40, with a readiness note", () => {
+  for (const sectionId of ["SEC-A", "SEC-B", null]) {
+    assert.deepEqual(serverOffOwnership({ assignment: null, hasLocalSession: false, sectionId }), { allowed: true, reason: null });
+  }
+  assert.equal(readServerOffAssignment("t1", "b1"), null, "nothing saved = not configured");
+  assert.match(assignmentReadinessNote(null) ?? "", /not set for this terminal.*any table, as before/);
+});
+
+test("explicit 'only tables already open here' → held tables only (never the cached free map)", () => {
+  writeServerOffAssignment("t1", "b1", { mode: "held" }, "mgr");
+  const a = readServerOffAssignment("t1", "b1");
+  assert.equal(a?.mode, "held");
+  assert.deepEqual(serverOffOwnership({ assignment: a, hasLocalSession: false, sectionId: "SEC-A" }), { allowed: false, reason: SERVER_OFF_NOT_ASSIGNED_MESSAGE });
+  assert.deepEqual(serverOffOwnership({ assignment: a, hasLocalSession: true, sectionId: "SEC-A" }), { allowed: true, reason: null });
+  assert.equal(assignmentReadinessNote(a), null);
+  writeServerOffAssignment("t1", "b1", null, "mgr");
+  assert.equal(readServerOffAssignment("t1", "b1"), null, "clearing returns to not configured");
 });
 
 test("'all tables' (single-terminal site) and assigned sections are owned; another section is view-only", () => {

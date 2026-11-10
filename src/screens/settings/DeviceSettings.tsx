@@ -90,14 +90,14 @@ function ServerOffTables() {
   const layout = useFloor((f) => f.layout);
   const canEdit = s.permissions[OFFLINE_TABLES_PERMISSION] === true;
   const [assignment, setAssignment] = useState<ServerOffAssignment | null>(() => readServerOffAssignment(tenantId, branchId));
-  const [mode, setMode] = useState<"none" | "all" | "sections">(assignment ? assignment.mode : "none");
+  const [mode, setMode] = useState<"unset" | "all" | "sections" | "held">(assignment ? assignment.mode : "unset");
   const [picked, setPicked] = useState<string[]>(assignment && assignment.mode === "sections" ? assignment.sectionIds : []);
   const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
     const a = readServerOffAssignment(tenantId, branchId);
     setAssignment(a);
-    setMode(a ? a.mode : "none");
+    setMode(a ? a.mode : "unset");
     setPicked(a && a.mode === "sections" ? a.sectionIds : []);
     if (tenantId && branchId) void useFloor.getState().load({ tenantId, branchId }).catch(() => undefined);
   }, [tenantId, branchId]);
@@ -105,7 +105,12 @@ function ServerOffTables() {
   const save = () => {
     if (!tenantId || !canEdit) return;
     try {
-      writeServerOffAssignment(tenantId, branchId, mode === "none" ? null : mode === "all" ? { mode: "all" } : { mode: "sections", sectionIds: picked }, s.userId ?? null);
+      writeServerOffAssignment(
+        tenantId,
+        branchId,
+        mode === "unset" ? null : mode === "sections" ? { mode: "sections", sectionIds: picked } : { mode },
+        s.userId ?? null,
+      );
       setAssignment(readServerOffAssignment(tenantId, branchId));
       setNote("Saved for this terminal.");
     } catch (e) {
@@ -118,7 +123,8 @@ function ServerOffTables() {
       <h2 className="text-lg font-bold">Offline tables</h2>
       <p className="mt-1 text-sm text-sub">
         While Breadee&apos;s server is off, each terminal keeps trading on its own. To keep two tills from taking the same table, choose the tables
-        this terminal serves then. Tables already open on this terminal always continue here.
+        this terminal serves then. Tables already open on this terminal always continue here. Until this is set, the terminal can take any
+        table while the server is off, as before.
       </p>
       {!canEdit && <p className="mt-2 text-xs font-semibold text-amber-800">A manager with floor management can change this.</p>}
       <div className="mt-4 space-y-2 text-sm">
@@ -147,8 +153,12 @@ function ServerOffTables() {
           </div>
         )}
         <label className="flex items-center gap-2">
-          <input type="radio" name="serveroff-mode" checked={mode === "none"} disabled={!canEdit} onChange={() => setMode("none")} />
-          None (only tables already open on this terminal)
+          <input type="radio" name="serveroff-mode" checked={mode === "held"} disabled={!canEdit} onChange={() => setMode("held")} />
+          Only tables already open on this terminal
+        </label>
+        <label className="flex items-center gap-2">
+          <input type="radio" name="serveroff-mode" checked={mode === "unset"} disabled={!canEdit} onChange={() => setMode("unset")} />
+          Not set (any table, as before)
         </label>
       </div>
       <div className="mt-4 flex items-center gap-3">

@@ -302,7 +302,7 @@ test("BUG 6: Open Tables and its rail count read the SAME effective floor the Di
 
 test("RELEASE 1.0.41 (production): customer note in latest.json + release body, contracts flag ON, one version everywhere", () => {
   const NOTE =
-    "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off.";
+    "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers, at the time, price and exchange rate they were taken at. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off.";
   const wf = read(".github", "workflows", "desktop-production-release.yml");
   assert.ok(wf.includes(`RELEASE_NOTE: "${NOTE}"`), "the exact customer note");
   assert.match(wf, /"notes": "\$\{RELEASE_NOTE\}",/, "latest.json notes = the customer note");

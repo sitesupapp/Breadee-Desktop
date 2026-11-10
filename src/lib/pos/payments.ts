@@ -15,6 +15,7 @@
 import { callPosRpc, asRecord, bool, num, numOrNull, requireId, str, type RpcClient } from "@/lib/pos/rpc";
 import { hasValidRate, roundForCurrency, type CurrencyCode } from "@/lib/currency";
 import type { PayOrderResult } from "@/types/pos";
+import type { CaptureEvidence } from "@/lib/offline/captureEvidence";
 
 /**
  * A tenant payment-method KEY from the Phase B `pos_payment_methods` catalog.
@@ -41,6 +42,8 @@ export type PayOrderInput = {
   clientOpId?: string;
   /** 1.0.41 (F-WRITE) — bound the interactive wait; past it → AmbiguousOutcomeError (never aborted, never re-charged). */
   deadlineMs?: number;
+  /** 1.0.41 (S-CAPTURE) — offline replay evidence (when / at which rate). Omitted online. */
+  capture?: CaptureEvidence;
 };
 
 /** 1.0.41 (F-WRITE) — how long an INTERACTIVE money call may keep the cashier waiting before its outcome
@@ -111,6 +114,8 @@ export async function payOrder(input: PayOrderInput, client?: RpcClient): Promis
     currency_code: input.currency,
     ...(input.discount ?? {}),
     ...(input.clientOpId ? { client_op_id: input.clientOpId } : {}),
+    // 1.0.41 (S-CAPTURE) — offline replay only: when/at which rate the cash was taken (server-validated).
+    ...(input.capture ? { capture: input.capture } : {}),
   };
   // 1.0.41 (F-WRITE) — an interactive caller bounds the wait (`deadlineMs`): past it the outcome is AMBIGUOUS (the
   // request is not aborted; a re-send with the same clientOpId returns the recorded result, never a second charge).

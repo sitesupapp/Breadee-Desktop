@@ -9,8 +9,13 @@
 //   - this terminal already holds the table's open local session (it opened or re-homed the bill here — proven by
 //     its own durable session and operation log), or
 //   - the table sits in a floor section assigned to this terminal (or the terminal serves all tables).
-// Otherwise the table is view-only here. With no assignment at all, only tables this terminal already holds can be
-// worked on (the readiness indicator flags it BEFORE an outage). Online nothing changes: the server coordinates.
+// Otherwise the table is view-only here. Online nothing changes: the server coordinates.
+//
+// NOT CONFIGURED (no assignment saved on this terminal — every restaurant on upgrade): the terminal keeps the
+// 1.0.40 behaviour and may take any table, so no existing restaurant is blocked by the upgrade. The readiness
+// indicator says so before an outage, and the server's table-version checks on replay still send a table taken on
+// two tills to review (never a double charge). The restriction applies once a manager saves an assignment:
+// "all tables", "only these sections", or "only tables already open on this terminal".
 //
 // The assignment is device-local (per tenant + branch), written only by a person with the setting permission.
 
@@ -18,7 +23,8 @@ import type { FloorLayout } from "@/lib/pos/floor";
 
 export type ServerOffAssignment =
   | { mode: "all"; setAt: string; setBy: string | null }
-  | { mode: "sections"; sectionIds: string[]; setAt: string; setBy: string | null };
+  | { mode: "sections"; sectionIds: string[]; setAt: string; setBy: string | null }
+  | { mode: "held"; setAt: string; setBy: string | null };
 
 const KEY = (tenantId: string, branchId: string | null) => `breadee-desktop-serveroff-tables:${tenantId}:${branchId ?? "none"}`;
 
@@ -37,7 +43,7 @@ export function readServerOffAssignment(tenantId: string | null, branchId: strin
     const raw = store()?.getItem(KEY(tenantId, branchId));
     if (!raw) return null;
     const a = JSON.parse(raw) as ServerOffAssignment;
-    if (a && a.mode === "all") return a;
+    if (a && (a.mode === "all" || a.mode === "held")) return a;
     if (a && a.mode === "sections" && Array.isArray(a.sectionIds)) return { ...a, sectionIds: a.sectionIds.filter((x) => typeof x === "string" && x !== "") };
     return null;
   } catch {
@@ -49,7 +55,7 @@ export function readServerOffAssignment(tenantId: string | null, branchId: strin
 export function writeServerOffAssignment(
   tenantId: string,
   branchId: string | null,
-  value: { mode: "all" } | { mode: "sections"; sectionIds: string[] } | null,
+  value: { mode: "all" } | { mode: "held" } | { mode: "sections"; sectionIds: string[] } | null,
   by: string | null,
 ): void {
   const s = store();
@@ -59,7 +65,8 @@ export function writeServerOffAssignment(
     return;
   }
   const at = new Date().toISOString();
-  const rec: ServerOffAssignment = value.mode === "all" ? { mode: "all", setAt: at, setBy: by } : { mode: "sections", sectionIds: [...new Set(value.sectionIds)], setAt: at, setBy: by };
+  const rec: ServerOffAssignment =
+    value.mode === "sections" ? { mode: "sections", sectionIds: [...new Set(value.sectionIds)], setAt: at, setBy: by } : { mode: value.mode, setAt: at, setBy: by };
   s.setItem(KEY(tenantId, branchId), JSON.stringify(rec));
 }
 
@@ -74,7 +81,7 @@ export function sectionOfTable(layout: Pick<FloorLayout, "elements"> | null | un
 export const OFFLINE_TABLES_PERMISSION = "pos.tables.floor_manage";
 
 export const SERVER_OFF_NOT_ASSIGNED_MESSAGE =
-  "Breadee's server is off and this terminal has no tables assigned for that. You can keep working on tables already open on this terminal. A manager can assign tables in Settings → Device → Offline tables.";
+  "Breadee's server is off and this terminal is set to continue only the tables already open on it. A manager can change this in Settings → Device → Offline tables.";
 export const SERVER_OFF_OTHER_TERMINAL_MESSAGE =
   "Breadee's server is off and this table is served by another terminal. Use the terminal that serves it, so the same table is never taken on two tills.";
 
@@ -86,15 +93,16 @@ export function serverOffOwnership(input: {
 }): { allowed: boolean; reason: string | null } {
   if (input.hasLocalSession) return { allowed: true, reason: null };
   const a = input.assignment;
-  if (!a) return { allowed: false, reason: SERVER_OFF_NOT_ASSIGNED_MESSAGE };
+  if (!a) return { allowed: true, reason: null }; // not configured → 1.0.40 behaviour (never blocks on upgrade)
   if (a.mode === "all") return { allowed: true, reason: null };
+  if (a.mode === "held") return { allowed: false, reason: SERVER_OFF_NOT_ASSIGNED_MESSAGE };
   if (input.sectionId && a.sectionIds.includes(input.sectionId)) return { allowed: true, reason: null };
   return { allowed: false, reason: SERVER_OFF_OTHER_TERMINAL_MESSAGE };
 }
 
-/** PURE — the readiness note for this terminal's assignment (null = assigned). */
+/** PURE — the readiness note for this terminal's assignment (null = nothing to point out). */
 export function assignmentReadinessNote(a: ServerOffAssignment | null): string | null {
-  if (!a) return "No Server Off tables are assigned to this terminal: while Breadee's server is off it can only continue tables already open on it.";
+  if (!a) return "Offline tables are not set for this terminal: while Breadee's server is off it can take any table, as before. If several terminals take table orders at this branch, assign each its tables in Settings → Device → Offline tables.";
   if (a.mode === "sections" && a.sectionIds.length === 0) return "This terminal's Server Off table assignment is empty.";
   return null;
 }

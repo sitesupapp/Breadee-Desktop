@@ -18,6 +18,7 @@ import { updatePosOfflineTxn } from "@/lib/offline/db";
 import type { SubmitOrderPayload } from "@/lib/pos/orders";
 import type { PosRpcName, RpcClient } from "@/lib/pos/rpc";
 import type { CurrencyCode } from "@/lib/currency";
+import type { CaptureEvidence } from "@/lib/offline/captureEvidence";
 
 export type PosTxnSyncContext = {
   tenantId: string | null;
@@ -284,9 +285,9 @@ export type PosTxnSyncDeps = {
   submit: (payload: SubmitOrderPayload) => Promise<{ order_id: string; order_number: string }>;
   /** 1.0.41 — `clientOpId` (when the capture carries one) makes the replayed pay idempotent with the online
    *  attempt of the same sale (pos_pay_order replays the recorded result). */
-  pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown>; clientOpId?: string }) => Promise<unknown>;
+  pay: (args: { orderId: string; currency: CurrencyCode; discount?: Record<string, unknown>; clientOpId?: string; capture?: CaptureEvidence }) => Promise<unknown>;
   /** Open (or adopt) the shift for an offline-opened Case-2 shift, exactly once. */
-  openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string; requireNew?: boolean }) => Promise<{ shiftId: string; reused: boolean }>;
+  openShift: (args: { branchId: string | null; openingCash: number; clientOpId: string; requireNew?: boolean; capture?: CaptureEvidence }) => Promise<{ shiftId: string; reused: boolean }>;
   /** Phase-C: occupy a table / establish the session (pos_open_table, op-id + version CAS). */
   openTable: (payload: OpenTablePayload) => Promise<{ table_id: string; pos_entity_version: number | null }>;
   /** Phase-C: send a dine-in round (pos_submit_order; expected_order_id binds rounds >=2). */
@@ -320,6 +321,7 @@ export type PosTxnSyncDeps = {
     clientOpId: string;
     expectedOrderIds?: string[] | null;
     expectedAmount?: number | null;
+    capture?: CaptureEvidence;
   }) => Promise<{ ok: boolean; amount: number; idempotent: boolean; pos_entity_version?: number | null }>;
   /** Phase-D: settle a single ORDER (pos_pay_order) offline. client_op_id → exactly-once;
    *  expectedVersion pins the order when known. */
@@ -330,6 +332,7 @@ export type PosTxnSyncDeps = {
     discount?: Record<string, unknown>;
     clientOpId: string;
     expectedVersion: number | null;
+    capture?: CaptureEvidence;
   }) => Promise<{ order_id: string; paid: boolean; amount: number; idempotent: boolean }>;
   /** Phase-D: put a dine-in TABLE bill on a customer's account (pos_complete_table_on_account).
    *  1.0.38 (Bug 9 / S2) — the same bill binding as pay_table: `expectedOrderIds` (set equality with the
@@ -344,6 +347,7 @@ export type PosTxnSyncDeps = {
     clientOpId: string;
     expectedOrderIds?: string[] | null;
     expectedAmount?: number | null;
+    capture?: CaptureEvidence;
   }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-D: put a single ORDER on a customer's account (pos_complete_on_account). 1.0.38 — same pins. */
   onAccountOrder: (args: {
@@ -355,6 +359,7 @@ export type PosTxnSyncDeps = {
     clientOpId: string;
     expectedOrderIds?: string[] | null;
     expectedAmount?: number | null;
+    capture?: CaptureEvidence;
   }) => Promise<{ ok: boolean; idempotent: boolean }>;
   /** Phase-D: canonically END a shift (pos_end_shift) — replays LAST, after every shift op. */
   endShiftOp: (args: {
@@ -363,6 +368,7 @@ export type PosTxnSyncDeps = {
     notes: string | null;
     deliveryFeeCashTreatment?: string;
     clientOpId: string;
+    capture?: CaptureEvidence;
   }) => Promise<{ shift_id: string; idempotent: boolean; approval_required?: boolean | null }>;
   /** Phase-D: settle one SPLIT leg (pos_split_settle). Item-subset allocations; the server derives
    *  the amount. expectedVersion is optional (NULL offline). client_op_id → exactly-once per leg. */
@@ -373,6 +379,7 @@ export type PosTxnSyncDeps = {
     allocations: { order_item_id: string; quantity: number }[];
     expectedVersion: number | null;
     clientOpId: string;
+    capture?: CaptureEvidence;
   }) => Promise<{ ok: boolean; split_no: number; parent_completed: boolean; remaining_qty: number; idempotent: boolean }>;
   /** Phase-D: record a cash PAYOUT (pos_payout_create). client_op_id → exactly-once (the RPC
    *  carries the server replay wrapper). The server validates the linked source under its row lock
@@ -455,7 +462,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
   },
   pay: async (args) => {
     const { payOrder } = await import("@/lib/pos/payments");
-    return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount, ...(args.clientOpId ? { clientOpId: args.clientOpId } : {}) }, rc);
+    return payOrder({ orderId: args.orderId, method: "cash", currency: args.currency, discount: args.discount, ...(args.clientOpId ? { clientOpId: args.clientOpId } : {}), ...(args.capture ? { capture: args.capture } : {}) }, rc);
   },
   openShift: async (args) => {
     const { openShiftWithOp } = await import("@/lib/pos/shifts");
@@ -513,6 +520,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
     // caller's request is unchanged.
     if (args.expectedOrderIds && args.expectedOrderIds.length > 0) payload.expected_order_ids = args.expectedOrderIds;
     if (args.expectedAmount != null && Number.isFinite(args.expectedAmount)) payload.expected_amount = args.expectedAmount;
+    if (args.capture) payload.capture = args.capture; // 1.0.41 (S-CAPTURE)
     const row = (await callPosRpc("pos_pay_table", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: row.ok === true, amount: row.amount == null ? 0 : Number(row.amount), idempotent, pos_entity_version: row.pos_entity_version == null ? null : Number(row.pos_entity_version) };
@@ -526,6 +534,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
         client_op_id: args.clientOpId,
         ...(args.expectedVersion == null ? {} : { expected_version: args.expectedVersion }),
         ...(args.discount ?? {}),
+        ...(args.capture ? { capture: args.capture } : {}),
       },
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
@@ -537,6 +546,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
     if (args.expectedOrderIds && args.expectedOrderIds.length > 0) payload.expected_order_ids = args.expectedOrderIds;
     if (args.expectedAmount != null && Number.isFinite(args.expectedAmount)) payload.expected_amount = args.expectedAmount;
+    if (args.capture) payload.capture = args.capture; // 1.0.41 (S-CAPTURE)
     const row = (await callPosRpc("pos_complete_table_on_account", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: true, idempotent };
@@ -547,6 +557,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
     if (args.discount?.discount_value !== undefined) payload.discount_value = args.discount.discount_value;
     if (args.expectedOrderIds && args.expectedOrderIds.length > 0) payload.expected_order_ids = args.expectedOrderIds;
     if (args.expectedAmount != null && Number.isFinite(args.expectedAmount)) payload.expected_amount = args.expectedAmount;
+    if (args.capture) payload.capture = args.capture; // 1.0.41 (S-CAPTURE)
     const row = (await callPosRpc("pos_complete_on_account", { p_payload: payload })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
     return { ok: true, idempotent };
@@ -559,6 +570,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
         notes: args.notes && args.notes.trim() !== "" ? args.notes.trim() : null,
         delivery_fee_cash_treatment: args.deliveryFeeCashTreatment ?? "included",
         client_op_id: args.clientOpId,
+        ...(args.capture ? { capture: args.capture } : {}),
       },
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";
@@ -574,6 +586,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
         allocations: args.allocations,
         client_op_id: args.clientOpId,
         ...(args.expectedVersion == null ? {} : { expected_version: args.expectedVersion }),
+        ...(args.capture ? { capture: args.capture } : {}),
       },
     })) as Record<string, unknown>;
     const idempotent = row.idempotent === true || row.idempotent_replay === true || row.result_code === "DUPLICATE_REPLAY_RETURNED";

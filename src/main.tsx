@@ -3,7 +3,8 @@ import ReactDOM from "react-dom/client";
 import App from "@/App";
 import { bootTheme } from "@/lib/theme/apply";
 import { rcLogStartup } from "@/lib/rcDiagnostics";
-import { captureBuildStamp, setCaptureBuild } from "@/lib/offline/operationLog";
+import { captureBuildStamp, setCaptureBuild, setCaptureCurrencyProvider } from "@/lib/offline/operationLog";
+import { useSession } from "@/state/session";
 import { env } from "@/env";
 import { RootErrorBoundary } from "@/components/RootErrorBoundary";
 import { requestPersistentStorage } from "@/lib/offline/durability";
@@ -20,6 +21,9 @@ rcLogStartup();
 
 // rc.10 — stamp every captured offline operation with the running build (queue forensics).
 setCaptureBuild(captureBuildStamp(env.BUILD_SHA, env.APP_VERSION));
+
+// 1.0.41 (S-CAPTURE) — every captured offline operation also records the rate the till was using then.
+setCaptureCurrencyProvider(() => useSession.getState().currency);
 
 // 1.0.41 (F-STORE) — ask once for persistent storage: the offline queue must not be evicted under disk pressure.
 void requestPersistentStorage();

@@ -30,6 +30,7 @@ import { resolveEntity } from "@/lib/offline/entityMap";
 import { getOperation } from "@/lib/offline/operationLog";
 import { localdb } from "@/lib/offline/db";
 import { isLocalShiftId } from "@/lib/offline/shiftIdentity";
+import { captureArg, captureOf, withCapture } from "@/lib/offline/captureEvidence";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -193,6 +194,7 @@ export const openShiftHandler: OperationHandler = {
         openingCash: Number(p.openingCash) || 0,
         clientOpId: op.client_op_id,
         ...(chained ? { requireNew: true } : {}),
+        ...captureArg(op), // 1.0.41 (S-CAPTURE)
       });
       if (chained && reused === true) {
         return { ok: false, retryClass: "CONFLICT", code: "shift_adopted_existing", message: FOREIGN_OPEN_SHIFT_MSG };
@@ -303,7 +305,7 @@ export const takeawaySaleHandler: OperationHandler = {
     let orderNumber = (op.result_meta?.order_number as string | undefined) ?? null;
     if (!orderId) {
       try {
-        const saved = await ctx.deps.submit(payload);
+        const saved = await ctx.deps.submit(withCapture(payload, captureOf(op))); // 1.0.41 (S-CAPTURE)
         orderId = saved.order_id;
         orderNumber = saved.order_number;
         await ctx.update({ canonical_entity_id: orderId, result_meta: { ...(op.result_meta ?? {}), order_number: orderNumber } });
@@ -334,6 +336,7 @@ export const takeawaySaleHandler: OperationHandler = {
           currency: (p.payment_intent.currency as CurrencyCode) ?? "USD",
           discount: p.payment_intent.discount,
           ...(opBound ? { clientOpId: takeawayPayOpId(op.client_op_id) } : {}),
+          ...(opBound ? captureArg(op) : {}), // 1.0.41 (S-CAPTURE) — only on the client_op_id path
         });
         paid = true;
         await ctx.update({ payload: { ...p, paid: true, order_payload: payload } });
@@ -484,7 +487,7 @@ export const dineinSendRoundHandler: OperationHandler = {
     }
 
     try {
-      const r = await ctx.deps.submitRound(payload);
+      const r = await ctx.deps.submitRound(withCapture(payload, captureOf(op))); // 1.0.41 (S-CAPTURE)
       return { ok: true, canonicalId: r.order_id, resultMeta: { order_number: r.order_number, batch_no: r.batch_no, appended: r.appended } };
     } catch (e) {
       const msg = errMsg(e);
@@ -638,6 +641,7 @@ export const payTableHandler: OperationHandler = {
         clientOpId: op.client_op_id,
         ...(pins.order_ids ? { expectedOrderIds: pins.order_ids } : {}),
         ...(pins.amount != null ? { expectedAmount: pins.amount } : {}),
+        ...captureArg(op), // 1.0.41 (S-CAPTURE)
       });
       return { ok: true, canonicalId: tableId, resultMeta: { amount: r.amount, idempotent: r.idempotent, pos_entity_version: r.pos_entity_version ?? null } };
     } catch (e) {
@@ -684,7 +688,7 @@ export const payOrderHandler: OperationHandler = {
     }
     if (!orderId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_order", message: "no order id" };
     try {
-      const r = await ctx.deps.payOrderOp({ orderId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id, expectedVersion: p.expected_version ?? null });
+      const r = await ctx.deps.payOrderOp({ orderId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id, expectedVersion: p.expected_version ?? null, ...captureArg(op) });
       return { ok: true, canonicalId: r.order_id, resultMeta: { amount: r.amount, paid: r.paid, idempotent: r.idempotent } };
     } catch (e) {
       const msg = errMsg(e);
@@ -773,6 +777,7 @@ export const onAccountTableHandler: OperationHandler = {
         clientOpId: op.client_op_id,
         ...(pins.order_ids ? { expectedOrderIds: pins.order_ids } : {}),
         ...(pins.amount != null ? { expectedAmount: pins.amount } : {}),
+        ...captureArg(op), // 1.0.41 (S-CAPTURE)
       });
       return { ok: true, canonicalId: tableId, resultMeta: { idempotent: r.idempotent } };
     } catch (e) {
@@ -840,6 +845,7 @@ export const onAccountOrderHandler: OperationHandler = {
         clientOpId: op.client_op_id,
         ...(pins.order_ids ? { expectedOrderIds: pins.order_ids } : {}),
         ...(pins.amount != null ? { expectedAmount: pins.amount } : {}),
+        ...captureArg(op), // 1.0.41 (S-CAPTURE)
       });
       return { ok: true, canonicalId: orderId, resultMeta: { idempotent: r.idempotent } };
     } catch (e) {
@@ -886,6 +892,7 @@ export const endShiftHandler: OperationHandler = {
         notes: p.notes,
         deliveryFeeCashTreatment: p.delivery_fee_cash_treatment,
         clientOpId: op.client_op_id,
+        ...captureArg(op), // 1.0.41 (S-CAPTURE)
       });
       // 1.0.38 (Bug 3) — record the branch's End-Shift approval rule the server applied (server truth for a
       // later chained offline open). Best-effort; never affects the close.
@@ -987,7 +994,7 @@ export const splitSettleHandler: OperationHandler = {
     }
 
     try {
-      const r = await ctx.deps.splitSettle({ orderId, method: p.method, currency: p.currency, allocations: resolved, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id });
+      const r = await ctx.deps.splitSettle({ orderId, method: p.method, currency: p.currency, allocations: resolved, expectedVersion: p.expected_version ?? null, clientOpId: op.client_op_id, ...captureArg(op) });
       return { ok: true, canonicalId: orderId, resultMeta: { split_no: r.split_no, parent_completed: r.parent_completed, remaining_qty: r.remaining_qty, idempotent: r.idempotent } };
     } catch (e) {
       const msg = errMsg(e);
