@@ -104,6 +104,33 @@ export async function capturePayOrderOffline(input: {
   return { operationId, clientOpId, alreadyCaptured: false };
 }
 
+/**
+ * 1.0.41 (Staging 1.0.52 native QA, D-4) — a settlement of this order recorded on THIS device and not resolved yet:
+ * still on its way to Breadee (pending · syncing · retryable · blocked_dependency) or refused by it (needs_attention).
+ * While one exists the order must never be collected again. A synced settle is Breadee's own record; a withdrawn
+ * (cancelled) one was resolved by a manager. `orderIds` = every id the order may appear under (canonical / local).
+ */
+export async function unresolvedLocalOrderSettle(orderIds: (string | null | undefined)[]): Promise<OfflineOperation | null> {
+  const ids = new Set(orderIds.filter((x): x is string => typeof x === "string" && x !== ""));
+  if (ids.size === 0) return null;
+  const { localdb } = await import("@/lib/offline/db");
+  const ops = (await localdb.operations.where("operation_type").anyOf(["pay_order", "on_account_order"]).toArray()).filter(
+    (o) => o.status !== "synced" && o.status !== "cancelled",
+  );
+  let found: OfflineOperation | null = null;
+  for (const o of ops) {
+    const p = (o.payload ?? {}) as { order_id?: unknown; order_local?: unknown };
+    const local = typeof p.order_local === "string" ? p.order_local : null;
+    const canonicalOfLocal = local ? ((await localdb.entityMap.get(local).catch(() => undefined))?.canonical_id ?? null) : null;
+    const refs = [typeof p.order_id === "string" ? p.order_id : null, local, canonicalOfLocal, o.canonical_entity_id];
+    if (refs.some((r) => r != null && ids.has(r))) {
+      if (o.status === "needs_attention") return o; // a refusal is the more urgent fact
+      found = found ?? o;
+    }
+  }
+  return found;
+}
+
 /** 1.0.38 (D2) — the pay-step pricing carried to replay (online pos_pay_order field names). */
 export type PayOrderPricing = {
   discount_type?: "percent" | "amount";

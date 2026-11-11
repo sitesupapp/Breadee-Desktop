@@ -236,8 +236,8 @@ test("an unpaid order is never labelled completed", () => {
 test("the summary offers Pay only while the order is unpaid", () => {
   const code = stripJsxComments(summarySrc);
   assert.match(code, /Unpaid/);
-  // Paid branch first: a settled order gets a statement, not a button.
-  assert.match(code, /\{paid \? \(/);
+  // Settled branches first (1.0.41 D-4: an offline settle, then a paid row): a statement, never a button.
+  assert.match(code, /\{settle \? \([\s\S]{0,300}\) : paid \? \(/);
   assert.match(code, /Paid and completed/i);
   // Pay is behind BOTH the paid check and the presence of a gate.
   assert.match(code, /\) : props\.payGate \? \([\s\S]{0,200}Pay \(F4\)/);
@@ -248,14 +248,13 @@ test("the summary offers Pay only while the order is unpaid", () => {
 // 1.0.41 (Staging 1.0.52 native QA, D-4): after an offline COD/cash settle the panel said "Unpaid" while the Orders
 // list said paid. It now says "Paid offline" and never offers Pay for it; the workspace passes the flag it already
 // used to withdraw Pay.
-test("D-4: an order settled offline on this terminal reads Paid offline, with no Pay to press", () => {
+test("D-4: the panel shows the offline settle's own state and never offers Pay for it", () => {
   const code = stripJsxComments(summarySrc);
-  assert.match(code, /const settledOffline = !paid && props\.settledOffline === true;/);
-  assert.match(code, /settledOffline \? "Paid offline" : "Unpaid"/);
-  // The offline-settled statement comes BEFORE the Pay branch: no button for it.
-  assert.match(code, /\) : settledOffline \? \([\s\S]{0,160}DELIVERY_SETTLED_OFFLINE_NOTE[\s\S]{0,40}\) : props\.payGate \? \(/);
-  assert.match(code, /do not collect it again/);
-  assert.match(stripJsxComments(deliverySrc), /settledOffline=\{offlineSettledOrderId === submitted\.order\.id\}/);
+  assert.match(code, /const settle = props\.offlineSettle \? DELIVERY_SETTLE_TEXT\[props\.offlineSettle\] : null;/);
+  // The settle statement is the FIRST branch: neither "Paid and completed" nor Pay is reached for it.
+  assert.match(code, /\{settle \? \([\s\S]{0,300}\{settle\.note\}[\s\S]{0,40}\) : paid \? \([\s\S]{0,400}\) : props\.payGate \? \(/);
+  const ws = stripJsxComments(deliverySrc);
+  assert.match(ws, /offlineSettle=\{submittedSettle\}/);
 });
 
 test("the summary never offers a collection or completion action", () => {

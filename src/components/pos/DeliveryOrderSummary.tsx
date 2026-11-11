@@ -17,6 +17,7 @@ import { addressLine } from "@/components/pos/CustomerCard";
 import type { CustomerAddress, CustomerProfile } from "@/lib/pos/customers";
 import { kitchenStateLabel, type OpenDeliveryOrder } from "@/lib/pos/deliveryOrder";
 import { customerDisplayName } from "@/lib/pos/customerDisplay";
+import { DELIVERY_SETTLE_TEXT, type DeliveryOfflineSettleState } from "@/lib/pos/deliverySettleState";
 
 export type DeliveryOrderSummaryProps = {
   order: OpenDeliveryOrder;
@@ -34,26 +35,25 @@ export type DeliveryOrderSummaryProps = {
   payGate?: Gate;
   onPay?: () => void;
   /**
-   * 1.0.41 (Staging 1.0.52 native QA, D-4) — this order was settled OFFLINE on this terminal (cash / COD) and the
-   * settlement has not synced yet. Through 1.0.52 the panel still said "Unpaid" (only the Orders list knew it was
-   * paid); Pay was already withdrawn. It now says what happened, and that the money must not be taken again.
+   * 1.0.41 (Staging 1.0.52 native QA, D-4) — this order was settled OFFLINE on this terminal (cash / COD): the
+   * settle operation's own state (lib/pos/deliverySettleState). Through 1.0.52 the panel still said "Unpaid" (only
+   * the Orders list knew it was paid). Pending sync, confirmed by Breadee and refused are told apart, and in every
+   * one of them Pay is never offered again (the money is already recorded on this terminal).
    */
-  settledOffline?: boolean;
+  offlineSettle?: DeliveryOfflineSettleState | null;
 };
-
-export const DELIVERY_SETTLED_OFFLINE_NOTE =
-  "Settled on this terminal while offline. It syncs automatically when Breadee answers — do not collect it again.";
 
 export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
   const o = props.order;
   const paid = o.payment_status === "paid";
-  const settledOffline = !paid && props.settledOffline === true;
+  // The offline settle's state wins over the stored (pre-settle) row: it is the newer, durable fact.
+  const settle = props.offlineSettle ? DELIVERY_SETTLE_TEXT[props.offlineSettle] : null;
 
   return (
     <section aria-label="Sent delivery order" className="rounded-2xl border border-line bg-white p-4">
       <PanelTitle
         right={
-          <Badge tone={paid || settledOffline ? "green" : "amber"}>{paid ? o.payment_status : settledOffline ? "Paid offline" : "Unpaid"}</Badge>
+          settle ? <Badge tone={settle.tone}>{settle.badge}</Badge> : <Badge tone={paid ? "green" : "amber"}>{paid ? o.payment_status : "Unpaid"}</Badge>
         }
       >
         {o.order_number ? `Order #${o.order_number}` : "Delivery order"}
@@ -83,14 +83,16 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
         </span>
       </div>
 
-      {paid ? (
+      {settle ? (
+        <p className={`mt-2 text-[11px] font-semibold ${settle.tone === "red" ? "text-red-700" : settle.tone === "amber" ? "text-amber-800" : "text-brand-dark"}`} role="status">
+          {settle.note}
+        </p>
+      ) : paid ? (
         // Paying IS the completion: `pos_pay_order` sets paid and completed in
         // one statement, so there is no "collected" step to offer next.
         <p className="mt-2 text-[11px] font-semibold text-brand-dark">
           Paid and completed. Nothing further is needed for this order.
         </p>
-      ) : settledOffline ? (
-        <p className="mt-2 text-[11px] font-semibold text-brand-dark">{DELIVERY_SETTLED_OFFLINE_NOTE}</p>
       ) : props.payGate ? (
         <GatedButton gate={props.payGate} size="lg" className="mt-3 w-full" onClick={props.onPay}>
           Pay (F4)

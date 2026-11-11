@@ -78,6 +78,8 @@ import { searchCustomersOfflineAware, upsertCustomerOfflineAware } from "@/lib/o
 import { loadDeliveryQueueOfflineAware } from "@/lib/offline/deliveryQueueOffline";
 import { mergePartyMaps, persistResolvedParties, rememberOrderParty, resolveOrderParties } from "@/lib/offline/deliveryParties";
 import { OFFLINE_DRAINED_EVENT } from "@/lib/offline/reconnectDrain";
+import { getOperation } from "@/lib/offline/operationLog";
+import { deliverySettleBlockReason, deliverySettleState, type DeliveryOfflineSettleState } from "@/lib/pos/deliverySettleState";
 import { resolveOperationalShift } from "@/lib/offline/shiftIdentity";
 import { proveOfflineReversible, captureOfflineRefund } from "@/lib/offline/refundOffline";
 import { captureDeliveryOpsOffline, captureEditOrderNoteOffline } from "@/lib/offline/deliveryActionOffline";
@@ -184,7 +186,7 @@ import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/u
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
-import { capturePayOrderOffline, payOrderClientOpId } from "@/lib/offline/payOrderOffline";
+import { capturePayOrderOffline, payOrderClientOpId, unresolvedLocalOrderSettle } from "@/lib/offline/payOrderOffline";
 import { notifyPosSettled } from "@/state/shiftOrders";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
@@ -331,6 +333,31 @@ export function useDeliveryWorkspace(input: {
   /** 1.0.38 (D7c) — the just-sent (customer-half) order settled offline on this device: Pay / on-account
    *  are withdrawn for it, so a second tender never becomes a second op. */
   const [offlineSettledOrderId, setOfflineSettledOrderId] = useState<string | null>(null);
+  /** 1.0.41 (D-4) — that settle's operation, and its live state (pending sync · confirmed · refused) for the panel. */
+  const [offlineSettleOp, setOfflineSettleOp] = useState<{ orderId: string; operationId: string } | null>(null);
+  const [offlineSettleStatus, setOfflineSettleStatus] = useState<DeliveryOfflineSettleState | null>(null);
+  /** The queue detail's unresolved local settle (read by refreshDetail), for the Pay gate. */
+  const [queueSettle, setQueueSettle] = useState<{ orderId: string; state: DeliveryOfflineSettleState | null } | null>(null);
+  useEffect(() => {
+    if (!offlineSettleOp) {
+      setOfflineSettleStatus(null);
+      return;
+    }
+    let live = true;
+    const read = () =>
+      void getOperation(offlineSettleOp.operationId)
+        .then((op) => live && setOfflineSettleStatus(deliverySettleState(op ?? null) ?? "pending_sync"))
+        .catch(() => undefined);
+    read();
+    // Re-read after every drain, and on a short tick (a local Dexie read; no network).
+    const id = window.setInterval(read, 3_000);
+    window.addEventListener(OFFLINE_DRAINED_EVENT, read);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+      window.removeEventListener(OFFLINE_DRAINED_EVENT, read);
+    };
+  }, [offlineSettleOp]);
 
   // --- Level 3B ordering state ------------------------------------------------
   const [view, setView] = useState<DeliveryView>("customer");
@@ -483,6 +510,9 @@ export function useDeliveryWorkspace(input: {
   );
   // A just-sent order carries no provider yet (it is captured on the order detail),
   // so in provider mode the quick Pay on the summary directs the operator to Orders.
+  /** 1.0.41 (D-4) — the just-sent order's offline settle state, when this terminal settled it offline. */
+  const submittedSettle: DeliveryOfflineSettleState | null =
+    submitted?.order && offlineSettleOp && offlineSettleOp.orderId === submitted.order.id ? offlineSettleStatus : null;
   const summaryFinalizeBlock = useMemo(
     () =>
       providerModeOn && submitted?.order
@@ -1375,6 +1405,11 @@ export function useDeliveryWorkspace(input: {
   const refreshDetail = useCallback(async (orderId: string) => {
     setDetailLoading(true);
     setDetailError(null);
+    // 1.0.41 (D-4) — a settle of this order recorded on this terminal and not resolved (pending or refused):
+    // Pay stays withdrawn, online or offline, until it syncs or a manager resolves it.
+    void unresolvedLocalOrderSettle([orderId])
+      .then((op) => setQueueSettle({ orderId, state: deliverySettleState(op) }))
+      .catch(() => undefined);
     try {
       // rc.9 — OFFLINE: the order's lines/totals/provider/ops come from the ONE operational projection
       // (local offline order payload or the cached line snapshot + unsynced local mutations), never a
@@ -1775,10 +1810,14 @@ export function useDeliveryWorkspace(input: {
       return { allowed: false, reason: "This order was settled offline — it will sync when you reconnect." };
     }
     if (g.allowed && !payTarget.fromQueue && payTarget.order != null && payTarget.order.id === offlineSettledOrderId) {
-      return { allowed: false, reason: "This order was settled offline — it will sync when you reconnect." };
+      return { allowed: false, reason: deliverySettleBlockReason(submittedSettle) ?? "This order was settled offline — it will sync when you reconnect." };
     }
+    // 1.0.41 (D-4) — from the queue too, online or offline: never a second collection while this terminal holds an
+    // unresolved settle of the order (pending, or refused by Breadee and not yet reviewed).
+    const queueBlock = payTarget.fromQueue && detail && queueSettle && queueSettle.orderId === detail.id ? deliverySettleBlockReason(queueSettle.state) : null;
+    if (g.allowed && queueBlock) return { allowed: false, reason: queueBlock };
     return g;
-  }, [accessGate, input.takePayments, payTarget, online, providersFeatureOn, providersKnown, itemEditOfflineScope, input.currency, input.rate, paying, detailProj, offlineSettledOrderId]);
+  }, [accessGate, input.takePayments, payTarget, online, providersFeatureOn, providersKnown, itemEditOfflineScope, input.currency, input.rate, paying, detailProj, offlineSettledOrderId, submittedSettle, detail, queueSettle]);
 
   /** 1.0.38 (D7c) — the settle target's ONE operational projection: the queue detail's, or — for the
    *  just-sent order on the customer half (previously never projected) — one built from that order,
@@ -1938,7 +1977,10 @@ export function useDeliveryWorkspace(input: {
             pricing,
             orderType: "delivery",
           });
-          if (!payTarget.fromQueue) setOfflineSettledOrderId(order.id);
+          if (!payTarget.fromQueue) {
+            setOfflineSettledOrderId(order.id);
+            setOfflineSettleOp({ orderId: order.id, operationId: cap.operationId });
+          }
           setPayOpen(false);
           toast.push(
             cap.alreadyCaptured
@@ -3095,7 +3137,7 @@ export function useDeliveryWorkspace(input: {
              otherwise reject the finalize). */
           payGate={summaryFinalizeBlock ? { allowed: false, reason: summaryFinalizeBlock } : payGate}
           onPay={requestPay}
-          settledOffline={offlineSettledOrderId === submitted.order.id}
+          offlineSettle={submittedSettle}
         />
       ) : view === "add_items" ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
