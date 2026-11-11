@@ -12,13 +12,18 @@ import type { OfflineOperation } from "@/lib/offline/operationLog";
 export type DeliveryOfflineSettleState = "pending_sync" | "confirmed" | "refused";
 
 /** PURE — null when there is no offline settle to describe (unknown op id / op not found yet). */
-export function deliverySettleState(op: Pick<OfflineOperation, "status"> | null | undefined): DeliveryOfflineSettleState | null {
+export function deliverySettleState(op: (Pick<OfflineOperation, "status"> & { withdrawal?: unknown }) | null | undefined): DeliveryOfflineSettleState | null {
   if (!op) return null;
   switch (op.status) {
     case "synced":
       return "confirmed";
+    case "cancelled":
+      // 1.0.41 (S-PAYORDER_01) — withdrawn through the server-verified withdrawal (Breadee holds no receipt; a
+      // manager-level operator; audit on the op): resolved. The order is unpaid on Breadee and is paid online for the
+      // amount Breadee shows — the same rule the queue already applies (unresolvedLocalOrderSettle).
+      if (op.withdrawal) return null;
+      return "refused"; // cancelled any other way: still never applied by Breadee
     case "needs_attention":
-    case "cancelled": // withdrawn after a refusal: still never applied by Breadee
       return "refused";
     default:
       return "pending_sync"; // pending · syncing · retryable · blocked_dependency

@@ -427,11 +427,30 @@ export const SALE_WITHDRAW_CONFIRM =
 export const SALE_WITHDRAWN_NOTE =
   "Withdrawn. Breadee confirmed it never recorded this sale; the record and any cash it noted stay in Sync history. Account for that cash in the shift close.";
 
+const NOT_A_REFUSAL_OF_THIS_OP = ["dependency_failed", "missing_dependency", "circular_dependency", "unknown_handler", "engine_error", "awaiting_parked_prerequisite"];
+
 export function isWithdrawableRefusedSale(o: Pick<OfflineOperation, "operation_type" | "status" | "canonical_entity_id" | "last_error_code"> | null | undefined): boolean {
   if (!o || o.operation_type !== "takeaway_sale" || o.status !== "needs_attention" || o.canonical_entity_id) return false;
   // Parked behind something else / an engine fault: not a refusal of THIS sale (the dine-in rule, operationalProjection).
   const code = (o.last_error_code ?? "").toLowerCase();
-  return !["dependency_failed", "missing_dependency", "circular_dependency", "unknown_handler", "engine_error", "awaiting_parked_prerequisite"].includes(code);
+  return !NOT_A_REFUSAL_OF_THIS_OP.includes(code);
+}
+
+// 1.0.41 (S-PAYORDER_01, Staging 1.0.55 native QA) — a refused offline ORDER payment (pay_order: delivery COD / cash).
+// With the order-total pin, Breadee refuses a settle whose order changed elsewhere (PAY_AMOUNT_CHANGED) and writes
+// nothing. The D-4 gate then withholds Pay for that order while the refusal stands, and the op is never retried — so
+// without a way out the order could not be settled at all. The same explicit, server-verified withdrawal: Breadee
+// must hold NO receipt of this payment (pos_op_submissions, its client_op_id); capturing cashier, tenant, branch
+// access and pos.cancel_orders. The op is cancelled (refusal + `withdrawal` audit kept) and the collected cash stays
+// in Sync history; the order is then paid online for the amount Breadee shows, once.
+export const PAYMENT_WITHDRAW_CONFIRM =
+  "Withdraw this payment? It is never sent to Breadee. Breadee is checked first: only a payment it never recorded can be withdrawn. The cash collected stays in this terminal's Sync history as withdrawn. Then take the payment for this order online, for the amount Breadee shows now, counting the cash already collected.";
+export const PAYMENT_WITHDRAWN_NOTE =
+  "Withdrawn. Breadee confirmed it never recorded this payment; the record and the cash it noted stay in Sync history. Take the payment for this order online, for the amount Breadee shows now.";
+
+export function isWithdrawableRefusedPayment(o: Pick<OfflineOperation, "operation_type" | "status" | "last_error_code"> | null | undefined): boolean {
+  if (!o || o.operation_type !== "pay_order" || o.status !== "needs_attention") return false;
+  return !NOT_A_REFUSAL_OF_THIS_OP.includes((o.last_error_code ?? "").toLowerCase());
 }
 
 export async function withdrawRefusedSale(input: {
@@ -442,7 +461,8 @@ export async function withdrawRefusedSale(input: {
 }): Promise<{ ok: true; withdrawn: string[] } | { ok: false; reason: string }> {
   const op = await localdb.operations.get(input.operationId);
   if (!op) return { ok: false, reason: WITHDRAW_STATE_CHANGED };
-  if (!isWithdrawableRefusedSale(op)) return { ok: false, reason: WITHDRAW_SALE_NOT_REFUSED };
+  const isPayment = isWithdrawableRefusedPayment(op);
+  if (!isPayment && !isWithdrawableRefusedSale(op)) return { ok: false, reason: WITHDRAW_SALE_NOT_REFUSED };
   const s = op.scope;
   if (
     s.tenant_id !== input.scope.tenantId ||
@@ -453,8 +473,9 @@ export async function withdrawRefusedSale(input: {
   ) {
     return { ok: false, reason: WITHDRAW_NOT_YOURS };
   }
-  const intent = (op.payload as { payment_intent?: { pay_op_v?: number } | null } | null)?.payment_intent ?? null;
-  const payOpIds = intent && intent.pay_op_v === TAKEAWAY_PAY_OP_VERSION ? [takeawayPayOpId(op.client_op_id)] : [];
+  const intent = isPayment ? null : ((op.payload as { payment_intent?: { pay_op_v?: number } | null } | null)?.payment_intent ?? null);
+  // A refused order payment: its own client_op_id is the pos_pay_order receipt key; it created no order.
+  const payOpIds = isPayment ? [op.client_op_id] : intent && intent.pay_op_v === TAKEAWAY_PAY_OP_VERSION ? [takeawayPayOpId(op.client_op_id)] : [];
 
   let outcome: ReceiptOutcome;
   try {
@@ -464,7 +485,7 @@ export async function withdrawRefusedSale(input: {
       actorUserId: input.actorUserId,
       // The sale's submit records in pos_order_submissions (its client_op_id); its pay in pos_op_submissions.
       openClientOpIds: payOpIds,
-      roundClientOpIds: [op.client_op_id],
+      roundClientOpIds: isPayment ? [] : [op.client_op_id],
     });
   } catch (e) {
     outcome = { kind: receiptFaultKind(e), detail: e instanceof Error ? e.message : String(e) };
@@ -483,9 +504,9 @@ export async function withdrawRefusedSale(input: {
       }
       await localdb.operations.update(op.operation_id, {
         status: "cancelled",
-        withdrawal: { at, by_user_id: input.actorUserId, reason: "refused_never_applied", verified_at: at, verified_against: ["pos_order_submissions", ...(payOpIds.length ? ["pos_op_submissions"] : []), `authority:${WITHDRAW_PERMISSION}`] },
+        withdrawal: { at, by_user_id: input.actorUserId, reason: "refused_never_applied", verified_at: at, verified_against: [...(isPayment ? [] : ["pos_order_submissions"]), ...(payOpIds.length ? ["pos_op_submissions"] : []), `authority:${WITHDRAW_PERMISSION}`] },
       });
-      if (op.local_entity_id) {
+      if (!isPayment && op.local_entity_id) {
         const row = await localdb.posOfflineTxns.get(op.local_entity_id);
         if (row && row.status !== "synced") await localdb.posOfflineTxns.update(op.local_entity_id, { review_reason: SALE_WITHDRAWN, last_error: row.last_error ?? null });
       }
@@ -498,16 +519,22 @@ export async function withdrawRefusedSale(input: {
     at,
     operation_id: op.operation_id,
     operation_type: op.operation_type,
-    action_label: payOpIds.length || intent ? "Takeaway sale (cash collected offline, never on a Breadee order)" : "Takeaway sale",
+    action_label: isPayment
+      ? "Order payment (collected offline, refused by Breadee, never applied)"
+      : payOpIds.length || intent
+        ? "Takeaway sale (cash collected offline, never on a Breadee order)"
+        : "Takeaway sale",
     tenant_id: s.tenant_id,
     branch_id: s.branch_id,
     device_id: s.device_id,
     cashier_user_id: s.cashier_user_id,
     local_ref: op.local_entity_id,
-    canonical_ref: null,
+    canonical_ref: isPayment ? op.canonical_entity_id : null,
     status: "cancelled",
     retry_count: op.retry_count,
-    error_summary: "withdrawn by the operator — Breadee confirmed it was never applied; account for any cash it recorded in the shift close",
+    error_summary: isPayment
+      ? "withdrawn by the operator — Breadee confirmed it never recorded this payment; take the order's payment online for the amount Breadee shows"
+      : "withdrawn by the operator — Breadee confirmed it was never applied; account for any cash it recorded in the shift close",
     synced_at: null,
   });
   return { ok: true, withdrawn: [op.operation_id] };

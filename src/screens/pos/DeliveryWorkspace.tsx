@@ -346,7 +346,18 @@ export function useDeliveryWorkspace(input: {
     let live = true;
     const read = () =>
       void getOperation(offlineSettleOp.operationId)
-        .then((op) => live && setOfflineSettleStatus(deliverySettleState(op ?? null) ?? "pending_sync"))
+        .then((op) => {
+          if (!live) return;
+          // 1.0.41 (S-PAYORDER_01) — withdrawn through the server-verified withdrawal: resolved. Release this
+          // session's guards so the order is paid online (re-read + identity/money check) for Breadee's amount.
+          if (op && op.status === "cancelled" && (op as { withdrawal?: unknown }).withdrawal) {
+            setOfflineSettledOrderId((cur) => (cur === offlineSettleOp.orderId ? null : cur));
+            setOfflineSettleOp(null);
+            return;
+          }
+          // Not readable yet (just captured) → pending; otherwise the op's own state.
+          setOfflineSettleStatus(op ? deliverySettleState(op) : "pending_sync");
+        })
         .catch(() => undefined);
     read();
     // Re-read after every drain, and on a short tick (a local Dexie read; no network).
