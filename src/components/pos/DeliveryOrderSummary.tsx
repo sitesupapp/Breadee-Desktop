@@ -33,17 +33,27 @@ export type DeliveryOrderSummaryProps = {
    */
   payGate?: Gate;
   onPay?: () => void;
+  /**
+   * 1.0.41 (Staging 1.0.52 native QA, D-4) — this order was settled OFFLINE on this terminal (cash / COD) and the
+   * settlement has not synced yet. Through 1.0.52 the panel still said "Unpaid" (only the Orders list knew it was
+   * paid); Pay was already withdrawn. It now says what happened, and that the money must not be taken again.
+   */
+  settledOffline?: boolean;
 };
+
+export const DELIVERY_SETTLED_OFFLINE_NOTE =
+  "Settled on this terminal while offline. It syncs automatically when Breadee answers — do not collect it again.";
 
 export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
   const o = props.order;
   const paid = o.payment_status === "paid";
+  const settledOffline = !paid && props.settledOffline === true;
 
   return (
     <section aria-label="Sent delivery order" className="rounded-2xl border border-line bg-white p-4">
       <PanelTitle
         right={
-          <Badge tone={paid ? "green" : "amber"}>{paid ? o.payment_status : "Unpaid"}</Badge>
+          <Badge tone={paid || settledOffline ? "green" : "amber"}>{paid ? o.payment_status : settledOffline ? "Paid offline" : "Unpaid"}</Badge>
         }
       >
         {o.order_number ? `Order #${o.order_number}` : "Delivery order"}
@@ -79,6 +89,8 @@ export function DeliveryOrderSummary(props: DeliveryOrderSummaryProps) {
         <p className="mt-2 text-[11px] font-semibold text-brand-dark">
           Paid and completed. Nothing further is needed for this order.
         </p>
+      ) : settledOffline ? (
+        <p className="mt-2 text-[11px] font-semibold text-brand-dark">{DELIVERY_SETTLED_OFFLINE_NOTE}</p>
       ) : props.payGate ? (
         <GatedButton gate={props.payGate} size="lg" className="mt-3 w-full" onClick={props.onPay}>
           Pay (F4)

@@ -245,6 +245,19 @@ test("the summary offers Pay only while the order is unpaid", () => {
   assert.equal(code.includes("PaymentDialog"), false);
 });
 
+// 1.0.41 (Staging 1.0.52 native QA, D-4): after an offline COD/cash settle the panel said "Unpaid" while the Orders
+// list said paid. It now says "Paid offline" and never offers Pay for it; the workspace passes the flag it already
+// used to withdraw Pay.
+test("D-4: an order settled offline on this terminal reads Paid offline, with no Pay to press", () => {
+  const code = stripJsxComments(summarySrc);
+  assert.match(code, /const settledOffline = !paid && props\.settledOffline === true;/);
+  assert.match(code, /settledOffline \? "Paid offline" : "Unpaid"/);
+  // The offline-settled statement comes BEFORE the Pay branch: no button for it.
+  assert.match(code, /\) : settledOffline \? \([\s\S]{0,160}DELIVERY_SETTLED_OFFLINE_NOTE[\s\S]{0,40}\) : props\.payGate \? \(/);
+  assert.match(code, /do not collect it again/);
+  assert.match(stripJsxComments(deliverySrc), /settledOffline=\{offlineSettledOrderId === submitted\.order\.id\}/);
+});
+
 test("the summary never offers a collection or completion action", () => {
   // `pos_pay_order` sets paid AND completed in one statement, and the schema has
   // no `collected` status - a second action would model a transition that does

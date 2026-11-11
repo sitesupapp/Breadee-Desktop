@@ -3095,6 +3095,7 @@ export function useDeliveryWorkspace(input: {
              otherwise reject the finalize). */
           payGate={summaryFinalizeBlock ? { allowed: false, reason: summaryFinalizeBlock } : payGate}
           onPay={requestPay}
+          settledOffline={offlineSettledOrderId === submitted.order.id}
         />
       ) : view === "add_items" ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
