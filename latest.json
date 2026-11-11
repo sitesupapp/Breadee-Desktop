@@ -1,11 +1,11 @@
 {
-  "version": "1.0.55",
+  "version": "1.0.56",
   "notes": "Keeps trading when Breadee's server is off · متابعة البيع عند توقّف خادم Breadee\n\nWhen Breadee's server stops answering, the top bar says so and this terminal keeps taking cash sales. They are saved on this terminal and sync automatically, from any screen, as soon as Breadee answers again, at the time, price and exchange rate they were taken at, after Breadee checks them. If Breadee has not confirmed a payment, you are told not to collect it again: pressing Confirm checks the same payment, and Breadee applies it at most once. Card and other payment methods wait for a confirmed connection. A badge in the top bar shows whether this terminal is ready to work offline, and for how long.\n\nعندما يتوقّف خادم Breadee عن الاستجابة، يُظهر الشريط العلوي ذلك وتتابع هذه المحطة قبول المبيعات النقدية. تُحفظ على هذه المحطة وتتمّ مزامنتها تلقائياً، من أي شاشة، فور عودة Breadee للاستجابة، بالوقت والسعر وسعر الصرف الذي تمّت به، بعد أن يتحقّق Breadee منها. وإذا لم يؤكّد Breadee دفعةً ما، تُبلَّغ بعدم تحصيلها مرة أخرى: فالضغط على «تأكيد» يتحقّق من الدفعة نفسها، ويطبّقها Breadee مرة واحدة على الأكثر. أما البطاقة وطرق الدفع الأخرى فتنتظر اتصالاً مؤكَّداً. وتُظهر شارة في الشريط العلوي ما إذا كانت هذه المحطة جاهزة للعمل دون اتصال، والمدة المتبقية لذلك.",
-  "pub_date": "2026-11-11T13:20:00Z",
+  "pub_date": "2026-11-11T21:57:22Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNXFhYjRUdnErbWhiSGV0Q3ZQTVZ3RkR6WDJIVUNZZFhHcTVSY2lrb0pXOEhHdTVHRFVSYzRUcnhpNnhOMGcrcDFVS3VNeVZocGtOZnVqRENkTEd1WkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDAzMTkwCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC41NV94NjQtc2V0dXAuZXhlCjlYZ1EwdmpXdEJvSWErZC9XVmVKRTBQTElGdXcwY3pvdFl2bklVUmR4KzI2WEkzemx0VUR0WVAybmUyV3BVcHVTMXVnQ01hV1ViNEJyUnI5NmFpb0FRPT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.55/Breadee_Staging_1.0.55_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNXZHa0NnUXZISlVCa2J2QlF3YWoyZ0hyeTBEZ1ZmWWlrNWgzaWhUVW9Fak9YaEE1ZE80VUVOOFdrVXQzRjVXcTNLaWc2THorOWxlVndPTDZGdm9sWHdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDM0MjMyCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC41Nl94NjQtc2V0dXAuZXhlCktaK2t0S1RRdHdHakUwWmg3a3gzcGM1VWtlYnZSQUhnNXdQUU9hbXRTY1p4SjZ4dDgvVzlUNWVZbHduYzIvbys1SDJXNklxeVVGR1oxQ25Wci9SckJnPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.56/Breadee_Staging_1.0.56_x64-setup.exe"
     }
   }
 }
