@@ -672,9 +672,14 @@ type PayOrderPayload = {
   discount?: Record<string, unknown>;
   expected_version?: number | null;
   order_number?: string | null;
+  /** 1.0.41 (S-PAYORDER_01) — the order total Breadee last gave the capturing device (order currency, before
+   *  pay-time pricing); absent when not known exactly or on ops captured before 1.0.56. */
+  expected_order_total?: number | null;
 };
 
-/** pay_order — settle a single ORDER offline (pos_pay_order), exactly-once on client_op_id. */
+/** pay_order — settle a single ORDER offline (pos_pay_order), exactly-once on client_op_id.
+ *  1.0.41 (S-PAYORDER_01) — pinned to the order total the device knew: a total changed elsewhere meanwhile is
+ *  refused (PAY_AMOUNT_CHANGED → needs_attention, nothing charged), never charged at the new amount. */
 export const payOrderHandler: OperationHandler = {
   type: "pay_order",
   schemaVersion: 1,
@@ -688,11 +693,17 @@ export const payOrderHandler: OperationHandler = {
     }
     if (!orderId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "no_order", message: "no order id" };
     try {
-      const r = await ctx.deps.payOrderOp({ orderId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id, expectedVersion: p.expected_version ?? null, ...captureArg(op) });
+      const expectedOrderTotal = typeof p.expected_order_total === "number" && Number.isFinite(p.expected_order_total) ? p.expected_order_total : null;
+      const r = await ctx.deps.payOrderOp({ orderId, method: p.method, currency: (p.currency as CurrencyCode) ?? "USD", discount: p.discount, clientOpId: op.client_op_id, expectedVersion: p.expected_version ?? null, ...(expectedOrderTotal != null ? { expectedOrderTotal } : {}), ...captureArg(op) });
       return { ok: true, canonicalId: r.order_id, resultMeta: { amount: r.amount, paid: r.paid, idempotent: r.idempotent } };
     } catch (e) {
       const msg = errMsg(e);
       if (ctx.deps.isTransport(e)) return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "pay_order: transport", message: msg };
+      // 1.0.41 (S-PAYORDER_01) — the structured settle refusals, by code (their wording is not the legacy one).
+      const code = posErrorCode(e);
+      if (code === "PAY_AMOUNT_CHANGED" || code === "ALREADY_PAID" || code === "PAYMENT_RESIDUE") {
+        return { ok: false, retryClass: "CONFLICT", code: code.toLowerCase(), message: msg };
+      }
       if (isSettleConflict(msg)) return { ok: false, retryClass: "CONFLICT", code: "settle_conflict", message: msg };
       const t = terminalClass(msg);
       return { ok: false, retryClass: t.retryClass, code: t.code, message: msg };

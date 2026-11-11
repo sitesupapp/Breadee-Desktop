@@ -55,6 +55,11 @@ export async function capturePayOrderOffline(input: {
   pricing?: PayOrderPricing | null;
   /** Display-only order kind for the Sync Center label ("delivery"); ignored by the handler. */
   orderType?: string | null;
+  /** 1.0.41 (S-PAYORDER_01, Staging 1.0.55 native QA) — the order's total (order currency, before pay-time
+   *  pricing) exactly as Breadee last gave it to this device. Replayed as expected_order_total: when another
+   *  device changed the order meanwhile, Breadee refuses (PAY_AMOUNT_CHANGED) instead of charging the new
+   *  total. Pass it only when it is exact (a server-known order with no unsynced local change); else omit. */
+  expectedOrderTotal?: number | null;
 }): Promise<{ operationId: string; clientOpId: string; alreadyCaptured: boolean }> {
   const clientOpId = input.clientOpId;
   const operationId = PAY_ORDER_OP_PREFIX + clientOpId;
@@ -85,6 +90,7 @@ export async function capturePayOrderOffline(input: {
       // online settle sends. Absent when nothing was entered (byte-identical to the pre-1.0.38 op).
       ...(pricingFields(input.pricing) ? { discount: pricingFields(input.pricing) } : {}),
       ...(input.cashAmountUsd != null && input.cashAmountUsd > 0 ? { cash_amount_usd: input.cashAmountUsd } : {}),
+      ...(typeof input.expectedOrderTotal === "number" && Number.isFinite(input.expectedOrderTotal) ? { expected_order_total: input.expectedOrderTotal } : {}),
     },
     status: "pending",
     retry_count: 0,
@@ -129,6 +135,25 @@ export async function unresolvedLocalOrderSettle(orderIds: (string | null | unde
     }
   }
   return found;
+}
+
+/**
+ * 1.0.41 (S-PAYORDER_01) — the order total an offline settle is pinned to, or null when it is not exact.
+ * Exact = the order on screen IS Breadee's row (its id is the canonical id, it was not created offline on this
+ * terminal) and nothing about it is still waiting to sync from here (otherwise Breadee's total at replay
+ * legitimately includes those changes). Never a guess: null → no pin, the pre-1.0.56 request.
+ */
+export function offlineSettleTotalPin(o: {
+  orderId: string;
+  canonicalOrderId: string | null;
+  orderLocal: string | null;
+  liveMutationCount: number;
+  totalAmount: number | null | undefined;
+}): number | null {
+  if (o.orderLocal) return null;
+  if (!o.canonicalOrderId || o.canonicalOrderId !== o.orderId) return null;
+  if (o.liveMutationCount > 0) return null;
+  return typeof o.totalAmount === "number" && Number.isFinite(o.totalAmount) ? o.totalAmount : null;
 }
 
 /** 1.0.38 (D2) — the pay-step pricing carried to replay (online pos_pay_order field names). */

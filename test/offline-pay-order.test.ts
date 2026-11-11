@@ -118,7 +118,7 @@ test("DeliveryWorkspace source: offline settle captures pay_order (rc.9: provide
   assert.match(dw, /online: online \|\| \(itemEditOfflineScope != null && \(!providersFeatureOn \|\| providersKnown\)\)/);
   // 1.0.38 (C3 + D4) — after every LIVE pending mutation (never a parked one) and after the order's
   // own create op while it is still local.
-  assert.match(dw, /const dependencyIds = \[\.\.\.ref\.dependencyIds, \.\.\.\(await liveCaptureDependencies\(proj\?\.mutationOpIds \?\? \[\]\)\)\]/, "settle replays after every live pending mutation");
+  assert.match(dw, /const liveMutations = await liveCaptureDependencies\(proj\?\.mutationOpIds \?\? \[\]\);\s*const dependencyIds = \[\.\.\.ref\.dependencyIds, \.\.\.liveMutations\];/, "settle replays after every live pending mutation");
   assert.match(dw, /await capturePayOrderOffline\(/, "captures a pay_order op offline");
   assert.match(dw, /await performDeliverySettlement\(/, "the ONLINE settlement path is preserved");
 });

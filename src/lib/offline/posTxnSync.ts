@@ -332,6 +332,8 @@ export type PosTxnSyncDeps = {
     discount?: Record<string, unknown>;
     clientOpId: string;
     expectedVersion: number | null;
+    /** 1.0.41 (S-PAYORDER_01) — the order total the capturing device knew; omitted (never null) when unknown. */
+    expectedOrderTotal?: number | null;
     capture?: CaptureEvidence;
   }) => Promise<{ order_id: string; paid: boolean; amount: number; idempotent: boolean }>;
   /** Phase-D: put a dine-in TABLE bill on a customer's account (pos_complete_table_on_account).
@@ -534,6 +536,7 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
         client_op_id: args.clientOpId,
         ...(args.expectedVersion == null ? {} : { expected_version: args.expectedVersion }),
         ...(args.discount ?? {}),
+        ...(args.expectedOrderTotal != null && Number.isFinite(args.expectedOrderTotal) ? { expected_order_total: args.expectedOrderTotal } : {}),
         ...(args.capture ? { capture: args.capture } : {}),
       },
     })) as Record<string, unknown>;

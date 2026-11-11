@@ -337,7 +337,8 @@ test("DeliveryWorkspace source: one order reference, per-intent ids, double-sett
   assert.doesNotMatch(dw, /"delivery_address"\]|"delivery_customer_edit"\]/, "no value-derived op id for address / customer edit");
   assert.equal((dw.match(/await orderRefFor\(/g) ?? []).length, 5, "pay + on-account + provider + ops + note");
   assert.match(dw, /intentIds\.clientOpId\(intentKey/);
-  assert.match(dw, /const dependencyIds = \[\.\.\.ref\.dependencyIds, \.\.\.\(await liveCaptureDependencies\(proj\?\.mutationOpIds \?\? \[\]\)\)\]/);
+  // 1.0.41 (S-PAYORDER_01) — the live-mutation list is named once (it also decides the total pin); same set.
+  assert.match(dw, /const liveMutations = await liveCaptureDependencies\(proj\?\.mutationOpIds \?\? \[\]\);\s*const dependencyIds = \[\.\.\.ref\.dependencyIds, \.\.\.liveMutations\];/);
   assert.match(dw, /pricing,\s*orderType: "delivery",/);
   assert.match(dw, /payTarget\.order\.id === offlineSettledOrderId/, "the just-sent order has a double-settle guard");
   assert.match(dw, /if \(offlineSettledOrderId === order\.id\)/);

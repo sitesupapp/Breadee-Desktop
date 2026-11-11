@@ -186,7 +186,7 @@ import { Button, EmptyState, GatedButton, Input, Textarea } from "@/components/u
 import { Modal } from "@/components/overlays";
 import { useCart, type CartOwner } from "@/state/cart";
 import { isBackendReachable, lastKnownReachable } from "@/lib/offline/reachability";
-import { capturePayOrderOffline, payOrderClientOpId, unresolvedLocalOrderSettle } from "@/lib/offline/payOrderOffline";
+import { capturePayOrderOffline, offlineSettleTotalPin, payOrderClientOpId, unresolvedLocalOrderSettle } from "@/lib/offline/payOrderOffline";
 import { notifyPosSettled } from "@/state/shiftOrders";
 import { useActivePaymentMethods } from "@/lib/pos/useActivePaymentMethods";
 import { addPosOfflineTxn, getPosOfflineTxnByOp, updatePosOfflineTxn, getCachedCustomer } from "@/lib/offline/db";
@@ -1963,7 +1963,19 @@ export function useDeliveryWorkspace(input: {
           });
           const pricing = { discount_type: priced.discount_type, discount_value: priced.discount_value, delivery_fee: priced.delivery_fee };
           // C3 — a parked (needs_attention / cancelled) mutation is never a prerequisite of a NEW settle.
-          const dependencyIds = [...ref.dependencyIds, ...(await liveCaptureDependencies(proj?.mutationOpIds ?? []))];
+          const liveMutations = await liveCaptureDependencies(proj?.mutationOpIds ?? []);
+          const dependencyIds = [...ref.dependencyIds, ...liveMutations];
+          // 1.0.41 (S-PAYORDER_01, Staging 1.0.55 native QA) — pin the settle to the order total Breadee gave this
+          // terminal, so an order another device changed meanwhile is refused, not charged at its new total. Sent
+          // only when that figure is exact: the order is Breadee's own row (not created offline here) and has no
+          // unsynced change on this terminal.
+          const expectedOrderTotal = offlineSettleTotalPin({
+            orderId: order.id,
+            canonicalOrderId: ref.orderId,
+            orderLocal: ref.orderLocal,
+            liveMutationCount: liveMutations.length,
+            totalAmount: order.total_amount,
+          });
           const clientOpId = payOrderClientOpId(itemEditOfflineScope, order.id, confirm.method, confirm.currency, pricing);
           const cap = await capturePayOrderOffline({
             scope: itemEditOfflineScope,
@@ -1976,6 +1988,7 @@ export function useDeliveryWorkspace(input: {
             dependencyIds,
             pricing,
             orderType: "delivery",
+            expectedOrderTotal,
           });
           if (!payTarget.fromQueue) {
             setOfflineSettledOrderId(order.id);
