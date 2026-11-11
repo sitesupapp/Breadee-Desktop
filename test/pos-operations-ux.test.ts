@@ -86,9 +86,12 @@ test("the reversal is derived from payment state, never chosen by a screen", () 
   assert.equal(reversalLabel("refund"), "Refund order");
   assert.equal(reversalLabel("cancel"), "Cancel order");
   assert.match(reversalTitle("refund", "260815-0001"), /Refund order #260815-0001/);
-  // Only the refund warns about money, because only the refund moves any.
+  // Only the refund moves money. A cancel moves none on Breadee, but (1.0.41 D-5) it must never tell a cashier
+  // that no money was involved: an offline cash sale Breadee refused had its cash taken at this till.
   assert.match(reversalWarning("refund"), /negative payment/);
-  assert.match(reversalWarning("cancel"), /never paid/);
+  assert.match(reversalWarning("cancel"), /Breadee holds no payment/);
+  assert.match(reversalWarning("cancel"), /cash was taken for it on this terminal while offline/);
+  assert.doesNotMatch(reversalWarning("cancel"), /No money is involved/);
 });
 
 test("a terminal order offers nothing at all", () => {

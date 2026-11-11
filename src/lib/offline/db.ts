@@ -2,6 +2,7 @@ import Dexie, { type Table } from "dexie";
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 import type { EntityMapping } from "@/lib/offline/entityMap";
 import type { SyncHistoryEvent } from "@/lib/offline/syncHistory";
+import type { CaptureEvidence } from "@/lib/offline/captureEvidence";
 
 // Local offline store. Holds ONLY required operational data + a durable outbox of
 // actions to sync. No raw passwords, no secrets, no service keys. Snapshots are
@@ -120,6 +121,10 @@ export interface PosOfflineTxn {
   /** rc.11 — DISPLAY ONLY: the customer identity as captured at order time (the last-resort source of
    *  the unified Delivery customer projection). Never replayed, never authoritative. */
   party_snapshot?: { customer_name: string | null; customer_phone: string | null; address_text: string | null } | null;
+  /** 1.0.41 (S-CAPTURE, D-3) — when the sale was taken and at which till rate; stamped once when the row is
+   *  written (operationLog's posOfflineTxns creating hook) and carried onto the takeaway_sale op at staging.
+   *  Through Staging 1.0.52 the op was stamped only at STAGING (sync) time, i.e. with the rate held at sync. */
+  capture?: CaptureEvidence | null;
 }
 
 /** Lifecycle of an offline-opened shift that has not yet reached the server. */

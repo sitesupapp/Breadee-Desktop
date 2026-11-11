@@ -194,6 +194,9 @@ export async function migrateLegacyToOperations(): Promise<MigrationReport> {
       last_error_message: t.last_error ?? null,
       result_meta: t.server_order_number ? { order_number: t.server_order_number } : null,
       synced_at: t.status === "synced" ? (t.last_attempt_at ?? t.created_at) : null,
+      // 1.0.41 (D-3) — the evidence stamped on the row at capture; a pre-fix row has none and keeps the 1.0.52
+      // behaviour (the operations creating hook stamps it now; the server honours a rate only if it was in effect).
+      ...(t.capture ? { capture: t.capture } : {}),
     };
     await localdb.operations.add(op);
     if (t.status === "synced" && t.server_order_id) {

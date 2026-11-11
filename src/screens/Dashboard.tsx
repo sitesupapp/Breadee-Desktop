@@ -30,6 +30,7 @@ import { openExternal, webUrl } from "@/lib/webApp";
 import { env } from "@/env";
 import { visibleModules, type ModuleEntry } from "@/lib/modules";
 import { useSyncScope, useSyncSummary } from "@/components/sync/SyncCenterPanel";
+import { healthBadge, useBackendHealth } from "@/lib/offline/useBackendHealth";
 import { Card, Badge } from "@/components/ui";
 
 const AVAIL_BADGE: Record<ModuleEntry["availability"], { tone: "green" | "amber" | "slate"; label: string }> = {
@@ -95,6 +96,7 @@ function ModuleCard({ m, onOpenWeb }: { m: ModuleEntry; onOpenWeb: (m: ModuleEnt
 
 export function Dashboard() {
   const s = useSession();
+  const backendHealth = useBackendHealth();
   const device = getDeviceIdentity();
   // 1.0.38 (Bug 7) — the same scoped summary as both Sync Centers (live operations log for this
   // tenant + operational branch, incl. parked work), not the dead legacy outbox.
@@ -120,8 +122,11 @@ export function Dashboard() {
     if (result.kind !== "opened") setWebError(`${m.label}: ${result.reason}`);
   };
 
-  const connection = s.offlineMode ? "Offline mode" : s.online ? "Online" : "No internet";
-  const connectionTone = s.offlineMode ? "amber" : s.online ? "green" : "red";
+  // 1.0.41 (D-2) — the same backend-health badge as the header (was navigator.onLine: "Online" beside the header's
+  // "Breadee server off" during a backend outage with the network up).
+  const health = healthBadge(backendHealth, s.offlineMode, s.online);
+  const connection = health.text;
+  const connectionTone = health.tone;
   const rate = s.currency.rate;
   const currencyLabel = hasValidRate(rate) ? `${s.currency.primary} · ${Math.round(rate).toLocaleString()}/USD` : s.currency.primary;
 

@@ -3,10 +3,12 @@
 
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { __setSyncPassForTests, __syncWorkerRunningForTests, appDrain, startSyncWorker } from "@/lib/offline/syncWorker";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { __setSyncPassForTests, __syncWorkerRunningForTests, appDrain, recoveryProbe, startSyncWorker, SYNC_WORKER_RECOVERY_PROBE_MS } from "@/lib/offline/syncWorker";
 import { __drainListenerCountForTests, requestDrainAndWait } from "@/lib/offline/operationLog";
 import { runSyncNow, SYNC_NOW_NO_POS, SYNC_NOW_SERVER_OFF, SYNC_NOW_NOT_RUN, retryOutcomeText } from "@/lib/offline/syncActions";
-import { __resetReachabilityForTests, markBackendDegraded } from "@/lib/offline/reachability";
+import { __reachabilityProbeCountForTests, __resetReachabilityForTests, getBackendHealth, markBackendDegraded, markBackendUnreachable } from "@/lib/offline/reachability";
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
 afterEach(() => __setSyncPassForTests(null));
@@ -72,6 +74,50 @@ test("a failing pass never throws to the caller and frees the worker", async () 
   __setSyncPassForTests(async () => { ran = true; });
   await appDrain("operator-retry");
   assert.equal(ran, true);
+});
+
+// --- D-2 (Staging 1.0.52 native QA): recovery from ANY screen -------------------------------------------------------
+// Native evidence 2026-11-11: after a backend outage with the network up, Dashboard / Settings made no request for
+// 3.5 min and stayed "Breadee server off" (the header) beside "Online" (the Dashboard card) until POS was opened.
+
+test("D-2: while the server is off, the worker's recovery step re-probes and a healthy answer starts the drain", async () => {
+  let up = false;
+  __resetReachabilityForTests(async () => up);
+  const passes: string[] = [];
+  __setSyncPassForTests(async (t) => { passes.push(t); });
+  const stop = startSyncWorker();
+  try {
+    await tick();
+    passes.length = 0;
+    markBackendUnreachable(); // transport drop (the app's own proxy offline / server gone)
+    assert.equal(getBackendHealth(), "server_off");
+    await new Promise((r) => setTimeout(r, 3_100)); // past the shared store's 3 s TTL (the 20 s cadence always is)
+    const n0 = __reachabilityProbeCountForTests();
+    assert.equal(await recoveryProbe(), false, "still down: the step probes and reports down");
+    assert.equal(__reachabilityProbeCountForTests(), n0 + 1, "exactly one probe per step");
+    assert.deepEqual(passes, [], "no drain while down (nothing hammered)");
+    up = true;
+    await new Promise((r) => setTimeout(r, 3_100)); // past the shared store's 3 s TTL
+    assert.equal(await recoveryProbe(), true);
+    await tick();
+    assert.equal(getBackendHealth(), "online");
+    assert.ok(passes.includes("backend-returned"), "the healthy answer started the drain with no screen involved");
+    const n1 = __reachabilityProbeCountForTests();
+    assert.equal(recoveryProbe(), null, "online: no probe at all (no background load while healthy)");
+    assert.equal(__reachabilityProbeCountForTests(), n1);
+  } finally {
+    stop();
+  }
+});
+
+test("D-2: the worker schedules the recovery step on the POS badge cadence and clears it on stop", () => {
+  assert.equal(SYNC_WORKER_RECOVERY_PROBE_MS, 20_000);
+  const src = readFileSync(join(process.cwd(), "src", "lib", "offline", "syncWorker.ts"), "utf8");
+  assert.match(src, /window\.setInterval\(\(\) => void recoveryProbe\(\), SYNC_WORKER_RECOVERY_PROBE_MS\)/);
+  assert.match(src, /if \(recovery !== null\) window\.clearInterval\(recovery\);/);
+  const dash = readFileSync(join(process.cwd(), "src", "screens", "Dashboard.tsx"), "utf8");
+  assert.match(dash, /const health = healthBadge\(backendHealth, s\.offlineMode, s\.online\);/, "the Dashboard badge reads the same health truth as the header");
+  assert.doesNotMatch(dash, /s\.online \? "Online" : "No internet"/);
 });
 
 test("Sync now wording follows the ONE health truth (no 'online' header next to 'offline' text)", async () => {

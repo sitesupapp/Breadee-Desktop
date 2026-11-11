@@ -20,7 +20,7 @@
 //     (`needs_attention`, reason `unknown_handler`) and never executed.
 
 import { localdb, operationsRevision } from "@/lib/offline/db";
-import { captureEvidenceFor, type CaptureCurrency, type CaptureEvidence } from "@/lib/offline/captureEvidence";
+import { captureEvidenceFor, menuSyncedAt, type CaptureCurrency, type CaptureEvidence } from "@/lib/offline/captureEvidence";
 
 /** The business operation types Phase B knows. Compat handlers only — Phase B adds NO
  *  new offline business capability. Future phases register new types here. */
@@ -227,13 +227,28 @@ localdb.operations.hook("creating", (_pk, obj) => {
 });
 
 /** 1.0.41 (S-CAPTURE) — stamp an op being created with its capture evidence (once; never overwrites). */
-export function applyCaptureStamp(o: OfflineOperation): void {
+export function applyCaptureStamp(o: {
+  created_at: string;
+  capture?: CaptureEvidence | null;
+  scope?: { tenant_id?: string | null; branch_id?: string | null };
+  tenant_id?: string | null;
+  branch_id?: string | null;
+}): void {
   if (o.capture != null || !captureCurrencyProvider) return;
   let currency: CaptureCurrency = null;
   try { currency = captureCurrencyProvider(); } catch { currency = null; }
-  const c = captureEvidenceFor(o.created_at, currency);
+  // Owner decision 2026-11-11: also record when this till last loaded the OU's menu (op scope / sale row scope).
+  const tenant = o.scope?.tenant_id ?? o.tenant_id ?? null;
+  const branch = o.scope ? (o.scope.branch_id ?? null) : (o.branch_id ?? null);
+  const c = captureEvidenceFor(o.created_at, currency, menuSyncedAt(tenant, branch));
   if (c) o.capture = c;
 }
+// 1.0.41 (D-3) — an offline Takeaway / Delivery sale is written to posOfflineTxns and becomes a takeaway_sale op
+// only when the next drain stages it (migration.ts). Stamp the evidence on the ROW at capture, so the op carries
+// the till's rate at the sale, not the rate held at sync time (a rate changed during the outage was lost).
+localdb.posOfflineTxns.hook("creating", (_pk, obj) => {
+  applyCaptureStamp(obj as { created_at: string; capture?: CaptureEvidence | null; tenant_id?: string | null; branch_id?: string | null });
+});
 
 /** The schema version new captures are written at. Bump when the envelope/payload shape changes. */
 export const OPERATION_SCHEMA_VERSION = 1;

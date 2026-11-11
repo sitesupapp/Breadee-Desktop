@@ -209,13 +209,17 @@ export async function loadPosMenu(branchId: string | null): Promise<MenuData> {
  */
 export async function cacheMenu(menu: MenuData, tenantId: string, branchId: string | null): Promise<void> {
   const { localdb } = await import("@/lib/offline/db");
+  const cachedAt = new Date().toISOString();
   await localdb.snapshots.put({
     key: posMenuSnapshotKey(branchId),
     tenant_id: tenantId,
     branch_id: branchId,
     data: menu,
-    cached_at: new Date().toISOString(),
+    cached_at: cachedAt,
   });
+  // 1.0.41 (owner decision 2026-11-11) — the menu the till sells from was loaded from the server at this moment.
+  const { noteMenuSynced } = await import("@/lib/offline/captureEvidence");
+  noteMenuSynced(tenantId, branchId, cachedAt);
 }
 
 export async function readCachedMenu(
@@ -229,6 +233,9 @@ export async function readCachedMenu(
   if (!snap || snap.tenant_id !== tenantId || snap.branch_id !== branchId) return null;
   const data = snap.data as Partial<MenuData> | null;
   if (!data || !Array.isArray(data.items)) return null;
+  // 1.0.41 (owner decision 2026-11-11) — a till restarted offline sells from this cache: it was synced at cached_at.
+  const { noteMenuSynced } = await import("@/lib/offline/captureEvidence");
+  noteMenuSynced(tenantId, branchId, snap.cached_at);
   return { menu: { ...EMPTY, ...data } as MenuData, cachedAt: snap.cached_at };
 }
 

@@ -70,7 +70,9 @@ export function reversalTitle(action: VoidAction, orderNumber: string): string {
 export function reversalWarning(action: VoidAction): string {
   return action === "refund"
     ? "This writes a negative payment and a refund record against the shift that took the money. It cannot be undone from the desktop."
-    : "This voids the order. No money is involved because it was never paid. The reason is recorded against your account.";
+    : // 1.0.41 (Staging 1.0.52 native QA, D-5): "No money is involved because it was never paid" was shown for an
+      // offline cash sale that Breadee refused — the cash WAS taken. Breadee holds no payment; the till may.
+      "This voids the order. Breadee holds no payment for it. If cash was taken for it on this terminal while offline and Breadee did not accept the sale, this does not give that cash back: count it in the shift close and tell a manager. The reason is recorded against your account.";
 }
 
 // --- what each surface may offer ---------------------------------------------

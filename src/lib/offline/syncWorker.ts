@@ -22,6 +22,10 @@ export type DrainTrigger = "reconnect" | "backend-returned" | "periodic" | "oper
 
 /** The periodic pass interval (unchanged from the 1.0.38 POS timer). */
 export const SYNC_WORKER_PERIOD_MS = 45_000;
+/** 1.0.41 (Staging 1.0.52 native QA, D-2) — while the backend is NOT answering, the worker re-asks on this cadence
+ *  (the POS badge poll's 20 s), from ANY screen. Through 1.0.52 only the POS screen probed, so after an outage with
+ *  the network up, Dashboard / Settings stayed "Breadee server off" and never synced until POS was opened. */
+export const SYNC_WORKER_RECOVERY_PROBE_MS = 20_000;
 
 /** The stores and transport, imported LAZILY (they load the Supabase client / Vite env), so this module stays
  *  importable in tests and the worker's own startup never blocks on them. */
@@ -106,6 +110,15 @@ export function appDrain(trigger: DrainTrigger): Promise<void> {
   return next;
 }
 
+/**
+ * 1.0.41 (D-2) — one recovery step: while the health store is NOT online, ask the shared store again (its
+ * DB-touching probe; deduplicated with the POS badge poll; creates nothing). Returns null when online (no probe).
+ */
+export function recoveryProbe(): Promise<boolean> | null {
+  if (getBackendHealth() === "online") return null;
+  return isBackendReachable().catch(() => false);
+}
+
 let stopFn: (() => void) | null = null;
 let periodicBusy = false;
 
@@ -151,6 +164,9 @@ export function startSyncWorker(): () => void {
     }
   };
   const id = typeof window !== "undefined" ? window.setInterval(() => void tick(), 45_000) : null;
+  // D-2 — recovery probe while NOT online (see recoveryProbe). A healthy answer publishes through the store, and
+  // offHealth above starts the drain.
+  const recovery = typeof window !== "undefined" ? window.setInterval(() => void recoveryProbe(), SYNC_WORKER_RECOVERY_PROBE_MS) : null;
   // Startup: replay whatever a previous session left, as soon as the database answers.
   void appDrain("startup");
   stopFn = () => {
@@ -158,6 +174,7 @@ export function startSyncWorker(): () => void {
     offHealth();
     if (typeof window !== "undefined") window.removeEventListener("online", run);
     if (id !== null) window.clearInterval(id);
+    if (recovery !== null) window.clearInterval(recovery);
     stopFn = null;
   };
   return stopFn;
