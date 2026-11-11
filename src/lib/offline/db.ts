@@ -996,9 +996,17 @@ export async function listPosOfflineTxns(): Promise<PosOfflineTxn[]> {
   return localdb.posOfflineTxns.orderBy("created_at").reverse().toArray();
 }
 
-/** Offline sales that still hold unsynced work (must never be dropped silently). */
+/** 1.0.41 (D-5) — `review_reason` of a refused, never-applied sale the operator WITHDREW after Breadee confirmed it
+ *  holds no record of it (refusedSessions.withdrawRefusedSale). The row is kept (its cash stays on record). */
+export const SALE_WITHDRAWN = "withdrawn_refused";
+
+/** Offline sales that still hold unsynced work (must never be dropped silently). A withdrawn sale holds none. */
 export async function pendingPosTxnCount(): Promise<number> {
-  return localdb.posOfflineTxns.where("status").anyOf("queued", "syncing", "needs_attention").count();
+  return localdb.posOfflineTxns
+    .where("status")
+    .anyOf("queued", "syncing", "needs_attention")
+    .filter((t) => t.review_reason !== SALE_WITHDRAWN)
+    .count();
 }
 
 /** Patch one offline transaction by its local id. */

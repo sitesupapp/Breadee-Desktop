@@ -15,7 +15,7 @@
 
 import { isBackendReachable } from "@/lib/offline/reachability";
 import Dexie from "dexie";
-import { localdb, revisionCached, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
+import { localdb, revisionCached, SALE_WITHDRAWN, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
 import { isStructuralOp, settleCoveredIds, settlePrecedence, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { UNSETTLED_STATUSES, operationsWithStatus, type OfflineOperation } from "@/lib/offline/operationLog";
 import { loadOrdersForDay, loadShiftOrders, toDayKey, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -278,8 +278,10 @@ async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenO
       id: canonical ?? t.local_txn_id,
       order_number: t.server_order_number ?? `OFF-${t.local_txn_id.slice(0, 6).toUpperCase()}`,
       order_type: typeof p.order_type === "string" ? p.order_type : "takeaway",
-      status: "sent_to_kitchen",
-      payment_status: t.payment_intent || t.paid ? "paid" : "unpaid",
+      // 1.0.41 (D-5) — a refused sale the operator withdrew (Breadee confirmed it never recorded it) is voided here,
+      // never Open / collectible again; its cash stays in Sync history as withdrawn.
+      status: t.review_reason === SALE_WITHDRAWN ? "voided" : "sent_to_kitchen",
+      payment_status: t.review_reason === SALE_WITHDRAWN ? "unpaid" : t.payment_intent || t.paid ? "paid" : "unpaid",
       payment_method: t.payment_intent?.method ?? null,
       subtotal: typeof t.total === "number" ? t.total : null,
       discount_amount: 0,

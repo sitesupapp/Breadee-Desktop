@@ -10,7 +10,16 @@ import { useCallback, useEffect, useState } from "react";
 import { listHistory, type SyncHistoryEvent } from "@/lib/offline/syncHistory";
 import { currentCaptureBuild, listOperations } from "@/lib/offline/operationLog";
 import { buildDiagnostic, loadSyncCenterRows, type SyncCenterRow } from "@/lib/offline/queueForensics";
-import { COLLECTED_OFFLINE_NOT_ON_BILL, listRefusedSessions, withdrawRefusedSession, type RefusedOrderSummary } from "@/lib/offline/refusedSessions";
+import {
+  COLLECTED_OFFLINE_NOT_ON_BILL,
+  isWithdrawableRefusedSale,
+  listRefusedSessions,
+  SALE_WITHDRAW_CONFIRM,
+  SALE_WITHDRAWN_NOTE,
+  withdrawRefusedSale,
+  withdrawRefusedSession,
+  type RefusedOrderSummary,
+} from "@/lib/offline/refusedSessions";
 import { operatorRetry, runSyncNow } from "@/lib/offline/syncActions";
 import { noRetryText } from "@/lib/offline/refusalPolicy";
 import { BACKUP_MIN_PASSPHRASE, buildQueueBackup, downloadBackup } from "@/lib/offline/durability";
@@ -157,6 +166,25 @@ export function SyncCenterPanel({
         const r = await withdrawRefusedSession({ sessionId, scope: refusedScope(), actorUserId: userId }).catch(() => ({ ok: false as const, reason: "The order could not be withdrawn on this device." }));
         setWithdrawNote({ sessionId, text: r.ok ? "Withdrawn. Breadee confirmed none of it was applied; the record is kept in Sync history." : r.reason });
         setConfirmWithdraw(null);
+        await refresh();
+      } finally {
+        setWithdrawing(null);
+      }
+    },
+    [userId, refusedScope, refresh],
+  );
+
+  // 1.0.41 (D-5) — a refused offline Takeaway / Delivery sale: the same explicit, server-verified withdrawal.
+  const [confirmSale, setConfirmSale] = useState<string | null>(null);
+  const [saleNote, setSaleNote] = useState<{ operationId: string; text: string } | null>(null);
+  const withdrawSale = useCallback(
+    async (operationId: string) => {
+      if (!userId) return;
+      setWithdrawing(operationId);
+      try {
+        const r = await withdrawRefusedSale({ operationId, scope: refusedScope(), actorUserId: userId }).catch(() => ({ ok: false as const, reason: "The sale could not be withdrawn on this device." }));
+        setSaleNote({ operationId, text: r.ok ? SALE_WITHDRAWN_NOTE : r.reason });
+        setConfirmSale(null);
         await refresh();
       } finally {
         setWithdrawing(null);
@@ -515,6 +543,42 @@ export function SyncCenterPanel({
                                 {noRetryText({ status: "needs_attention", operation_type: r.type as never, last_error_code: r.error_code, last_error_message: r.error })}
                               </div>
                             )}
+                        {!canRetryOp(state, r) &&
+                          isWithdrawableRefusedSale({ operation_type: r.type as never, status: r.status as never, canonical_entity_id: r.canonical, last_error_code: r.error_code }) && (
+                            <div className="mt-2">
+                              {saleNote?.operationId === r.operation_id && (
+                                <p className="mb-1 font-semibold text-amber-800" role="status">
+                                  {saleNote.text}
+                                </p>
+                              )}
+                              {confirmSale === r.operation_id ? (
+                                <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-amber-900">
+                                  <p className="font-semibold">{SALE_WITHDRAW_CONFIRM}</p>
+                                  <div className="mt-2 flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => void withdrawSale(r.operation_id)}
+                                      disabled={withdrawing === r.operation_id}
+                                      className="rounded-lg border border-amber-400 bg-white px-2.5 py-1 font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-60"
+                                    >
+                                      {withdrawing === r.operation_id ? "Checking with Breadee…" : "Withdraw sale"}
+                                    </button>
+                                    <button type="button" onClick={() => setConfirmSale(null)} className="rounded-lg border border-line px-2.5 py-1 font-semibold text-sub hover:bg-slate-50">
+                                      Keep it
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmSale(r.operation_id)}
+                                  className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+                                >
+                                  Withdraw this sale…
+                                </button>
+                              )}
+                            </div>
+                          )}
                       </div>
                     )}
                   </li>
