@@ -21,6 +21,7 @@ import { FloorSectionNav } from "@/components/pos/floor/FloorSectionNav";
 import { FloorSearchBox } from "@/components/pos/floor/FloorSearchBox";
 import { useFloor } from "@/state/floor";
 import { elementsForSection } from "@/lib/pos/floor";
+import { summarizeUnplacedTables } from "@/lib/pos/floorStatus";
 import { searchFloor, type FloorSearchMatch } from "@/lib/pos/floorSearch";
 import {
   clampPan,
@@ -78,6 +79,10 @@ export function ServiceFloor({
     [layout, activeSectionId],
   );
   const matches = useMemo(() => searchFloor(layout, tables, query), [layout, tables, query]);
+  // Use the SAME authorized operational table map as List. A placement is
+  // geometry only: it never makes an open bill disappear from these counts.
+  const unplaced = useMemo(() => summarizeUnplacedTables(layout, tables), [layout, tables]);
+  const sectionHasTables = sectionElements.some((e) => e.type === "table" && e.tableId);
   const plane = useMemo(() => sectionPlane(activeSection, sectionElements), [activeSection, sectionElements]);
   const minScale = useMemo(() => minReadableScale(sectionElements), [sectionElements]);
 
@@ -175,6 +180,24 @@ export function ServiceFloor({
           onPick={pickMatch}
           sectionNameById={(id) => layout.sections.find((s) => s.id === id)?.name ?? ""}
         />
+        <div role="status" aria-live="polite" className="ml-auto flex shrink-0 flex-wrap items-center gap-1.5 text-xs font-semibold">
+          <span
+            data-unplaced-tables
+            className="rounded-full border border-line bg-white px-2 py-1 text-sub"
+            title="Active tables not placed anywhere on the published floor map"
+          >
+            {unplaced.activeUnplaced} unplaced
+          </span>
+          {unplaced.withOpenBills > 0 && (
+            <span
+              data-unplaced-open-bills
+              className="rounded-full border border-amber-300 bg-amber-50 px-2 py-1 text-amber-900"
+              title="Unplaced tables with open bills — use the Dine-In List"
+            >
+              {unplaced.withOpenBills} with open bills
+            </span>
+          )}
+        </div>
       </div>
 
       <div ref={wrapRef} className="relative min-h-0 flex-1">
@@ -190,6 +213,24 @@ export function ServiceFloor({
           now={now}
           onSelect={onSelect}
         />
+        {!sectionHasTables && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4">
+            <div className="pointer-events-auto max-w-sm rounded-xl border border-line bg-white/95 p-5 text-center shadow-sm">
+              <p className="font-bold text-ink">No tables placed on this floor</p>
+              <p className="mt-1 text-sm text-sub">
+                This published floor section has no placed tables. Other active tables may still have open bills in the List.
+              </p>
+              <button
+                type="button"
+                onClick={onSwitchToList}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-sm font-bold text-onbrand"
+              >
+                <Glyph name="list" size={16} />
+                Go to Dine-In List
+              </button>
+            </div>
+          </div>
+        )}
         <div className="absolute bottom-3 right-3">
           <FloorMapControls
             zoomPercent={transform ? zoomPercent(transform.scale) : 100}

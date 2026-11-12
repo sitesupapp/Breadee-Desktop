@@ -10,7 +10,7 @@
 // not crash the floor: the node renders as a neutral, dimmed "unavailable" tile
 // that cannot be opened, and the operator republishes the floor when convenient.
 
-import type { FloorElement, FloorTableShape } from "@/lib/pos/floor";
+import { placedTableIds, type FloorElement, type FloorLayout, type FloorTableShape } from "@/lib/pos/floor";
 import { elapsedMinutes, formatElapsed, tableCardState } from "@/lib/pos/tables";
 import type { TableCardState, TableSummary } from "@/types/tables";
 
@@ -135,4 +135,27 @@ export function shapeLabel(shape: FloorTableShape | null): string {
     case "lounge": return "lounge";
     default: return "table";
   }
+}
+
+/**
+ * Read-only published-floor coverage. Only the already-authorized operational
+ * table map is counted (never a cross-branch query or a layout-derived bill).
+ * Ignore inactive rows, duplicate identities and placements in other sections
+ * correctly: placement anywhere in the published layout counts as placed.
+ */
+export function summarizeUnplacedTables(
+  layout: FloorLayout,
+  tables: TableSummary[],
+): { activeUnplaced: number; withOpenBills: number } {
+  const placed = placedTableIds(layout);
+  const seen = new Set<string>();
+  let activeUnplaced = 0;
+  let withOpenBills = 0;
+  for (const table of tables) {
+    if (table.status === "inactive" || placed.has(table.id) || seen.has(table.id)) continue;
+    seen.add(table.id);
+    activeUnplaced += 1;
+    if (table.orders > 0) withOpenBills += 1;
+  }
+  return { activeUnplaced, withOpenBills };
 }
