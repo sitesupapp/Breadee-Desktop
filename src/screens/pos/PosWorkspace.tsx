@@ -51,7 +51,13 @@ import { ReverseOrderDialog } from "@/components/pos/ReverseOrderDialog";
 import { hydrateRefundProofs } from "@/lib/pos/refundProofHydration";
 import { orderOnAccountOffline, takeawaySaleOpId } from "@/lib/offline/orderOnAccountOffline";
 import { useShiftOrders, selectedShiftOrder, notifyPosSettled } from "@/state/shiftOrders";
-import { DINE_IN_PAY_FROM_TABLE_MESSAGE, LOCAL_PAYMENT_PENDING_MESSAGE } from "@/lib/pos/orderDue";
+import {
+  DINE_IN_PAY_FROM_TABLE_MESSAGE,
+  LOCAL_PAYMENT_CHECK_FAILED_MESSAGE,
+  LOCAL_PAYMENT_PENDING_MESSAGE,
+  LOCAL_PAYMENT_REFUSED_MESSAGE,
+} from "@/lib/pos/orderDue";
+import { unresolvedLocalOrderSettle } from "@/lib/offline/payOrderOffline";
 import { canSettleOrder, reversalActionFor } from "@/lib/pos/orderActions";
 import { buildShiftReportLines, itemReductionsFromReport, type ShiftReportDetail } from "@/lib/pos/shiftReport";
 import { paymentSummary } from "@/lib/pos/paymentBreakdown";
@@ -2091,7 +2097,7 @@ function PosWorkspaceInner() {
    * never do is take a customer's money for a second time.
    */
   const openPaymentForOrder = useCallback(
-    (order: ShiftOpenOrder) => {
+    async (order: ShiftOpenOrder) => {
       if (!canSettleOrder(order)) {
         toast.push({ tone: "warning", message: `Order ${order.order_number ?? ""} can no longer be paid.`.trim() });
         return;
@@ -2106,6 +2112,21 @@ function PosWorkspaceInner() {
       // Breadee yet: paying it again here would take the money twice.
       if (order.local_pending === true) {
         toast.push({ tone: "warning", message: LOCAL_PAYMENT_PENDING_MESSAGE });
+        return;
+      }
+      // 1.0.41 (F-COD-2, native QA on Staging 1.0.56) — a Breadee order whose payment was collected on this
+      // terminal and REFUSED (e.g. PAY_AMOUNT_CHANGED) shows as the server's "Open · unpaid": the list carries no
+      // local overlay for it. The same queue rule the Delivery panel uses: never open a second collection.
+      const held = await unresolvedLocalOrderSettle([order.id]).then(
+        (o) => ({ ok: true as const, o }),
+        () => ({ ok: false as const, o: null }),
+      );
+      if (!held.ok) {
+        toast.push({ tone: "warning", message: LOCAL_PAYMENT_CHECK_FAILED_MESSAGE });
+        return;
+      }
+      if (held.o) {
+        toast.push({ tone: "warning", message: held.o.status === "needs_attention" ? LOCAL_PAYMENT_REFUSED_MESSAGE : LOCAL_PAYMENT_PENDING_MESSAGE });
         return;
       }
       if (!shiftId) {
@@ -2163,6 +2184,17 @@ function PosWorkspaceInner() {
         // both carry a stable idempotency id: the cart op id for the order, takeawayPayOpId(cart op id) for the
         // payment (an existing order keeps one id per order while it is unsettled). A resend after an
         // unconfirmed attempt therefore returns the recorded result instead of charging again.
+        // 1.0.41 (F-COD-2) — re-checked at Confirm: a settle captured here may have been refused while the dialog was open.
+        if (intent.kind === "order") {
+          const held = await unresolvedLocalOrderSettle([intent.order.id]).then(
+            (o) => ({ ok: true as const, o }),
+            () => ({ ok: false as const, o: null }),
+          );
+          if (!held.ok || held.o) {
+            setPayError(!held.ok ? LOCAL_PAYMENT_CHECK_FAILED_MESSAGE : held.o!.status === "needs_attention" ? LOCAL_PAYMENT_REFUSED_MESSAGE : LOCAL_PAYMENT_PENDING_MESSAGE);
+            return;
+          }
+        }
         const draft =
           intent.kind === "draft" ? await withDeadline(ensureOrder(), INTERACTIVE_MONEY_DEADLINE_MS, "pos_submit_order") : null;
         if (intent.kind === "draft" && !draft) return;

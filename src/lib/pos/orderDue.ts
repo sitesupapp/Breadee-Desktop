@@ -15,6 +15,11 @@ export const DINE_IN_PAY_FROM_TABLE_MESSAGE =
   "This is a table order. Pay it from its table in Dine-in, so anything already paid on it is deducted and the table closes.";
 export const LOCAL_PAYMENT_PENDING_MESSAGE =
   "This order was recorded on this terminal and Breadee hasn't confirmed it yet. Don't take payment again — it syncs automatically.";
+/** 1.0.41 (F-COD-2) — a payment for this order collected on THIS terminal was refused by Breadee and is unresolved. */
+export const LOCAL_PAYMENT_REFUSED_MESSAGE =
+  "A payment for this order was already collected on this terminal and Breadee refused it. Don't collect again — resolve it in Sync Center first.";
+export const LOCAL_PAYMENT_CHECK_FAILED_MESSAGE =
+  "Couldn't check this terminal's records for an earlier payment of this order. Nothing was charged — try again.";
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 

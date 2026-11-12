@@ -167,3 +167,26 @@ test("the workspace passes the pin and the RPC client forwards it", () => {
   assert.match(ws, /liveMutationCount: liveMutations\.length/);
   assert.match(ws, /orderType: "delivery",\s*expectedOrderTotal,/);
 });
+
+test("F-COD-2: the POS Orders list never opens a second collection for a refused/unconfirmed local settle", async () => {
+  // Native QA on Staging 1.0.56: #261111-0015 (refused PAY_AMOUNT_CHANGED) opened from the shift's Orders list as
+  // the server's "Open · unpaid" and Pay offered Confirm 198,901 LBP with no warning.
+  const pos = readFileSync(join(process.cwd(), "src", "screens", "pos", "PosWorkspace.tsx"), "utf8");
+  const open = pos.slice(pos.indexOf("const openPaymentForOrder"), pos.indexOf("const confirmPayment"));
+  assert.match(open, /async \(order: ShiftOpenOrder\) =>/);
+  assert.match(open, /await unresolvedLocalOrderSettle\(\[order\.id\]\)/);
+  assert.match(open, /if \(!held\.ok\) \{[\s\S]{0,120}LOCAL_PAYMENT_CHECK_FAILED_MESSAGE[\s\S]{0,40}return;/, "an unreadable queue fails closed");
+  assert.match(open, /if \(held\.o\) \{[\s\S]{0,200}LOCAL_PAYMENT_REFUSED_MESSAGE[\s\S]{0,80}return;/);
+  assert.ok(open.indexOf("unresolvedLocalOrderSettle") < open.indexOf("setPayIntent({ kind: \"order\", order })"), "checked before the dialog opens");
+  const confirm = pos.slice(pos.indexOf("const confirmPayment"), pos.indexOf("const confirmOnAccount"));
+  assert.ok(confirm.indexOf("unresolvedLocalOrderSettle([intent.order.id])") > -1, "re-checked at Confirm");
+  assert.ok(confirm.indexOf("unresolvedLocalOrderSettle([intent.order.id])") < confirm.indexOf("await payOrder("), "before any charge");
+  const { LOCAL_PAYMENT_REFUSED_MESSAGE } = await import("@/lib/pos/orderDue");
+  assert.match(LOCAL_PAYMENT_REFUSED_MESSAGE, /Don't collect again/);
+  // The rule itself: a refused settle on Breadee's own (canonical) order id is found; a withdrawn one is not.
+  const cap = await capturePayOrderOffline({ scope: PSCOPE, orderId: "SRV-9", method: "cod", currency: "LBP", clientOpId: "b016725c-0000-4000-8000-000000000009", orderType: "delivery", expectedOrderTotal: 98901 });
+  await localdb.operations.update(cap.operationId, { status: "needs_attention", last_error_code: "pay_amount_changed" });
+  assert.equal((await unresolvedLocalOrderSettle(["SRV-9"]))?.status, "needs_attention");
+  await localdb.operations.update(cap.operationId, { status: "cancelled" });
+  assert.equal(await unresolvedLocalOrderSettle(["SRV-9"]), null);
+});
