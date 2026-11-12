@@ -172,6 +172,9 @@ export type CashBox = {
   delivery_fee_cash_treatment: DeliveryFeeCashTreatment;
   /** `expected_cash` with the cash delivery-fee portion EXCLUDED. */
   expected_cash_excluded: number;
+  /** 1.0.41 (D-1, S-DRAWER_01) — active cash payouts already deducted from `expected_cash`. Null when the
+   *  server predates S-DRAWER_01 (its `expected_cash` does not deduct payouts). */
+  cash_payouts?: number | null;
 };
 
 /** `pos_end_shift` report. Server-authoritative. */

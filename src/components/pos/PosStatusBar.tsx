@@ -15,7 +15,7 @@
 import { useEffect, useState } from "react";
 import { Badge, Button, StatusDot, cn } from "@/components/ui";
 import { CASH_CONTRACT_CURRENCY, formatMoney, type CurrencyCode } from "@/lib/currency";
-import { elapsedSince } from "@/lib/pos/shifts";
+import { elapsedSince, serverDrawerNote } from "@/lib/pos/shifts";
 import { TopBarPopover } from "@/components/pos/TopBarPopover";
 import { SyncCenter } from "@/components/pos/SyncCenter";
 import { orderLifecycleLabel, orderLifecycleTone, orderRouteLabel, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
@@ -186,7 +186,7 @@ export function PosStatusBar(props: PosStatusBarProps) {
                     {formatMoney(props.cashBox.expected_cash, CASH_CONTRACT_CURRENCY)}
                   </p>
                   <p className="mt-1 text-[11px] text-sub">
-                    Expected cash: opening float plus cash taken this shift. Read from the server, in USD.
+                    {serverDrawerNote(props.cashBox, (n) => formatMoney(n, CASH_CONTRACT_CURRENCY))}
                   </p>
                 </>
               ) : offlineDrawer === null ? (

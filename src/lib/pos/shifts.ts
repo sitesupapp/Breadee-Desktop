@@ -169,7 +169,20 @@ export async function getCashBox(shiftId: string | null): Promise<CashBox> {
     delivery_fee_cash_treatment: toTreatment(row.delivery_fee_cash_treatment),
     expected_cash_excluded:
       row.expected_cash_excluded == null ? num(row.expected_cash) : num(row.expected_cash_excluded),
+    cash_payouts: numOrNull(row.cash_payouts),
   };
+}
+
+/**
+ * 1.0.41 (D-1) — PURE. The explanation under the server Drawer figure. It names payouts only when the server
+ * says it deducted them (S-DRAWER_01 returns `cash_payouts`); an older server's figure is described as it is.
+ */
+export function serverDrawerNote(box: Pick<CashBox, "cash_payouts">, fmtUsd: (n: number) => string): string {
+  if (box.cash_payouts == null) return "Expected cash: opening float plus cash taken this shift. Read from the server, in USD.";
+  const p = Number(box.cash_payouts);
+  return p > 0
+    ? `Expected cash: opening float plus cash taken this shift, minus ${fmtUsd(p)} cash payouts. Read from the server, in USD.`
+    : "Expected cash: opening float plus cash taken this shift, minus cash payouts (none). Read from the server, in USD.";
 }
 
 function toByItem(value: unknown): ShiftReport["by_item"] {
