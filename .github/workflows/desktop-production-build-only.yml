@@ -136,12 +136,18 @@ jobs:
           host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
           echo "Production backend host: $host"
 
+      # 1.0.41 correction (2026-11-16): the 1.0.38 server-contracts switch MUST be
+      # compiled ON, exactly as desktop-production-release.yml / desktop-staging-release.yml
+      # do. Without it this "twin" produced a bundle that refuses full Pay of a
+      # part-paid bill and disables offline Move/Merge (proven on the 1.0.41 pilot
+      # artifact 0ef4a5e7…). Set in BOTH build steps and asserted below.
       - name: Build frontend
         run: npm run build
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: production
+          VITE_SERVER_1038_CONTRACTS: "1"
 
       - name: Verify built bundle targets production
         shell: bash
@@ -155,6 +161,8 @@ jobs:
             exit 1
           fi
           echo "Bundle backend target verified: production."
+          # The compiled 1.0.38 contracts switch must be ON (same check as the release workflow).
+          node -e "const fs=require('fs');const p='dist/assets';let ok=false;for(const f of fs.readdirSync(p).filter(x=>x.endsWith('.js'))){const s=fs.readFileSync(p+'/'+f,'utf8');const i=s.indexOf('this.name=\"PartPaidBillError\"');if(i>=0&&/=\"1\"\.trim\(\)===\"1\"/.test(s.slice(i,i+600)))ok=true}if(!ok){console.log('::error::The 1.0.38 contracts flag is NOT enabled in the bundle. Refusing.');process.exit(1)}console.log('1.0.38 contracts flag: ON')"
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -180,6 +188,7 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_APP_ENV: production
+          VITE_SERVER_1038_CONTRACTS: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
 

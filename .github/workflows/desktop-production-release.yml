@@ -1,28 +1,38 @@
 # ---------------------------------------------------------------------------
-# Breadee Desktop — PRODUCTION RELEASE + UPDATE PUBLISH
+# Breadee Desktop — PRODUCTION RELEASE + UPDATE PUBLISH (promote mode)
 #
 # The only workflow that can change what an installed production terminal is
 # offered. Everything about it is deliberately hard to trigger by accident.
 #
-# TRIGGER: a `desktop-prod-v*` tag, and nothing else. Merging to desktop-staging
-# does NOT update customer machines - a release is a separate, intentional act
-# with its own version number. That separation is the whole safety model: code
-# can land continuously while the fleet moves only when someone decides it does.
+# 1.0.41 CHANGE (2026-11-16) — PROMOTE, NEVER REBUILD.
+# Until 1.0.40 this job rebuilt and re-signed the app from the tagged commit, so
+# the bytes customers received were never the bytes the owner had installed and
+# certified first. It now publishes EXACTLY one owner-approved artifact produced
+# earlier by desktop-production-build-only.yml (same Production environment, same
+# signing key, same build configuration, VITE_SERVER_1038_CONTRACTS asserted ON):
+#
+#   * The tag must point at a commit that adds ONLY `release-pins/<tag>.json` to
+#     the commit the artifact was built from. The pin names the build run and the
+#     SHA-256 of the installer and signature the owner certified.
+#   * job `verify` (no secrets, read-only token) proves the run, downloads the
+#     artifact, and checks every hash, the version and the minisign signature
+#     against the public key compiled into the app. Any mismatch fails closed
+#     before anything is published.
+#   * job `publish` runs in the protected Production environment, so its
+#     required-reviewer approval gates publication. It creates the release from
+#     the verified bytes, re-downloads the published assets and re-checks their
+#     hashes, and only THEN advances the update channel (channel last).
+#
+# TRIGGER: a `desktop-prod-v*` tag, and nothing else.
 #
 # WHY A DEDICATED CHANNEL BRANCH RATHER THAN /releases/latest.
 # This repository has already published `desktop-v1.0.0-rc1-staging`. A generic
 # "latest release" endpoint would happily hand that RC to a production till,
 # which would point a real restaurant at the staging database. The updater
-# therefore reads ONE file on ONE branch, and only this job writes it. A staging
-# build cannot appear there because nothing else ever writes there.
-#
-# SIGNING is mandatory and unconditional. The private key lives in the protected
-# Production environment; the matching public key is compiled into the app, so an
-# artifact this workflow did not sign cannot install - the client refuses it.
+# therefore reads ONE file on ONE branch, and only this job writes it.
 #
 # FAIL CLOSED. Every check below exits non-zero rather than publishing something
-# unverified. A release that does not happen is a nuisance; a release that points
-# a production till at staging, or ships an unsigned binary, is an incident.
+# unverified.
 # ---------------------------------------------------------------------------
 
 name: Desktop Production Release
@@ -33,45 +43,49 @@ on:
       - 'desktop-prod-v*'
 
 permissions:
-  contents: write # required to create the release and push the channel manifest
+  contents: read
 
 concurrency:
   group: desktop-production-release
   cancel-in-progress: false
 
 env:
-  # The branch carrying the production update manifest. Orphan by design: it
-  # holds `latest.json` and nothing else, so it can never accidentally serve
-  # source or a staging artifact.
   CHANNEL_BRANCH: desktop-production-channel
   STAGING_REF: azjxprewycygsocusxjn
   PRODUCTION_REF: cltlqfqormkhppmbvyrv
+  BUILD_WORKFLOW_PATH: .github/workflows/desktop-production-build-only.yml
+  # minisign key id of the production updater key compiled into installed terminals.
+  EXPECTED_KEY_ID: B77999D821F82FD7
   # The customer-facing note shown in "Breadee Update Available" (latest.json
   # `notes`) and in the GitHub release description. Business language only.
   RELEASE_NOTE: "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers, at the time, price and exchange rate they were taken at. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off."
 
 jobs:
-  release:
-    name: Build, sign and publish
-    runs-on: windows-latest
-    environment: Production
-
+  verify:
+    name: Verify the owner-approved signed artifact (no build, no secrets)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.pin.outputs.version }}
+      tag: ${{ steps.pin.outputs.tag }}
+      installer_sha256: ${{ steps.pin.outputs.installer_sha256 }}
+      sig_sha256: ${{ steps.pin.outputs.sig_sha256 }}
     steps:
       - name: Checkout the tagged commit
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 1. The tag IS the version. Validate its shape, then prove the
-      #    application actually claims that version - a tag that disagrees with
-      #    tauri.conf.json would publish a manifest advertising a version no
-      #    client can ever reach, and every terminal would re-download forever.
-      - name: Validate tag and version agreement
+      # 1. The tag IS the version, the manifests must agree, and a pin must exist.
+      - name: Read the release pin and prove tag/version agreement
+        id: pin
         shell: bash
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          echo "Tag: $tag"
           version="${tag#desktop-prod-v}"
+          echo "Tag: $tag"
           if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::'$version' is not a plain SemVer MAJOR.MINOR.PATCH."
             exit 1
@@ -79,147 +93,185 @@ jobs:
           conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
           pkg=$(node -p "require('./package.json').version")
           cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
-          echo "tauri.conf.json=$conf package.json=$pkg Cargo.toml=$cargo"
+          ident=$(node -p "require('./src-tauri/tauri.conf.json').identifier")
+          echo "tauri.conf.json=$conf package.json=$pkg Cargo.toml=$cargo identifier=$ident"
           for got in "$conf" "$pkg" "$cargo"; do
             if [ "$got" != "$version" ]; then
               echo "::error::Version mismatch: tag says $version but a manifest says $got."
               exit 1
             fi
           done
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "TAG=$tag" >> "$GITHUB_ENV"
+          if [ "$ident" != "app.breadee.desktop" ]; then
+            echo "::error::Unexpected app identifier '$ident'."
+            exit 1
+          fi
+          pin="release-pins/${tag}.json"
+          if [ ! -f "$pin" ]; then
+            echo "::error::No release pin $pin. A release publishes only an owner-pinned build-only artifact."
+            exit 1
+          fi
+          cat "$pin"
+          node -e "
+            const p=require('./$pin');
+            const bad=(m)=>{console.log('::error::'+m);process.exit(1)};
+            if(p.version!=='$version') bad('pin version '+p.version+' != tag version $version');
+            if(!/^[0-9]+$/.test(String(p.build_run_id))) bad('pin build_run_id is not a run id');
+            if(!/^[0-9a-f]{40}$/.test(p.build_commit)) bad('pin build_commit is not a 40-hex sha');
+            if(!/^[0-9a-f]{64}$/.test(p.installer_sha256)) bad('pin installer_sha256 is not a sha-256');
+            if(!/^[0-9a-f]{64}$/.test(p.sig_sha256)) bad('pin sig_sha256 is not a sha-256');
+            if(p.key_id!==process.env.EXPECTED_KEY_ID) bad('pin key_id '+p.key_id+' != '+process.env.EXPECTED_KEY_ID);
+            const fs=require('fs');const o=process.env.GITHUB_OUTPUT;
+            fs.appendFileSync(o,'version=$version\ntag=$tag\nbuild_run_id='+p.build_run_id+'\nbuild_commit='+p.build_commit+'\ninstaller_sha256='+p.installer_sha256+'\nsig_sha256='+p.sig_sha256+'\n');
+          "
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # 2. Same source: the tag may add nothing but the pin to the built commit.
+      - name: Prove the tagged commit adds only the pin to the built commit
+        shell: bash
+        env:
+          BUILD_COMMIT: ${{ steps.pin.outputs.build_commit }}
+        run: |
+          git cat-file -e "${BUILD_COMMIT}^{commit}"
+          if ! git merge-base --is-ancestor "$BUILD_COMMIT" "$GITHUB_SHA"; then
+            echo "::error::The built commit $BUILD_COMMIT is not an ancestor of the tagged commit."
+            exit 1
+          fi
+          changed=$(git diff --name-only "$BUILD_COMMIT" "$GITHUB_SHA")
+          echo "Changed since the built commit:"; printf '%s\n' "$changed"
+          bad=$(printf '%s\n' "$changed" | grep -v '^release-pins/' | grep -v '^$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::The tag changes more than the release pin since the built commit: $bad"
+            exit 1
+          fi
+
+      # 3. The pinned run is the protected Build-Only workflow, on that commit, succeeded.
+      - name: Prove the pinned run is the Build-Only workflow on the built commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.pin.outputs.build_run_id }}
+          BUILD_COMMIT: ${{ steps.pin.outputs.build_commit }}
+        run: |
+          info=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '[.path,.head_sha,.conclusion,.event]|@tsv')
+          echo "Run ${RUN_ID}: $info"
+          IFS=$'\t' read -r path head conclusion event <<< "$info"
+          path="${path%%@*}"
+          if [ "$path" != "$BUILD_WORKFLOW_PATH" ] || [ "$head" != "$BUILD_COMMIT" ] || [ "$conclusion" != "success" ] || [ "$event" != "workflow_dispatch" ]; then
+            echo "::error::Run ${RUN_ID} is not a successful Build-Only dispatch of ${BUILD_COMMIT}."
+            exit 1
+          fi
+
+      # 4. The exact bytes. No build tool is installed in this job.
+      - name: Download the pinned artifact (exact bytes, no rebuild)
+        uses: actions/download-artifact@v4
         with:
-          node-version: '24'
-          cache: 'npm'
+          name: breadee-desktop-${{ steps.pin.outputs.version }}-signed-unpublished
+          run-id: ${{ steps.pin.outputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: out
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Typecheck frontend
-        run: npm run typecheck
-
-      # 2. Same production-environment guards as the installer workflow. Kept
-      #    here rather than shared, because a release must not depend on another
-      #    workflow having been correct.
-      - name: Verify production environment is configured
+      - name: Verify hashes, manifest and the updater signature
         shell: bash
         env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          VERSION: ${{ steps.pin.outputs.version }}
+          INSTALLER_SHA256: ${{ steps.pin.outputs.installer_sha256 }}
+          SIG_SHA256: ${{ steps.pin.outputs.sig_sha256 }}
         run: |
-          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
-            echo "::error::The Production environment has no Supabase URL/key. Refusing to release."
-            exit 1
-          fi
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::No updater signing key in the Production environment. Refusing to publish an unsigned update."
-            exit 1
-          fi
-          case "$VITE_SUPABASE_URL" in
-            *"$STAGING_REF"*)
-              echo "::error::The Production environment points at the STAGING project. Refusing to release."
-              exit 1 ;;
-          esac
-          host=$(printf '%s' "$VITE_SUPABASE_URL" | sed -E 's#^https://([^/]+).*#\1#')
-          echo "Production backend host: $host"
-
-      - name: Build frontend
-        run: npm run build
-        env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_APP_ENV: production
-          # 1.0.38: the 1.0.38 server contracts are LIVE in PRODUCTION (ledger
-          # desktop_1038_offline_contracts + desktop_1038_open_shift_require_new,
-          # applied under the 1.0.38 production GO) - the same switch the
-          # human-accepted staging build ran with.
-          VITE_SERVER_1038_CONTRACTS: "1"
-
-      - name: Verify built bundle targets production
-        shell: bash
-        run: |
-          if grep -rl "$STAGING_REF" dist/assets >/dev/null 2>&1; then
-            echo "::error::The built bundle references the STAGING project. Refusing to release."
-            exit 1
-          fi
-          if ! grep -rl "$PRODUCTION_REF" dist/assets >/dev/null 2>&1; then
-            echo "::error::The built bundle does not reference the production project. Refusing to release."
-            exit 1
-          fi
-          echo "Bundle backend target verified: production."
-          # The compiled 1.0.38 contracts switch must be ON (same check as staging).
-          node -e "const fs=require('fs');const p='dist/assets';let ok=false;for(const f of fs.readdirSync(p).filter(x=>x.endsWith('.js'))){const s=fs.readFileSync(p+'/'+f,'utf8');const i=s.indexOf('this.name=\"PartPaidBillError\"');if(i>=0&&/=\"1\"\.trim\(\)===\"1\"/.test(s.slice(i,i+600)))ok=true}if(!ok){console.log('::error::The 1.0.38 contracts flag is NOT enabled in the bundle. Refusing.');process.exit(1)}console.log('1.0.38 contracts flag: ON')"
-
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      # The Rust cache restores the previously-compiled app crate, and Tauri
-      # embeds the frontend INTO that crate at compile time. Cargo's fingerprint
-      # does not invalidate when only dist/ changes, so the cached crate keeps
-      # its OLD embedded frontend - which shipped a stale bundle (wrong in-app
-      # version) even though the dist rebuilt correctly. Clean just the app crate
-      # so the next build re-runs its build script and re-embeds the fresh dist;
-      # dependency caching is untouched.
-      - name: Force fresh frontend embed (bust stale app-crate cache)
-        run: cargo clean -p breadee-desktop --manifest-path src-tauri/Cargo.toml
-
-      # 3. Build + sign.
-      #
-      #    `--config src-tauri/tauri.release.conf.json` is what turns updater
-      #    artifacts ON, and it is deliberately NOT on in the base config: Tauri
-      #    demands a private signing key from any build that produces updater
-      #    artifacts, so leaving it enabled globally made the ordinary STAGING
-      #    installer fail with "a public key has been found, but no private key".
-      #    Signing belongs to the one workflow that holds the key, so only this
-      #    build asks for it - and staging never needs the production key at all,
-      #    which is a better boundary than the one that broke.
-      #
-      #    The password variable must be PRESENT even though the key has none.
-      - name: Build and sign the production app
-        run: npm run tauri:build -- --config src-tauri/tauri.release.conf.json
-        env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_APP_ENV: production
-          VITE_SERVER_1038_CONTRACTS: "1"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-
-      # 4. Collect the assets and prove the signature exists. An unsigned
-      #    release is worse than no release: it cannot install, and it would
-      #    look like a broken app rather than a broken pipeline.
-      - name: Collect and verify release assets
-        shell: bash
-        run: |
-          nsis_dir=src-tauri/target/release/bundle/nsis
-          mkdir -p out
-          installer=$(ls "$nsis_dir"/*-setup.exe | head -n 1)
-          sig=$(ls "$nsis_dir"/*-setup.exe.sig 2>/dev/null | head -n 1 || true)
-          if [ -z "$sig" ] || [ ! -s "$sig" ]; then
-            echo "::error::No updater signature was produced. Refusing to publish an unsigned update."
-            exit 1
-          fi
-          cp "$installer" "out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe"
-          cp "$installer" "out/Breadee_${VERSION}_x64-setup.exe"
-          cp "$sig"       "out/Breadee_${VERSION}_x64-setup.exe.sig"
           cd out
-          sha256sum Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe > SHA256SUMS.txt
-          sha256sum "Breadee_${VERSION}_x64-setup.exe" >> SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          ls -la
+          inst="Breadee_${VERSION}_x64-setup.exe"
+          fresh="Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe"
+          sig="${inst}.sig"
+          for f in "$inst" "$fresh" "$sig" SHA256SUMS.txt latest.preview.json; do
+            [ -s "$f" ] || { echo "::error::Artifact is missing $f."; exit 1; }
+          done
+          got_inst=$(sha256sum "$inst" | cut -d' ' -f1)
+          got_fresh=$(sha256sum "$fresh" | cut -d' ' -f1)
+          got_sig=$(sha256sum "$sig" | cut -d' ' -f1)
+          echo "installer=$got_inst fresh=$got_fresh sig=$got_sig"
+          [ "$got_inst" = "$INSTALLER_SHA256" ] || { echo "::error::Installer SHA-256 $got_inst != pinned $INSTALLER_SHA256."; exit 1; }
+          [ "$got_fresh" = "$INSTALLER_SHA256" ] || { echo "::error::Fresh-install copy differs from the pinned installer."; exit 1; }
+          [ "$got_sig" = "$SIG_SHA256" ] || { echo "::error::Signature SHA-256 $got_sig != pinned $SIG_SHA256."; exit 1; }
+          tr -d '\r' < SHA256SUMS.txt | grep -q "^${INSTALLER_SHA256} [ *]${inst}\$" || { echo "::error::SHA256SUMS.txt does not list the pinned installer."; exit 1; }
+          cat > /tmp/verify.js <<'JS'
+          const fs = require('fs'), crypto = require('crypto');
+          const [conf, file, sigPath, preview, version, expectId] = process.argv.slice(2);
+          const fail = (m) => { console.log('::error::' + m); process.exit(1); };
+          const pubB64 = require(conf).plugins.updater.pubkey;
+          const pubLine = Buffer.from(pubB64, 'base64').toString('utf8').split('\n')[1].trim();
+          const pubRaw = Buffer.from(pubLine, 'base64');
+          const keyId = Buffer.from(pubRaw.subarray(2, 10)).reverse().toString('hex').toUpperCase();
+          if (keyId !== expectId) fail('compiled updater key ' + keyId + ' != ' + expectId);
+          const sigFile = fs.readFileSync(sigPath, 'utf8').trim();
+          const lines = Buffer.from(sigFile, 'base64').toString('utf8').split('\n');
+          const sigRaw = Buffer.from(lines[1].trim(), 'base64');
+          const alg = sigRaw.subarray(0, 2).toString('latin1');
+          const sigId = Buffer.from(sigRaw.subarray(2, 10)).reverse().toString('hex').toUpperCase();
+          if (sigId !== keyId) fail('signature key id ' + sigId + ' != ' + keyId);
+          const trusted = lines[2].replace(/^trusted comment: /, '');
+          const key = crypto.createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), pubRaw.subarray(10, 42)]), format: 'der', type: 'spki' });
+          const data = fs.readFileSync(file);
+          const msg = alg === 'ED' ? crypto.createHash('blake2b512').update(data).digest() : data;
+          if (!crypto.verify(null, msg, key, sigRaw.subarray(10, 74))) fail('updater signature does NOT verify for the installer');
+          if (!crypto.verify(null, Buffer.concat([sigRaw.subarray(10, 74), Buffer.from(trusted, 'utf8')]), key, Buffer.from(lines[3].trim(), 'base64'))) fail('trusted comment signature does NOT verify');
+          const p = JSON.parse(fs.readFileSync(preview, 'utf8'));
+          if (p.version !== version) fail('preview manifest version ' + p.version + ' != ' + version);
+          if (p.platforms['windows-x86_64'].signature !== sigFile) fail('preview manifest signature != .sig');
+          console.log('Updater signature verified with key ' + keyId + ' (' + alg + '); ' + trusted);
+          JS
+          node /tmp/verify.js "$GITHUB_WORKSPACE/src-tauri/tauri.conf.json" "$inst" "$sig" latest.preview.json "$VERSION" "$EXPECTED_KEY_ID"
+          echo "### Verified artifact for ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- installer SHA-256: \`${got_inst}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- signature SHA-256: \`${got_sig}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the verified bytes to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verified-${{ steps.pin.outputs.version }}
+          path: |
+            out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe
+            out/Breadee_${{ steps.pin.outputs.version }}_x64-setup.exe
+            out/Breadee_${{ steps.pin.outputs.version }}_x64-setup.exe.sig
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish the verified artifact (Production approval required)
+    needs: verify
+    runs-on: ubuntu-latest
+    # The protected Production environment: its required-reviewer approval is the
+    # human gate before anything a customer terminal can see is created.
+    environment: Production
+    permissions:
+      contents: write # required to create the release and push the channel manifest
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      TAG: ${{ needs.verify.outputs.tag }}
+      INSTALLER_SHA256: ${{ needs.verify.outputs.installer_sha256 }}
+      SIG_SHA256: ${{ needs.verify.outputs.sig_sha256 }}
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Receive the verified bytes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-verified-${{ needs.verify.outputs.version }}
+          path: out
+
+      - name: Re-check the bytes about to be published
+        shell: bash
+        run: |
+          cd out
+          [ "$(sha256sum "Breadee_${VERSION}_x64-setup.exe" | cut -d' ' -f1)" = "$INSTALLER_SHA256" ] || { echo "::error::Installer changed between jobs."; exit 1; }
+          [ "$(sha256sum "Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe" | cut -d' ' -f1)" = "$INSTALLER_SHA256" ] || { echo "::error::Fresh-install copy changed between jobs."; exit 1; }
+          [ "$(sha256sum "Breadee_${VERSION}_x64-setup.exe.sig" | cut -d' ' -f1)" = "$SIG_SHA256" ] || { echo "::error::Signature changed between jobs."; exit 1; }
           echo "SIGNATURE=$(cat "Breadee_${VERSION}_x64-setup.exe.sig")" >> "$GITHUB_ENV"
 
-      # 5. Immutable release assets. Fresh installs keep working: the normal
-      #    installer is published alongside the updater artifact, so a brand-new
-      #    customer can still install Breadee the ordinary way.
+      # Immutable release assets first. Fresh installs keep working: the normal
+      # installer is published alongside the updater artifact.
       - name: Publish the GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -234,7 +286,7 @@ jobs:
             - `Breadee_${{ env.VERSION }}_x64-setup.exe` + `.sig` — signed automatic update
             - `SHA256SUMS.txt` — checksums
 
-            Installed production terminals will be offered this version in-app.
+            Installer SHA-256: `${{ env.INSTALLER_SHA256 }}` (the owner-certified build, promoted unchanged).
           files: |
             out/Breadee_Desktop_POS_v1_PRODUCTION_x64_Setup.exe
             out/Breadee_${{ env.VERSION }}_x64-setup.exe
@@ -243,13 +295,22 @@ jobs:
           draft: false
           prerelease: false
 
-      # 6. Advance the channel. This is the step that actually reaches the
-      #    fleet, and it happens LAST - only after the assets exist and are
-      #    signed, so the manifest can never point at something unpublished.
-      - name: Publish the production update manifest
+      # Prove what customers will download before the channel points at it.
+      - name: Verify the published release assets byte-for-byte
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p published
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published --pattern "Breadee_${VERSION}_x64-setup.exe" --pattern "Breadee_${VERSION}_x64-setup.exe.sig"
+          [ "$(sha256sum "published/Breadee_${VERSION}_x64-setup.exe" | cut -d' ' -f1)" = "$INSTALLER_SHA256" ] || { echo "::error::Published installer differs from the verified bytes."; exit 1; }
+          [ "$(sha256sum "published/Breadee_${VERSION}_x64-setup.exe.sig" | cut -d' ' -f1)" = "$SIG_SHA256" ] || { echo "::error::Published signature differs from the verified bytes."; exit 1; }
+          echo "Published release assets verified."
+
+      # Advance the channel LAST: only after the assets exist, are signed and are
+      # proven identical to the owner-certified artifact.
+      - name: Publish the production update manifest
+        shell: bash
         run: |
           asset="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Breadee_${VERSION}_x64-setup.exe"
           pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -272,8 +333,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Orphan branch: it carries the manifest and nothing else, so no source
-          # and no staging artifact can ever be served from this endpoint.
+          # Orphan branch: it carries the manifest and nothing else.
           git checkout --orphan "$CHANNEL_BRANCH"
           git rm -rf . >/dev/null 2>&1 || true
           cp channel/latest.json ./latest.json
