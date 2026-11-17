@@ -1,6 +1,6 @@
 [package]
 name = "breadee-desktop"
-version = "1.0.62"
+version = "1.0.63"
 description = "Breadee Desktop"
 authors = ["Breadee"]
 edition = "2021"
