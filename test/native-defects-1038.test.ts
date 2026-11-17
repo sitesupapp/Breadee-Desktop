@@ -313,11 +313,11 @@ test("RELEASE 1.0.41 (production): customer note in latest.json + release body, 
   assert.match(wf, /1\.0\.38 contracts flag is NOT enabled in the bundle/);
   assert.match(wf, /tags:\s*\n\s*- 'desktop-prod-v\*'/);
   // One version everywhere (Production 1.0.41 = the cumulative candidate tested on Staging under the staging channel number).
-  assert.equal(JSON.parse(read("package.json")).version, "1.0.61");
-  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.61");
+  assert.equal(JSON.parse(read("package.json")).version, "1.0.62");
+  assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).version, "1.0.62");
   assert.match(read("src-tauri", "Cargo.toml"), /^version = "1\.0\.41"$/m);
   assert.equal(JSON.parse(read("src-tauri", "tauri.conf.json")).identifier, "app.breadee.desktop");
-  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.61"/);
+  assert.match(read("src", "lib", "whatsNew.ts"), /WHATS_NEW_VERSION = "1\.0\.62"/);
 });
 
 test("BUG 5: an offline quantity INCREASE of a sent line is a new round (never the version-checked line edit); decrease / remove stay audited edits", () => {
