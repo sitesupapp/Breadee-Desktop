@@ -256,7 +256,8 @@ test("BUG 7: the bill panel offers Open table for a selected table with no open 
   assert.match(panel, /\{noOpenBill && props\.openGate\.allowed && \(/);
   assert.match(panel, /\{noOpenBill && !props\.openGate\.allowed && props\.openGate\.reason && \(/, "a blocked open always says why");
   const ws = read("src", "screens", "pos", "DineInWorkspace.tsx");
-  assert.match(ws, /bill=\{offlineCapture \? \(selectedProj \? selectedProj\.bill : null\) : tables\.bill\}/, "offline: the selected table's own projection (never another table's stale bill)");
+  // 1.0.63 (D-B) — the selected table's own projection, shown through the display-only paid view.
+  assert.match(ws, /bill=\{offlineCapture \? \(selectedProj \? offlineDisplayBill\(selectedProj\) : null\) : tables\.bill\}/, "offline: the selected table's own projection (never another table's stale bill)");
   assert.doesNotMatch(ws, /bill=\{offlineCapture \? \(offlineBill \?\? tables\.bill\) : tables\.bill\}\s*loading=\{offlineCapture \? false : tables\.billLoading\}\s*error=\{offlineCapture \? null : tables\.billError\}\s*openGate=/, "the table panel no longer falls back to the server / another table's bill");
   // The open gate itself is unchanged (permission, shift, table eligibility, offline readiness).
   assert.match(ws, /const base = canOpenTable\(pos\.access, hasOpenShift\);/);

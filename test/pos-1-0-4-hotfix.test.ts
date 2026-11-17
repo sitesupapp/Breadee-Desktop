@@ -301,7 +301,9 @@ test("settling an existing order does not touch the draft cart", () => {
 test("Print binds to the selected order and takes no payment", () => {
   // The panel reads the order it was given, at call time, and goes to the
   // server for the lines rather than to whatever the cart holds.
-  assert.match(currentOrder, /readOrderReceiptLines\(order\.id\)/);
+  // 1.0.63 (D-A) — via reprintLines: the server's rows, or this device's own durable lines when the bill is
+  // device-held or Breadee is unreachable (never the cart).
+  assert.match(currentOrder, /reprintLines\(order\.id, order\.local_pending === true\)/);
   for (const forbidden of ["payOrder", "submitOrder", "autoPrintReceipt", "autoPrintKitchenTicket", "presentReceipt("]) {
     assert.equal(currentOrder.includes(forbidden), false, `Print must not reach ${forbidden}`);
   }

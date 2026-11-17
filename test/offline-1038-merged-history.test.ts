@@ -143,7 +143,8 @@ test("L the source's items are read from the merge record by item id (wherever t
   // the panel uses it for the lines and for a reprint; the plain path stays for every other order
   const panel = src("src/components/pos/CurrentOrderPanel.tsx");
   assert.match(panel, /readOrderDisplayLines\(\{ id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number \}\)/);
-  assert.match(panel, /isMergedSource\(order\) \? await readOrderDisplayLines\(order\) : await readOrderReceiptLines\(order\.id\)/);
+  // 1.0.63 (D-A) — the plain path goes through reprintLines (server rows, or this device's lines offline).
+  assert.match(panel, /isMergedSource\(order\) \? await readOrderDisplayLines\(order\) : await reprintLines\(order\.id, order\.local_pending === true\)/);
   assert.match(panel, /Moved to #\$\{mergedTargetLabel\(order\)\}/);
 });
 
