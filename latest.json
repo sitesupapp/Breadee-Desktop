@@ -1,11 +1,11 @@
 {
-  "version": "1.0.62",
+  "version": "1.0.63",
   "notes": "Offline tables sync reliably · مزامنة موثوقة للطاولات دون اتصال\n\nA table opened while Breadee's server is off now syncs as soon as the connection returns, with its rounds and payment, instead of waiting in the Sync Center. If Breadee shows the table taken meanwhile, the offline bill is kept for review and never added to someone else's bill. Orders taken on this terminal now show their items and print their receipt automatically, even offline, and a bill Breadee refused is marked as refused, never as open or paid.\n\nأصبحت الطاولة التي تُفتح أثناء توقّف خادم Breadee تتمّ مزامنتها فور عودة الاتصال، مع دفعاتها وطلباتها، بدلاً من انتظارها في مركز المزامنة. وإذا أظهر Breadee أن الطاولة أصبحت مشغولة في الأثناء، تُحفظ الفاتورة غير المتصلة للمراجعة ولا تُضاف أبداً إلى فاتورة شخص آخر. كما تُظهر الطلبات المأخوذة على هذه المحطة أصنافها وتطبع إيصالها تلقائياً حتى دون اتصال، وتُعلَّم الفاتورة التي رفضها Breadee بأنها مرفوضة، وليس مفتوحة أو مدفوعة.",
-  "pub_date": "2026-11-17T15:55:20Z",
+  "pub_date": "2026-11-17T18:07:04Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNW9Uc0VLZEI3S1RscDRtTVdRNFcxM09vSExKQ05SQ29LaHozQzlYbk1NaWp4bFQxL0UvMWdzR00rd0dESnRzK2pqS3VISUVTcVJsWXNBa1RpbWNCQUE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTMwOTA5CWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC42Ml94NjQtc2V0dXAuZXhlCndaSnlYWE5CeEdoNWNuNE5kbjRGV3RYSDFRbmt4aVI0TmYrZWFDODVtRVZrUGJteEQxMHovQ3NzL0crS3pjazVENjVhcmx5QmRCVnR3WUx4RXFjNEJBPT0K",
-      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.62/Breadee_Staging_1.0.62_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2E0QTlzeW5jNXBSamduU0hYeXRITWRUa3RqRjk5dWo0RjNvcFZHZG1hdDRtT2VXcytDNTl6UWIxOG1KMTdnVkJmSFJUU0ZDZnJvVUdqREVZVmVwMXQ0S2xTVytrcndBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTM4ODEzCWZpbGU6QnJlYWRlZSBTdGFnaW5nXzEuMC42M194NjQtc2V0dXAuZXhlCk9PQmFJaTQwMlJ3WGV5L2J4dDFwczdNY3NmckpoNXdKVjZsOTR5em82RElmYitHWWE0V0RxZkszK2FUckNxb09KOE1lQ0x1Vk9FTDVYMFUxSzE3VkNRPT0K",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-staging-v1.0.63/Breadee_Staging_1.0.63_x64-setup.exe"
     }
   }
 }
