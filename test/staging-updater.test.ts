@@ -243,15 +243,16 @@ test("there is ONE staging identity: the acceptance installer uses the staging o
 test("What's New: the 1.0.41 Server Off page leads, bilingual, describing exactly this version", () => {
   const whatsNew = read("src", "lib", "whatsNew.ts");
   assert.match(whatsNew, new RegExp(`export const WHATS_NEW_VERSION = "${base.version.replace(/\./g, "\\.")}";`));
-  assert.equal(base.version, "1.0.41");
+  assert.equal(base.version, "1.0.61");
   // The release workflow takes the FIRST title/titleAr/body/bodyAr in the file as the release notes.
   const lit = (key: string) => JSON.parse(new RegExp(`\\b${key}:\\s*("(?:[^"\\\\]|\\\\.)*")`).exec(whatsNew)![1]);
   assert.match(whatsNew, /glyph: "sync"/);
-  assert.equal(lit("title"), "Keeps trading when Breadee's server is off");
-  assert.equal(lit("titleAr"), "متابعة البيع عند توقّف خادم Breadee");
-  assert.match(lit("body"), /^When Breadee's server stops answering, the top bar says so and this terminal keeps taking cash sales\./);
-  assert.match(lit("body"), /Card and other payment methods wait for a confirmed connection\./);
-  assert.match(lit("bodyAr"), /^عندما يتوقّف خادم Breadee عن الاستجابة/);
+  // 1.0.61 (1.0.42 candidate) — the offline-tables page leads.
+  assert.equal(lit("title"), "Offline tables sync reliably");
+  assert.equal(lit("titleAr"), "مزامنة موثوقة للطاولات دون اتصال");
+  assert.match(lit("body"), /^A table opened while Breadee's server is off now syncs as soon as the connection returns/);
+  assert.match(lit("body"), /never added to someone else's bill\./);
+  assert.match(lit("bodyAr"), /^أصبحت الطاولة التي تُفتح أثناء توقّف خادم Breadee/);
   // Business language only in the notes.
   assert.doesNotMatch(lit("body"), /\b(RPC|Supabase|JWT|token|scope|401|42501|auth-js)\b/i);
 });

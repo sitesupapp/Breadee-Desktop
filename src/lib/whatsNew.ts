@@ -10,7 +10,7 @@ import type { GlyphName } from "@/components/Glyph";
  * What's New content changes; the flow reappears once when it no longer matches the
  * stored "seen" version. Kept as its own constant so the gate is explicit and testable.
  */
-export const WHATS_NEW_VERSION = "1.0.41";
+export const WHATS_NEW_VERSION = "1.0.61";
 
 const SEEN_KEY = "whatsNewSeenVersion";
 
@@ -20,6 +20,28 @@ export type WhatsNewPage = { glyph: GlyphName; title: string; body: string; titl
 // One short, business-worded page per shipped POS capability in this release. No
 // developer terminology; icons come from the existing Glyph set.
 export const WHATS_NEW_PAGES: WhatsNewPage[] = [
+  {
+    glyph: "sync",
+    title: "Offline tables sync reliably",
+    titleAr: "مزامنة موثوقة للطاولات دون اتصال",
+    body:
+      "A table opened while Breadee's server is off now syncs as soon as the connection returns, with its rounds and payment, instead of waiting in the Sync Center. If Breadee shows the table taken meanwhile, the offline bill is kept for review and never added to someone else's bill. Orders taken on this terminal now show their items and print their receipt automatically, even offline, and a bill Breadee refused is marked as refused, never as open or paid.",
+    bodyAr:
+      "أصبحت الطاولة التي تُفتح أثناء توقّف خادم Breadee تتمّ مزامنتها فور عودة الاتصال، مع دفعاتها وطلباتها، بدلاً من انتظارها في مركز المزامنة. وإذا أظهر Breadee أن الطاولة أصبحت مشغولة في الأثناء، تُحفظ الفاتورة غير المتصلة للمراجعة ولا تُضاف أبداً إلى فاتورة شخص آخر. كما تُظهر الطلبات المأخوذة على هذه المحطة أصنافها وتطبع إيصالها تلقائياً حتى دون اتصال، وتُعلَّم الفاتورة التي رفضها Breadee بأنها مرفوضة، وليس مفتوحة أو مدفوعة.",
+  },
+  {
+    glyph: "sync",
+    title: "Force sync and offline void",
+    titleAr: "المزامنة الإجبارية والإلغاء دون اتصال",
+    body:
+      "Force sync in the Sync Center checks every item that needs attention against Breadee's own records and sends again only what Breadee confirms or what can safely continue; refused payments stay for review and are never collected twice. A takeaway sale that has not been sent to Breadee yet can now be voided on this terminal, with a reason, and its cash is recorded as handed back. Putting a sale on account after it was already paid in cash is now refused.",
+    bodyAr:
+      "تتحقّق المزامنة الإجبارية في مركز المزامنة من كل عنصر يحتاج إلى انتباه مقابل سجلات Breadee نفسها، ولا تعيد إرسال إلا ما يؤكّده Breadee أو ما يمكن متابعته بأمان، بينما تبقى الدفعات المرفوضة للمراجعة ولا تُحصَّل مرتين أبداً. ويمكن الآن إلغاء عملية بيع سفري لم تُرسَل إلى Breadee بعد على هذه المحطة، مع ذكر السبب، ويُسجَّل نقدها على أنه أُعيد. كما أصبح وضع عملية بيع على الحساب بعد دفعها نقداً مرفوضاً.",
+  },
+];
+
+/** 1.0.41 pages, kept for reference (not shown). */
+export const WHATS_NEW_PAGES_1041: WhatsNewPage[] = [
   {
     glyph: "sync",
     title: "Keeps trading when Breadee's server is off",
