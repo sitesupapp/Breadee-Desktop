@@ -118,7 +118,15 @@ export async function forceSync(scope: { tenantId: string; branchId: string | nu
   );
   // Parents before children: a re-queued parent can make its children recoverable in the same sweep.
   parked.sort((a, b) => a.created_at.localeCompare(b.created_at));
-  for (const op of parked) {
+  for (const listed of parked) {
+    // Re-read: an earlier step of THIS sweep may already have released it (a rebase re-queues the parked
+    // children of the open it re-armed) — that is a released dependency, never "left for review".
+    const op = await deps.getOp(listed.operation_id);
+    if (!op || op.status === "cancelled" || op.status === "synced") continue;
+    if (op.status !== "needs_attention") {
+      out.dependencyRecovered.push(op.operation_id);
+      continue;
+    }
     let receipt = false;
     try {
       receipt = await deps.hasReceipt(op.scope.tenant_id, op.client_op_id);
