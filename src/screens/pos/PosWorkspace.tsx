@@ -810,7 +810,18 @@ function PosWorkspaceInner() {
       // unchanged: the server's rows first, the snapshot only when that read fails.
       if (lastKnownReachable() === false && (await presentSnapshot())) return;
       try {
-        const lines = await readOrderReceiptLines(order.id);
+        // 1.0.42 (P0) — a bill held on this device (offline Dine-In session) reprints from its own captured lines;
+        // an unreachable server read falls back to them. Through 1.0.41 a device-only bill could not be reprinted.
+        const { readLocalOrderLines } = await import("@/lib/offline/ordersHistoryOffline");
+        const own = order.local_pending ? await readLocalOrderLines(order.id).catch(() => null) : null;
+        const lines =
+          own && own.length > 0
+            ? own
+            : await readOrderReceiptLines(order.id).catch(async (e) => {
+                const l = await readLocalOrderLines(order.id).catch(() => null);
+                if (l && l.length > 0) return l;
+                throw e;
+              });
         const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
           ? order.order_type
           : "takeaway") as "takeaway" | "dine_in" | "delivery";
@@ -1851,7 +1862,12 @@ function PosWorkspaceInner() {
           const unit = Number(l.base_price) + mods.reduce((s, m) => s + m.price_delta * m.quantity, 0);
           return { name: l.name, qty: l.quantity, unitPrice: unit, lineTotal: unit * l.quantity, modifiers: mods, note: l.kitchen_note ?? null };
         });
-        receiptStore.present(
+        // 1.0.42 (P0 2026-11-17) — through the ONE receipt pipeline (presentReceipt → autoPrintReceipt), exactly as
+        // an online settlement: Customer Auto Print ON prints the paper offline too (it is a local Windows printer),
+        // a print failure is a toast (the sale is already durable), and `manual` opens the preview. Through 1.0.41
+        // this path called receiptStore.present directly, so an offline cash sale NEVER auto-printed. Both paths
+        // persist the receipt snapshot, so offline reprint after a restart is unchanged.
+        presentReceipt(
           buildReceipt({
             businessName: pos.tenantName,
             branchName: pos.branch.name,
@@ -1893,7 +1909,7 @@ function PosWorkspaceInner() {
         toast.push({ tone: "success", message: "Saved offline - cash sale queued", detail: `Ref ${ref}. It will sync when the connection returns.` });
       }
     },
-    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, provisionalResult, rate, receiptStore, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
+    [buildOfflinePayload, currency, newOrder, pos.branch.id, pos.branch.name, pos.tenantName, pos.userName, presentReceipt, provisionalResult, rate, receiptStore, refreshOfflineQueue, tenantId, ticketForOrder, toast, userId],
   );
 
   /** Resume an offline order that was sent to the kitchen but not yet paid. */

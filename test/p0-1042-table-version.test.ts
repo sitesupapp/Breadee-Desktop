@@ -26,7 +26,8 @@ import { drainOffline, __resetDrainLockForTests } from "@/lib/offline/orchestrat
 import type { PosTxnSyncDeps } from "@/lib/offline/posTxnSync";
 import { useShift, shiftNet } from "@/state/shift";
 import { clearPosSessionSnapshot } from "@/lib/offline/posSession";
-import { openTableOffline, addDraftLine, sendRoundOffline } from "@/lib/offline/dineinOffline";
+import { openTableOffline, addDraftLine, sendRoundOffline, settleTableOffline, reconcileDineDraftsFromOperations } from "@/lib/offline/dineinOffline";
+import { captureEndShiftOffline } from "@/lib/offline/endShiftOffline";
 import { rebaseRefusedOpen, type RebaseDeps } from "@/lib/offline/openRebase";
 import { OPEN_VERSION_UNKNOWN_TABLE_BUSY, OPEN_VERSION_UNKNOWN_UNVERIFIED } from "@/lib/offline/handlers";
 import { parseTableMap, knownTableVersion } from "@/lib/pos/tables";
@@ -203,6 +204,33 @@ test("P0-8 fail closed: no guard available → parked 'table_unverified'; guard 
   const s = (await getOperation(second.open.operation_id))!;
   assert.notEqual(s.status, "synced");
   assert.notEqual(s.last_error_code, "table_busy", "an unreachable check is not a business refusal");
+});
+
+// ============================================================ full lifecycle on the Production contract
+
+test("P0-LC offline open → round → CASH pay → RESTART → reconnect → sync → shift close: table usable, each call exactly once, payment once, shift closes last", async () => {
+  const { d } = await captureFromProdMap(freeRowNoVersion());
+  const pay = await settleTableOffline({ sessionId: d.local_session_id, method: "cash", covers: { orderIds: [], summary: false }, expectedAmount: 6 });
+  const end = await captureEndShiftOffline({ scope: SCOPE, shiftId: "SRV-SHIFT", shiftLocal: null, actualCashCounted: 6, notes: null, shiftOpenedAt: SHIFT.opened_at });
+  // restart before the connection returns: every op and the session survive
+  localdb.close();
+  await localdb.open();
+  await reconcileDineDraftsFromOperations();
+  __resetDrainLockForTests();
+  const calls: Call[] = [];
+  const server = prodServer(calls);
+  (server as unknown as { endShiftOp: (a: { shiftId: string }) => Promise<unknown> }).endShiftOp = async (a) => { calls.push({ name: "end_shift", arg: a }); return { shift_id: a.shiftId, idempotent: false }; };
+  await drainOffline(CTX, "reconnect", server);
+  const names = calls.map((c) => c.name);
+  assert.deepEqual(names.filter((n) => n !== "receipt" && n !== "read_table"), ["open_table", "round", "pay_table", "end_shift"], "dependency order kept; the shift closes only after the sale and its payment");
+  assert.equal(names.filter((n) => n === "pay_table").length, 1, "the cash is booked exactly once");
+  assert.equal((await getOperation(pay.operationId))!.status, "synced");
+  assert.equal((await getOperation(end.operationId))!.status, "synced");
+  // a second reconnect sends nothing (exactly-once across restart + reconnect)
+  __resetDrainLockForTests();
+  const again: Call[] = [];
+  await drainOffline(CTX, "reconnect", prodServer(again));
+  assert.equal(again.filter((c) => ["open_table", "round", "pay_table"].includes(c.name)).length, 0);
 });
 
 // ============================================================ recovery of ALREADY-REFUSED 1.0.41 captures

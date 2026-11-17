@@ -19,6 +19,7 @@ import { localdb, revisionCached, SALE_WITHDRAWN, type DineDraft, type PosOfflin
 import { isStructuralOp, settleCoveredIds, settlePrecedence, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { UNSETTLED_STATUSES, operationsWithStatus, type OfflineOperation } from "@/lib/offline/operationLog";
 import { loadOrdersForDay, loadShiftOrders, toDayKey, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
+import type { ReceiptLine } from "@/lib/receipt";
 
 export type OrdersHistoryScope =
   | { kind: "shift"; tenantId: string | null; branchId: string | null; shiftId: string | null }
@@ -107,6 +108,47 @@ export async function readOrdersHistoryLocal(scope: OrdersHistoryScope): Promise
 /** 1.0.38 — overlay marker: a payment captured here that the SERVER REFUSED (never shown as Paid). */
 export const PAYMENT_REFUSED = "refused";
 
+/** 1.0.42 (P0) — the LOCAL lifecycle of an offline bill Breadee refused: never on any bill, never collectible.
+ *  A device-only status (no server order ever has it); terminal for Pay / Edit / Void. */
+export const LOCAL_REFUSED_STATUS = "refused_by_breadee";
+
+/**
+ * 1.0.42 (P0 2026-11-17) — the lines of an order that exists (or is still shown) on THIS device: an offline
+ * Dine-In session (by local session id or its canonical order id). Through 1.0.41 the order panel read lines
+ * only from Breadee, so every device-only bill said "No items readable for this order" (and so did any
+ * order while offline). Null = this device holds no lines for it (the caller keeps the server read).
+ */
+/** 1.0.42 (P0) — the operator sentence for a Void / Refund pressed on a bill that exists ONLY on this device. */
+export const DEVICE_ONLY_VOID_MESSAGE =
+  "This order is saved only on this terminal — Breadee has not recorded it yet, so it cannot be voided here. It syncs automatically; void it once it shows its Breadee number. If Breadee refused it, withdraw it in the Sync Center. Don't hand back or collect any money twice.";
+
+/** 1.0.42 (P0) — true when `orderId` is a LOCAL id (an offline sale / Dine-In session) with no Breadee order yet. */
+export async function isDeviceOnlyOrderId(orderId: string): Promise<boolean> {
+  if (!orderId) return false;
+  const txn = await localdb.posOfflineTxns.get(orderId).catch(() => undefined);
+  if (txn) return !txn.server_order_id;
+  const d = await localdb.dineDrafts.get(orderId).catch(() => undefined);
+  if (d) {
+    if (d.canonical_order_id) return false;
+    const mapped = await localdb.entityMap.get(orderId).catch(() => undefined);
+    return !mapped?.canonical_id;
+  }
+  return false;
+}
+
+export async function readLocalOrderLines(orderId: string): Promise<ReceiptLine[] | null> {
+  if (!orderId) return null;
+  const draft = (await localdb.dineDrafts.get(orderId).catch(() => undefined)) ?? (await localdb.dineDrafts.filter((x) => x.canonical_order_id === orderId).first().catch(() => undefined));
+  if (!draft) return null;
+  const sent = draft.lines.filter((l) => l.sent_round !== null);
+  if (sent.length === 0) return null;
+  return sent.map((l) => {
+    const mods = l.modifiers.map((m) => ({ name: m.name, price_delta: Number(m.price_delta), quantity: Number(m.quantity ?? 1) }));
+    const unit = Number(l.base_price) + mods.reduce((s, m) => s + m.price_delta * m.quantity, 0);
+    return { name: l.name, qty: l.quantity, unitPrice: unit, lineTotal: unit * l.quantity, ...(mods.length > 0 ? { modifiers: mods } : {}), note: l.kitchen_note ?? null };
+  });
+}
+
 /** PURE — canonical rows + local rows (a local row that already has its canonical id REPLACES nothing: the
  *  canonical row wins, carrying the local pending payment overlay), oldest first (the carousel order).
  *  `payOverlay` comes from the ONE precedence rule (settlePrecedence): "paid" / "on_account" = a local
@@ -143,7 +185,9 @@ export function mergeOrdersHistory(cached: ShiftOpenOrder[], locals: ShiftOpenOr
   }
   for (const [id, status] of payOverlay) {
     const o = byId.get(id);
-    if (!o || o.status === "voided" || o.status === "refunded") continue;
+    // 1.0.42 (P0) — a refused offline bill's payment is on no bill: never overlaid as "Paid" (the screenshot
+    // OFF-B1E8E6 showed "Paid" in the panel and "Open" in the list for the same refused session).
+    if (!o || o.status === "voided" || o.status === "refunded" || o.status === LOCAL_REFUSED_STATUS) continue;
     if (status === PAYMENT_REFUSED) {
       if (!canonical.has(id) && o.payment_status === "paid") byId.set(id, { ...o, payment_status: "unpaid" });
       continue;
@@ -307,12 +351,18 @@ async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenO
     const total = sent.reduce((s, l) => s + (l.base_price + l.modifiers.reduce((m, x) => m + Number(x.price_delta) * Number(x.quantity ?? 1), 0)) * l.quantity, 0);
     const settle = d.settled_operation_id ? settleById.get(d.settled_operation_id) : undefined;
     const settledHere = d.status === "settled" && settle != null && settleStillCovers(settle);
+    // 1.0.42 (P0 2026-11-17) — a session Breadee REFUSED (never on any bill) or the operator WITHDREW was listed
+    // as "Open · unpaid" here (and so offered Pay / Void / Edit), while its detail panel showed the local
+    // "Paid" overlay. It is neither: its own terminal state, never collectible again; any payment it recorded
+    // stays on this device in Sync history (do not collect again).
+    const refused = d.status === "refused";
+    const withdrawn = d.status === "withdrawn";
     out.push({
       id: d.canonical_order_id ?? canonicalOf.get(d.local_session_id) ?? d.local_session_id,
       order_number: `OFF-${d.local_session_id.slice(0, 6).toUpperCase()}`,
       order_type: "dine_in",
-      status: settledHere ? "completed" : "sent_to_kitchen",
-      payment_status: settledHere ? (settle!.operation_type === "on_account_table" ? "on_account" : "paid") : "unpaid",
+      status: refused ? LOCAL_REFUSED_STATUS : withdrawn ? "voided" : settledHere ? "completed" : "sent_to_kitchen",
+      payment_status: refused || withdrawn ? "unpaid" : settledHere ? (settle!.operation_type === "on_account_table" ? "on_account" : "paid") : "unpaid",
       payment_method: null,
       subtotal: total,
       discount_amount: 0,

@@ -31,7 +31,10 @@ test("dialog: the ONLINE reversal path is preserved unchanged", () => {
 
 test("dialog: a reason is validated BEFORE either path (audit preserved)", () => {
   const src = ts(DIALOG);
-  assert.match(src, /const clean = validateVoidReason\(reason\);[\s\S]{0,200}if \(captureOffline\)/);
+  // 1.0.42 (P0): the device-only guard (nothing sent / captured for a bill Breadee has not recorded) sits between
+  // the validation and the two paths — validation still comes first.
+  assert.match(src, /const clean = validateVoidReason\(reason\);[\s\S]{0,700}if \(captureOffline\)/);
+  assert.match(src, /const clean = validateVoidReason\(reason\);[\s\S]{0,500}DEVICE_ONLY_VOID_MESSAGE/);
 });
 
 test("dialog: offline capture is fail-closed — ready + scope + local proof required", () => {

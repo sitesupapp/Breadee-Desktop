@@ -63,6 +63,15 @@ export function ReverseOrderDialog(props: {
     setError(null);
     try {
       const clean = validateVoidReason(reason);
+      // 1.0.42 (P0) — a bill saved only on this device has no Breadee order to void (online the server refused the
+      // local id; offline there was no proof). Say so precisely, before anything is sent or captured.
+      if (order.local_pending) {
+        const { isDeviceOnlyOrderId, DEVICE_ONLY_VOID_MESSAGE } = await import("@/lib/offline/ordersHistoryOffline");
+        if (await isDeviceOnlyOrderId(order.id).catch(() => false)) {
+          setError(DEVICE_ONLY_VOID_MESSAGE);
+          return;
+        }
+      }
       if (captureOffline) {
         const off = props.offline!;
         if (!off.offlineReady || !off.scope) {

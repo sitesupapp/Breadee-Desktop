@@ -46,16 +46,31 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((list) => list.filter((t) => t.id !== id));
   }, []);
 
+  // 1.0.42 (P0 2026-11-17, #2123 screenshot) — the SAME notice pressed again (e.g. "This is a table order…" on
+  // every Pay press) stacked four identical toasts that covered the screen. An identical visible toast (same
+  // tone + message + detail) is now REFRESHED in place — its timer restarts — never duplicated. Different
+  // notices still stack (last four), and an error is never collapsed into a different one.
+  const visible = useRef<Toast[]>([]);
   const push = useCallback(
     (toast: ToastInput) => {
-      const id = nextId.current++;
-      setToasts((list) => [...list.slice(-3), { ...toast, id }]);
+      const same = visible.current.find((t) => !t.action && !toast.action && t.tone === toast.tone && t.message === toast.message && (t.detail ?? null) === (toast.detail ?? null));
       const ms = AUTO_DISMISS_MS[toast.tone];
+      if (same) {
+        const old = timers.current.get(same.id);
+        if (old) window.clearTimeout(old);
+        if (ms) timers.current.set(same.id, window.setTimeout(() => dismiss(same.id), ms));
+        return same.id;
+      }
+      const id = nextId.current++;
+      // eager: a second identical press before the next render is still recognised
+      visible.current = [...visible.current.slice(-3), { ...toast, id }];
+      setToasts((list) => [...list.slice(-3), { ...toast, id }]);
       if (ms) timers.current.set(id, window.setTimeout(() => dismiss(id), ms));
       return id;
     },
     [dismiss],
   );
+  visible.current = toasts;
 
   const value = useMemo<ToastContextValue>(() => ({ push, dismiss }), [push, dismiss]);
 

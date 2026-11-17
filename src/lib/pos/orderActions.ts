@@ -19,7 +19,10 @@ import { voidActionFor, type VoidAction } from "@/lib/pos/deliveryOrderManagemen
 import { isMergedSource, mergedTargetLabel, type MergeProvenance, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 
 /** States from which nothing further can be done. */
-export const TERMINAL_STATUSES = ["voided", "cancelled", "refunded"] as const;
+// 1.0.42 (P0) — "refused_by_breadee" is a DEVICE-ONLY lifecycle (ordersHistoryOffline.LOCAL_REFUSED_STATUS): an
+// offline bill Breadee refused is never paid, edited or voided from the Orders list — it is reviewed in the
+// Sync Center (withdraw, receipt-checked) and its recorded payment is never collected again.
+export const TERMINAL_STATUSES = ["voided", "cancelled", "refunded", "refused_by_breadee"] as const;
 
 export function isTerminalOrder(order: Pick<ShiftOpenOrder, "status">): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(order.status);

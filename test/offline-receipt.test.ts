@@ -62,8 +62,9 @@ test("store source: present/stage persist durably; clear() drops the cache; rest
 
 test("PosWorkspace source: offline sale presents a provisional receipt; reprint falls back offline; restart restores", () => {
   const src = srcOf("src/screens/pos/PosWorkspace.tsx");
-  // Offline Takeaway cash presents (and thus persists) a provisional receipt.
-  assert.match(src, /receiptStore\.present\([\s\S]{0,400}orderNumber: ref,/, "offline sale presents a provisional receipt");
+  // Offline Takeaway cash presents (and thus persists) a provisional receipt. 1.0.42 (P0): through the ONE
+  // settlement pipeline (presentReceipt → stage + autoPrintReceipt), which persists exactly like present().
+  assert.match(src, /presentReceipt\(\s*buildReceipt\(\{[\s\S]{0,400}orderNumber: ref,/, "offline sale presents a provisional receipt");
   // Reprint offline falls back to the durable snapshot.
   assert.match(src, /readReceiptSnapshot\(order\.order_number/, "reprint falls back to the local snapshot offline");
   // Restart restores the last receipt so Ctrl+P reprints it.

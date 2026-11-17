@@ -75,6 +75,102 @@ export async function runSyncNow(
   return { ran: true, ...c, text: syncNowText(c, standing) };
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// 1.0.42 (P0 2026-11-17) — FORCE SYNC: one orchestrated recovery sweep over THIS terminal's parked work, then the
+// SAME single-flight drain. It never marks anything synced itself, never re-sends a deterministic refusal, never
+// bypasses a CAS / authorization / idempotency guard and never touches money evidence:
+//   1. receipt-verified — Breadee holds the op's receipt (pos_op_submissions): the op WAS applied; it is re-queued
+//      and the server's idempotent replay returns the recorded result (that, not this sweep, makes it Synced);
+//   2. dependency recovery — a child parked only because a parent failed (dependency_failed) whose parents have
+//      ALL synced since is re-queued;
+//   3. a CAS-refused table open goes through the existing fail-closed rebase (receipt / free table / no sale since);
+//   4. everything else (genuine conflicts, refused payments, price / permission / validation refusals) stays
+//      parked for review and is counted, never retried.
+// ---------------------------------------------------------------------------------------------------------------
+
+export type ForceSyncDeps = {
+  hasReceipt(tenantId: string, clientOpId: string): Promise<boolean>;
+  rebaseDeps: RebaseDeps;
+  drain: (reason: string) => Promise<number>;
+  listParked: () => Promise<OfflineOperation[]>;
+  getOp: (id: string) => Promise<OfflineOperation | undefined>;
+  requeue: (id: string) => Promise<boolean>;
+  health: () => string;
+};
+
+export type ForceSyncResult = {
+  ran: boolean;
+  receiptVerified: string[];
+  dependencyRecovered: string[];
+  rebased: string[];
+  leftForReview: string[];
+  text: string;
+};
+
+export const FORCE_SYNC_SERVER_OFF =
+  "Force sync needs Breadee's server: it checks every parked step against Breadee before re-sending anything. Nothing was changed.";
+
+export async function forceSync(scope: { tenantId: string; branchId: string | null }, actorUserId: string | null, deps: ForceSyncDeps): Promise<ForceSyncResult> {
+  const out: ForceSyncResult = { ran: false, receiptVerified: [], dependencyRecovered: [], rebased: [], leftForReview: [], text: "" };
+  if (deps.health() !== "online") return { ...out, text: FORCE_SYNC_SERVER_OFF };
+  const parked = (await deps.listParked()).filter(
+    (o) => o.status === "needs_attention" && o.scope.tenant_id === scope.tenantId && (o.scope.branch_id ?? null) === (scope.branchId ?? null),
+  );
+  // Parents before children: a re-queued parent can make its children recoverable in the same sweep.
+  parked.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  for (const op of parked) {
+    let receipt = false;
+    try {
+      receipt = await deps.hasReceipt(op.scope.tenant_id, op.client_op_id);
+    } catch {
+      out.leftForReview.push(op.operation_id); // cannot verify → nothing changes
+      continue;
+    }
+    if (receipt) {
+      if (await deps.requeue(op.operation_id)) out.receiptVerified.push(op.operation_id);
+      else out.leftForReview.push(op.operation_id);
+      continue;
+    }
+    const recovery = recoveryOf(op);
+    if (recovery === "via_parent") {
+      const parents = await Promise.all((op.dependency_ids ?? []).map((id) => deps.getOp(id)));
+      const allSynced = parents.length > 0 && parents.every((p) => p?.status === "synced");
+      const parentRequeued = (op.dependency_ids ?? []).some((id) => out.receiptVerified.includes(id) || out.rebased.includes(id) || out.dependencyRecovered.includes(id));
+      if ((allSynced || parentRequeued) && (await deps.requeue(op.operation_id))) out.dependencyRecovered.push(op.operation_id);
+      else out.leftForReview.push(op.operation_id);
+      continue;
+    }
+    if (isRebasableOpen(op)) {
+      const r = await rebaseRefusedOpen(op.operation_id, deps.rebaseDeps, actorUserId, { drain: false });
+      if (r.kind === "rebased") out.rebased.push(op.operation_id);
+      else if (r.kind === "receipt_found" && (await deps.requeue(op.operation_id))) out.receiptVerified.push(op.operation_id);
+      else out.leftForReview.push(op.operation_id);
+      continue;
+    }
+    out.leftForReview.push(op.operation_id);
+  }
+  const touched = out.receiptVerified.length + out.dependencyRecovered.length + out.rebased.length;
+  if (touched > 0) await deps.drain("operator-force-sync");
+  out.ran = true;
+  out.text =
+    `Force sync: ${out.receiptVerified.length} confirmed by Breadee's records, ${out.rebased.length} table open${out.rebased.length === 1 ? "" : "s"} re-checked and re-sent, ` +
+    `${out.dependencyRecovered.length} waiting step${out.dependencyRecovered.length === 1 ? "" : "s"} released · ${out.leftForReview.length} still need${out.leftForReview.length === 1 ? "s" : ""} review (nothing was forced; no payment was re-collected).`;
+  return out;
+}
+
+/** Live Force Sync deps (read-only checks + the existing queue primitives). */
+export function liveForceSyncDeps(): ForceSyncDeps {
+  return {
+    hasReceipt: liveRebaseDeps.hasReceipt,
+    rebaseDeps: liveRebaseDeps,
+    drain: requestDrainAndWait,
+    listParked: async () => (await import("@/lib/offline/db")).localdb.operations.where("status").equals("needs_attention").toArray(),
+    getOp: getOperation,
+    requeue: (id) => requeueOperation(id, { drain: false }),
+    health: getBackendHealth,
+  };
+}
+
 export type RetryResult = { ok: boolean; text: string };
 
 /** PURE — the operator sentence for an op's state after a retry. */

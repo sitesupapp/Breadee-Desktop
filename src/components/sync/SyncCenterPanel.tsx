@@ -23,7 +23,7 @@ import {
   withdrawRefusedSession,
   type RefusedOrderSummary,
 } from "@/lib/offline/refusedSessions";
-import { operatorRetry, runSyncNow } from "@/lib/offline/syncActions";
+import { forceSync, liveForceSyncDeps, operatorRetry, runSyncNow } from "@/lib/offline/syncActions";
 import { noRetryText } from "@/lib/offline/refusalPolicy";
 import { BACKUP_MIN_PASSPHRASE, buildQueueBackup, downloadBackup } from "@/lib/offline/durability";
 import { getDeviceIdentity } from "@/lib/device";
@@ -236,6 +236,21 @@ export function SyncCenterPanel({
     }
   }, [refresh, tenantId, branchId]);
 
+  // 1.0.42 (P0) — Force sync: receipt-verified + dependency recovery over THIS terminal's parked work, then the
+  // same drain. Never marks anything synced itself and never re-sends a refused payment (syncActions.forceSync).
+  const forceSyncNow = useCallback(async () => {
+    if (!tenantId) return;
+    setSyncing(true);
+    setSyncNote(null);
+    try {
+      const r = await forceSync({ tenantId, branchId: branchId ?? null }, userId ?? null, liveForceSyncDeps()).catch(() => ({ text: "Force sync could not run on this device. Nothing was changed." }));
+      setSyncNote(r.text);
+      await refresh();
+    } finally {
+      setSyncing(false);
+    }
+  }, [refresh, tenantId, branchId, userId]);
+
   useEffect(() => {
     void refresh();
     const t = setInterval(() => void refresh(), POLL_MS);
@@ -326,6 +341,15 @@ export function SyncCenterPanel({
             className="ml-3 rounded-lg border border-brand/30 bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand-dark hover:bg-brand-soft/70 disabled:opacity-60"
           >
             {syncing ? "Syncing…" : "Sync now"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void forceSyncNow()}
+            disabled={syncing}
+            title="Checks every step that needs attention against Breadee's own records: re-sends only what Breadee confirms or what can safely continue. Refused payments and conflicts stay for review."
+            className="ml-2 rounded-lg border border-line px-2 py-0.5 text-[11px] font-semibold text-sub hover:bg-slate-50 disabled:opacity-60"
+          >
+            Force sync
           </button>
           <button
             type="button"

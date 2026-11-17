@@ -301,21 +301,33 @@ export function CurrentOrderPanel(props: {
  *  lines come from its merge record (they now live on the destination bill). */
 function OrderLines(props: { order: ShiftOpenOrder; currency: CurrencyCode }) {
   const [lines, setLines] = useState<Awaited<ReturnType<typeof readOrderDisplayLines>> | null>(null);
-  const { id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number } = props.order;
+  const { id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number, local_pending } = props.order;
   useEffect(() => {
     let live = true;
     setLines(null);
-    readOrderDisplayLines({ id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number })
-      .then((l) => {
-        if (live) setLines(l);
-      })
-      .catch(() => {
-        if (live) setLines([]);
-      });
+    // 1.0.42 (P0 2026-11-17) — a bill held on THIS device (an offline Dine-In session, synced or not) shows
+    // its own captured lines; a server read that fails (offline) or finds nothing falls back to them. Through
+    // 1.0.41 every device-only bill said "No items readable for this order".
+    const local = () => import("@/lib/offline/ordersHistoryOffline").then((m) => m.readLocalOrderLines(id)).catch(() => null);
+    (async () => {
+      if (local_pending) {
+        const own = await local();
+        if (own && own.length > 0) return own;
+      }
+      try {
+        const server = await readOrderDisplayLines({ id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number });
+        if (server.length > 0) return server;
+      } catch {
+        /* offline / unreachable: fall back to this device's lines below */
+      }
+      return (await local()) ?? [];
+    })().then((l) => {
+      if (live) setLines(l);
+    });
     return () => {
       live = false;
     };
-  }, [id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number]);
+  }, [id, status, merged_into_order_id, merged_into_merge_id, merged_into_order_number, local_pending]);
 
   if (lines === null) return <p className="mt-2 text-[11px] text-sub">Loading items...</p>;
   if (lines.length === 0) return <p className="mt-2 text-[11px] text-sub">No items readable for this order.</p>;

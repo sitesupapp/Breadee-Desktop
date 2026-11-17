@@ -57,6 +57,9 @@ export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "paym
       return "Refunded";
     case "cancelled":
       return "Cancelled";
+    case "refused_by_breadee":
+      // 1.0.42 (P0) — device-only: Breadee refused this offline bill; it is on no bill. Never "Open" / "Paid".
+      return "Refused — see Sync Center";
     case "completed":
       return order.payment_status === "paid" ? "Paid" : "Completed";
     case OPEN_ORDER_STATUS:
@@ -69,7 +72,7 @@ export function orderLifecycleLabel(order: Pick<ShiftOpenOrder, "status" | "paym
 /** Badge tone per lifecycle: money in green, reversal in red, work in amber. */
 export function orderLifecycleTone(order: Pick<ShiftOpenOrder, "status" | "payment_status"> & MergeProvenance): "green" | "amber" | "red" | "slate" {
   if (isMergedSource(order)) return "slate";
-  if (order.status === "voided" || order.status === "cancelled" || order.status === "refunded") return "red";
+  if (order.status === "voided" || order.status === "cancelled" || order.status === "refunded" || order.status === "refused_by_breadee") return "red";
   if (order.payment_status === "paid") return "green";
   if (order.status === OPEN_ORDER_STATUS) return "amber";
   return "slate";
