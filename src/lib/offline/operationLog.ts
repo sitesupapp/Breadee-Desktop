@@ -183,7 +183,8 @@ export interface OfflineOperation {
     by_user_id: string | null;
     from_version: number | null;
     from_version_after_op: string | null;
-    to_version: number;
+    /** 1.0.42 (P0) — null when the live map carried no version: re-armed as `version_unknown`, re-proved at replay. */
+    to_version: number | null;
     refusal: string | null;
     verified_against: string[];
   }[];

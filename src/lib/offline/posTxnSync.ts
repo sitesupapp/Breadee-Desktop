@@ -19,6 +19,7 @@ import type { SubmitOrderPayload } from "@/lib/pos/orders";
 import type { PosRpcName, RpcClient } from "@/lib/pos/rpc";
 import type { CurrencyCode } from "@/lib/currency";
 import type { CaptureEvidence } from "@/lib/offline/captureEvidence";
+import type { TableSummary } from "@/types/tables";
 
 export type PosTxnSyncContext = {
   tenantId: string | null;
@@ -438,6 +439,15 @@ export type PosTxnSyncDeps = {
    *  next attempt carries a fresh token. Resolves true when a session is available afterwards. Optional:
    *  a missing dep simply skips the refresh (the op stays bounded-retryable). */
   refreshSession?: () => Promise<boolean>;
+  /** 1.0.42 (P0 2026-11-17) — read-only proof for a table open captured with an UNKNOWN table version
+   *  (`version_unknown`: the cached pos_table_map row had none). Both reads throw when they cannot tell.
+   *  Optional: when absent such an open is PARKED for review — never sent without a guard. */
+  tableGuard?: {
+    /** The table's LIVE pos_table_map row; null when the server does not list it. */
+    readTable(branchId: string | null, tableId: string): Promise<TableSummary | null>;
+    /** True when Breadee already holds this client_op_id's receipt (pos_op_submissions). */
+    hasReceipt(tenantId: string, clientOpId: string): Promise<boolean>;
+  };
 };
 
 /** Offline-first recovery — a PARKED user's own client (their own session): replay of their captured work
@@ -734,6 +744,22 @@ export function makePosTxnSyncDeps(client: ReplayClient | null): PosTxnSyncDeps 
     } catch {
       return false;
     }
+  },
+  tableGuard: {
+    async readTable(branchId, tableId) {
+      const { parseTableMap } = await import("@/lib/pos/tables");
+      if (!branchId) throw new Error("A branch is required to read the table map");
+      const map = parseTableMap(await callPosRpc("pos_table_map", { p_branch: branchId }));
+      return map.tables.find((t) => t.id === tableId) ?? null;
+    },
+    async hasReceipt(tenantId, clientOpId) {
+      type Sel = { from(t: string): { select(c: string): { eq(k: string, v: string): { eq(k: string, v: string): PromiseLike<{ data: unknown; error: { message?: string } | null }> } } } };
+      const db = (client && typeof (client as unknown as Partial<Sel>).from === "function" ? client : (await import("@/lib/supabase")).supabase) as unknown as Sel;
+      const r = await db.from("pos_op_submissions").select("client_op_id").eq("tenant_id", tenantId).eq("client_op_id", clientOpId);
+      if (r.error) throw new Error(r.error.message ?? "receipt check failed");
+      if (!Array.isArray(r.data)) throw new Error("receipt check: no rows array");
+      return r.data.length > 0;
+    },
   },
   };
 }

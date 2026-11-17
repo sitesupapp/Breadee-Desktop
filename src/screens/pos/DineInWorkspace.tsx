@@ -28,7 +28,7 @@ import { SeatCountDialog } from "@/components/pos/SeatCountDialog";
 import { DineInRoundPanel } from "@/components/pos/DineInRoundPanel";
 import { Modal } from "@/components/overlays";
 import { Button } from "@/components/ui";
-import { filterTables, isOpenable, openTable } from "@/lib/pos/tables";
+import { filterTables, isOpenable, knownTableVersion, openTable } from "@/lib/pos/tables";
 import { loadAutoSeatDirectOpen, readCachedAutoSeat } from "@/lib/pos/autoSeat";
 import { classifyError, mergeRefusalReason, MergePartialLineError } from "@/lib/pos/errors";
 import { findPartlyPaidLine } from "@/lib/pos/tableBill";
@@ -922,7 +922,9 @@ export function useDineInWorkspace(input: {
               tableName: selected?.name ?? name,
               seats,
               currency: input.currency,
-              baseOrderVersion: raw?.pos_entity_version ?? null,
+              // 1.0.42 (P0) — a REAL table version only; a placeholder 0 is never sent as a CAS token.
+              baseOrderVersion: knownTableVersion(raw),
+              ...(raw ? { baseVersionKnown: knownTableVersion(raw) != null } : {}),
               // 1.0.38 — or after the offline move / merge that took the previous bill away.
               afterSettleOpId: proj?.freedByOpId ?? proj?.settlingOpId ?? null,
             });
@@ -1187,7 +1189,9 @@ export function useDineInWorkspace(input: {
       tableName: selected.name,
       seats: selected.seats ?? null,
       currency: proj.currency ?? input.currency,
-      baseOrderVersion: raw.pos_entity_version ?? null,
+      // 1.0.42 (P0) — a REAL table version only; a placeholder 0 is never sent as a CAS token.
+      baseOrderVersion: knownTableVersion(raw),
+      baseVersionKnown: knownTableVersion(raw) != null,
       canonicalOrderId,
       // rc.10 — a table reused after a local settle: the new bill's open replays after it.
       afterSettleOpId: canonicalOrderId ? null : (proj.freedByOpId ?? proj.settlingOpId),

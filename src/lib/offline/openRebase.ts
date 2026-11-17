@@ -28,6 +28,7 @@ import { localdb } from "@/lib/offline/db";
 import { requeueDependents, requestDrain, type OfflineOperation } from "@/lib/offline/operationLog";
 import { isCasRefusedOpen } from "@/lib/offline/operationalProjection";
 import type { TableSummary } from "@/types/tables";
+import { knownTableVersion } from "@/lib/pos/tables";
 
 /** 1.0.41 — one dine-in sale Breadee recorded on the table (ids / numbers / times only). */
 export type TableSale = { order_number: string | null; created_at: string; status: string | null };
@@ -43,7 +44,8 @@ export type RebaseDeps = {
 };
 
 export type RebaseOutcome =
-  | { kind: "rebased"; fromVersion: number | null; toVersion: number }
+  /** toVersion null = the live map carried no version: re-armed as `version_unknown` (1.0.42 P0). */
+  | { kind: "rebased"; fromVersion: number | null; toVersion: number | null }
   | { kind: "not_applicable" }
   | { kind: "receipt_found" }
   | { kind: "table_busy"; message: string }
@@ -118,8 +120,12 @@ export async function rebaseRefusedOpen(operationId: string, deps: RebaseDeps, a
   if (receipt) return { kind: "receipt_found" };
   if (!tableFreeOnServer(row)) return { kind: "table_busy", message: REBASE_TABLE_BUSY };
   if (sales && sales.length > 0) return { kind: "sold_since", message: rebaseSoldSinceMessage(sales), sales };
-  const toVersion = Number((row as TableSummary).pos_entity_version);
-  if (!Number.isFinite(toVersion)) return { kind: "table_busy", message: REBASE_TABLE_BUSY };
+  // 1.0.42 (P0 2026-11-17) — Production's pos_table_map carries NO version: the parser's placeholder 0 was
+  // re-armed here, so the rebased open was refused again, forever. An unknown live version re-arms the open
+  // as `version_unknown` instead: dineinOpenTableHandler re-proves the table free (and opens with the live
+  // version whenever the server reports one) at the moment it replays.
+  const liveVersion = knownTableVersion(row as TableSummary);
+  if (liveVersion == null && (row as TableSummary).pos_entity_version_known !== false) return { kind: "table_busy", message: REBASE_TABLE_BUSY };
   const p = (o.payload ?? {}) as Record<string, unknown>;
   const fromVersion = typeof p.expected_version === "number" ? p.expected_version : null;
   const at = new Date().toISOString();
@@ -127,9 +133,9 @@ export async function rebaseRefusedOpen(operationId: string, deps: RebaseDeps, a
     const cur = await localdb.operations.get(operationId);
     // Compare-and-swap on everything the decision read: still parked on the same refusal, never attempted since.
     if (!cur || !isCasRefusedOpen(cur) || cur.retry_count !== o.retry_count || cur.last_error_message !== o.last_error_message || cur.client_op_id !== o.client_op_id) return false;
-    const { version_after_op: prevAfter, ...rest } = (cur.payload ?? {}) as Record<string, unknown>;
+    const { version_after_op: prevAfter, version_unknown: _prevUnknown, ...rest } = (cur.payload ?? {}) as Record<string, unknown>;
     await localdb.operations.update(operationId, {
-      payload: { ...rest, expected_version: toVersion },
+      payload: liveVersion == null ? { ...rest, expected_version: null, version_unknown: true } : { ...rest, expected_version: liveVersion },
       status: "pending",
       last_error_code: null,
       last_error_message: null,
@@ -141,7 +147,7 @@ export async function rebaseRefusedOpen(operationId: string, deps: RebaseDeps, a
           by_user_id: actorUserId,
           from_version: fromVersion,
           from_version_after_op: typeof prevAfter === "string" ? prevAfter : null,
-          to_version: toVersion,
+          to_version: liveVersion,
           refusal: cur.last_error_message,
           verified_against: ["pos_table_map", "pos_op_submissions"],
         },
@@ -152,7 +158,7 @@ export async function rebaseRefusedOpen(operationId: string, deps: RebaseDeps, a
   if (!ok) return { kind: "stale", message: REBASE_STALE };
   await requeueDependents([operationId]).catch(() => undefined);
   if (opts.drain !== false) requestDrain("operator-retry");
-  return { kind: "rebased", fromVersion, toVersion };
+  return { kind: "rebased", fromVersion, toVersion: liveVersion };
 }
 
 /** Live deps over the app's Supabase client. Read-only: pos_table_map + one RLS read of pos_op_submissions. */

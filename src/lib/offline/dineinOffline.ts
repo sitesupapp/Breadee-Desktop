@@ -151,12 +151,19 @@ export async function openTableOffline(args: {
    *  server-returned version (pos_pay_table bumps it) — so the new bill can never join the old one and
    *  our own settle never trips the new open's CAS. */
   afterSettleOpId?: string | null;
+  /** 1.0.42 (P0 2026-11-17) — FALSE when the cached map row carried no real table version
+   *  (knownTableVersion() === null). The open then records `version_unknown` instead of a fake 0, and
+   *  its replay proves the table free on Breadee before opening it (dineinOpenTableHandler). */
+  baseVersionKnown?: boolean;
 }): Promise<DineDraft> {
   const now = new Date().toISOString();
   const localSessionId = nid();
   const openOpId = nid();
   const bound = typeof args.canonicalOrderId === "string" && args.canonicalOrderId !== "";
   const afterSettle = typeof args.afterSettleOpId === "string" && args.afterSettleOpId !== "" ? args.afterSettleOpId : null;
+  // Only a MAPPED table whose cached row lacked a real version. An ad-hoc named open (no map row) keeps its
+  // pre-1.0.42 contract (no version, adopted) — it has no row to prove free.
+  const versionUnknown = !bound && !afterSettle && args.baseVersionKnown === false;
   const op: OfflineOperation = {
     operation_id: openOpId,
     operation_type: "dinein_open_table",
@@ -171,8 +178,9 @@ export async function openTableOffline(args: {
     payload: {
       name: args.tableName,
       seats: args.seats,
-      expected_version: bound || afterSettle ? null : (args.baseOrderVersion ?? null),
+      expected_version: bound || afterSettle || versionUnknown ? null : (args.baseOrderVersion ?? null),
       ...(afterSettle ? { version_after_op: afterSettle } : {}),
+      ...(versionUnknown ? { version_unknown: true } : {}),
     },
     status: "pending",
     retry_count: 0,

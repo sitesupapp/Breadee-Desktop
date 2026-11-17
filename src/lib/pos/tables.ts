@@ -67,7 +67,23 @@ function toTable(raw: unknown): TableSummary | null {
     // 1.0.36 (migration 20261013200551): optimistic-concurrency token for the
     // merge stale-dialog guard. num() defaults to 0 when an older server omits it.
     pos_entity_version: num(r.pos_entity_version),
+    // 1.0.42 (P0) — Production's pos_table_map omits the key: the 0 above is then a placeholder, not a
+    // version. Every CAS consumer must read the table version through knownTableVersion().
+    pos_entity_version_known: r.pos_entity_version != null && r.pos_entity_version !== "" && Number.isFinite(Number(r.pos_entity_version)),
   };
+}
+
+/**
+ * 1.0.42 (P0 2026-11-17) — the table's REAL optimistic-concurrency version, or null when the server did
+ * not send one. Through 1.0.41 the offline open sent the parser's placeholder 0 as `expected_version`, so
+ * on Production (no version in pos_table_map) every offline open of a table at version > 0 was refused
+ * with VERSION_CONFLICT — and the Sync Center rebase re-armed it with 0 again. Null ≠ "skip the guard":
+ * callers that need a guard must establish one (see dineinOpenTableHandler's version_unknown path).
+ */
+export function knownTableVersion(t: Pick<TableSummary, "pos_entity_version" | "pos_entity_version_known"> | null | undefined): number | null {
+  if (!t || t.pos_entity_version_known === false) return null;
+  const v = Number(t.pos_entity_version);
+  return Number.isFinite(v) ? v : null;
 }
 
 export function parseTableMap(raw: unknown): TableMap {

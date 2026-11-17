@@ -31,6 +31,7 @@ import { getOperation } from "@/lib/offline/operationLog";
 import { localdb } from "@/lib/offline/db";
 import { isLocalShiftId } from "@/lib/offline/shiftIdentity";
 import { captureArg, captureOf, withCapture } from "@/lib/offline/captureEvidence";
+import { knownTableVersion } from "@/lib/pos/tables";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -373,7 +374,16 @@ type DineinOpenTablePayload = {
   name: string;
   seats: number | null;
   expected_version?: number | null;
+  /** 1.0.42 (P0) — the cached map row had no real table version (see dineinOpenTableHandler). */
+  version_unknown?: boolean;
 };
+
+/** 1.0.42 (P0) — an unknown-version open whose table Breadee shows occupied / with a bill at replay. */
+export const OPEN_VERSION_UNKNOWN_TABLE_BUSY =
+  "Breadee shows this table occupied (or with an open bill) now, so this offline open was not sent — it could join someone else's bill. Add the items to the table's current bill online, then withdraw this offline order in the Sync Center. Any payment it recorded stays on this device; don't collect it again.";
+/** 1.0.42 (P0) — an unknown-version open with no way to verify the table (no read-only guard available). */
+export const OPEN_VERSION_UNKNOWN_UNVERIFIED =
+  "This offline table open could not be checked against Breadee's table map, so it was not sent. Retry it from the Sync Center while online.";
 
 /** dinein_open_table — occupy the table / establish the session on the server via
  *  pos_open_table (op-id dedup + version CAS). canonical_entity_id becomes the canonical
@@ -392,6 +402,28 @@ export const dineinOpenTableHandler: OperationHandler = {
       // 1.0.38 — the freeing op may be an offline move / merge that vacated this table: its result carries
       // every involved TABLE's version in `table_versions` (a merge's pos_entity_version is an ORDER's).
       expected = await tableVersionAfter(p.version_after_op, op.local_entity_id ?? "");
+    } else if (p.version_unknown === true) {
+      // 1.0.42 (P0 2026-11-17) — captured from a map row that carried NO table version (Production's
+      // pos_table_map lacks it). Through 1.0.41 the placeholder 0 went out as the CAS token and every such
+      // open was refused. Now the guard is re-established at replay, read-only, fail-closed:
+      //   1. Breadee already holds this op's receipt → replay it (pos_op_replay returns the recorded open);
+      //   2. else the table must be FREE with NO open bill on Breadee now — otherwise park (never join or
+      //      overwrite someone else's bill);
+      //   3. open with the LIVE version when the server reports one, so nothing can change in between.
+      const guard = ctx.deps.tableGuard;
+      if (!guard) return { ok: false, retryClass: "CONFLICT", code: "table_unverified", message: OPEN_VERSION_UNKNOWN_UNVERIFIED };
+      try {
+        const receipt = await guard.hasReceipt(op.scope.tenant_id, op.client_op_id);
+        if (!receipt) {
+          const row = await guard.readTable(op.scope.branch_id ?? null, op.local_entity_id ?? "");
+          if (!(row != null && row.status === "available" && !row.occupied && Number(row.orders) === 0)) {
+            return { ok: false, retryClass: "CONFLICT", code: "table_busy", message: OPEN_VERSION_UNKNOWN_TABLE_BUSY };
+          }
+          expected = knownTableVersion(row);
+        }
+      } catch (e) {
+        return { ok: false, retryClass: "TRANSPORT_RETRYABLE", code: "open_table: table check", message: errMsg(e) };
+      }
     }
     try {
       const r = await ctx.deps.openTable({
@@ -822,6 +854,17 @@ type OnAccountOrderPayload = {
  *  (pos_complete_on_account), exactly-once on client_op_id. 1.0.38 (Bug 9) — bound to its order
  *  (expected_order_ids = [the canonical order], via the entity map for an offline-created one) and, when
  *  known exactly, expected_amount = R; frozen before the first send. */
+/** 1.0.42 (P0) — an on-account whose offline takeaway was already booked as CASH on Breadee. */
+export function onAccountPaidCashMessage(orderNumber: string | null | undefined, amount: number | null | undefined): string {
+  const ref = orderNumber ? `#${orderNumber}` : "This sale";
+  const amt = typeof amount === "number" && Number.isFinite(amount) ? ` (${amount})` : "";
+  return (
+    `${ref} was booked on Breadee as PAID IN CASH — its offline cash payment synced first — so putting it on account${amt} was not applied. ` +
+    "A manager must check whether that cash was really collected: if it was not, the drawer is short by this amount and the customer still owes it. " +
+    "Do not collect again and do not retry this step."
+  );
+}
+
 export const onAccountOrderHandler: OperationHandler = {
   type: "on_account_order",
   schemaVersion: 1,
@@ -840,6 +883,17 @@ export const onAccountOrderHandler: OperationHandler = {
       customerId = c;
     }
     if (!orderId || !customerId) return { ok: false, retryClass: "VALIDATION_TERMINAL", code: "missing_ref", message: "no order or customer id" };
+    // 1.0.42 (P0 2026-11-17, #2123) — the order this receivable waits for was an offline takeaway that ALSO
+    // carried a cash payment intent; its replay already PAID it in cash on Breadee. Sending the on-account now
+    // is refused forever ("already fully paid") and hid the real question. Park it once, read-only, with the
+    // fact a manager must reconcile: Breadee booked this sale as cash.
+    for (const depId of op.dependency_ids ?? []) {
+      const dep = await getOperation(depId);
+      const depIntent = (dep?.payload as { payment_intent?: unknown } | undefined)?.payment_intent;
+      if (dep?.operation_type === "takeaway_sale" && dep.status === "synced" && dep.result_meta?.paid === true && depIntent != null) {
+        return { ok: false, retryClass: "CONFLICT", code: "paid_cash_on_server", message: onAccountPaidCashMessage(dep.result_meta?.order_number as string | undefined, p.amount) };
+      }
+    }
     let pins = p.resolved_pins ?? null;
     if (!pins) {
       const amount = typeof p.expected_amount === "number" && Number.isFinite(p.expected_amount) ? p.expected_amount : null;

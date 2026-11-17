@@ -2368,6 +2368,16 @@ function PosWorkspaceInner() {
               setPayError("Add items before putting a sale on account.");
               return;
             }
+            // 1.0.42 (P0 2026-11-17, #2123) — this cart's sale may ALREADY carry an offline cash payment (Pay was
+            // pressed first; the cart is kept). Chaining an on-account behind it replays as a CASH sale on Breadee
+            // and the receivable is refused — two tenders for one sale. Fail closed before anything is written.
+            {
+              const prior = await getPosOfflineTxnByOp(useCart.getState().ensureOpId());
+              if (prior?.payment_intent) {
+                setPayError("This sale already has a cash payment recorded on this device, so it cannot also be put on account. Start a new sale for the on-account order — don't collect again.");
+                return;
+              }
+            }
             await saveOfflineSend(lines); // durable order capture (posOfflineTxns → takeaway_sale)
             const opId = useCart.getState().ensureOpId();
             const txn = await getPosOfflineTxnByOp(opId);

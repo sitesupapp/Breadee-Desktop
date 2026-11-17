@@ -63,6 +63,10 @@ export type TableSummary = {
    *  VERSION_CONFLICT. Defaults to 0 when an older server omits it (the parser
    *  falls back to 0, and 0 is treated as "unknown" and never asserted). */
   pos_entity_version: number;
+  /** 1.0.42 (P0 2026-11-17) — FALSE when the server row carried NO version (Production's pos_table_map
+   *  never got migration 20261013200551), so `pos_entity_version` is the parser's placeholder 0 and must
+   *  never be sent as a CAS token. Undefined (fixtures / older callers) means the version is real. */
+  pos_entity_version_known?: boolean;
 };
 
 /** The full `pos_table_map` response, including its aggregate counters. */
