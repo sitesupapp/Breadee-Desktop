@@ -139,7 +139,19 @@ export async function isDeviceOnlyOrderId(orderId: string): Promise<boolean> {
 export async function readLocalOrderLines(orderId: string): Promise<ReceiptLine[] | null> {
   if (!orderId) return null;
   const draft = (await localdb.dineDrafts.get(orderId).catch(() => undefined)) ?? (await localdb.dineDrafts.filter((x) => x.canonical_order_id === orderId).first().catch(() => undefined));
-  if (!draft) return null;
+  if (!draft) {
+    // 1.0.42 (native Staging 1.0.61, cell 4) — an offline Takeaway / Delivery sale has no Dine-In draft: its lines
+    // live in the provisional receipt persisted when it was taken (receipts store, keyed by its OFF- / Breadee ref).
+    const txn = (await localdb.posOfflineTxns.get(orderId).catch(() => undefined)) ?? (await localdb.posOfflineTxns.filter((t) => t.server_order_id === orderId).first().catch(() => undefined));
+    if (!txn) return null;
+    const refs = [txn.server_order_number, `OFF-${txn.local_txn_id.slice(0, 6).toUpperCase()}`].filter((r): r is string => typeof r === "string" && r !== "");
+    for (const ref of refs) {
+      const snap = await localdb.receipts.get(ref).catch(() => undefined);
+      const lines = (snap?.data as { lines?: unknown } | undefined)?.lines;
+      if (Array.isArray(lines) && lines.length > 0) return lines as ReceiptLine[];
+    }
+    return null;
+  }
   const sent = draft.lines.filter((l) => l.sent_round !== null);
   if (sent.length === 0) return null;
   return sent.map((l) => {

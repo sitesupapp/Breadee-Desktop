@@ -28,7 +28,7 @@ import { forceSync, FORCE_SYNC_SERVER_OFF, type ForceSyncDeps } from "@/lib/offl
 import type { OfflineOperation } from "@/lib/offline/operationLog";
 
 beforeEach(async () => {
-  await Promise.all([localdb.operations.clear(), localdb.dineDrafts.clear(), localdb.snapshots.clear(), localdb.posOfflineTxns.clear(), localdb.entityMap.clear(), localdb.pendingShifts.clear()]);
+  await Promise.all([localdb.operations.clear(), localdb.dineDrafts.clear(), localdb.snapshots.clear(), localdb.posOfflineTxns.clear(), localdb.entityMap.clear(), localdb.pendingShifts.clear(), localdb.receipts.clear()]);
 });
 
 function draft(over: Partial<DineDraft>): DineDraft {
@@ -112,6 +112,13 @@ test("R2b found by its CANONICAL order id once round 1 synced; unknown ids and u
   assert.equal(await readLocalOrderLines("NOPE"), null);
   await localdb.dineDrafts.put(draft({ local_session_id: "LS-empty", lines: [{ line_id: "X", menu_item_id: "m", name: "x", base_price: 1, quantity: 1, modifiers: [], kitchen_note: null, sent_round: null }] as never }));
   assert.equal(await readLocalOrderLines("LS-empty"), null);
+});
+
+test("R2d (native 1.0.61 finding) an offline TAKEAWAY sale shows its items from its persisted provisional receipt", async () => {
+  await localdb.posOfflineTxns.put({ local_txn_id: "49a2ac07-d4fe-4bb0-b833-6b024352efb6", client_op_id: "c", tenant_id: "t1", branch_id: "b1", device_id: "d", terminal_id: "t", cashier_user_id: "u1", shift_id: "SHIFT-1", created_at: new Date().toISOString(), order_payload: { items: [] }, payment_intent: { method: "cash", currency: "LBP" }, sent_to_kitchen: true, currency: "LBP", total: 98901, status: "queued", attempts: 0 } as never);
+  await localdb.receipts.put({ ref: "OFF-49A2AC", data: { lines: [{ name: "QA Test Burger", qty: 1, unitPrice: 98901, lineTotal: 98901 }] }, tenant_id: "t1", branch_id: "b1", provisional: true, created_at: Date.now() } as never);
+  assert.deepEqual(await readLocalOrderLines("49a2ac07-d4fe-4bb0-b833-6b024352efb6"), [{ name: "QA Test Burger", qty: 1, unitPrice: 98901, lineTotal: 98901 }]);
+  assert.equal(await readLocalOrderLines("49a2ac07-nope"), null);
 });
 
 test("R2c the order panel reads this device's lines for a local bill and falls back to them when the server read fails", () => {
