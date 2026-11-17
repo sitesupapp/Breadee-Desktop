@@ -11,7 +11,7 @@
 import { Badge, Button, EmptyState, GatedButton, PanelTitle, Skeleton, type Gate } from "@/components/ui";
 import { Glyph } from "@/components/Glyph";
 import { formatMoney } from "@/lib/currency";
-import { linesByBatch, billItemCount, billCollected, billDue, unpaidBillView } from "@/lib/pos/tableBill";
+import { linesByBatch, billItemCount, billCollected, billDue, unpaidBillView, billStatusLabel } from "@/lib/pos/tableBill";
 import { lineTotals } from "@/lib/pos/modifiers";
 import { sentRoundLabel } from "@/lib/pos/tableRounds";
 import type { TableBill, TableSummary } from "@/types/tables";
@@ -104,8 +104,10 @@ export function TableBillPanel(props: TableBillPanelProps) {
               <Badge tone={bill.orders[0].status === "sent_to_kitchen" ? "blue" : "slate"}>
                 {bill.orders[0].status.replace(/_/g, " ")}
               </Badge>
+              {/* 1.0.64 — a bill part-paid by split (server-held or pending offline legs) reads "Partially Paid",
+                  never the raw "unpaid" Breadee keeps until the final settle. Display only: the figures are unchanged. */}
               <Badge tone={bill.orders[0].payment_status === "paid" ? "slate" : "amber"}>
-                {bill.orders[0].payment_status}
+                {billStatusLabel(bill.orders[0].payment_status, paidBySplit)}
               </Badge>
               {bill.splitShift && <Badge tone="amber">multiple shifts</Badge>}
             </div>

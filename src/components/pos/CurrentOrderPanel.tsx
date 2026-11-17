@@ -146,7 +146,8 @@ export function CurrentOrderPanel(props: {
           // or a tenant method); passing null here made the renderer fall back
           // to "cash", so paid card/online/COD orders reprinted as "Paid - cash"
           // (Part 3). Unpaid orders still carry no method.
-          method: order.payment_status === "paid" ? order.payment_method : null,
+          // 1.0.64 — a device-held Dine-In bill names the method its captured settle recorded (display only).
+          method: order.payment_status === "paid" ? order.payment_method ?? order.display_method ?? null : null,
           // The order's OWN currency snapshot - the same source-of-truth rule
           // the delivery receipt fix establishes. Never a display currency.
           currency,

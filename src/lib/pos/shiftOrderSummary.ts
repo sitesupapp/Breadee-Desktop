@@ -107,6 +107,10 @@ export type ShiftOpenOrder = {
   /** 1.0.41 (BUG 02 S3) — Σ PAID split settlements (order currency) of a not-yet-paid order (orderDue.attachCollected);
    *  undefined / null = unknown (never read as zero). */
   collected?: number | null;
+  /** 1.0.64 — DISPLAY ONLY: the method(s) a bill held on this device was settled with, from its own captured
+   *  settle operation (settledMethodFrom). Printed on a reprint and in the payment cell; never read by any
+   *  money path (a reversal's tender reads `payment_method`). Absent on server rows. */
+  display_method?: string | null;
 } & MergeProvenance;
 
 /**

@@ -18,6 +18,7 @@ import Dexie from "dexie";
 import { localdb, revisionCached, SALE_VOIDED_BEFORE_SYNC, SALE_WITHDRAWN, type DineDraft, type PosOfflineTxn } from "@/lib/offline/db";
 import { isStructuralOp, settleCoveredIds, settlePrecedence, settleStillCovers, structuralRefusedByServer } from "@/lib/offline/operationalProjection";
 import { UNSETTLED_STATUSES, operationsWithStatus, type OfflineOperation } from "@/lib/offline/operationLog";
+import { settledMethodFrom } from "@/lib/offline/settledMethod";
 import { loadOrdersForDay, loadShiftOrders, toDayKey, type ShiftOpenOrder } from "@/lib/pos/shiftOrderSummary";
 import type { ReceiptLine } from "@/lib/receipt";
 
@@ -359,6 +360,17 @@ async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenO
   const settleIds = [...new Set(drafts.map((d) => d.settled_operation_id).filter((x): x is string => !!x))];
   const settleRows = settleIds.length > 0 ? await localdb.operations.bulkGet(settleIds).catch(() => [] as (OfflineOperation | undefined)[]) : [];
   const settleById = new Map(settleRows.filter((o): o is OfflineOperation => !!o).map((o) => [o.operation_id, o]));
+  // 1.0.64 — the split legs captured for those sessions (the same rule as dineinOffline.sessionSplitLegs: a
+  // cancelled or parked leg paid nothing), so a device-held bill reprints the method(s) its own captured
+  // operations recorded (settledMethodFrom). One indexed read, only when a settled pay_table is in scope. Display only.
+  const anyPaid = [...settleById.values()].some((o) => o.operation_type === "pay_table");
+  const legRows = anyPaid ? await localdb.operations.where("operation_type").equals("split_settle").toArray().catch(() => [] as OfflineOperation[]) : [];
+  const legsFor = (d: DineDraft): OfflineOperation[] =>
+    legRows.filter((o) => {
+      if (o.status === "cancelled" || o.status === "needs_attention") return false;
+      const p = (o.payload ?? {}) as { order_local?: string | null; order_id?: string | null };
+      return p.order_local === d.local_session_id || (!!d.canonical_order_id && p.order_id === d.canonical_order_id);
+    });
   for (const d of scopedDrafts) {
     const sent = d.lines.filter((l) => l.sent_round !== null);
     const total = sent.reduce((s, l) => s + (l.base_price + l.modifiers.reduce((m, x) => m + Number(x.price_delta) * Number(x.quantity ?? 1), 0)) * l.quantity, 0);
@@ -377,6 +389,12 @@ async function projectLocalOrders(scope: OrdersHistoryScope): Promise<ShiftOpenO
       status: refused ? LOCAL_REFUSED_STATUS : withdrawn ? "voided" : settledHere ? "completed" : "sent_to_kitchen",
       payment_status: refused || withdrawn ? "unpaid" : settledHere ? (settle!.operation_type === "on_account_table" ? "on_account" : "paid") : "unpaid",
       payment_method: null,
+      // 1.0.64 — DISPLAY ONLY (receipt reprint + payment cell). Never `payment_method`, which a reversal reads
+      // for its tender: what a captured settle names is shown, nothing downstream decides on it.
+      display_method:
+        !refused && !withdrawn && settledHere && settle!.operation_type === "pay_table"
+          ? settledMethodFrom(settle, legsFor(d))
+          : null,
       subtotal: total,
       discount_amount: 0,
       total_amount: total,

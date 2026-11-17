@@ -125,7 +125,7 @@ export function canPrintOrder(): boolean {
 
 /** The payment cell. An unpaid order shows no method, because it has none.
  *  1.0.38 (Bug 4): a merged clean source has no balance of its own — it MOVED (never "unpaid"). */
-export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method"> & Partial<Pick<ShiftOpenOrder, "status" | "collected">> & MergeProvenance): string {
+export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "payment_method"> & Partial<Pick<ShiftOpenOrder, "status" | "collected" | "display_method">> & MergeProvenance): string {
   if (order.status != null && isMergedSource({ status: order.status, merged_into_order_id: order.merged_into_order_id })) {
     return `No balance — moved to #${mergedTargetLabel(order)}`;
   }
@@ -134,7 +134,8 @@ export function paymentLabel(order: Pick<ShiftOpenOrder, "payment_status" | "pay
   // collected part of it (orderDue.attachCollected), so it is never labelled plain "unpaid".
   if (order.payment_status !== "paid" && Number(order.collected ?? 0) > 0) return "part paid";
   if (order.payment_status !== "paid") return order.payment_status || "unpaid";
-  return order.payment_method ? `paid · ${order.payment_method}` : "paid";
+  const method = order.payment_method ?? order.display_method ?? null;
+  return method ? `paid · ${method}` : "paid";
 }
 
 /** 1.0.38 (Bug 4) — the payment badge tone, shared by every surface (a merged source is neutral, not amber). */

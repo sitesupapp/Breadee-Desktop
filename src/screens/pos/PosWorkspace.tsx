@@ -838,7 +838,8 @@ function PosWorkspaceInner() {
             // Reprint the method the order was actually settled with (Part 3).
             // Passing null made the renderer print "Paid - cash" for every
             // reprinted order, including paid card/online/COD sales.
-            method: order.payment_status === "paid" ? order.payment_method : null,
+            // 1.0.64 — a device-held Dine-In bill names the method its captured settle recorded (display only).
+            method: order.payment_status === "paid" ? order.payment_method ?? order.display_method ?? null : null,
             currency: (order.currency ?? currency) as CurrencyCode,
             lines,
             subtotal: order.subtotal ?? order.total_amount ?? 0,

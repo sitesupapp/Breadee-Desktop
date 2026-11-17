@@ -382,6 +382,17 @@ export function billCollected(bill: TableBill | null | undefined): number {
   return Math.max(0, Number(bill.collected ?? 0) || 0);
 }
 
+/**
+ * 1.0.64 — the bill panel's status label. Breadee keeps a part-paid order `unpaid` until its final settle, so
+ * a bill with money already collected by split (server-held or pending offline legs, see `billCollected`)
+ * reads "Partially Paid". DISPLAY ONLY: no figure, status or record changes.
+ */
+export function billStatusLabel(paymentStatus: string | null | undefined, collected: number): string {
+  const s = paymentStatus || "unpaid";
+  if (s !== "paid" && s !== "refunded" && Number(collected) > 0) return "Partially Paid";
+  return s;
+}
+
 /** The amount still due on the bill: gross T − paid splits P (null when no single figure exists). */
 export function billDue(bill: TableBill): number | null {
   if (bill.total == null) return null;
