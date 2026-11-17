@@ -169,10 +169,16 @@ export interface OfflineOperation {
   withdrawal?: {
     at: string;
     by_user_id: string;
-    reason: "refused_never_applied";
+    /** 1.0.42 (P0) — "voided_before_sync": an operator VOID of a sale this device NEVER sent (no attempt, so
+     *  Breadee cannot hold it); proven locally under the drain lock, see voidLocalSale.ts. */
+    reason: "refused_never_applied" | "voided_before_sync";
     verified_at: string;
-    /** Server receipt tables checked for this op's client_op_id (none held it). */
+    /** Server receipt tables checked for this op's client_op_id (none held it) — or, for voided_before_sync,
+     *  the local proofs (never attempted, drain excluded, no dependents) and the authority held. */
     verified_against: string[];
+    /** voided_before_sync only: the operator's reason and the cash handed back (order currency), for the shift close. */
+    void_reason?: string;
+    cash_returned?: number | null;
   } | null;
   /** 1.0.40 (BUG 03, F3) — operator retries of a table open the server refused on its table-version CAS that
    *  were re-armed with the table's CURRENT version, after Breadee showed the table free with no open bill and

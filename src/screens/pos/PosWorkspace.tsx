@@ -103,7 +103,7 @@ import { autoPrintKitchenTicket, autoPrintReceipt } from "@/lib/pos/autoPrintRun
 import type { ResolverOrderSource } from "@/lib/pos/printRouting";
 import { useDineInWorkspace } from "@/screens/pos/DineInWorkspace";
 import { dineInBottomBar } from "@/lib/pos/dineInActions";
-import { canApproveTransfer, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewOrders, canViewTables, canViewTransfers } from "@/lib/pos/access";
+import { canApproveTransfer, canCancelOrders, canCreateTransfer, canFinalizeForceEndShift, canForceTransfer, canRequestForceEndShift, canViewDelivery, canViewFloor, canViewOrders, canViewTables, canViewTransfers } from "@/lib/pos/access";
 import { useDeliveryWorkspace } from "@/screens/pos/DeliveryWorkspace";
 import { useTables } from "@/state/tables";
 import { prewarmFloorCache, floorPrewarmCached } from "@/state/floor";
@@ -3339,6 +3339,9 @@ function PosWorkspaceInner() {
         offline={{
           online,
           offlineReady: offlineReadiness.ready,
+          // 1.0.42 (P0) — a never-sent local sale is voided on this device; it needs the SAME authority the
+          // server's void enforces (pos.cancel_orders), checked here because no server call is made.
+          canCancelOrders: canCancelOrders(pos.access).allowed,
           scope: offlineScope
             ? {
                 tenantId: offlineScope.tenantId,

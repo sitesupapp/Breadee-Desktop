@@ -682,6 +682,21 @@ export async function drainOffline(
   }
 }
 
+/**
+ * 1.0.42 (P0) — run `fn` while NO drain can run: it takes the SAME single-flight flag every drain acquires before
+ * its first await, so a local decision about an op (offline void of a never-sent sale) can never race a replay
+ * that already read it. Returns "busy" — and runs nothing — when a drain holds the flag.
+ */
+export async function withDrainExcluded<T>(fn: () => Promise<T>): Promise<T | "busy"> {
+  if (draining) return "busy";
+  draining = true;
+  try {
+    return await fn();
+  } finally {
+    draining = false;
+  }
+}
+
 /** Test-only: reset the module single-flight lock between cases. */
 export function __resetDrainLockForTests(): void {
   draining = false;

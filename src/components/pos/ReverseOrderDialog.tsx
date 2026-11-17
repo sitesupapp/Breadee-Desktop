@@ -37,7 +37,7 @@ export function ReverseOrderDialog(props: {
    * whose refund-proof is locally hydrated (policy rules 1/8/9); otherwise the operator is told to
    * reconnect. Online, this context is ignored and the live path is byte-identical.
    */
-  offline?: { online: boolean; offlineReady: boolean; scope: RefundScope | null };
+  offline?: { online: boolean; offlineReady: boolean; scope: RefundScope | null; canCancelOrders?: boolean };
 }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -68,6 +68,22 @@ export function ReverseOrderDialog(props: {
       if (order.local_pending) {
         const { isDeviceOnlyOrderId, DEVICE_ONLY_VOID_MESSAGE } = await import("@/lib/offline/ordersHistoryOffline");
         if (await isDeviceOnlyOrderId(order.id).catch(() => false)) {
+          // A takeaway / delivery sale this device NEVER sent is voided here (proven locally, drain excluded,
+          // pos.cancel_orders); anything else (a Dine-In session, an attempted send) keeps the fail-closed message.
+          const { localdb } = await import("@/lib/offline/db");
+          const txn = await localdb.posOfflineTxns.get(order.id).catch(() => undefined);
+          const scope = props.offline?.scope ?? null;
+          if (txn && scope) {
+            const { voidUnsyncedLocalSale } = await import("@/lib/offline/voidLocalSale");
+            const r = await voidUnsyncedLocalSale({ localTxnId: order.id, scope, actorUserId: scope.cashierUserId, authorized: props.offline?.canCancelOrders === true, reason: clean });
+            if (!r.ok) {
+              setError(r.reason);
+              return;
+            }
+            props.onDone();
+            props.onClose();
+            return;
+          }
           setError(DEVICE_ONLY_VOID_MESSAGE);
           return;
         }

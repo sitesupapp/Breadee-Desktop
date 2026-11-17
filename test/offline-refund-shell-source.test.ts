@@ -33,8 +33,10 @@ test("dialog: a reason is validated BEFORE either path (audit preserved)", () =>
   const src = ts(DIALOG);
   // 1.0.42 (P0): the device-only guard (nothing sent / captured for a bill Breadee has not recorded) sits between
   // the validation and the two paths — validation still comes first.
-  assert.match(src, /const clean = validateVoidReason\(reason\);[\s\S]{0,700}if \(captureOffline\)/);
+  // (and the local void of a NEVER-sent sale, voidUnsyncedLocalSale, which receives the validated `clean` reason).
+  assert.match(src, /const clean = validateVoidReason\(reason\);[\s\S]{0,2200}if \(captureOffline\)/);
   assert.match(src, /const clean = validateVoidReason\(reason\);[\s\S]{0,500}DEVICE_ONLY_VOID_MESSAGE/);
+  assert.match(src, /voidUnsyncedLocalSale\(\{[^}]*reason: clean/);
 });
 
 test("dialog: offline capture is fail-closed — ready + scope + local proof required", () => {

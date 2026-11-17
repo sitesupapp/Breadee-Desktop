@@ -999,13 +999,16 @@ export async function listPosOfflineTxns(): Promise<PosOfflineTxn[]> {
 /** 1.0.41 (D-5) — `review_reason` of a refused, never-applied sale the operator WITHDREW after Breadee confirmed it
  *  holds no record of it (refusedSessions.withdrawRefusedSale). The row is kept (its cash stays on record). */
 export const SALE_WITHDRAWN = "withdrawn_refused";
+/** 1.0.42 (P0) — `review_reason` of a sale VOIDED on this device before it was ever sent (voidLocalSale.ts). The row is
+ *  kept (its sale, cash and void stay on record); it is never staged, sent or counted as unsynced work. */
+export const SALE_VOIDED_BEFORE_SYNC = "voided_before_sync";
 
 /** Offline sales that still hold unsynced work (must never be dropped silently). A withdrawn sale holds none. */
 export async function pendingPosTxnCount(): Promise<number> {
   return localdb.posOfflineTxns
     .where("status")
     .anyOf("queued", "syncing", "needs_attention")
-    .filter((t) => t.review_reason !== SALE_WITHDRAWN)
+    .filter((t) => t.review_reason !== SALE_WITHDRAWN && t.review_reason !== SALE_VOIDED_BEFORE_SYNC)
     .count();
 }
 
