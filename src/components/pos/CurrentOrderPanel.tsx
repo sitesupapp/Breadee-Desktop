@@ -28,7 +28,8 @@ import { Glyph } from "@/components/Glyph";
 import { OrderCarousel } from "@/components/pos/OrderCarousel";
 import { formatMoney, type CurrencyCode } from "@/lib/currency";
 import { buildReceipt, type ReceiptData, type ReceiptOrderSource } from "@/lib/receipt";
-import { readOrderDisplayLines, readOrderReceiptLines } from "@/lib/pos/deliverySettlement";
+import { readOrderDisplayLines } from "@/lib/pos/deliverySettlement";
+import { reprintLines } from "@/lib/pos/reprintLines";
 import {
   isMergedSource,
   mergedTargetLabel,
@@ -121,7 +122,12 @@ export function CurrentOrderPanel(props: {
     setPrintError(null);
     try {
       // 1.0.38 (Bug 4) — a merged source's lines live on its destination now (read via the merge record).
-      const lines = isMergedSource(order) ? await readOrderDisplayLines(order) : await readOrderReceiptLines(order.id);
+      // 1.0.63 (native Staging 1.0.62, D-A) — the manual reprint of a bill held on THIS device reads its own
+      // durable lines (Dine-In draft, or the provisional receipt persisted at capture) with no server call;
+      // when Breadee is known unreachable, or its read fails / finds nothing, it falls back to them too.
+      // Through 1.0.62 this button always read pos_order_items, so offline it showed "Failed to fetch" while
+      // the Orders history reprint worked. The lines shown on screen and the totals below are unchanged.
+      const lines = isMergedSource(order) ? await readOrderDisplayLines(order) : await reprintLines(order.id, order.local_pending === true);
       const source = (["takeaway", "dine_in", "delivery"].includes(order.order_type)
         ? order.order_type
         : "takeaway") as ReceiptOrderSource;

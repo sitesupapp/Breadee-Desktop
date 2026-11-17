@@ -24,6 +24,7 @@ import { isBackendReachable } from "@/lib/offline/reachability";
 import { useShortcuts } from "@/lib/keyboard/provider";
 import { TableMap } from "@/components/pos/TableMap";
 import { TableBillPanel } from "@/components/pos/TableBillPanel";
+import { offlineDisplayBill } from "@/lib/offline/displayBill";
 import { SeatCountDialog } from "@/components/pos/SeatCountDialog";
 import { DineInRoundPanel } from "@/components/pos/DineInRoundPanel";
 import { Modal } from "@/components/overlays";
@@ -2709,7 +2710,7 @@ export function useDineInWorkspace(input: {
     () => (
       <TableBillPanel
         table={selected}
-        bill={offlineCapture ? (selectedProj ? selectedProj.bill : null) : tables.bill}
+        bill={offlineCapture ? (selectedProj ? offlineDisplayBill(selectedProj) : null) : tables.bill}
         loading={offlineCapture ? selected != null && selectedProj == null && offlineProjFailed !== selected.id : tables.billLoading}
         error={offlineCapture ? (selected != null && selectedProj == null && offlineProjFailed === selected.id ? "This table's bill could not be read on this device." : null) : tables.billError}
         openGate={openGate}
