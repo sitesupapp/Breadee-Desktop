@@ -270,7 +270,9 @@ test("printing an open order fabricates nothing", () => {
   // method it was actually settled with (Part 3); an OPEN/unpaid order still
   // carries no method, so nothing is fabricated for the unpaid case.
   assert.match(panel, /paid: order\.payment_status === "paid"/);
-  assert.match(panel, /method: order\.payment_status === "paid" \? order\.payment_method : null/);
+  // 1.0.64 — a device-held Dine-In bill falls back to the method its own captured settle recorded
+  // (display_method); an unpaid order still carries none.
+  assert.match(panel, /method: order\.payment_status === "paid" \? order\.payment_method \?\? order\.display_method \?\? null : null/);
   for (const invented of ["tendered:", "change:", "tenderCurrency:", "tenderTotal:"]) {
     assert.equal(panel.includes(invented), false, `${invented} must not be invented for an open order`);
   }
