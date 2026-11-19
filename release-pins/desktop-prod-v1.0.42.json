@@ -1,0 +1,11 @@
+{
+    "version":  "1.0.42",
+    "build_run_id":  44296603933,
+    "build_commit":  "6979be431cf336f856816d5c7d1abf8052e1848f",
+    "installer_sha256":  "a18c1d61bf45f0eba628bb4d46bab53dffcf4ef36a22e7f0b843ac591db6bafc",
+    "sig_sha256":  "1eb8b3f2e77f8d2bf59032b6f37ea1b326bb8c71af716c638294a37862f7a747",
+    "key_id":  "B77999D821F82FD7",
+    "artifact_id":  14425433869,
+    "artifact_digest":  "sha256:6c41027d0316ef3aeff6597f1ce24761fbc1ba0c540d17fe61aa8c6d41632020",
+    "owner_pc_verified":  "2026-11-18 owner PC pilot PASS: installed exe 94d982c853b01ad7a64d59fbb78228d6785bdc8680a1c74bece69b264abc82e3, terminal e1e22a4a, bundle contracts flag ON, Production backend"
+}
