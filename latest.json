@@ -1,0 +1,11 @@
+{
+  "version": "1.0.42",
+  "notes": "Breadee keeps taking cash sales when its server is off and syncs them automatically from any screen once it answers, at the time, price and exchange rate they were taken at. A payment Breadee has not confirmed is never collected twice, Retry is offered only where it can work, part-paid orders show what is still due, and each terminal can be given its own tables for when the server is off.",
+  "pub_date": "2026-11-19T09:16:08Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUWEwvZ2gySmw1dDU5cG9JbXp5dFYyQmJ3ZkEyclMrL1lpL0ZVWUlXdVZKQld4SklPSEtxUFJQS0Jjbm91dUl3dEowQ0h5UjVqcEw2ZXdYcTFKTFJVL2NsK2Q0dW9DZlFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MDAzNzY2CWZpbGU6QnJlYWRlZV8xLjAuNDJfeDY0LXNldHVwLmV4ZQpZTWtLMVJScVhkQWIwYnI0SmtnK3lSUHp1K010L1BNVjgwZzhuWEVubWZQQ3ZiMzc0aUs5TG5yNzJ0V296ZmcxdC8vVTNLbW1tYVRNNTE1NEJKaElBQT09Cg==",
+      "url": "https://github.com/sitesupapp/Breadee-Desktop/releases/download/desktop-prod-v1.0.42/Breadee_1.0.42_x64-setup.exe"
+    }
+  }
+}
